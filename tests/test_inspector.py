@@ -14,7 +14,7 @@ class TestInspector(unittest.TestCase):
         }
         self.assertEqual(classify_pr(evidence), "NEEDS_REVIEW")
 
-    def test_classify_pr_implementation_ready_unresolved_comments(self):
+    def test_classify_pr_unresolved_comments_needs_review(self):
         evidence = {
             'head_sha': '12345',
             'changed_files': 1,
@@ -28,7 +28,7 @@ class TestInspector(unittest.TestCase):
                 }
             ]
         }
-        self.assertEqual(classify_pr(evidence), "IMPLEMENTATION_READY")
+        self.assertEqual(classify_pr(evidence), "NEEDS_REVIEW")
 
     def test_classify_pr_stale_review(self):
         # Review is clean but bound to an old commit
@@ -71,35 +71,31 @@ class TestInspector(unittest.TestCase):
         evidence_unresolved = {
             'head_sha': head_sha,
             'changed_files': 1,
-            'review_threads_graphql': {
-                'data': {'repository': {'pullRequest': {'reviewThreads': {'nodes': [
-                    {
-                        'isResolved': False,
-                        'comments': {'nodes': [
-                            {'author': {'login': 'chatgpt-codex-connector[bot]'}, 'originalCommit': {'oid': head_sha}}
-                        ]}
-                    }
-                ]}}}}
-            }
+            'review_threads_graphql': [
+                {
+                    'isResolved': False,
+                    'comments': {'nodes': [
+                        {'author': {'login': 'chatgpt-codex-connector[bot]'}, 'originalCommit': {'oid': head_sha}}
+                    ]}
+                }
+            ]
         }
-        self.assertEqual(classify_pr(evidence_unresolved), "IMPLEMENTATION_READY")
+        self.assertEqual(classify_pr(evidence_unresolved), "NEEDS_REVIEW")
 
         # Resolved thread
         evidence_resolved = {
             'head_sha': head_sha,
             'changed_files': 1,
-            'review_threads_graphql': {
-                'data': {'repository': {'pullRequest': {'reviewThreads': {'nodes': [
-                    {
-                        'isResolved': True,
-                        'comments': {'nodes': [
-                            {'author': {'login': 'chatgpt-codex-connector[bot]'}, 'originalCommit': {'oid': head_sha}}
-                        ]}
-                    }
-                ]}}}}
-            }
+            'review_threads_graphql': [
+                {
+                    'isResolved': True,
+                    'comments': {'nodes': [
+                        {'author': {'login': 'chatgpt-codex-connector[bot]'}, 'originalCommit': {'oid': head_sha}}
+                    ]}
+                }
+            ]
         }
-        self.assertEqual(classify_pr(evidence_resolved), "NEEDS_REVIEW")
+        self.assertEqual(classify_pr(evidence_resolved), "NEEDS_REVIEW") # Should be NEEDS_REVIEW because it doesn't have clean evidence either
 
     def test_classify_pr_current_head_changes_requested_blocking(self):
         evidence = {
@@ -114,11 +110,55 @@ class TestInspector(unittest.TestCase):
                 }
             ]
         }
-        self.assertEqual(classify_pr(evidence), "IMPLEMENTATION_READY")
+        self.assertEqual(classify_pr(evidence), "NEEDS_REVIEW")
 
-    def test_inspect_pr_check_run_fetch_failure_semantics(self):
-        # We need to mock to test inspect_pr
-        pass
+    def test_classify_pr_graphql_fail_closed(self):
+        evidence = {
+            'head_sha': '12345',
+            'changed_files': 1,
+            'graphql_error': True,
+            'issue_comments': [
+                {
+                    'user': {'login': 'chatgpt-codex-connector[bot]'},
+                    'body': "Didn't find any major issues for commit 12345."
+                }
+            ]
+        }
+        # Even with clean comment, if graphql_error is True, block REVIEW_READY
+        self.assertEqual(classify_pr(evidence), "NEEDS_REVIEW")
+
+    def test_classify_pr_check_run_error_blocking(self):
+        evidence = {
+            'head_sha': '12345',
+            'changed_files': 1,
+            'check_runs_error': True,
+            'issue_comments': [
+                {
+                    'user': {'login': 'chatgpt-codex-connector[bot]'},
+                    'body': "Didn't find any major issues for commit 12345."
+                }
+            ]
+        }
+        self.assertEqual(classify_pr(evidence), "NEEDS_REVIEW")
+
+    def test_classify_pr_codex_clean_review_reaction(self):
+        evidence = {
+            'head_sha': '12345',
+            'changed_files': 1,
+            'issue_comments': [
+                {
+                    'user': {'login': 'some-user'},
+                    'body': "@codex review",
+                    'reactions': [
+                        {
+                            'user': {'login': 'chatgpt-codex-connector[bot]'},
+                            'content': '+1'
+                        }
+                    ]
+                }
+            ]
+        }
+        self.assertEqual(classify_pr(evidence), "REVIEW_READY")
 
     def test_classify_pr_current_head_review_binding(self):
         # Known expected fixture facts for oimus1976/calendar-csv2ics-converter PR #5
