@@ -7,6 +7,9 @@ def main():
     parser.add_argument("command", choices=["inspect-pr"], help="Command to run")
     parser.add_argument("--repo", required=True, help="Target repository in OWNER/REPO format")
     parser.add_argument("--pr", required=True, type=int, help="Target pull request number")
+    parser.add_argument("--allowed-paths", nargs='*', help="List of allowed glob patterns for files (e.g. 'src/*' '*.py')")
+    parser.add_argument("--denied-paths", nargs='*', help="List of denied glob patterns for files")
+    parser.add_argument("--allow-docs-only", action='store_true', help="Allow PRs that only change documentation/config")
 
     args = parser.parse_args()
 
@@ -18,8 +21,14 @@ def main():
 
         owner, repo = owner_repo
 
+        policy = {
+            'allowed_paths': args.allowed_paths,
+            'denied_paths': args.denied_paths,
+            'allow_docs_only': args.allow_docs_only
+        }
+
         try:
-            result = inspect_pr(owner, repo, args.pr)
+            result = inspect_pr(owner, repo, args.pr, scope_policy=policy)
             print(f"PR State: {result['classification']}")
             print(f"Head SHA: {result['head_sha']}")
             print(f"Base Branch: {result['base_branch']}")

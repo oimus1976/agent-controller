@@ -7,50 +7,48 @@ class TestInspector(unittest.TestCase):
     def test_classify_pr_not_implementation_ready_no_changes(self):
         evidence = {
             'head_sha': '12345',
-            'has_implementation_diff': False,
+            'scope_status': 'UNKNOWN',
             'draft': False,
             'merged': False,
             'state': 'open'
         }
         self.assertEqual(classify_pr(evidence), "NEEDS_REVIEW")
 
-    @patch('agent_controller.inspector.get_pr_files')
-    @patch('agent_controller.inspector.get_check_runs')
-    @patch('agent_controller.inspector.get_pr_review_threads_graphql')
-    @patch('agent_controller.inspector.get_pr_issue_comments')
-    @patch('agent_controller.inspector.get_pr_review_comments')
-    @patch('agent_controller.inspector.get_pr_reviews')
-    @patch('agent_controller.inspector.get_pr_details')
-    def test_has_implementation_diff_logic(self, mock_details, mock_reviews, mock_review_comments, mock_issue_comments, mock_graphql, mock_check_runs, mock_files):
-        mock_details.return_value = {
-            'head': {'sha': '12345'},
-            'base': {'ref': 'main'},
-            'draft': False,
-            'merged': False,
-            'state': 'open',
-            'changed_files': 1
-        }
-        # Files with changes
-        mock_files.return_value = [{'filename': 'src/code.py', 'changes': 10, 'status': 'modified'}]
-        mock_reviews.return_value = []
-        mock_review_comments.return_value = []
-        mock_issue_comments.return_value = []
-        mock_graphql.return_value = None
-        mock_check_runs.return_value = {'check_runs': []}
+    def test_evaluate_scope(self):
+        from agent_controller.inspector import evaluate_scope
 
-        result = inspect_pr("owner", "repo", 1)
-        self.assertTrue(result['has_implementation_diff'])
-        self.assertEqual(len(result['diff_summary']), 1)
+        # 1. No policy
+        self.assertEqual(evaluate_scope([{'filename': 'src/code.py', 'changes': 1}], {}), "UNKNOWN")
 
-        # Files with no changes
-        mock_files.return_value = [{'filename': 'src/code.py', 'changes': 0, 'status': 'modified'}]
-        result = inspect_pr("owner", "repo", 1)
-        self.assertFalse(result['has_implementation_diff'])
+        # 2. allowed implementation path => SATISFIED
+        policy = {'allowed_paths': ['src/*.py']}
+        files = [{'filename': 'src/code.py', 'changes': 1}]
+        self.assertEqual(evaluate_scope(files, policy), "SATISFIED")
+
+        # 3. denied/out-of-scope path => VIOLATION
+        policy = {'denied_paths': ['tests/*'], 'allowed_paths': ['src/*.py']}
+        files = [{'filename': 'tests/test_code.py', 'changes': 1}]
+        self.assertEqual(evaluate_scope(files, policy), "VIOLATION")
+
+        # 4. mixed allowed+denied files => VIOLATION
+        files = [{'filename': 'src/code.py', 'changes': 1}, {'filename': 'tests/test_code.py', 'changes': 1}]
+        self.assertEqual(evaluate_scope(files, policy), "VIOLATION")
+
+        # 5. docs-only allowed vs disallowed
+        policy = {'allowed_paths': ['*']}
+        files = [{'filename': 'README.md', 'changes': 1}]
+        self.assertEqual(evaluate_scope(files, policy), "VIOLATION") # Not allowed by default
+
+        policy = {'allowed_paths': ['*'], 'allow_docs_only': True}
+        self.assertEqual(evaluate_scope(files, policy), "SATISFIED")
+
+        # 6. missing/ambiguous policy => UNKNOWN
+        self.assertEqual(evaluate_scope(files, None), "UNKNOWN")
 
     def test_classify_pr_implementation_ready_reachable(self):
         evidence = {
             'head_sha': '12345',
-            'has_implementation_diff': True,
+            'scope_status': 'SATISFIED',
             'draft': False,
             'merged': False,
             'state': 'open',
@@ -63,7 +61,7 @@ class TestInspector(unittest.TestCase):
     def test_classify_pr_unresolved_comments_needs_review(self):
         evidence = {
             'head_sha': '12345',
-            'has_implementation_diff': True,
+            'scope_status': 'SATISFIED',
             'draft': True,
             'merged': False,
             'state': 'open',
@@ -80,7 +78,7 @@ class TestInspector(unittest.TestCase):
         # Review is clean but bound to an old commit
         evidence = {
             'head_sha': 'current_head_sha_98765',
-            'has_implementation_diff': True,
+            'scope_status': 'SATISFIED',
             'draft': True,
             'merged': False,
             'state': 'open',
@@ -97,7 +95,7 @@ class TestInspector(unittest.TestCase):
     def test_classify_pr_spoofed_non_codex_clean_comment_rejection(self):
         evidence = {
             'head_sha': '12345',
-            'has_implementation_diff': True,
+            'scope_status': 'SATISFIED',
             'draft': True,
             'merged': False,
             'state': 'open',
@@ -116,7 +114,7 @@ class TestInspector(unittest.TestCase):
         # Unresolved thread
         evidence_unresolved = {
             'head_sha': head_sha,
-            'has_implementation_diff': True,
+            'scope_status': 'SATISFIED',
             'review_threads_graphql': [
                 {
                     'isResolved': False,
@@ -131,7 +129,7 @@ class TestInspector(unittest.TestCase):
         # Resolved thread
         evidence_resolved = {
             'head_sha': head_sha,
-            'has_implementation_diff': True,
+            'scope_status': 'SATISFIED',
             'state': 'open',
             'merged': False,
             'issue_comments': [{'user': {'login': 'chatgpt-codex-connector[bot]'}, 'body': 'some general non-clean review'}],
@@ -149,7 +147,7 @@ class TestInspector(unittest.TestCase):
     def test_classify_pr_current_head_changes_requested_blocking(self):
         evidence = {
             'head_sha': '12345',
-            'has_implementation_diff': True,
+            'scope_status': 'SATISFIED',
             'reviews': [
                 {
                     'user': {'login': 'chatgpt-codex-connector[bot]'},
@@ -164,7 +162,7 @@ class TestInspector(unittest.TestCase):
     def test_classify_pr_graphql_fail_closed(self):
         evidence = {
             'head_sha': '12345',
-            'has_implementation_diff': True,
+            'scope_status': 'SATISFIED',
             'graphql_error': True,
             'issue_comments': [
                 {
@@ -179,7 +177,7 @@ class TestInspector(unittest.TestCase):
     def test_classify_pr_check_run_error_blocking(self):
         evidence = {
             'head_sha': '12345',
-            'has_implementation_diff': True,
+            'scope_status': 'SATISFIED',
             'check_runs_error': True,
             'issue_comments': [
                 {
@@ -193,7 +191,7 @@ class TestInspector(unittest.TestCase):
     def test_classify_pr_codex_clean_review_reaction(self):
         evidence = {
             'head_sha': '12345',
-            'has_implementation_diff': True,
+            'scope_status': 'SATISFIED',
             'state': 'open',
             'merged': False,
             'issue_comments': [
@@ -264,7 +262,7 @@ class TestInspector(unittest.TestCase):
         head_sha = "b201119ec5b82aef81630ec375d208d2c113f033"
         evidence = {
             'head_sha': head_sha,
-            'has_implementation_diff': True,
+            'scope_status': 'SATISFIED',
             'draft': True,
             'merged': False,
             'state': 'open',
@@ -305,7 +303,8 @@ class TestInspector(unittest.TestCase):
         mock_graphql.return_value = None
         mock_check_runs.return_value = {'check_runs': []}
 
-        result = inspect_pr("oimus1976", "calendar-csv2ics-converter", 5)
+        # Pass a policy that will evaluate to SATISFIED
+        result = inspect_pr("oimus1976", "calendar-csv2ics-converter", 5, scope_policy={'allowed_paths': ['*']})
         self.assertEqual(result['classification'], "REVIEW_READY")
         self.assertEqual(result['head_sha'], "b201119ec5b82aef81630ec375d208d2c113f033")
         self.assertFalse(result['check_runs_error'])
@@ -333,7 +332,7 @@ class TestInspector(unittest.TestCase):
         mock_graphql.return_value = None
         mock_check_runs.side_effect = Exception("API Error")
 
-        result = inspect_pr("oimus1976", "calendar-csv2ics-converter", 5)
+        result = inspect_pr("oimus1976", "calendar-csv2ics-converter", 5, scope_policy={'allowed_paths': ['*']})
         self.assertTrue(result['check_runs_error'])
         self.assertIsNone(result['check_runs'])
         self.assertEqual(result['classification'], "NEEDS_REVIEW")

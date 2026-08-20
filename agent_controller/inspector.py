@@ -165,14 +165,62 @@ def get_issue_comment_reactions(owner, repo, comment_id):
     url = f"https://api.github.com/repos/{owner}/{repo}/issues/comments/{comment_id}/reactions?per_page=100"
     return _github_api_request_paginated(url, headers={"Accept": "application/vnd.github.squirrel-girl-preview+json"})
 
+import fnmatch
+
 def get_check_runs(owner, repo, ref):
     url = f"https://api.github.com/repos/{owner}/{repo}/commits/{ref}/check-runs"
     return _github_api_request(url)
 
-def inspect_pr(owner, repo, pr_number):
+def evaluate_scope(files, policy):
+    if not policy or (policy.get('allowed_paths') is None and policy.get('denied_paths') is None and not policy.get('allow_docs_only')):
+        return "UNKNOWN"
+
+    if not files:
+        return "UNKNOWN"
+
+    allowed_paths = policy.get('allowed_paths') or []
+    denied_paths = policy.get('denied_paths') or []
+    allow_docs_only = policy.get('allow_docs_only', False)
+
+    docs_extensions = ['.md', '.txt', '.json', '.yml', '.yaml', '.ini', '.cfg', '.toml']
+    has_non_doc_change = False
+
+    for f in files:
+        filename = f.get('filename', '')
+
+        # Check denied paths first
+        for pattern in denied_paths:
+            if fnmatch.fnmatch(filename, pattern):
+                return "VIOLATION"
+
+        # Check allowed paths
+        if allowed_paths:
+            matched = False
+            for pattern in allowed_paths:
+                if fnmatch.fnmatch(filename, pattern):
+                    matched = True
+                    break
+            if not matched:
+                return "VIOLATION"
+
+        # Check docs only
+        if f.get('changes', 0) > 0:
+            _, ext = os.path.splitext(filename)
+            if ext.lower() not in docs_extensions:
+                has_non_doc_change = True
+
+    if not allow_docs_only and not has_non_doc_change:
+        return "VIOLATION"
+
+    return "SATISFIED"
+
+def inspect_pr(owner, repo, pr_number, scope_policy=None):
     """
     Inspects a GitHub PR for objective evidence and classifies its state.
     """
+    if scope_policy is None:
+        scope_policy = {}
+
     pr_data = get_pr_details(owner, repo, pr_number)
 
     head_sha = pr_data.get('head', {}).get('sha')
@@ -199,7 +247,6 @@ def inspect_pr(owner, repo, pr_number):
     files = get_pr_files(owner, repo, pr_number)
 
     # Generic file scope analysis
-    has_implementation_diff = False
     diff_summary = []
 
     if isinstance(files, list):
@@ -214,11 +261,8 @@ def inspect_pr(owner, repo, pr_number):
                 'deletions': f.get('deletions', 0),
                 'changes': changes
             })
-            # A simple generic heuristic: if there are changes to non-documentation/non-configuration files
-            # For simplicity, we just consider any file with changes as an implementation diff,
-            # but we explicitly calculate and store this predicate.
-            if changes > 0:
-                has_implementation_diff = True
+
+    scope_status = evaluate_scope(files, scope_policy)
 
     graphql_error = False
     try:
@@ -243,7 +287,7 @@ def inspect_pr(owner, repo, pr_number):
         'changed_files': changed_files,
         'files': files,
         'diff_summary': diff_summary,
-        'has_implementation_diff': has_implementation_diff,
+        'scope_status': scope_status,
         'reviews': reviews,
         'review_comments': review_comments,
         'issue_comments': issue_comments,
@@ -342,10 +386,9 @@ def classify_pr(evidence):
     if evidence.get('merged') or evidence.get('state') == 'closed':
         return "CLOSED"
 
-    has_implementation_diff = evidence.get('has_implementation_diff', False)
+    scope_status = evidence.get('scope_status')
 
-    if not has_implementation_diff:
-        # No relevant implementation diff/artifact
+    if scope_status != "SATISFIED":
         return "NEEDS_REVIEW"
 
     # Blocking current-head findings => NEEDS_REVIEW
