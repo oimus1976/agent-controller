@@ -198,6 +198,28 @@ def inspect_pr(owner, repo, pr_number):
 
     files = get_pr_files(owner, repo, pr_number)
 
+    # Generic file scope analysis
+    has_implementation_diff = False
+    diff_summary = []
+
+    if isinstance(files, list):
+        for f in files:
+            filename = f.get('filename', '')
+            status = f.get('status', '')
+            changes = f.get('changes', 0)
+            diff_summary.append({
+                'filename': filename,
+                'status': status,
+                'additions': f.get('additions', 0),
+                'deletions': f.get('deletions', 0),
+                'changes': changes
+            })
+            # A simple generic heuristic: if there are changes to non-documentation/non-configuration files
+            # For simplicity, we just consider any file with changes as an implementation diff,
+            # but we explicitly calculate and store this predicate.
+            if changes > 0:
+                has_implementation_diff = True
+
     graphql_error = False
     try:
         review_threads_graphql = get_pr_review_threads_graphql(owner, repo, pr_number)
@@ -220,6 +242,8 @@ def inspect_pr(owner, repo, pr_number):
         'state': state,
         'changed_files': changed_files,
         'files': files,
+        'diff_summary': diff_summary,
+        'has_implementation_diff': has_implementation_diff,
         'reviews': reviews,
         'review_comments': review_comments,
         'issue_comments': issue_comments,
@@ -244,12 +268,15 @@ def classify_pr(evidence):
 
     # 1. Analyze issue comments (top-level PR comments)
     issue_comments = evidence.get('issue_comments', [])
+    has_any_review = False
+
     for comment in issue_comments:
         body = comment.get('body', '')
         user = comment.get('user', {}).get('login', '')
         reactions = comment.get('reactions', [])
 
         if user == 'chatgpt-codex-connector[bot]':
+            has_any_review = True
             # Check if it binds to the current head
             if head_sha and (head_sha in body or head_sha[:10] in body):
                 if "Didn't find any major issues" in body:
@@ -259,7 +286,11 @@ def classify_pr(evidence):
             for reaction in reactions:
                 reaction_user = reaction.get('user', {}).get('login')
                 if reaction_user == 'chatgpt-codex-connector[bot]' and reaction.get('content') in ['+1', 'thumbsup', '👍']:
-                    has_clean_codex_review_on_head = True
+                    # We can only accept this if there's explicit proof it's bound to the current head.
+                    # Since reactions don't have built-in head SHAs, and we don't have reliable timestamp comparison yet,
+                    # we must fail closed and NOT treat a naked reaction as clean review evidence for REVIEW_READY.
+                    # It may mean a review happened, but we can't prove it's on *this* head.
+                    has_any_review = True
 
     # 2. Analyze formal reviews
     reviews = evidence.get('reviews', [])
@@ -270,6 +301,7 @@ def classify_pr(evidence):
         body = review.get('body', '')
 
         if user == 'chatgpt-codex-connector[bot]':
+            has_any_review = True
             if commit_id == head_sha or (head_sha and (head_sha in body or head_sha[:10] in body)):
                 if state == 'APPROVED' or "Didn't find any major issues" in body:
                     has_clean_codex_review_on_head = True
@@ -310,24 +342,29 @@ def classify_pr(evidence):
     if evidence.get('merged') or evidence.get('state') == 'closed':
         return "CLOSED"
 
-    files = evidence.get('files', [])
-    has_meaningful_changes = False
-    if files:
-        has_meaningful_changes = len(files) > 0
-    else:
-        # Fallback to changed_files integer
-        has_meaningful_changes = evidence.get('changed_files', 0) > 0
+    has_implementation_diff = evidence.get('has_implementation_diff', False)
 
-    if not has_meaningful_changes:
-        return "NEEDS_REVIEW" # No changes yet, cannot be implementation ready
+    if not has_implementation_diff:
+        # No relevant implementation diff/artifact
+        return "NEEDS_REVIEW"
 
+    # Blocking current-head findings => NEEDS_REVIEW
     if has_unresolved_codex_findings_on_head or has_changes_requested_on_head:
         return "NEEDS_REVIEW"
 
+    # Unavailable/contradictory evidence => NEEDS_REVIEW
     if evidence.get('graphql_error') or evidence.get('check_runs_error'):
         return "NEEDS_REVIEW"
 
+    # Valid current-head clean review evidence => REVIEW_READY
     if has_clean_codex_review_on_head:
         return "REVIEW_READY"
 
+    # If it's open, unmerged, has an implementation diff, and NO review evidence on head,
+    # and no general review evidence at all (or we couldn't bind it), it's implementation ready.
+    if evidence.get('state') == 'open' and not evidence.get('merged'):
+        if not has_any_review:
+            return "IMPLEMENTATION_READY"
+
+    # Fallback
     return "NEEDS_REVIEW"
