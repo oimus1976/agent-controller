@@ -13,6 +13,42 @@ class TestWatcher(unittest.TestCase):
     def tearDown(self):
         self.test_dir.cleanup()
 
+
+    @patch('agent_controller.watcher.inspect_pr')
+    def test_watch_pr_once_inspect_failure(self, mock_inspect):
+        # inspect_pr raising/API failure -> explicit fail-closed observation/provenance
+        initial_state = {
+            'head_sha': 'sha1',
+            'classification': 'REVIEW_READY',
+            'draft': False,
+            'merged': False,
+            'state_enum': 'open',
+            'graphql_error': False,
+            'check_runs_error': False,
+            'scope_status': 'SATISFIED'
+        }
+        with open(self.state_file, 'w') as f:
+            json.dump(initial_state, f)
+
+        mock_inspect.side_effect = Exception("API connection dropped")
+
+        obs = watch_pr_once('owner', 'repo', 1, self.state_file)
+
+        self.assertTrue(obs['transition'])
+        self.assertIn('EVIDENCE_AVAILABILITY_CHANGED', obs['transition_reasons'])
+        self.assertIn('CLASSIFICATION_CHANGED', obs['transition_reasons'])
+        self.assertEqual(obs['current_classification'], 'NEEDS_REVIEW')
+        self.assertEqual(obs['runtime_status'], 'EVIDENCE_UNAVAILABLE')
+        self.assertEqual(obs['error_reason'], 'API connection dropped')
+
+        # Verify state file retains safe fallback values
+        with open(self.state_file, 'r') as f:
+            state = json.load(f)
+            self.assertEqual(state['classification'], 'NEEDS_REVIEW')
+            self.assertEqual(state['head_sha'], 'sha1')
+            self.assertTrue(state['graphql_error'])
+            self.assertTrue(state['check_runs_error'])
+
     @patch('agent_controller.watcher.inspect_pr')
     def test_watch_pr_once_baseline(self, mock_inspect):
         # first observation creates baseline state with no false prior transition
@@ -71,8 +107,8 @@ class TestWatcher(unittest.TestCase):
             'classification': 'NEEDS_REVIEW',
             'draft': False,
             'merged': False,
-            'state_enum': 'open',
-            'evidence_unavailable': False
+            'state_enum': 'open', 'scope_status': 'UNKNOWN',
+            'graphql_error': False, 'check_runs_error': False, 'scope_status': 'UNKNOWN'
         }
         with open(self.state_file, 'w') as f:
             json.dump(initial_state, f)
@@ -102,8 +138,8 @@ class TestWatcher(unittest.TestCase):
             'classification': 'NEEDS_REVIEW',
             'draft': False,
             'merged': False,
-            'state_enum': 'open',
-            'evidence_unavailable': False
+            'state_enum': 'open', 'scope_status': 'UNKNOWN',
+            'graphql_error': False, 'check_runs_error': False, 'scope_status': 'UNKNOWN'
         }
         with open(self.state_file, 'w') as f:
             json.dump(initial_state, f)
@@ -133,8 +169,8 @@ class TestWatcher(unittest.TestCase):
             'classification': 'NEEDS_REVIEW',
             'draft': True,
             'merged': False,
-            'state_enum': 'open',
-            'evidence_unavailable': False
+            'state_enum': 'open', 'scope_status': 'UNKNOWN',
+            'graphql_error': False, 'check_runs_error': False, 'scope_status': 'UNKNOWN'
         }
         with open(self.state_file, 'w') as f:
             json.dump(initial_state, f)
@@ -162,8 +198,8 @@ class TestWatcher(unittest.TestCase):
             'classification': 'REVIEW_READY',
             'draft': False,
             'merged': False,
-            'state_enum': 'open',
-            'evidence_unavailable': False
+            'state_enum': 'open', 'scope_status': 'UNKNOWN',
+            'graphql_error': False, 'check_runs_error': False, 'scope_status': 'UNKNOWN'
         }
         with open(self.state_file, 'w') as f:
             json.dump(initial_state, f)
@@ -202,9 +238,8 @@ class TestWatcher(unittest.TestCase):
 
         obs = watch_pr_once('owner', 'repo', 1, self.state_file)
 
-        # Should treat as empty/baseline
-        self.assertFalse(obs['transition'])
-        self.assertEqual(obs['transition_reasons'], [])
+        self.assertTrue(obs['transition'])
+        self.assertIn('PRIOR_STATE_CORRUPT', obs['transition_reasons'])
 
         # File should be overwritten with valid json
         with open(self.state_file, 'r') as f:
