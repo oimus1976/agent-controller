@@ -78,6 +78,11 @@ def execute_action(plan, owner, repo, pr_number, apply=False):
         "failure_reason": None
     }
 
+    if plan.get("repo") != f"{owner}/{repo}" or plan.get("pr") != pr_number:
+        result["final_outcome"] = "BLOCKED"
+        result["failure_reason"] = "TARGET_MISMATCH"
+        return result
+
     if plan.get("decision") == "NOOP":
         result["final_outcome"] = "NOOP"
         result["failure_reason"] = plan.get("reason")

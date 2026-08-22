@@ -66,6 +66,8 @@ class TestExecutor(unittest.TestCase):
             "state": "open"
         }
         plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", self.policy_path)
+        mock_get_pr_details.reset_mock()
+
         self.assertEqual(plan["decision"], "NOOP")
         self.assertEqual(plan["reason"], "ALREADY_DRAFT")
 
@@ -81,6 +83,8 @@ class TestExecutor(unittest.TestCase):
             "node_id": "node123"
         }
         plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", self.policy_path)
+        mock_get_pr_details.reset_mock()
+
         self.assertEqual(plan["decision"], "EXECUTABLE")
 
         result = execute_action(plan, self.owner, self.repo, self.pr_number, apply=False)
@@ -121,6 +125,8 @@ class TestExecutor(unittest.TestCase):
         ]
 
         plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", self.policy_path)
+        mock_get_pr_details.reset_mock()
+
         self.assertEqual(plan["decision"], "EXECUTABLE")
 
         result = execute_action(plan, self.owner, self.repo, self.pr_number, apply=True)
@@ -153,6 +159,8 @@ class TestExecutor(unittest.TestCase):
         ]
 
         plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", self.policy_path)
+        mock_get_pr_details.reset_mock()
+
         result = execute_action(plan, self.owner, self.repo, self.pr_number, apply=True)
         self.assertEqual(result["final_outcome"], "BLOCKED")
         self.assertEqual(result["failure_reason"], "STALE_HEAD_SHA")
@@ -180,6 +188,8 @@ class TestExecutor(unittest.TestCase):
         ]
 
         plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", self.policy_path)
+        mock_get_pr_details.reset_mock()
+
         result = execute_action(plan, self.owner, self.repo, self.pr_number, apply=True)
         self.assertEqual(result["final_outcome"], "BLOCKED")
         self.assertEqual(result["failure_reason"], "PR_CLOSED_OR_MERGED")
@@ -207,6 +217,8 @@ class TestExecutor(unittest.TestCase):
         ]
 
         plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", self.policy_path)
+        mock_get_pr_details.reset_mock()
+
         result = execute_action(plan, self.owner, self.repo, self.pr_number, apply=True)
         self.assertEqual(result["final_outcome"], "BLOCKED")
         self.assertEqual(result["failure_reason"], "PR_CLOSED_OR_MERGED")
@@ -234,6 +246,8 @@ class TestExecutor(unittest.TestCase):
         ]
 
         plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", self.policy_path)
+        mock_get_pr_details.reset_mock()
+
         result = execute_action(plan, self.owner, self.repo, self.pr_number, apply=True)
         self.assertEqual(result["final_outcome"], "NOOP")
         self.assertEqual(result["failure_reason"], "ALREADY_DRAFT")
@@ -245,6 +259,8 @@ class TestExecutor(unittest.TestCase):
         mock_get_pr_details.side_effect = Exception("API error")
 
         plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", self.policy_path)
+        mock_get_pr_details.reset_mock()
+
         self.assertEqual(plan["decision"], "BLOCKED")
         self.assertTrue(plan["reason"].startswith("EVIDENCE_FETCH_FAILED"))
 
@@ -275,6 +291,8 @@ class TestExecutor(unittest.TestCase):
         mock_graphql.side_effect = Exception("GraphQL failure")
 
         plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", self.policy_path)
+        mock_get_pr_details.reset_mock()
+
         result = execute_action(plan, self.owner, self.repo, self.pr_number, apply=True)
         self.assertEqual(result["final_outcome"], "BLOCKED")
         self.assertEqual(result["failure_reason"], "MUTATION_FAILED")
@@ -309,6 +327,8 @@ class TestExecutor(unittest.TestCase):
         ]
 
         plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", self.policy_path)
+        mock_get_pr_details.reset_mock()
+
         result = execute_action(plan, self.owner, self.repo, self.pr_number, apply=True)
         self.assertEqual(result["final_outcome"], "FAILED")
         self.assertEqual(result["failure_reason"], "POSTCONDITION_FAILED")
@@ -342,6 +362,48 @@ class TestExecutor(unittest.TestCase):
         dangerous_functions = ["merge", "create_comment", "add_label"]
         for func in dangerous_functions:
             self.assertNotIn(func, imported_names)
+
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
+    @patch('agent_controller.executor.get_pr_details')
+    def test_target_mismatch_different_repo(self, mock_get_pr_details, mock_convert):
+        plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", self.policy_path)
+        mock_get_pr_details.reset_mock()
+
+
+        # execution with different repo
+        result = execute_action(plan, "otherowner", "otherrepo", self.pr_number, apply=True)
+        self.assertEqual(result["final_outcome"], "BLOCKED")
+        self.assertEqual(result["failure_reason"], "TARGET_MISMATCH")
+        mock_get_pr_details.assert_not_called()
+        mock_convert.assert_not_called()
+
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
+    @patch('agent_controller.executor.get_pr_details')
+    def test_target_mismatch_different_pr(self, mock_get_pr_details, mock_convert):
+        plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", self.policy_path)
+        mock_get_pr_details.reset_mock()
+
+
+        # execution with different pr number
+        result = execute_action(plan, self.owner, self.repo, 999, apply=True)
+        self.assertEqual(result["final_outcome"], "BLOCKED")
+        self.assertEqual(result["failure_reason"], "TARGET_MISMATCH")
+        mock_get_pr_details.assert_not_called()
+        mock_convert.assert_not_called()
+
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
+    @patch('agent_controller.executor.get_pr_details')
+    def test_target_mismatch_different_both(self, mock_get_pr_details, mock_convert):
+        plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", self.policy_path)
+        mock_get_pr_details.reset_mock()
+
+
+        # execution with completely different target
+        result = execute_action(plan, "otherowner", "otherrepo", 999, apply=True)
+        self.assertEqual(result["final_outcome"], "BLOCKED")
+        self.assertEqual(result["failure_reason"], "TARGET_MISMATCH")
+        mock_get_pr_details.assert_not_called()
+        mock_convert.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()
