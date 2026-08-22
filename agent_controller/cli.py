@@ -1,27 +1,29 @@
 import argparse
-import sys
 import json
+import sys
 from .inspector import inspect_pr
 from .watcher import watch_pr_once, watch_pr_loop
 from .executor import plan_action, execute_action
+from .reconciler import reconcile_pr_once
 
 def main():
     parser = argparse.ArgumentParser(description="Agent Controller: PR Inspector")
-    parser.add_argument("command", choices=["inspect-pr", "watch-pr", "act-pr"], help="Command to run")
+    parser.add_argument("command", choices=["inspect-pr", "watch-pr", "act-pr", "reconcile-pr"], help="Command to run")
     parser.add_argument("--repo", required=True, help="Target repository in OWNER/REPO format")
     parser.add_argument("--pr", required=True, type=int, help="Target pull request number")
     parser.add_argument("--allowed-paths", nargs='*', help="List of allowed glob patterns for files (e.g. 'src/*' '*.py')")
     parser.add_argument("--denied-paths", nargs='*', help="List of denied glob patterns for files")
     parser.add_argument("--allow-docs-only", action='store_true', help="Allow PRs that only change documentation/config")
 
-    # Arguments for watch-pr
-    parser.add_argument("--once", action='store_true', help="Run a single deterministic observation (watch-pr)")
-    parser.add_argument("--state-file", default=".pr_state.json", help="Path to local state/evidence file (watch-pr)")
-    parser.add_argument("--interval", type=int, default=60, help="Polling interval in seconds for loop mode (watch-pr)")
+    # Arguments for watch-pr and reconcile-pr
+    parser.add_argument("--once", action='store_true', help="Run a single deterministic observation or reconciliation cycle")
+    parser.add_argument("--state-file", default=".pr_state.json", help="Path to local state/evidence file")
+    parser.add_argument("--interval", type=int, default=60, help="Polling interval in seconds for loop mode")
 
-    # Arguments for act-pr
-    parser.add_argument("--policy", help="Path to explicit local policy JSON file (act-pr)")
-    parser.add_argument("--apply", action='store_true', help="Actually perform authorized GitHub writes (act-pr)")
+    # Arguments for act-pr and reconcile-pr
+    parser.add_argument("--policy", help="Path to explicit local policy JSON file")
+    parser.add_argument("--receipts-file", default=".action_receipts.json", help="Path to action receipts file (reconcile-pr)")
+    parser.add_argument("--apply", action='store_true', help="Actually perform authorized GitHub writes")
 
     args = parser.parse_args()
 
@@ -78,6 +80,29 @@ def main():
                 sys.exit(1)
         except Exception as e:
             print(f"Error acting on PR: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif args.command == "reconcile-pr":
+        try:
+            if not args.once:
+                print("Error: reconcile-pr currently requires --once flag", file=sys.stderr)
+                sys.exit(1)
+
+            result = reconcile_pr_once(
+                owner, repo, args.pr,
+                state_file=args.state_file,
+                policy_file=args.policy,
+                receipts_file=args.receipts_file,
+                apply=args.apply
+            )
+            print(json.dumps(result, indent=2))
+
+            plan = result.get("action_plan") or {}
+            exec_res = result.get("execution_result") or {}
+            if plan.get("decision") == "BLOCKED" or exec_res.get("final_outcome") in ["BLOCKED", "FAILED"]:
+                sys.exit(1)
+        except Exception as e:
+            print(f"Error reconciling PR: {e}", file=sys.stderr)
             sys.exit(1)
 
 if __name__ == "__main__":
