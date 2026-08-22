@@ -1,6 +1,7 @@
 import json
 import os
-from .inspector import get_pr_details, _github_graphql_request
+from .inspector import get_pr_details
+from .mutator import convert_pull_request_to_draft
 
 def load_policy(policy_path):
     if not policy_path or not os.path.exists(policy_path):
@@ -132,21 +133,11 @@ def execute_action(plan, owner, repo, pr_number, apply=False):
         return result
 
     # 4. Perform exactly one Draft mutation
-    mutation = """
-    mutation($prId: ID!) {
-      convertPullRequestToDraft(input: {pullRequestId: $prId}) {
-        pullRequest {
-          isDraft
-        }
-      }
-    }
-    """
-
     result["mutation_attempted"] = True
     result["mutation_type"] = "ENSURE_DRAFT"
 
     try:
-        _github_graphql_request(mutation, {"prId": node_id})
+        convert_pull_request_to_draft(node_id)
     except Exception as e:
         result["failure_reason"] = "MUTATION_FAILED"
         return result

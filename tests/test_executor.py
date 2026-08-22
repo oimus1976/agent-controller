@@ -70,7 +70,7 @@ class TestExecutor(unittest.TestCase):
         self.assertEqual(plan["reason"], "ALREADY_DRAFT")
 
     # 5. open non-Draft + valid policy -> EXECUTABLE in dry-run, no mutation
-    @patch('agent_controller.executor._github_graphql_request')
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
     @patch('agent_controller.executor.get_pr_details')
     def test_executable_dry_run(self, mock_get_pr_details, mock_graphql):
         mock_get_pr_details.return_value = {
@@ -89,7 +89,7 @@ class TestExecutor(unittest.TestCase):
         mock_graphql.assert_not_called()
     # 6. same case + --apply -> exactly one Draft mutation
     # 13. successful mutation -> verified Draft=true
-    @patch('agent_controller.executor._github_graphql_request')
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
     @patch('agent_controller.executor.get_pr_details')
     def test_successful_mutation(self, mock_get_pr_details, mock_graphql):
         # Initial fetch
@@ -130,7 +130,7 @@ class TestExecutor(unittest.TestCase):
         mock_graphql.assert_called_once()
 
     # 7. pre-execution head changed -> BLOCKED, no mutation
-    @patch('agent_controller.executor._github_graphql_request')
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
     @patch('agent_controller.executor.get_pr_details')
     def test_stale_head(self, mock_get_pr_details, mock_graphql):
         mock_get_pr_details.side_effect = [
@@ -159,7 +159,7 @@ class TestExecutor(unittest.TestCase):
         mock_graphql.assert_not_called()
 
     # 8. PR closed before execute -> BLOCKED, no mutation
-    @patch('agent_controller.executor._github_graphql_request')
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
     @patch('agent_controller.executor.get_pr_details')
     def test_closed_before_execute(self, mock_get_pr_details, mock_graphql):
         mock_get_pr_details.side_effect = [
@@ -186,7 +186,7 @@ class TestExecutor(unittest.TestCase):
         mock_graphql.assert_not_called()
 
     # 9. PR merged before execute -> BLOCKED, no mutation
-    @patch('agent_controller.executor._github_graphql_request')
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
     @patch('agent_controller.executor.get_pr_details')
     def test_merged_before_execute(self, mock_get_pr_details, mock_graphql):
         mock_get_pr_details.side_effect = [
@@ -213,7 +213,7 @@ class TestExecutor(unittest.TestCase):
         mock_graphql.assert_not_called()
 
     # 14. repeated run after successful Draft conversion -> NOOP, no duplicate mutation
-    @patch('agent_controller.executor._github_graphql_request')
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
     @patch('agent_controller.executor.get_pr_details')
     def test_repeated_run_after_success(self, mock_get_pr_details, mock_graphql):
         mock_get_pr_details.side_effect = [
@@ -239,7 +239,7 @@ class TestExecutor(unittest.TestCase):
         self.assertEqual(result["failure_reason"], "ALREADY_DRAFT")
         mock_graphql.assert_not_called()
     # 10. GitHub read/API failure -> BLOCKED, no mutation
-    @patch('agent_controller.executor._github_graphql_request')
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
     @patch('agent_controller.executor.get_pr_details')
     def test_github_read_failure(self, mock_get_pr_details, mock_graphql):
         mock_get_pr_details.side_effect = Exception("API error")
@@ -253,7 +253,7 @@ class TestExecutor(unittest.TestCase):
         mock_graphql.assert_not_called()
 
     # 11. mutation failure -> explicit failure, no false success
-    @patch('agent_controller.executor._github_graphql_request')
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
     @patch('agent_controller.executor.get_pr_details')
     def test_mutation_failure(self, mock_get_pr_details, mock_graphql):
         mock_get_pr_details.side_effect = [
@@ -281,7 +281,7 @@ class TestExecutor(unittest.TestCase):
         self.assertEqual(result["postcondition_result"], None)
 
     # 12. postcondition remains non-Draft -> explicit verification failure
-    @patch('agent_controller.executor._github_graphql_request')
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
     @patch('agent_controller.executor.get_pr_details')
     def test_postcondition_failure(self, mock_get_pr_details, mock_graphql):
         mock_get_pr_details.side_effect = [
@@ -316,9 +316,32 @@ class TestExecutor(unittest.TestCase):
 
     # 15. executor has no callable merge/comment/label/review-trigger/file-write path
     def test_no_other_capabilities(self):
-        # We ensure this by structural verification of the file.
-        # There's no other GraphQL mutation defined and we use strict exact string match in execute_action.
-        pass
+        import ast
+        with open("agent_controller/executor.py", "r") as f:
+            tree = ast.parse(f.read())
+
+        imported_names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported_names.add(alias.name)
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    imported_names.add(alias.name)
+
+        # Should not import generic request functions or general github GraphQL client
+        self.assertNotIn("_github_graphql_request", imported_names)
+        self.assertNotIn("urllib", imported_names)
+        self.assertNotIn("urllib.request", imported_names)
+        self.assertNotIn("requests", imported_names)
+
+        # Verify the only mutating function allowed is convert_pull_request_to_draft
+        self.assertIn("convert_pull_request_to_draft", imported_names)
+
+        # Ensure we don't have dangerous operations
+        dangerous_functions = ["merge", "create_comment", "add_label"]
+        for func in dangerous_functions:
+            self.assertNotIn(func, imported_names)
 
 if __name__ == '__main__':
     unittest.main()
