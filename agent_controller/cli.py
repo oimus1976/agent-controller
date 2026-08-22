@@ -3,10 +3,11 @@ import sys
 import json
 from .inspector import inspect_pr
 from .watcher import watch_pr_once, watch_pr_loop
+from .executor import plan_action, execute_action
 
 def main():
     parser = argparse.ArgumentParser(description="Agent Controller: PR Inspector")
-    parser.add_argument("command", choices=["inspect-pr", "watch-pr"], help="Command to run")
+    parser.add_argument("command", choices=["inspect-pr", "watch-pr", "act-pr"], help="Command to run")
     parser.add_argument("--repo", required=True, help="Target repository in OWNER/REPO format")
     parser.add_argument("--pr", required=True, type=int, help="Target pull request number")
     parser.add_argument("--allowed-paths", nargs='*', help="List of allowed glob patterns for files (e.g. 'src/*' '*.py')")
@@ -17,6 +18,10 @@ def main():
     parser.add_argument("--once", action='store_true', help="Run a single deterministic observation (watch-pr)")
     parser.add_argument("--state-file", default=".pr_state.json", help="Path to local state/evidence file (watch-pr)")
     parser.add_argument("--interval", type=int, default=60, help="Polling interval in seconds for loop mode (watch-pr)")
+
+    # Arguments for act-pr
+    parser.add_argument("--policy", help="Path to explicit local policy JSON file (act-pr)")
+    parser.add_argument("--apply", action='store_true', help="Actually perform authorized GitHub writes (act-pr)")
 
     args = parser.parse_args()
 
@@ -57,6 +62,22 @@ def main():
                 watch_pr_loop(owner, repo, args.pr, args.state_file, args.interval, scope_policy=policy)
         except Exception as e:
             print(f"Error watching PR: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif args.command == "act-pr":
+        try:
+            plan = plan_action(owner, repo, args.pr, "ENSURE_DRAFT", args.policy)
+            print("PLAN:")
+            print(json.dumps(plan, indent=2))
+
+            result = execute_action(plan, owner, repo, args.pr, apply=args.apply)
+            print("EXECUTION:")
+            print(json.dumps(result, indent=2))
+
+            if result.get("final_outcome") in ["BLOCKED", "FAILED"]:
+                sys.exit(1)
+        except Exception as e:
+            print(f"Error acting on PR: {e}", file=sys.stderr)
             sys.exit(1)
 
 if __name__ == "__main__":
