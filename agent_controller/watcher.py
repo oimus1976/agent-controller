@@ -21,12 +21,14 @@ def watch_pr_once(owner, repo, pr_number, state_file, scope_policy=None):
             previous_state = {}
 
     # Re-inspect to get current objective evidence
+    error_occurred = False
     try:
         current_evidence = inspect_pr(owner, repo, pr_number, scope_policy=scope_policy)
         runtime_status = 'OK'
         error_reason = None
     except Exception as e:
         # Explicit fail-closed watcher observation
+        error_occurred = True
         runtime_status = 'EVIDENCE_UNAVAILABLE'
         error_reason = str(e)
         current_evidence = {
@@ -107,21 +109,22 @@ def watch_pr_once(owner, repo, pr_number, state_file, scope_policy=None):
     if error_reason:
         observation["error_reason"] = error_reason
 
-    # Safely write new state atomically
-    dir_name = os.path.dirname(os.path.abspath(state_file))
-    os.makedirs(dir_name, exist_ok=True)
+    # Safely write new state atomically, only if no error occurred
+    if not error_occurred:
+        dir_name = os.path.dirname(os.path.abspath(state_file))
+        os.makedirs(dir_name, exist_ok=True)
 
-    fd, temp_path = tempfile.mkstemp(dir=dir_name)
-    try:
-        with os.fdopen(fd, 'w') as f:
-            json.dump(new_state, f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temp_path, state_file)
-    except Exception as e:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        raise e
+        fd, temp_path = tempfile.mkstemp(dir=dir_name)
+        try:
+            with os.fdopen(fd, 'w') as f:
+                json.dump(new_state, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, state_file)
+        except Exception as e:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise e
 
     return observation
 

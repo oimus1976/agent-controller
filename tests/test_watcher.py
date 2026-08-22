@@ -14,9 +14,10 @@ class TestWatcher(unittest.TestCase):
         self.test_dir.cleanup()
 
 
+
     @patch('agent_controller.watcher.inspect_pr')
-    def test_watch_pr_once_inspect_failure(self, mock_inspect):
-        # inspect_pr raising/API failure -> explicit fail-closed observation/provenance
+    def test_watch_pr_once_inspect_failure_preserves_state(self, mock_inspect):
+        # inspect_pr raising/API failure -> explicit fail-closed observation, BUT state file unchanged
         initial_state = {
             'head_sha': 'sha1',
             'classification': 'REVIEW_READY',
@@ -41,13 +42,69 @@ class TestWatcher(unittest.TestCase):
         self.assertEqual(obs['runtime_status'], 'EVIDENCE_UNAVAILABLE')
         self.assertEqual(obs['error_reason'], 'API connection dropped')
 
-        # Verify state file retains safe fallback values
+        # Verify state file remains UNCHANGED (original known-good state)
         with open(self.state_file, 'r') as f:
             state = json.load(f)
-            self.assertEqual(state['classification'], 'NEEDS_REVIEW')
+            self.assertEqual(state['classification'], 'REVIEW_READY') # Not NEEDS_REVIEW
             self.assertEqual(state['head_sha'], 'sha1')
-            self.assertTrue(state['graphql_error'])
-            self.assertTrue(state['check_runs_error'])
+            self.assertFalse(state['graphql_error']) # Not True
+            self.assertFalse(state['check_runs_error'])
+
+    @patch('agent_controller.watcher.inspect_pr')
+    def test_watch_pr_once_inspect_failure_no_baseline(self, mock_inspect):
+        # If no prior state exists and inspection fails, do not create a synthetic baseline
+        if os.path.exists(self.state_file):
+            os.remove(self.state_file)
+
+        mock_inspect.side_effect = Exception("API connection dropped")
+
+        obs = watch_pr_once('owner', 'repo', 1, self.state_file)
+
+        self.assertEqual(obs['runtime_status'], 'EVIDENCE_UNAVAILABLE')
+
+        # Verify NO state file was created
+        self.assertFalse(os.path.exists(self.state_file))
+
+    @patch('agent_controller.watcher.inspect_pr')
+    def test_watch_pr_once_inspect_failure_then_success(self, mock_inspect):
+        # A successful observation after a failure compares against original last-known-good state
+        initial_state = {
+            'head_sha': 'sha1',
+            'classification': 'REVIEW_READY',
+            'draft': False,
+            'merged': False,
+            'state_enum': 'open',
+            'graphql_error': False,
+            'check_runs_error': False,
+            'scope_status': 'SATISFIED'
+        }
+        with open(self.state_file, 'w') as f:
+            json.dump(initial_state, f)
+
+        # First run fails
+        mock_inspect.side_effect = Exception("API connection dropped")
+        watch_pr_once('owner', 'repo', 1, self.state_file)
+
+        # Second run succeeds with a new head
+        mock_inspect.side_effect = None
+        mock_inspect.return_value = {
+            'head_sha': 'sha2',
+            'classification': 'NEEDS_REVIEW',
+            'draft': False,
+            'merged': False,
+            'state': 'open',
+            'graphql_error': False,
+            'check_runs_error': False,
+            'scope_status': 'SATISFIED'
+        }
+
+        obs = watch_pr_once('owner', 'repo', 1, self.state_file)
+
+        # It should compare sha2 (current) against sha1 (from state file), emitting HEAD_CHANGED
+        self.assertTrue(obs['transition'])
+        self.assertIn('HEAD_CHANGED', obs['transition_reasons'])
+        self.assertEqual(obs['previous_head_sha'], 'sha1')
+        self.assertEqual(obs['current_head_sha'], 'sha2')
 
     @patch('agent_controller.watcher.inspect_pr')
     def test_watch_pr_once_baseline(self, mock_inspect):
