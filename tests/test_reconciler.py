@@ -31,7 +31,7 @@ class TestReconciler(unittest.TestCase):
         def side_effect_watch(owner, repo, pr_number, state_file, scope_policy=None):
             # Simulate watch_pr_once writing state_file on first observation
             with open(state_file, 'w') as f:
-                json.dump({"head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+                json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
             return {
                 "repo": f"{owner}/{repo}",
                 "pr": pr_number,
@@ -72,7 +72,7 @@ class TestReconciler(unittest.TestCase):
     def test_repeated_identical_observation_no_transition(self, mock_watch):
         # Baseline state exists
         with open(self.state_file, 'w') as f:
-            json.dump({"head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
 
         mock_watch.return_value = {
             "repo": f"{self.owner}/{self.repo}",
@@ -110,7 +110,7 @@ class TestReconciler(unittest.TestCase):
     @patch('agent_controller.reconciler.watch_pr_once')
     def test_draft_changed_dry_run(self, mock_watch, mock_plan, mock_execute):
         with open(self.state_file, 'w') as f:
-            json.dump({"head_sha": "sha1", "draft": True, "merged": False, "state_enum": "open"}, f)
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": True, "merged": False, "state_enum": "open"}, f)
 
         mock_watch.return_value = {
             "repo": f"{self.owner}/{self.repo}",
@@ -162,7 +162,7 @@ class TestReconciler(unittest.TestCase):
     @patch('agent_controller.reconciler.watch_pr_once')
     def test_successful_apply_and_receipt(self, mock_watch, mock_get_pr_details, mock_convert):
         with open(self.state_file, 'w') as f:
-            json.dump({"head_sha": "sha1", "draft": True, "merged": False, "state_enum": "open"}, f)
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": True, "merged": False, "state_enum": "open"}, f)
 
         mock_watch.return_value = {
             "repo": f"{self.owner}/{self.repo}",
@@ -212,7 +212,7 @@ class TestReconciler(unittest.TestCase):
     @patch('agent_controller.reconciler.watch_pr_once')
     def test_duplicate_transition_with_receipt(self, mock_watch):
         with open(self.state_file, 'w') as f:
-            json.dump({"head_sha": "sha1", "draft": True, "merged": False, "state_enum": "open"}, f)
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": True, "merged": False, "state_enum": "open"}, f)
 
         # Populate receipts file with consumed receipt
         consumed_receipt = {
@@ -256,7 +256,7 @@ class TestReconciler(unittest.TestCase):
     @patch('agent_controller.reconciler.watch_pr_once')
     def test_head_change_relevant_transition(self, mock_watch, mock_get_pr_details, mock_convert):
         with open(self.state_file, 'w') as f:
-            json.dump({"head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
 
         mock_watch.return_value = {
             "repo": f"{self.owner}/{self.repo}",
@@ -290,7 +290,7 @@ class TestReconciler(unittest.TestCase):
     @patch('agent_controller.reconciler.watch_pr_once')
     def test_evidence_unavailable_fail_closed(self, mock_watch):
         with open(self.state_file, 'w') as f:
-            json.dump({"head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
 
         mock_watch.return_value = {
             "repo": f"{self.owner}/{self.repo}",
@@ -325,7 +325,7 @@ class TestReconciler(unittest.TestCase):
     @patch('agent_controller.reconciler.watch_pr_once')
     def test_missing_or_malformed_policy(self, mock_watch):
         with open(self.state_file, 'w') as f:
-            json.dump({"head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
 
         mock_watch.return_value = {
             "repo": f"{self.owner}/{self.repo}",
@@ -357,7 +357,7 @@ class TestReconciler(unittest.TestCase):
     @patch('agent_controller.reconciler.watch_pr_once')
     def test_stale_head_before_apply(self, mock_watch, mock_get_pr_details, mock_convert):
         with open(self.state_file, 'w') as f:
-            json.dump({"head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
 
         mock_watch.return_value = {
             "repo": f"{self.owner}/{self.repo}",
@@ -396,7 +396,7 @@ class TestReconciler(unittest.TestCase):
     @patch('agent_controller.reconciler.watch_pr_once')
     def test_mutation_failure_no_receipt(self, mock_watch, mock_get_pr_details, mock_convert):
         with open(self.state_file, 'w') as f:
-            json.dump({"head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
 
         mock_watch.return_value = {
             "repo": f"{self.owner}/{self.repo}",
@@ -433,7 +433,7 @@ class TestReconciler(unittest.TestCase):
     @patch('agent_controller.reconciler.watch_pr_once')
     def test_postcondition_failure_no_receipt(self, mock_watch, mock_get_pr_details, mock_convert):
         with open(self.state_file, 'w') as f:
-            json.dump({"head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
 
         mock_watch.return_value = {
             "repo": f"{self.owner}/{self.repo}",
@@ -470,7 +470,7 @@ class TestReconciler(unittest.TestCase):
     @patch('agent_controller.reconciler.watch_pr_once')
     def test_corrupt_receipts_file(self, mock_watch):
         with open(self.state_file, 'w') as f:
-            json.dump({"head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
 
         # Write corrupt JSON into receipts file
         with open(self.receipts_file, 'w') as f:
@@ -540,6 +540,567 @@ class TestReconciler(unittest.TestCase):
         dangerous_functions = ["merge", "create_comment", "add_label"]
         for func in dangerous_functions:
             self.assertNotIn(func, imported_names)
+
+
+    # 17. dry-run then apply retry (should succeed on apply)
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
+    @patch('agent_controller.executor.get_pr_details')
+    @patch('agent_controller.reconciler.watch_pr_once')
+    def test_dry_run_then_apply_retry(self, mock_watch, mock_get_pr_details, mock_convert):
+        # Initial state baseline
+        with open(self.state_file, 'w') as f:
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+
+        def side_effect_watch(owner, repo, pr, state_file, scope_policy=None):
+            with open(state_file, 'w') as f:
+                json.dump({"repo": f"{owner}/{repo}", "pr": pr, "head_sha": "sha2", "draft": False, "merged": False, "state_enum": "open"}, f)
+            return {
+                "repo": f"{owner}/{repo}",
+                "pr": pr,
+                "previous_head_sha": "sha1",
+                "current_head_sha": "sha2",
+                "runtime_status": "OK",
+                "transition": True,
+                "transition_reasons": ["HEAD_CHANGED"]
+            }
+
+        mock_watch.side_effect = side_effect_watch
+
+        mock_get_pr_details.side_effect = [
+            {"head": {"sha": "sha2"}, "draft": False, "merged": False, "state": "open", "node_id": "node2"},
+            {"head": {"sha": "sha2"}, "draft": False, "merged": False, "state": "open", "node_id": "node2"},
+            {"head": {"sha": "sha2"}, "draft": False, "merged": False, "state": "open", "node_id": "node2"},
+            {"head": {"sha": "sha2"}, "draft": True, "merged": False, "state": "open", "node_id": "node2"}
+        ]
+
+        res = reconcile_pr_once(
+            self.owner, self.repo, self.pr_number,
+            state_file=self.state_file,
+            policy_file=self.policy_file,
+            receipts_file=self.receipts_file,
+            apply=False
+        )
+
+        self.assertEqual(res["execution_result"]["final_outcome"], "DRY_RUN")
+        self.assertIsNone(res["action_receipt"])
+
+        with open(self.state_file, 'r') as f:
+            data = json.load(f)
+            self.assertEqual(data["head_sha"], "sha1")
+
+        res2 = reconcile_pr_once(
+            self.owner, self.repo, self.pr_number,
+            state_file=self.state_file,
+            policy_file=self.policy_file,
+            receipts_file=self.receipts_file,
+            apply=True
+        )
+
+        self.assertEqual(res2["execution_result"]["final_outcome"], "SUCCESS")
+        self.assertIsNotNone(res2["action_receipt"])
+
+        with open(self.state_file, 'r') as f:
+            data = json.load(f)
+            self.assertEqual(data["head_sha"], "sha2")
+
+    # 18. failed apply then retry (should preserve transition)
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
+    @patch('agent_controller.executor.get_pr_details')
+    @patch('agent_controller.reconciler.watch_pr_once')
+    def test_failed_apply_then_retry(self, mock_watch, mock_get_pr_details, mock_convert):
+        with open(self.state_file, 'w') as f:
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+
+        def side_effect_watch(owner, repo, pr, state_file, scope_policy=None):
+            with open(state_file, 'w') as f:
+                json.dump({"repo": f"{owner}/{repo}", "pr": pr, "head_sha": "sha2", "draft": False, "merged": False, "state_enum": "open"}, f)
+            return {
+                "repo": f"{owner}/{repo}",
+                "pr": pr,
+                "previous_head_sha": "sha1",
+                "current_head_sha": "sha2",
+                "runtime_status": "OK",
+                "transition": True,
+                "transition_reasons": ["HEAD_CHANGED"]
+            }
+
+        mock_watch.side_effect = side_effect_watch
+
+        mock_get_pr_details.side_effect = [
+            {"head": {"sha": "sha2"}, "draft": False, "merged": False, "state": "open", "node_id": "node2"},
+            {"head": {"sha": "sha2"}, "draft": False, "merged": False, "state": "open", "node_id": "node2"},
+        ]
+        mock_convert.side_effect = Exception("API error")
+
+        res = reconcile_pr_once(
+            self.owner, self.repo, self.pr_number,
+            state_file=self.state_file,
+            policy_file=self.policy_file,
+            receipts_file=self.receipts_file,
+            apply=True
+        )
+
+        self.assertEqual(res["execution_result"]["final_outcome"], "BLOCKED")
+        self.assertEqual(res["execution_result"]["failure_reason"], "MUTATION_FAILED")
+        self.assertIsNone(res["action_receipt"])
+
+        with open(self.state_file, 'r') as f:
+            data = json.load(f)
+            self.assertEqual(data["head_sha"], "sha1")
+
+    # 19. repo/PR identity mismatch
+    @patch('agent_controller.reconciler.watch_pr_once')
+    def test_target_mismatch(self, mock_watch):
+        with open(self.state_file, 'w') as f:
+            json.dump({"repo": "other/repo", "pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+
+        res = reconcile_pr_once(
+            self.owner, self.repo, self.pr_number,
+            state_file=self.state_file,
+            policy_file=self.policy_file,
+            receipts_file=self.receipts_file,
+            apply=True
+        )
+
+        self.assertFalse(res["is_relevant_transition"])
+        self.assertEqual(res["action_plan"]["decision"], "BLOCKED")
+        self.assertEqual(res["action_plan"]["reason"], "TARGET_MISMATCH")
+        mock_watch.assert_not_called()
+
+    # 20. non-object state with watcher not called
+    @patch('agent_controller.reconciler.watch_pr_once')
+    def test_non_object_state_short_circuit(self, mock_watch):
+        with open(self.state_file, 'w') as f:
+            f.write("[]")
+
+        res = reconcile_pr_once(
+            self.owner, self.repo, self.pr_number,
+            state_file=self.state_file,
+            policy_file=self.policy_file,
+            receipts_file=self.receipts_file,
+            apply=True
+        )
+
+        self.assertFalse(res["is_relevant_transition"])
+        self.assertEqual(res["action_plan"]["decision"], "BLOCKED")
+        self.assertEqual(res["action_plan"]["reason"], "PRIOR_STATE_CORRUPT")
+        mock_watch.assert_not_called()
+
+    # 21. concurrent same-transition reconciliation resulting in lock failure
+    @patch('agent_controller.reconciler.watch_pr_once')
+    def test_concurrent_lock_failure(self, mock_watch):
+        import hashlib; target_hash = hashlib.sha256(f"{self.owner}/{self.repo}#{self.pr_number}".encode("utf-8")).hexdigest(); lock_file = os.path.join(tempfile.gettempdir(), f"agent_controller_pr_{target_hash}.lock")
+        fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+
+        res = reconcile_pr_once(
+            self.owner, self.repo, self.pr_number,
+            state_file=self.state_file,
+            policy_file=self.policy_file,
+            receipts_file=self.receipts_file,
+            apply=True
+        )
+
+        self.assertFalse(res["is_relevant_transition"])
+        self.assertEqual(res["action_plan"]["decision"], "BLOCKED")
+        self.assertEqual(res["action_plan"]["reason"], "CONCURRENT_RECONCILIATION")
+        mock_watch.assert_not_called()
+
+        os.remove(lock_file)
+
+    # 22. successful consumption exactly once
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
+    @patch('agent_controller.executor.get_pr_details')
+    @patch('agent_controller.reconciler.watch_pr_once')
+    def test_successful_consumption_exactly_once(self, mock_watch, mock_get_pr_details, mock_convert):
+        with open(self.state_file, 'w') as f:
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+
+        new_receipt = {
+            "repo": f"{self.owner}/{self.repo}",
+            "pr": self.pr_number,
+            "head_sha": "sha2",
+            "transition_reasons": ["HEAD_CHANGED"],
+            "action": "ENSURE_DRAFT",
+            "outcome": "SUCCESS",
+            "timestamp": "2026-01-01T00:00:00Z"
+        }
+        _save_receipt(self.receipts_file, new_receipt)
+
+        mock_watch.return_value = {
+            "repo": f"{self.owner}/{self.repo}",
+            "pr": self.pr_number,
+            "previous_head_sha": "sha1",
+            "current_head_sha": "sha2",
+            "runtime_status": "OK",
+            "transition": True,
+            "transition_reasons": ["HEAD_CHANGED"]
+        }
+
+        res = reconcile_pr_once(
+            self.owner, self.repo, self.pr_number,
+            state_file=self.state_file,
+            policy_file=self.policy_file,
+            receipts_file=self.receipts_file,
+            apply=True
+        )
+
+        self.assertEqual(res["action_plan"]["decision"], "NO_ACTION")
+        self.assertEqual(res["action_plan"]["reason"], "DUPLICATE_TRANSITION_CONSUMED")
+        mock_get_pr_details.assert_not_called()
+
+    # 23. prior non-empty state missing repo -> TARGET_MISMATCH
+    @patch('agent_controller.reconciler.watch_pr_once')
+    def test_legacy_state_missing_repo(self, mock_watch):
+        with open(self.state_file, 'w') as f:
+            json.dump({"pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+
+        res = reconcile_pr_once(
+            self.owner, self.repo, self.pr_number,
+            state_file=self.state_file,
+            policy_file=self.policy_file,
+            receipts_file=self.receipts_file,
+            apply=True
+        )
+
+        self.assertFalse(res["is_relevant_transition"])
+        self.assertEqual(res["action_plan"]["decision"], "BLOCKED")
+        self.assertEqual(res["action_plan"]["reason"], "TARGET_MISMATCH")
+        mock_watch.assert_not_called()
+
+    # 24. prior non-empty state missing pr -> TARGET_MISMATCH
+    @patch('agent_controller.reconciler.watch_pr_once')
+    def test_legacy_state_missing_pr(self, mock_watch):
+        with open(self.state_file, 'w') as f:
+            json.dump({"repo": f"{self.owner}/{self.repo}", "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+
+        res = reconcile_pr_once(
+            self.owner, self.repo, self.pr_number,
+            state_file=self.state_file,
+            policy_file=self.policy_file,
+            receipts_file=self.receipts_file,
+            apply=True
+        )
+
+        self.assertFalse(res["is_relevant_transition"])
+        self.assertEqual(res["action_plan"]["decision"], "BLOCKED")
+        self.assertEqual(res["action_plan"]["reason"], "TARGET_MISMATCH")
+        mock_watch.assert_not_called()
+
+    # 25. state promotion failure after durable receipt -> receipt intact and prior state unchanged
+    # 25. state promotion failure after durable receipt -> receipt intact and prior state unchanged
+    # 25. state promotion failure after durable receipt -> receipt intact and prior state unchanged
+    # 25. state promotion failure after durable receipt -> receipt intact and prior state unchanged
+    # 25. state promotion failure after durable receipt -> receipt intact and prior state unchanged
+    # 25. state promotion failure after durable receipt -> receipt intact and prior state unchanged
+    # 25. state promotion failure after durable receipt -> receipt intact and prior state unchanged
+    # 25. state promotion failure after durable receipt -> receipt intact and prior state unchanged
+    # 25. state promotion failure after durable receipt -> receipt intact and prior state unchanged
+    @patch('agent_controller.reconciler.os.replace')
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
+    @patch('agent_controller.executor.get_pr_details')
+    @patch('agent_controller.reconciler.watch_pr_once')
+    def test_state_promotion_failure(self, mock_watch, mock_get_pr_details, mock_convert, mock_os_replace):
+        with open(self.state_file, 'w') as f:
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+
+        def side_effect_watch(owner, repo, pr, state_file, scope_policy=None):
+            with open(state_file, 'w') as f:
+                json.dump({"repo": f"{owner}/{repo}", "pr": pr, "head_sha": "sha2", "draft": False, "merged": False, "state_enum": "open"}, f)
+            return {
+                "repo": f"{owner}/{repo}",
+                "pr": pr,
+                "previous_head_sha": "sha1",
+                "current_head_sha": "sha2",
+                "runtime_status": "OK",
+                "transition": True,
+                "transition_reasons": ["HEAD_CHANGED"]
+            }
+
+        mock_watch.side_effect = side_effect_watch
+
+        mock_get_pr_details.side_effect = [
+            {"head": {"sha": "sha2"}, "draft": False, "merged": False, "state": "open", "node_id": "node2"},
+            {"head": {"sha": "sha2"}, "draft": False, "merged": False, "state": "open", "node_id": "node2"},
+            {"head": {"sha": "sha2"}, "draft": True, "merged": False, "state": "open", "node_id": "node2"}
+        ]
+
+        import os
+        def side_effect_replace(src, dst):
+            if dst == self.state_file:
+                raise Exception("Disk full during state promotion")
+            os.rename(src, dst)
+            return None
+
+        mock_os_replace.side_effect = side_effect_replace
+
+        res = reconcile_pr_once(
+            self.owner, self.repo, self.pr_number,
+            state_file=self.state_file,
+            policy_file=self.policy_file,
+            receipts_file=self.receipts_file,
+            apply=True
+        )
+
+        self.assertEqual(res["action_plan"]["decision"], "BLOCKED")
+        self.assertEqual(res["action_plan"]["reason"], "STATE_PROMOTION_FAILED")
+        self.assertEqual(res["execution_result"]["final_outcome"], "FAILED")
+        self.assertEqual(res["execution_result"]["failure_reason"], "STATE_PROMOTION_FAILED")
+        self.assertIsNotNone(res["action_receipt"])
+
+        # Receipt must be intact
+        receipts, corrupt = _load_receipts(self.receipts_file)
+        self.assertFalse(corrupt)
+        self.assertEqual(len(receipts), 1)
+
+        # State must remain unchanged
+        with open(self.state_file, 'r') as f:
+            data = json.load(f)
+            self.assertEqual(data["head_sha"], "sha1")
+
+
+    # 26. receipt persistence failure -> leaves complete prior state unchanged and no success reported
+    @patch('agent_controller.reconciler._save_receipt')
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
+    @patch('agent_controller.executor.get_pr_details')
+    @patch('agent_controller.reconciler.watch_pr_once')
+    def test_receipt_persistence_failure(self, mock_watch, mock_get_pr_details, mock_convert, mock_save_receipt):
+        with open(self.state_file, 'w') as f:
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open", "custom_key": "custom_val"}, f)
+
+        def side_effect_watch(owner, repo, pr, state_file, scope_policy=None):
+            with open(state_file, 'w') as f:
+                json.dump({"repo": f"{owner}/{repo}", "pr": pr, "head_sha": "sha2", "draft": False, "merged": False, "state_enum": "open"}, f)
+            return {
+                "repo": f"{owner}/{repo}",
+                "pr": pr,
+                "previous_head_sha": "sha1",
+                "current_head_sha": "sha2",
+                "runtime_status": "OK",
+                "transition": True,
+                "transition_reasons": ["HEAD_CHANGED"]
+            }
+
+        mock_watch.side_effect = side_effect_watch
+
+        mock_get_pr_details.side_effect = [
+            {"head": {"sha": "sha2"}, "draft": False, "merged": False, "state": "open", "node_id": "node2"},
+            {"head": {"sha": "sha2"}, "draft": False, "merged": False, "state": "open", "node_id": "node2"},
+            {"head": {"sha": "sha2"}, "draft": True, "merged": False, "state": "open", "node_id": "node2"}
+        ]
+
+        # Simulate receipt persistence failure
+        mock_save_receipt.side_effect = Exception("Disk full")
+
+        res = reconcile_pr_once(
+            self.owner, self.repo, self.pr_number,
+            state_file=self.state_file,
+            policy_file=self.policy_file,
+            receipts_file=self.receipts_file,
+            apply=True
+        )
+
+        self.assertEqual(res["action_plan"]["decision"], "BLOCKED")
+        self.assertEqual(res["action_plan"]["reason"], "RECEIPT_PERSISTENCE_FAILED")
+        self.assertEqual(res["execution_result"]["final_outcome"], "FAILED")
+        self.assertEqual(res["execution_result"]["failure_reason"], "RECEIPT_PERSISTENCE_FAILED")
+        self.assertIsNone(res["action_receipt"])
+
+        # State must remain exactly as before
+        with open(self.state_file, 'r') as f:
+            data = json.load(f)
+            self.assertEqual(data["head_sha"], "sha1")
+            self.assertEqual(data["custom_key"], "custom_val")
+
+    # 27. retry after state promotion failure -> zero mutations, duplicates caught, state advances
+    @patch('agent_controller.executor.convert_pull_request_to_draft')
+    @patch('agent_controller.executor.get_pr_details')
+    @patch('agent_controller.reconciler.watch_pr_once')
+    def test_retry_after_state_promotion_failure(self, mock_watch, mock_get_pr_details, mock_convert):
+        # Initial state (sha1)
+        with open(self.state_file, 'w') as f:
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": self.pr_number, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+
+        # Manually create receipt as if mutation succeeded but state promotion failed
+        receipt = {
+            "repo": f"{self.owner}/{self.repo}",
+            "pr": self.pr_number,
+            "head_sha": "sha2",
+            "transition_reasons": ["HEAD_CHANGED"],
+            "action": "ENSURE_DRAFT",
+            "outcome": "SUCCESS",
+            "timestamp": "2026-01-01T00:00:00Z"
+        }
+        _save_receipt(self.receipts_file, receipt)
+
+        def side_effect_watch(owner, repo, pr, state_file, scope_policy=None):
+            with open(state_file, 'w') as f:
+                json.dump({"repo": f"{owner}/{repo}", "pr": pr, "head_sha": "sha2", "draft": False, "merged": False, "state_enum": "open"}, f)
+            return {
+                "repo": f"{owner}/{repo}",
+                "pr": pr,
+                "previous_head_sha": "sha1",
+                "current_head_sha": "sha2",
+                "runtime_status": "OK",
+                "transition": True,
+                "transition_reasons": ["HEAD_CHANGED"]
+            }
+
+        mock_watch.side_effect = side_effect_watch
+
+        res = reconcile_pr_once(
+            self.owner, self.repo, self.pr_number,
+            state_file=self.state_file,
+            policy_file=self.policy_file,
+            receipts_file=self.receipts_file,
+            apply=True
+        )
+
+        self.assertEqual(res["action_plan"]["decision"], "NO_ACTION")
+        self.assertEqual(res["action_plan"]["reason"], "DUPLICATE_TRANSITION_CONSUMED")
+        mock_convert.assert_not_called()
+        mock_get_pr_details.assert_not_called()
+
+        # State should now be promoted
+        with open(self.state_file, 'r') as f:
+            data = json.load(f)
+            self.assertEqual(data["head_sha"], "sha2")
+
+
+    # 28. concurrent same-transition but different receipts_file -> lock still catches it
+    @patch('agent_controller.reconciler.watch_pr_once')
+    def test_concurrent_lock_failure_different_receipts_file(self, mock_watch):
+        # Create lock for the state_file instead of receipts_file
+        import hashlib; target_hash = hashlib.sha256(f"{self.owner}/{self.repo}#{self.pr_number}".encode("utf-8")).hexdigest(); lock_file = os.path.join(tempfile.gettempdir(), f"agent_controller_pr_{target_hash}.lock")
+        fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+
+        res = reconcile_pr_once(
+            self.owner, self.repo, self.pr_number,
+            state_file=self.state_file,
+            policy_file=self.policy_file,
+            receipts_file="some_other_receipts.json",
+            apply=True
+        )
+
+        self.assertFalse(res["is_relevant_transition"])
+        self.assertEqual(res["action_plan"]["decision"], "BLOCKED")
+        self.assertEqual(res["action_plan"]["reason"], "CONCURRENT_RECONCILIATION")
+        mock_watch.assert_not_called()
+
+        os.remove(lock_file)
+
+    # 29. different PR identities do not collide when their canonical state identity differs
+    # 29. different PR identities do not collide when their canonical state identity differs
+    @patch('agent_controller.executor.get_pr_details')
+    @patch('agent_controller.reconciler.watch_pr_once')
+    def test_concurrent_lock_different_targets(self, mock_watch, mock_get_pr_details):
+        import hashlib; target_hash = hashlib.sha256(f"{self.owner}/{self.repo}#{self.pr_number}".encode("utf-8")).hexdigest(); lock_file = os.path.join(tempfile.gettempdir(), f"agent_controller_pr_{target_hash}.lock")
+        fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+
+        other_state_file = self.state_file + "_other"
+        with open(other_state_file, 'w') as f:
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": 999, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+
+        mock_watch.return_value = {
+            "repo": f"{self.owner}/{self.repo}",
+            "pr": 999,
+            "previous_head_sha": "sha1",
+            "current_head_sha": "sha2",
+            "runtime_status": "OK",
+            "transition": True,
+            "transition_reasons": ["HEAD_CHANGED"]
+        }
+
+        mock_get_pr_details.return_value = {
+            "head": {"sha": "sha2"}, "draft": False, "merged": False, "state": "open", "node_id": "node999"
+        }
+
+        # This should SUCCEED in acquiring the lock because it uses a different state_file
+        res = reconcile_pr_once(
+            self.owner, self.repo, 999,
+            state_file=other_state_file,
+            policy_file=self.policy_file,
+            receipts_file=self.receipts_file,
+            apply=False
+        )
+
+        self.assertNotEqual(res["action_plan"]["reason"], "CONCURRENT_RECONCILIATION")
+        self.assertEqual(res["execution_result"]["final_outcome"], "DRY_RUN")
+
+        os.remove(lock_file)
+
+
+
+    # 30. same owner/repo/pr + different state_file + different receipts_file -> lock catches it
+    @patch('agent_controller.reconciler.watch_pr_once')
+    def test_concurrent_lock_failure_completely_different_files(self, mock_watch):
+        import hashlib
+        target_hash = hashlib.sha256(f"{self.owner}/{self.repo}#{self.pr_number}".encode("utf-8")).hexdigest()
+        lock_file = os.path.join(tempfile.gettempdir(), f"agent_controller_pr_{target_hash}.lock")
+
+        fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+
+        res = reconcile_pr_once(
+            self.owner, self.repo, self.pr_number,
+            state_file="completely_different_state.json",
+            policy_file=self.policy_file,
+            receipts_file="completely_different_receipts.json",
+            apply=True
+        )
+
+        self.assertFalse(res["is_relevant_transition"])
+        self.assertEqual(res["action_plan"]["decision"], "BLOCKED")
+        self.assertEqual(res["action_plan"]["reason"], "CONCURRENT_RECONCILIATION")
+        mock_watch.assert_not_called()
+
+        os.remove(lock_file)
+
+    # 31. same owner/repo but different PR numbers -> different canonical lock identities
+    @patch('agent_controller.executor.get_pr_details')
+    @patch('agent_controller.reconciler.watch_pr_once')
+    def test_concurrent_lock_different_pr_numbers(self, mock_watch, mock_get_pr_details):
+        import hashlib
+        target_hash_pr1 = hashlib.sha256(f"{self.owner}/{self.repo}#{self.pr_number}".encode("utf-8")).hexdigest()
+        lock_file_pr1 = os.path.join(tempfile.gettempdir(), f"agent_controller_pr_{target_hash_pr1}.lock")
+
+        fd = os.open(lock_file_pr1, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+
+        other_pr = 999
+        other_state_file = self.state_file + "_other"
+        with open(other_state_file, 'w') as f:
+            json.dump({"repo": f"{self.owner}/{self.repo}", "pr": other_pr, "head_sha": "sha1", "draft": False, "merged": False, "state_enum": "open"}, f)
+
+        mock_watch.return_value = {
+            "repo": f"{self.owner}/{self.repo}",
+            "pr": other_pr,
+            "previous_head_sha": "sha1",
+            "current_head_sha": "sha2",
+            "runtime_status": "OK",
+            "transition": True,
+            "transition_reasons": ["HEAD_CHANGED"]
+        }
+
+        mock_get_pr_details.return_value = {
+            "head": {"sha": "sha2"}, "draft": False, "merged": False, "state": "open", "node_id": "node999"
+        }
+
+        # This should SUCCEED in acquiring the lock because it's a different PR
+        res = reconcile_pr_once(
+            self.owner, self.repo, other_pr,
+            state_file=other_state_file,
+            policy_file=self.policy_file,
+            receipts_file=self.receipts_file,
+            apply=False
+        )
+
+        self.assertNotEqual(res["action_plan"]["reason"], "CONCURRENT_RECONCILIATION")
+        self.assertEqual(res["execution_result"]["final_outcome"], "DRY_RUN")
+
+        os.remove(lock_file_pr1)
 
 if __name__ == '__main__':
     unittest.main()
