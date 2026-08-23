@@ -79,6 +79,8 @@ def watch_pr_once(owner, repo, pr_number, state_file, scope_policy=None):
             transition_reasons.add('EVIDENCE_AVAILABILITY_CHANGED')
 
     new_state = {
+        'repo': f"{owner}/{repo}",
+        'pr': pr_number,
         'head_sha': current_head_sha,
         'classification': current_classification,
         'draft': current_draft,
