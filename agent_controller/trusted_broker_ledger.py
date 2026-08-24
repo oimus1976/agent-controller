@@ -12,6 +12,7 @@ from typing import Optional
 from agent_controller.signed_approval import (
     ApprovalChallenge,
     ProvenanceAssurance,
+    SCHEMA_VERSION as CHALLENGE_SCHEMA_VERSION,
     canonicalize_approval_challenge,
     verify_signed_approval,
 )
@@ -31,6 +32,10 @@ class BrokerLedgerDecision(str, Enum):
     REPLAYED = "REPLAYED"
     BLOCKED = "BLOCKED"
     UNCERTAIN = "UNCERTAIN"
+
+
+class BrokerLedgerCorruptError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -64,7 +69,11 @@ class BrokerLedgerResult:
     reason: Optional[str] = None
 
 
-_EXPECTED_COLUMNS = (
+_EXPECTED_META_COLUMNS = (
+    ("key", "TEXT", 1, 1),
+    ("value", "TEXT", 1, 0),
+)
+_EXPECTED_ATTEMPT_COLUMNS = (
     ("authorization_digest", "TEXT", 1, 1),
     ("challenge_schema_version", "TEXT", 1, 0),
     ("approval_id", "TEXT", 1, 0),
@@ -88,12 +97,29 @@ _EXPECTED_COLUMNS = (
 )
 
 
+def _is_lower_hex_digest(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+    )
+
+
+def _valid_attempt_id(value: object) -> bool:
+    if not isinstance(value, str) or not value.startswith("attempt_"):
+        return False
+    suffix = value[len("attempt_") :]
+    return bool(suffix) and len(suffix) <= 128 and all(
+        char.isalnum() or char in "_-" for char in suffix
+    )
+
+
 class TrustedBrokerAttemptLedger:
     """Broker-local at-most-once ledger.
 
-    This class only becomes a security authority when its database and code run
-    under the separately reviewed trusted broker OS/service identity. It does
-    not itself create that OS isolation boundary.
+    This is a security authority only when its code and database are deployed
+    under the separately reviewed broker OS/service identity. The Python class
+    itself does not create that isolation boundary.
     """
 
     __slots__ = ("_db_path", "_timeout_seconds")
@@ -104,9 +130,10 @@ class TrustedBrokerAttemptLedger:
             raise ValueError("db_path must identify a database file")
         if timeout_seconds < 0:
             raise ValueError("timeout_seconds must be non-negative")
+        existed = path.exists()
         self._db_path = str(path)
         self._timeout_seconds = float(timeout_seconds)
-        self._initialize()
+        self._initialize(create_new=not existed)
 
     @property
     def db_path(self) -> str:
@@ -123,57 +150,53 @@ class TrustedBrokerAttemptLedger:
         connection.execute("PRAGMA journal_mode=DELETE")
         return connection
 
-    def _initialize(self) -> None:
+    def _initialize(self, *, create_new: bool) -> None:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS broker_meta (
-                    key TEXT PRIMARY KEY NOT NULL,
-                    value TEXT NOT NULL
-                ) STRICT
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS effect_attempts (
-                    authorization_digest TEXT PRIMARY KEY NOT NULL
-                        CHECK(length(authorization_digest) = 64),
-                    challenge_schema_version TEXT NOT NULL,
-                    approval_id TEXT NOT NULL,
-                    approval_policy_id TEXT NOT NULL,
-                    controller_task_id TEXT NOT NULL,
-                    operation_id TEXT NOT NULL,
-                    operation_version TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    requested_capability TEXT NOT NULL,
-                    effect TEXT NOT NULL,
-                    repo TEXT NOT NULL,
-                    target_kind TEXT NOT NULL,
-                    target_id TEXT NOT NULL,
-                    expected_head_sha TEXT NOT NULL,
-                    challenge_nonce TEXT NOT NULL,
-                    signer_key_id TEXT NOT NULL,
-                    signature_digest TEXT NOT NULL
-                        CHECK(length(signature_digest) = 64),
-                    attempt_id TEXT NOT NULL UNIQUE,
-                    state TEXT NOT NULL
-                        CHECK(state IN ('CLAIMED','EFFECT_VERIFIED','FAILED_AFTER_CLAIM')),
-                    failure_code TEXT
-                ) STRICT
-                """
-            )
-            connection.execute(
-                "INSERT OR IGNORE INTO broker_meta(key, value) VALUES('schema_version', ?)",
-                (LEDGER_SCHEMA_VERSION,),
-            )
-            row = connection.execute(
-                "SELECT value FROM broker_meta WHERE key='schema_version'"
-            ).fetchone()
-            if row != (LEDGER_SCHEMA_VERSION,):
-                raise RuntimeError("BROKER_LEDGER_SCHEMA_VERSION_MISMATCH")
-            self._validate_schema(connection)
+            if create_new:
+                connection.execute(
+                    """
+                    CREATE TABLE broker_meta (
+                        key TEXT PRIMARY KEY NOT NULL,
+                        value TEXT NOT NULL
+                    ) STRICT
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE effect_attempts (
+                        authorization_digest TEXT PRIMARY KEY NOT NULL
+                            CHECK(length(authorization_digest) = 64),
+                        challenge_schema_version TEXT NOT NULL,
+                        approval_id TEXT NOT NULL,
+                        approval_policy_id TEXT NOT NULL,
+                        controller_task_id TEXT NOT NULL,
+                        operation_id TEXT NOT NULL,
+                        operation_version TEXT NOT NULL,
+                        provider TEXT NOT NULL,
+                        requested_capability TEXT NOT NULL,
+                        effect TEXT NOT NULL,
+                        repo TEXT NOT NULL,
+                        target_kind TEXT NOT NULL,
+                        target_id TEXT NOT NULL,
+                        expected_head_sha TEXT NOT NULL,
+                        challenge_nonce TEXT NOT NULL,
+                        signer_key_id TEXT NOT NULL,
+                        signature_digest TEXT NOT NULL
+                            CHECK(length(signature_digest) = 64),
+                        attempt_id TEXT NOT NULL UNIQUE,
+                        state TEXT NOT NULL
+                            CHECK(state IN ('CLAIMED','EFFECT_VERIFIED','FAILED_AFTER_CLAIM')),
+                        failure_code TEXT
+                    ) STRICT
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO broker_meta(key, value) VALUES('schema_version', ?)",
+                    (LEDGER_SCHEMA_VERSION,),
+                )
+            self._validate_database(connection)
             connection.execute("COMMIT")
         except Exception:
             try:
@@ -185,11 +208,23 @@ class TrustedBrokerAttemptLedger:
             connection.close()
 
     @staticmethod
-    def _validate_schema(connection: sqlite3.Connection) -> None:
-        rows = connection.execute("PRAGMA table_info(effect_attempts)").fetchall()
-        observed = tuple((row[1], row[2], row[3], row[5]) for row in rows)
-        if observed != _EXPECTED_COLUMNS:
-            raise RuntimeError("BROKER_LEDGER_SCHEMA_INVALID")
+    def _table_shape(connection: sqlite3.Connection, table: str) -> tuple[tuple[object, ...], ...]:
+        rows = connection.execute(f"PRAGMA table_info('{table}')").fetchall()
+        return tuple((row[1], row[2], row[3], row[5]) for row in rows)
+
+    @classmethod
+    def _validate_database(cls, connection: sqlite3.Connection) -> None:
+        if cls._table_shape(connection, "broker_meta") != _EXPECTED_META_COLUMNS:
+            raise BrokerLedgerCorruptError("BROKER_LEDGER_META_SCHEMA_INVALID")
+        if cls._table_shape(connection, "effect_attempts") != _EXPECTED_ATTEMPT_COLUMNS:
+            raise BrokerLedgerCorruptError("BROKER_LEDGER_ATTEMPT_SCHEMA_INVALID")
+
+        version_rows = connection.execute(
+            "SELECT value FROM broker_meta WHERE key='schema_version'"
+        ).fetchall()
+        if version_rows != [(LEDGER_SCHEMA_VERSION,)]:
+            raise BrokerLedgerCorruptError("BROKER_LEDGER_SCHEMA_VERSION_MISMATCH")
+
         indexes = connection.execute("PRAGMA index_list(effect_attempts)").fetchall()
         unique_attempt = False
         for index in indexes:
@@ -202,26 +237,27 @@ class TrustedBrokerAttemptLedger:
                 unique_attempt = True
                 break
         if not unique_attempt:
-            raise RuntimeError("BROKER_LEDGER_ATTEMPT_UNIQUENESS_MISSING")
+            raise BrokerLedgerCorruptError("BROKER_LEDGER_ATTEMPT_UNIQUENESS_MISSING")
 
     def integrity_check(self) -> BrokerLedgerResult:
         try:
             connection = self._connect()
             try:
                 row = connection.execute("PRAGMA integrity_check").fetchone()
-                self._validate_schema(connection)
-                version = connection.execute(
-                    "SELECT value FROM broker_meta WHERE key='schema_version'"
-                ).fetchone()
+                if row != ("ok",):
+                    return BrokerLedgerResult(
+                        BrokerLedgerDecision.BLOCKED,
+                        reason="BROKER_LEDGER_INTEGRITY_FAILED",
+                    )
+                self._validate_database(connection)
             finally:
                 connection.close()
-        except Exception:
+        except BrokerLedgerCorruptError as exc:
+            return BrokerLedgerResult(BrokerLedgerDecision.BLOCKED, reason=str(exc))
+        except sqlite3.Error:
             return BrokerLedgerResult(
-                BrokerLedgerDecision.BLOCKED, reason="BROKER_LEDGER_INTEGRITY_UNCERTAIN"
-            )
-        if row != ("ok",) or version != (LEDGER_SCHEMA_VERSION,):
-            return BrokerLedgerResult(
-                BrokerLedgerDecision.BLOCKED, reason="BROKER_LEDGER_INTEGRITY_FAILED"
+                BrokerLedgerDecision.UNCERTAIN,
+                reason="BROKER_LEDGER_INTEGRITY_IO_UNCERTAIN",
             )
         return BrokerLedgerResult(BrokerLedgerDecision.PASS, reason="BROKER_LEDGER_OK")
 
@@ -240,7 +276,10 @@ class TrustedBrokerAttemptLedger:
             raise ValueError(verification.reason or "SIGNATURE_NOT_VERIFIED")
         canonical = canonicalize_approval_challenge(challenge)
         signature_bytes = base64.b64decode(signature_b64, validate=True)
-        return hashlib.sha256(canonical).hexdigest(), hashlib.sha256(signature_bytes).hexdigest()
+        return (
+            hashlib.sha256(canonical).hexdigest(),
+            hashlib.sha256(signature_bytes).hexdigest(),
+        )
 
     @staticmethod
     def _audit_tuple(
@@ -271,20 +310,56 @@ class TrustedBrokerAttemptLedger:
     @staticmethod
     def _row_to_record(row: tuple[object, ...]) -> BrokerAttemptRecord:
         if len(row) != 20:
-            raise ValueError("BROKER_LEDGER_ROW_INVALID")
+            raise BrokerLedgerCorruptError("BROKER_LEDGER_ROW_INVALID")
+        if any(not isinstance(value, str) or not value for value in row[:19]):
+            raise BrokerLedgerCorruptError("BROKER_LEDGER_ROW_FIELD_INVALID")
+        if not _is_lower_hex_digest(row[0]) or not _is_lower_hex_digest(row[16]):
+            raise BrokerLedgerCorruptError("BROKER_LEDGER_DIGEST_INVALID")
+        if row[1] != CHALLENGE_SCHEMA_VERSION:
+            raise BrokerLedgerCorruptError("BROKER_LEDGER_CHALLENGE_SCHEMA_INVALID")
+        if not _valid_attempt_id(row[17]):
+            raise BrokerLedgerCorruptError("BROKER_LEDGER_ATTEMPT_ID_INVALID")
         try:
             state = BrokerAttemptState(row[18])
         except (TypeError, ValueError) as exc:
-            raise ValueError("BROKER_LEDGER_STATE_INVALID") from exc
-        required = row[:19]
-        if any(not isinstance(value, str) or not value for value in required):
-            raise ValueError("BROKER_LEDGER_ROW_FIELD_INVALID")
-        if row[19] is not None and (not isinstance(row[19], str) or not row[19]):
-            raise ValueError("BROKER_LEDGER_FAILURE_CODE_INVALID")
-        return BrokerAttemptRecord(*row[:18], state, row[19])
+            raise BrokerLedgerCorruptError("BROKER_LEDGER_STATE_INVALID") from exc
 
+        failure_code = row[19]
+        if state in {BrokerAttemptState.CLAIMED, BrokerAttemptState.EFFECT_VERIFIED}:
+            if failure_code is not None:
+                raise BrokerLedgerCorruptError("BROKER_LEDGER_FAILURE_STATE_INVALID")
+        else:
+            if not isinstance(failure_code, str) or not failure_code:
+                raise BrokerLedgerCorruptError("BROKER_LEDGER_FAILURE_STATE_INVALID")
+
+        reconstructed = ApprovalChallenge(
+            approval_id=row[2],
+            approval_policy_id=row[3],
+            controller_task_id=row[4],
+            operation_id=row[5],
+            operation_version=row[6],
+            provider=row[7],
+            requested_capability=row[8],
+            effect=row[9],
+            repo=row[10],
+            target_kind=row[11],
+            target_id=row[12],
+            expected_head_sha=row[13],
+            challenge_nonce=row[14],
+            signer_key_id=row[15],
+            schema_version=row[1],
+        )
+        expected_digest = hashlib.sha256(
+            canonicalize_approval_challenge(reconstructed)
+        ).hexdigest()
+        if expected_digest != row[0]:
+            raise BrokerLedgerCorruptError("BROKER_LEDGER_AUTHORIZATION_BINDING_INVALID")
+
+        return BrokerAttemptRecord(*row[:18], state, failure_code)
+
+    @classmethod
     def _read_connection(
-        self, connection: sqlite3.Connection, authorization_digest: str
+        cls, connection: sqlite3.Connection, authorization_digest: str
     ) -> Optional[BrokerAttemptRecord]:
         row = connection.execute(
             "SELECT authorization_digest, challenge_schema_version, approval_id, "
@@ -295,22 +370,25 @@ class TrustedBrokerAttemptLedger:
             "WHERE authorization_digest=?",
             (authorization_digest,),
         ).fetchone()
-        return None if row is None else self._row_to_record(row)
+        return None if row is None else cls._row_to_record(row)
 
     def read_attempt(self, *, authorization_digest: str) -> BrokerLedgerResult:
-        if not isinstance(authorization_digest, str) or len(authorization_digest) != 64:
+        if not _is_lower_hex_digest(authorization_digest):
             return BrokerLedgerResult(
                 BrokerLedgerDecision.BLOCKED, reason="AUTHORIZATION_DIGEST_INVALID"
             )
         try:
             connection = self._connect()
             try:
+                self._validate_database(connection)
                 record = self._read_connection(connection, authorization_digest)
             finally:
                 connection.close()
-        except Exception:
+        except BrokerLedgerCorruptError as exc:
+            return BrokerLedgerResult(BrokerLedgerDecision.BLOCKED, reason=str(exc))
+        except sqlite3.Error:
             return BrokerLedgerResult(
-                BrokerLedgerDecision.BLOCKED, reason="BROKER_LEDGER_READ_FAILED"
+                BrokerLedgerDecision.UNCERTAIN, reason="BROKER_LEDGER_READ_UNCERTAIN"
             )
         if record is None:
             return BrokerLedgerResult(
@@ -344,16 +422,16 @@ class TrustedBrokerAttemptLedger:
             connection = self._connect()
             try:
                 connection.execute("BEGIN IMMEDIATE")
+                self._validate_database(connection)
                 existing = self._read_connection(connection, authorization_digest)
                 if existing is not None:
+                    connection.execute("ROLLBACK")
                     if self._record_matches_audit(existing, audit):
-                        connection.execute("ROLLBACK")
                         return BrokerLedgerResult(
                             BrokerLedgerDecision.REPLAYED,
                             existing,
                             "AUTHORIZATION_ALREADY_CONSUMED",
                         )
-                    connection.execute("ROLLBACK")
                     return BrokerLedgerResult(
                         BrokerLedgerDecision.BLOCKED,
                         existing,
@@ -380,6 +458,8 @@ class TrustedBrokerAttemptLedger:
                 raise
             finally:
                 connection.close()
+        except BrokerLedgerCorruptError as exc:
+            return BrokerLedgerResult(BrokerLedgerDecision.BLOCKED, reason=str(exc))
         except sqlite3.Error:
             reread = self.read_attempt(authorization_digest=authorization_digest)
             if (
@@ -387,12 +467,15 @@ class TrustedBrokerAttemptLedger:
                 and reread.record is not None
                 and reread.record.attempt_id == attempt_id
                 and self._record_matches_audit(reread.record, audit)
+                and reread.record.state is BrokerAttemptState.CLAIMED
             ):
                 return BrokerLedgerResult(
                     BrokerLedgerDecision.PASS,
                     reread.record,
                     "CLAIM_CONFIRMED_AFTER_PERSISTENCE_UNCERTAINTY",
                 )
+            if reread.decision is BrokerLedgerDecision.BLOCKED and reread.reason != "BROKER_ATTEMPT_MISSING":
+                return reread
             return BrokerLedgerResult(
                 BrokerLedgerDecision.UNCERTAIN, reason="BROKER_LEDGER_CLAIM_UNCERTAIN"
             )
@@ -468,35 +551,67 @@ class TrustedBrokerAttemptLedger:
         terminal: BrokerAttemptState,
         failure_code: Optional[str],
     ) -> BrokerLedgerResult:
-        if not isinstance(authorization_digest, str) or len(authorization_digest) != 64:
-            return BrokerLedgerResult(BrokerLedgerDecision.BLOCKED, reason="AUTHORIZATION_DIGEST_INVALID")
-        if not isinstance(attempt_id, str) or not attempt_id:
-            return BrokerLedgerResult(BrokerLedgerDecision.BLOCKED, reason="ATTEMPT_ID_INVALID")
+        if not _is_lower_hex_digest(authorization_digest):
+            return BrokerLedgerResult(
+                BrokerLedgerDecision.BLOCKED, reason="AUTHORIZATION_DIGEST_INVALID"
+            )
+        if not _valid_attempt_id(attempt_id):
+            return BrokerLedgerResult(
+                BrokerLedgerDecision.BLOCKED, reason="ATTEMPT_ID_INVALID"
+            )
         try:
             connection = self._connect()
             try:
                 connection.execute("BEGIN IMMEDIATE")
+                self._validate_database(connection)
                 current = self._read_connection(connection, authorization_digest)
                 if current is None:
                     connection.execute("ROLLBACK")
-                    return BrokerLedgerResult(BrokerLedgerDecision.BLOCKED, reason="BROKER_ATTEMPT_MISSING")
+                    return BrokerLedgerResult(
+                        BrokerLedgerDecision.BLOCKED, reason="BROKER_ATTEMPT_MISSING"
+                    )
                 if current.attempt_id != attempt_id:
                     connection.execute("ROLLBACK")
-                    return BrokerLedgerResult(BrokerLedgerDecision.BLOCKED, current, "ATTEMPT_ID_MISMATCH")
+                    return BrokerLedgerResult(
+                        BrokerLedgerDecision.BLOCKED, current, "ATTEMPT_ID_MISMATCH"
+                    )
                 if current.state is terminal:
-                    expected_failure = failure_code if terminal is BrokerAttemptState.FAILED_AFTER_CLAIM else None
+                    expected_failure = (
+                        failure_code
+                        if terminal is BrokerAttemptState.FAILED_AFTER_CLAIM
+                        else None
+                    )
                     connection.execute("ROLLBACK")
                     if current.failure_code == expected_failure:
-                        return BrokerLedgerResult(BrokerLedgerDecision.REPLAYED, current, "TERMINAL_STATE_ALREADY_RECORDED")
-                    return BrokerLedgerResult(BrokerLedgerDecision.BLOCKED, current, "TERMINAL_STATE_CONFLICT")
+                        return BrokerLedgerResult(
+                            BrokerLedgerDecision.REPLAYED,
+                            current,
+                            "TERMINAL_STATE_ALREADY_RECORDED",
+                        )
+                    return BrokerLedgerResult(
+                        BrokerLedgerDecision.BLOCKED,
+                        current,
+                        "TERMINAL_STATE_CONFLICT",
+                    )
                 if current.state is not BrokerAttemptState.CLAIMED:
                     connection.execute("ROLLBACK")
-                    return BrokerLedgerResult(BrokerLedgerDecision.BLOCKED, current, "TERMINAL_STATE_IMMUTABLE")
-                connection.execute(
+                    return BrokerLedgerResult(
+                        BrokerLedgerDecision.BLOCKED,
+                        current,
+                        "TERMINAL_STATE_IMMUTABLE",
+                    )
+                cursor = connection.execute(
                     "UPDATE effect_attempts SET state=?, failure_code=? "
                     "WHERE authorization_digest=? AND attempt_id=? AND state='CLAIMED'",
                     (terminal.value, failure_code, authorization_digest, attempt_id),
                 )
+                if cursor.rowcount != 1:
+                    connection.execute("ROLLBACK")
+                    return BrokerLedgerResult(
+                        BrokerLedgerDecision.UNCERTAIN,
+                        current,
+                        "BROKER_LEDGER_TERMINAL_CAS_FAILED",
+                    )
                 connection.execute("COMMIT")
             except Exception:
                 try:
@@ -506,8 +621,14 @@ class TrustedBrokerAttemptLedger:
                 raise
             finally:
                 connection.close()
+        except BrokerLedgerCorruptError as exc:
+            return BrokerLedgerResult(BrokerLedgerDecision.BLOCKED, reason=str(exc))
         except sqlite3.Error:
-            return BrokerLedgerResult(BrokerLedgerDecision.UNCERTAIN, reason="BROKER_LEDGER_TERMINAL_WRITE_UNCERTAIN")
+            return BrokerLedgerResult(
+                BrokerLedgerDecision.UNCERTAIN,
+                reason="BROKER_LEDGER_TERMINAL_WRITE_UNCERTAIN",
+            )
+
         reread = self.read_attempt(authorization_digest=authorization_digest)
         if (
             reread.decision is BrokerLedgerDecision.PASS
@@ -517,6 +638,8 @@ class TrustedBrokerAttemptLedger:
             and reread.record.failure_code == failure_code
         ):
             return BrokerLedgerResult(BrokerLedgerDecision.PASS, reread.record)
+        if reread.decision is BrokerLedgerDecision.BLOCKED:
+            return reread
         return BrokerLedgerResult(
             BrokerLedgerDecision.UNCERTAIN,
             reread.record,
