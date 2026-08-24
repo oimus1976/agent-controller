@@ -40,13 +40,14 @@ class FakeArtifactClient:
 
 
 class FakeGitHub:
-    def __init__(self):
+    def __init__(self, *, ref_sha="new-sha"):
+        self.ref_sha = ref_sha
         self.ref_calls = []
         self.compare_calls = []
 
     def get_ref_sha(self, repo, ref):
         self.ref_calls.append((repo, ref))
-        return "new-sha"
+        return self.ref_sha
 
     def compare_commits(self, repo, base_sha, head_sha):
         self.compare_calls.append((repo, base_sha, head_sha))
@@ -145,6 +146,7 @@ class TestProviderHandoff(unittest.TestCase):
             result, observation_client, artifact_client, github = self._run(provider)
 
             self.assertTrue(result.binding.valid)
+            self.assertEqual(result.verification_result, VerificationResult.PASS)
             self.assertEqual(result.observation.mapped_state, ControllerState.ARTIFACT_READY)
             self.assertEqual(len(result.artifacts), 1)
             artifact = result.artifacts[0]
@@ -158,7 +160,7 @@ class TestProviderHandoff(unittest.TestCase):
             normalized.append(
                 (
                     result.observation.mapped_state,
-                    artifact.verification_result,
+                    result.verification_result,
                     artifact.verified_sha,
                 )
             )
@@ -193,6 +195,7 @@ class TestProviderHandoff(unittest.TestCase):
 
         self.assertFalse(result.binding.valid)
         self.assertEqual(result.binding.reason, "CONTROLLER_TASK_ID_MISMATCH")
+        self.assertEqual(result.verification_result, VerificationResult.BLOCKED)
         self.assertIsNone(result.observation)
         self.assertEqual(result.artifacts, ())
         self.assertEqual(observation_client.calls, 0)
@@ -226,20 +229,60 @@ class TestProviderHandoff(unittest.TestCase):
             )
 
             self.assertFalse(result.binding.valid)
-            self.assertEqual(
-                result.binding.reason,
-                "OBSERVATION_NOT_ARTIFACT_READY_SUCCESS",
-            )
+            self.assertEqual(result.binding.reason, "OBSERVATION_NOT_ARTIFACT_READY_SUCCESS")
+            self.assertEqual(result.verification_result, VerificationResult.BLOCKED)
             self.assertEqual(result.artifacts, ())
             self.assertEqual(observation_client.calls, 1)
             self.assertEqual(artifact_client.calls, 0)
             self.assertEqual(github.ref_calls, [])
             self.assertEqual(github.compare_calls, [])
 
-    def test_artifact_binding_failure_stops_before_github_verification(self):
-        observation_client = FakeObservationClient(
-            {"status": "COMPLETED", "updated_at": "2026-08-24T01:10:00Z"}
+    def test_terminal_success_without_artifacts_is_not_verification_success(self):
+        observation_client = FakeObservationClient({"status": "COMPLETED"})
+        artifact_client = FakeArtifactClient([])
+        observer = JulesObservationAdapter(
+            observation_client, lambda: "2026-08-24T01:11:00Z"
         )
+        collector = JulesArtifactAdapter(
+            artifact_client, lambda: "2026-08-24T01:12:00Z"
+        )
+        result = run_verified_handoff(
+            task=task("jules"),
+            operation=operation("jules"),
+            observer=observer,
+            artifact_collector=collector,
+            github=FakeGitHub(),
+        )
+
+        self.assertTrue(result.binding.valid)
+        self.assertEqual(result.artifacts, ())
+        self.assertEqual(result.verification_result, VerificationResult.BLOCKED)
+
+    def test_artifact_verification_failure_is_explicit_even_when_binding_is_valid(self):
+        observation_client = FakeObservationClient({"status": "COMPLETED"})
+        artifact_client = FakeArtifactClient([
+            {"kind": "commit", "ref": "refs/heads/work", "sha": "claimed-sha"}
+        ])
+        observer = JulesObservationAdapter(
+            observation_client, lambda: "2026-08-24T01:11:00Z"
+        )
+        collector = JulesArtifactAdapter(
+            artifact_client, lambda: "2026-08-24T01:12:00Z"
+        )
+        result = run_verified_handoff(
+            task=task("jules"),
+            operation=operation("jules"),
+            observer=observer,
+            artifact_collector=collector,
+            github=FakeGitHub(ref_sha="different-sha"),
+        )
+
+        self.assertTrue(result.binding.valid)
+        self.assertEqual(result.verification_result, VerificationResult.FAIL)
+        self.assertFalse(result.artifacts[0].independently_verified)
+
+    def test_artifact_binding_failure_stops_before_github_verification(self):
+        observation_client = FakeObservationClient({"status": "COMPLETED"})
         observer = JulesObservationAdapter(
             observation_client, lambda: "2026-08-24T01:11:00Z"
         )
@@ -271,6 +314,7 @@ class TestProviderHandoff(unittest.TestCase):
 
         self.assertFalse(result.binding.valid)
         self.assertEqual(result.binding.reason, "ARTIFACT_PROVIDER_MISMATCH")
+        self.assertEqual(result.verification_result, VerificationResult.BLOCKED)
         self.assertEqual(result.artifacts, ())
         self.assertEqual(github.ref_calls, [])
         self.assertEqual(github.compare_calls, [])
@@ -319,6 +363,7 @@ class TestProviderHandoff(unittest.TestCase):
 
         self.assertFalse(result.binding.valid)
         self.assertEqual(result.binding.reason, "ARTIFACT_PROVIDER_MISMATCH")
+        self.assertEqual(result.verification_result, VerificationResult.BLOCKED)
         self.assertEqual(result.artifacts, ())
         self.assertEqual(len(github.ref_calls), 1)
         self.assertEqual(len(github.compare_calls), 1)
