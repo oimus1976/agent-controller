@@ -31,14 +31,27 @@ def validate_approval_binding(
 ) -> ApprovalValidation:
     """Validate one structured human approval against one exact effect target."""
 
-    if not approval.approval_id:
-        return ApprovalValidation(False, ApprovalResult.BLOCKED, "APPROVAL_ID_MISSING")
+    required_fields = {
+        "approval_id": approval.approval_id,
+        "approval_policy_id": approval.approval_policy_id,
+        "controller_task_id": approval.controller_task_id,
+        "operation_id": approval.operation_id,
+        "requested_capability": approval.requested_capability,
+        "effect": approval.effect,
+        "target_kind": approval.target_kind,
+        "issuer_kind": approval.issuer_kind,
+        "issuer_subject": approval.issuer_subject,
+        "ingress_source": approval.ingress_source,
+        "issued_at": approval.issued_at,
+    }
+    for field_name, value in required_fields.items():
+        if not isinstance(value, str) or not value:
+            return ApprovalValidation(False, ApprovalResult.BLOCKED, f"APPROVAL_FIELD_MISSING:{field_name}", approval.approval_id or None)
+
     if approval.issuer_kind != "HUMAN":
         return ApprovalValidation(False, ApprovalResult.BLOCKED, "ISSUER_NOT_HUMAN", approval.approval_id)
     if approval.ingress_source not in trusted_ingress_sources:
         return ApprovalValidation(False, ApprovalResult.BLOCKED, "INGRESS_NOT_TRUSTED", approval.approval_id)
-    if not approval.issuer_subject:
-        return ApprovalValidation(False, ApprovalResult.BLOCKED, "ISSUER_SUBJECT_MISSING", approval.approval_id)
     if approval.approval_policy_id != task.approval_policy_id:
         return ApprovalValidation(False, ApprovalResult.BLOCKED, "POLICY_MISMATCH", approval.approval_id)
     if approval.controller_task_id != task.controller_task_id:
@@ -71,6 +84,8 @@ def validate_approval_binding(
     except (TypeError, ValueError):
         return ApprovalValidation(False, ApprovalResult.UNCERTAIN, "APPROVAL_TIME_INVALID", approval.approval_id)
 
+    if expires_at is not None and expires_at <= issued_at:
+        return ApprovalValidation(False, ApprovalResult.UNCERTAIN, "APPROVAL_TIME_ORDER_INVALID", approval.approval_id)
     if issued_at > now_at:
         return ApprovalValidation(False, ApprovalResult.UNCERTAIN, "APPROVAL_FROM_FUTURE", approval.approval_id)
     if expires_at is not None and now_at >= expires_at:
