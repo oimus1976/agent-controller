@@ -77,8 +77,11 @@ def _save(path: str, receipts: list[dict]) -> None:
 def _receipt_matches_binding(receipt: dict, approval: ApprovalBinding) -> bool:
     return (
         receipt.get("approval_id") == approval.approval_id
+        and receipt.get("approval_policy_id") == approval.approval_policy_id
         and receipt.get("controller_task_id") == approval.controller_task_id
         and receipt.get("operation_id") == approval.operation_id
+        and receipt.get("provider") == approval.provider
+        and receipt.get("requested_capability") == approval.requested_capability
         and receipt.get("effect") == approval.effect
         and receipt.get("repo") == approval.repo
         and receipt.get("target_kind") == approval.target_kind
@@ -88,18 +91,19 @@ def _receipt_matches_binding(receipt: dict, approval: ApprovalBinding) -> bool:
     )
 
 
-def consume_approval_once(
+def _consume_validated_approval_once(
     *,
     ledger_path: str,
     approval: ApprovalBinding,
     consumed_at: str,
     receipt_id: str,
 ) -> ApprovalConsumption:
-    """Atomically consume one already-validated approval exactly once.
+    """Internal durable commit for an approval validated by the safe flow.
 
-    This function does not validate target freshness and does not execute the
-    authorized effect. Callers must perform trusted-source validation and any
-    required objective stale re-read before entering this ledger boundary.
+    This function intentionally has no public non-underscored consume entrypoint.
+    `approval_consumption.validate_and_consume_human_approval` is the supported
+    Controller API because it performs trusted-ingress validation and objective
+    stale re-read before reaching this ledger boundary.
     """
 
     if not ledger_path or not approval.approval_id or not consumed_at or not receipt_id:
@@ -125,10 +129,19 @@ def consume_approval_once(
                 continue
             if not _receipt_matches_binding(existing, approval):
                 return ApprovalConsumption(ApprovalResult.BLOCKED, reason="APPROVAL_RECEIPT_BINDING_MISMATCH")
+            required = (
+                "approval_id", "approval_policy_id", "controller_task_id", "operation_id",
+                "requested_capability", "effect", "target_kind", "consumed_at", "receipt_id", "status",
+            )
+            if any(key not in existing for key in required):
+                return ApprovalConsumption(ApprovalResult.BLOCKED, reason="APPROVAL_LEDGER_CORRUPT")
             receipt = ApprovalReceipt(
                 approval_id=existing["approval_id"],
+                approval_policy_id=existing["approval_policy_id"],
                 controller_task_id=existing["controller_task_id"],
                 operation_id=existing["operation_id"],
+                provider=existing.get("provider"),
+                requested_capability=existing["requested_capability"],
                 effect=existing["effect"],
                 repo=existing.get("repo"),
                 target_kind=existing["target_kind"],
@@ -142,8 +155,11 @@ def consume_approval_once(
 
         receipt = ApprovalReceipt(
             approval_id=approval.approval_id,
+            approval_policy_id=approval.approval_policy_id,
             controller_task_id=approval.controller_task_id,
             operation_id=approval.operation_id,
+            provider=approval.provider,
+            requested_capability=approval.requested_capability,
             effect=approval.effect,
             repo=approval.repo,
             target_kind=approval.target_kind,
