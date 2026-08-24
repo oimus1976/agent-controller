@@ -12,6 +12,7 @@ import agent_controller.execution_handoff as execution_handoff
 import agent_controller.execution_ledger as execution_ledger
 import agent_controller.execution_store as execution_store
 from agent_controller.approval_contract import ApprovalReceipt
+from agent_controller.approval_store import ApprovalLedgerStore
 from agent_controller.execution_contract import ExecutionClaimResult
 from agent_controller.execution_handoff import validate_and_claim_execution
 from agent_controller.execution_ledger import _claim_execution_once
@@ -82,14 +83,23 @@ def fresh(**overrides):
 class TestExecutionHandoff(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
+        self.approval_store = ApprovalLedgerStore(os.path.join(self.tempdir.name, "approvals.json"))
         self.store = ExecutionClaimStore(os.path.join(self.tempdir.name, "claims.json"))
 
     def tearDown(self):
         self.tempdir.cleanup()
 
-    def run_flow(self, candidate=None, bound_task=None, reader=None, claim_id="claim-20"):
+    def seed_receipt(self, candidate):
+        with open(self.approval_store.ledger_path, "w", encoding="utf-8") as handle:
+            json.dump([candidate.to_dict()], handle)
+
+    def run_flow(self, candidate=None, bound_task=None, reader=None, claim_id="claim-20", seed=True):
+        candidate = candidate or receipt()
+        if seed:
+            self.seed_receipt(candidate)
         return validate_and_claim_execution(
-            receipt=candidate or receipt(),
+            approval_store=self.approval_store,
+            approval_receipt_id=candidate.receipt_id,
             task=bound_task or task(),
             expected_effect="MERGE",
             expected_target_kind="PULL_REQUEST",
@@ -112,9 +122,19 @@ class TestExecutionHandoff(unittest.TestCase):
         self.assertNotIn("issuer_subject", data[0])
         self.assertNotIn("nonce", data[0])
 
-    def test_receipt_must_be_consumed(self):
-        result = self.run_flow(receipt(status="AVAILABLE"))
+    def test_caller_constructed_receipt_without_approval_ledger_entry_cannot_claim(self):
+        candidate = receipt()
+        result = self.run_flow(candidate, seed=False)
         self.assertEqual(result.result, ExecutionClaimResult.BLOCKED)
+        self.assertEqual(result.reason, "APPROVAL_RECEIPT_NOT_FOUND")
+        self.assertFalse(os.path.exists(self.store.ledger_path))
+        self.assertNotIn("receipt", inspect.signature(validate_and_claim_execution).parameters)
+
+    def test_non_consumed_or_malformed_approval_ledger_fails_closed(self):
+        candidate = receipt(status="AVAILABLE")
+        result = self.run_flow(candidate)
+        self.assertEqual(result.result, ExecutionClaimResult.BLOCKED)
+        self.assertEqual(result.reason, "APPROVAL_LEDGER_CORRUPT")
         self.assertFalse(os.path.exists(self.store.ledger_path))
 
     def test_exact_binding_mismatch_blocks(self):
@@ -169,7 +189,8 @@ class TestExecutionHandoff(unittest.TestCase):
         self.assertEqual(second.result, ExecutionClaimResult.BLOCKED)
         self.assertEqual(second.reason, "EXECUTION_CLAIM_ID_REUSED")
 
-    def test_corrupt_or_duplicate_ledger_fails_closed(self):
+    def test_corrupt_or_duplicate_execution_ledger_fails_closed(self):
+        self.seed_receipt(receipt())
         with open(self.store.ledger_path, "w", encoding="utf-8") as handle:
             handle.write("not-json")
         result = self.run_flow()
@@ -217,11 +238,14 @@ class TestExecutionHandoff(unittest.TestCase):
         self.assertEqual(results.count(ExecutionClaimResult.PASS), 1)
         self.assertEqual(len(results), 2)
 
-    def test_store_identity_is_fixed_and_supported_api_has_no_path_override(self):
+    def test_store_identities_are_fixed_and_supported_api_has_no_path_override(self):
+        self.assertEqual(self.approval_store.ledger_path, os.path.realpath(os.path.abspath(self.approval_store.ledger_path)))
         self.assertEqual(self.store.ledger_path, os.path.realpath(os.path.abspath(self.store.ledger_path)))
         params = inspect.signature(validate_and_claim_execution).parameters
+        self.assertIn("approval_store", params)
         self.assertIn("execution_store", params)
         self.assertNotIn("ledger_path", params)
+        self.assertNotIn("receipt", params)
 
     def test_codex_uses_same_core_and_provider_plan_cannot_satisfy_merge(self):
         codex = self.run_flow(candidate=receipt(provider="codex"), bound_task=task(provider="codex"))
