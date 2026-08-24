@@ -12,7 +12,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 
-SCHEMA_VERSION = "agent-controller-approval-challenge-v1"
+SCHEMA_VERSION = "agent-controller-approval-challenge-v2"
 
 
 class ProvenanceAssurance(str, Enum):
@@ -21,12 +21,12 @@ class ProvenanceAssurance(str, Enum):
     PROVENANCE_UNAVAILABLE = "PROVENANCE_UNAVAILABLE"
 
 
-# PoC-only Controller-pinned approval keys. Imported from reviewed PR #30 exact
-# head c5d8a0b55b07361ff4c540b49f5921b16cbcb9ad. Production key
-# enrollment/rotation remains a separately gated administrative operation.
+# PoC-only Controller-pinned approval key for the v2 exact-binding fixture.
+# The private key was generated only to create the fixture signature and is not
+# stored in this repository. Production enrollment/rotation remains separate.
 _PINNED_APPROVAL_KEYS = MappingProxyType(
     {
-        "human-key-poc-1": "rF1T3bTO5L9g4Wu34X42Kqh55voQdsfU92eqQ38xP+Q=",
+        "human-key-poc-2": "Pxpq8/gqzFvE+96c3WI2QMsKIMHevr175Yy4e1EvS/E=",
     }
 )
 
@@ -34,9 +34,12 @@ _PINNED_APPROVAL_KEYS = MappingProxyType(
 @dataclass(frozen=True)
 class ApprovalChallenge:
     approval_id: str
+    approval_policy_id: str
     controller_task_id: str
     operation_id: str
     operation_version: str
+    provider: str
+    requested_capability: str
     effect: str
     repo: str
     target_kind: str
