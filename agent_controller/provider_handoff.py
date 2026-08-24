@@ -20,6 +20,7 @@ from agent_controller.provider_contract import (
     ProviderOperationRef,
     TaskBinding,
     TerminalClaim,
+    VerificationResult,
 )
 
 
@@ -38,6 +39,25 @@ class VerifiedHandoffResult:
     binding: BindingValidation
     observation: AgentObservation | None
     artifacts: Sequence[ArtifactEvidence]
+    verification_result: VerificationResult
+
+
+def _aggregate_artifact_results(artifacts: Sequence[ArtifactEvidence]) -> VerificationResult:
+    if not artifacts:
+        return VerificationResult.BLOCKED
+
+    results = {artifact.verification_result for artifact in artifacts}
+    if VerificationResult.FAIL in results:
+        return VerificationResult.FAIL
+    if VerificationResult.BLOCKED in results:
+        return VerificationResult.BLOCKED
+    if VerificationResult.UNCERTAIN in results:
+        return VerificationResult.UNCERTAIN
+    if results == {VerificationResult.PASS} and all(
+        artifact.independently_verified for artifact in artifacts
+    ):
+        return VerificationResult.PASS
+    return VerificationResult.UNCERTAIN
 
 
 def run_verified_handoff(
@@ -53,13 +73,19 @@ def run_verified_handoff(
     Identity binding is checked before provider reads. Artifact collection is
     attempted only when the normalized provider observation claims terminal
     success and is mapped to ARTIFACT_READY. Artifact identities are checked
-    before any artifact can be promoted by GitHub verification. The flow never
-    branches on provider name.
+    before any artifact can be promoted by GitHub verification. Overall
+    verification success is explicit and separate from binding validity. The
+    flow never branches on provider name.
     """
 
     operation_binding = validate_operation_binding(task=task, operation=operation)
     if not operation_binding.valid:
-        return VerifiedHandoffResult(operation_binding, None, ())
+        return VerifiedHandoffResult(
+            operation_binding,
+            None,
+            (),
+            VerificationResult.BLOCKED,
+        )
 
     observation = observer.observe(operation)
     observation_binding = validate_observation_binding(
@@ -67,7 +93,12 @@ def run_verified_handoff(
         observation=observation,
     )
     if not observation_binding.valid:
-        return VerifiedHandoffResult(observation_binding, observation, ())
+        return VerifiedHandoffResult(
+            observation_binding,
+            observation,
+            (),
+            VerificationResult.BLOCKED,
+        )
 
     if (
         observation.mapped_state is not ControllerState.ARTIFACT_READY
@@ -77,6 +108,7 @@ def run_verified_handoff(
             BindingValidation(False, "OBSERVATION_NOT_ARTIFACT_READY_SUCCESS"),
             observation,
             (),
+            VerificationResult.BLOCKED,
         )
 
     raw_artifacts = artifact_collector.collect_artifacts(operation)
@@ -92,6 +124,7 @@ def run_verified_handoff(
                 artifact_binding,
                 observation,
                 (),
+                VerificationResult.BLOCKED,
             )
 
         verified_artifacts.append(
@@ -103,8 +136,10 @@ def run_verified_handoff(
             )
         )
 
+    verified_artifacts = tuple(verified_artifacts)
     return VerifiedHandoffResult(
         BindingValidation(True),
         observation,
-        tuple(verified_artifacts),
+        verified_artifacts,
+        _aggregate_artifact_results(verified_artifacts),
     )
