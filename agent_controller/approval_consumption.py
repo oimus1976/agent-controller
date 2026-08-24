@@ -4,8 +4,9 @@ from dataclasses import dataclass
 from typing import Mapping, Optional, Protocol, runtime_checkable
 
 from agent_controller.approval_contract import ApprovalResult, ApprovalValidation
-from agent_controller.approval_ledger import ApprovalConsumption, _consume_validated_approval_once
+from agent_controller.approval_ledger import ApprovalConsumption
 from agent_controller.approval_service import TrustedApprovalIngress, read_and_validate_human_approval
+from agent_controller.approval_store import ApprovalLedgerStore
 from agent_controller.provider_contract import TaskBinding
 
 
@@ -39,13 +40,16 @@ def validate_and_consume_human_approval(
     expected_target_id: Optional[str],
     expected_head_sha: Optional[str],
     target_reader: ApprovalTargetReadClient,
-    ledger_path: str,
+    ledger: ApprovalLedgerStore,
     now: str,
     receipt_id: str,
 ) -> ApprovalConsumeResult:
     """Validate trusted approval, re-read objective target, then consume once.
 
-    This is the supported consumption API. No authorized effect is executed.
+    The approval ledger identity is fixed in Controller composition via
+    `ApprovalLedgerStore`; callers cannot redirect an approval to another ledger
+    per consume request. No authorized effect is executed here.
+
     The objective read and local ledger commit are not a distributed transaction;
     a future effect executor must independently re-read target facts again before
     applying any high-impact effect.
@@ -113,8 +117,7 @@ def validate_and_consume_human_approval(
             None,
         )
 
-    consumption = _consume_validated_approval_once(
-        ledger_path=ledger_path,
+    consumption = ledger._consume_validated(
         approval=approval,
         consumed_at=now,
         receipt_id=receipt_id,
