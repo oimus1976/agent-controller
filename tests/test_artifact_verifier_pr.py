@@ -11,12 +11,28 @@ from agent_controller.provider_contract import (
 
 
 class FakeGitHub:
-    def __init__(self, *, state="open", merged=False, number=15, head_ref="refs/heads/work", head_sha="new-sha"):
+    def __init__(
+        self,
+        *,
+        state="open",
+        merged=False,
+        number=15,
+        base_repo="oimus1976/agent-controller",
+        base_ref="refs/heads/main",
+        base_sha="start-sha",
+        head_ref="refs/heads/work",
+        head_sha="new-sha",
+        omit_base=False,
+    ):
         self.state = state
         self.merged = merged
         self.number = number
+        self.base_repo = base_repo
+        self.base_ref = base_ref
+        self.base_sha = base_sha
         self.head_ref = head_ref
         self.head_sha = head_sha
+        self.omit_base = omit_base
         self.pr_calls = []
         self.compare_calls = []
         self.ref_calls = []
@@ -27,13 +43,22 @@ class FakeGitHub:
 
     def get_pull_request(self, repo, pr_number):
         self.pr_calls.append((repo, pr_number))
-        return {
+        result = {
             "number": self.number,
             "state": self.state,
             "merged": self.merged,
             "head_ref": self.head_ref,
             "head_sha": self.head_sha,
         }
+        if not self.omit_base:
+            result.update(
+                {
+                    "base_repo": self.base_repo,
+                    "base_ref": self.base_ref,
+                    "base_sha": self.base_sha,
+                }
+            )
+        return result
 
     def compare_commits(self, repo, base_sha, head_sha):
         self.compare_calls.append((repo, base_sha, head_sha))
@@ -85,7 +110,7 @@ def evidence(provider="jules", *, artifact_id="15", ref="refs/heads/work", sha="
 
 
 class TestPullRequestArtifactVerifier(unittest.TestCase):
-    def test_open_pr_identity_head_ancestry_and_scope_can_pass_for_both_providers(self):
+    def test_open_pr_identity_base_head_ancestry_and_scope_can_pass_for_both_providers(self):
         for provider in ("jules", "codex"):
             github = FakeGitHub()
             result = verify_github_artifact(
@@ -110,9 +135,12 @@ class TestPullRequestArtifactVerifier(unittest.TestCase):
             self.assertFalse(result.independently_verified)
             self.assertEqual(github.compare_calls, [])
 
-    def test_pr_number_ref_or_sha_mismatch_fails(self):
+    def test_pr_number_base_ref_or_sha_mismatch_fails(self):
         cases = (
             FakeGitHub(number=16),
+            FakeGitHub(base_repo="other/repo"),
+            FakeGitHub(base_ref="refs/heads/release"),
+            FakeGitHub(base_sha="other-base-sha"),
             FakeGitHub(head_ref="refs/heads/other"),
             FakeGitHub(head_sha="different-sha"),
         )
@@ -122,6 +150,15 @@ class TestPullRequestArtifactVerifier(unittest.TestCase):
             )
             self.assertEqual(result.verification_result, VerificationResult.FAIL)
             self.assertFalse(result.independently_verified)
+
+    def test_incomplete_pr_base_facts_are_uncertain(self):
+        github = FakeGitHub(omit_base=True)
+        result = verify_github_artifact(
+            task=task(), operation=operation(), evidence=evidence(), github=github
+        )
+        self.assertEqual(result.verification_result, VerificationResult.UNCERTAIN)
+        self.assertFalse(result.independently_verified)
+        self.assertEqual(github.compare_calls, [])
 
     def test_missing_or_invalid_pr_identity_blocks_without_pr_read(self):
         for artifact_id in (None, "", "not-a-number", "0"):
