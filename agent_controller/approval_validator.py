@@ -51,6 +51,10 @@ def validate_approval_binding(
         return ApprovalValidation(False, ApprovalResult.BLOCKED, "CAPABILITY_MISMATCH", approval.approval_id)
     if approval.effect != expected_effect:
         return ApprovalValidation(False, ApprovalResult.BLOCKED, "EFFECT_MISMATCH", approval.approval_id)
+    if expected_effect not in task.allowed_effects:
+        return ApprovalValidation(False, ApprovalResult.BLOCKED, "EFFECT_NOT_ALLOWED_BY_TASK", approval.approval_id)
+    if expected_effect in task.forbidden_effects:
+        return ApprovalValidation(False, ApprovalResult.BLOCKED, "EFFECT_FORBIDDEN_BY_TASK", approval.approval_id)
     if approval.repo != task.repo:
         return ApprovalValidation(False, ApprovalResult.BLOCKED, "REPO_MISMATCH", approval.approval_id)
     if approval.target_kind != expected_target_kind:
