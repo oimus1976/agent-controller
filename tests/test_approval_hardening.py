@@ -9,6 +9,7 @@ from agent_controller.approval_consumption import validate_and_consume_human_app
 from agent_controller.approval_contract import ApprovalBinding, ApprovalResult
 from agent_controller.approval_ledger import _consume_validated_approval_once
 from agent_controller.approval_service import TrustedApprovalIngress
+from agent_controller.approval_store import ApprovalLedgerStore
 from agent_controller.approval_validator import validate_approval_binding
 from agent_controller.provider_contract import ObjectiveScope, TaskBinding
 
@@ -112,7 +113,7 @@ class TestApprovalHardening(unittest.TestCase):
                     "target_kind": "PULL_REQUEST",
                     "target_id": "15",
                 }),
-                ledger_path=os.path.join(tempdir, "ledger.json"),
+                ledger=ApprovalLedgerStore(os.path.join(tempdir, "ledger.json")),
                 now="2026-08-24T06:30:00Z",
                 receipt_id="receipt-1",
             )
@@ -141,7 +142,7 @@ class TestApprovalHardening(unittest.TestCase):
                     "target_kind": "OPERATION",
                     "target_id": "op-17",
                 }),
-                ledger_path=os.path.join(tempdir, "ledger.json"),
+                ledger=ApprovalLedgerStore(os.path.join(tempdir, "ledger.json")),
                 now="2026-08-24T06:30:00Z",
                 receipt_id="receipt-ack",
             )
@@ -174,7 +175,6 @@ class TestApprovalHardening(unittest.TestCase):
             name for name, value in vars(approval_ledger).items()
             if not name.startswith("_") and inspect.isfunction(value) and value.__module__ == approval_ledger.__name__
         }
-        self.assertNotIn("consume_approval_once", public_functions)
         self.assertFalse(any("consume" in name.lower() for name in public_functions))
 
 
