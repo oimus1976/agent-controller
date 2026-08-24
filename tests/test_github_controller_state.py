@@ -13,6 +13,7 @@ class FakeTransport:
         self.rev = 0
         self.calls = []
         self.ref_exists = True
+        self.ref_revision = "ref-sha"
         self.raise_ref = False
         self.raise_read = False
         self.raise_write = False
@@ -27,7 +28,7 @@ class FakeTransport:
             raise RuntimeError("network")
         if not self.ref_exists:
             return GitHubContentsResponse(404)
-        return GitHubContentsResponse(200, revision="ref-sha")
+        return GitHubContentsResponse(200, revision=self.ref_revision)
 
     def read_file(self, *, repo, ref, path):
         self.calls.append(("read", repo, ref, path))
@@ -101,6 +102,11 @@ class GitHubControllerStateAdapterTests(unittest.TestCase):
     def test_missing_state_ref_never_looks_like_empty_file_state(self):
         self.transport.ref_exists = False
         with self.assertRaisesRegex(RuntimeError, "CONTROLLER_STATE_REF_STATUS_404"):
+            self.adapter.read(path=self.path)
+
+    def test_state_ref_success_without_revision_is_not_authoritative(self):
+        self.transport.ref_revision = ""
+        with self.assertRaisesRegex(RuntimeError, "CONTROLLER_STATE_REF_REVISION_INVALID"):
             self.adapter.read(path=self.path)
 
     def test_uncertain_state_ref_blocks_write_before_create(self):
