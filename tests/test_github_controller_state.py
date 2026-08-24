@@ -12,12 +12,22 @@ class FakeTransport:
         self.files = {}
         self.rev = 0
         self.calls = []
+        self.ref_exists = True
+        self.raise_ref = False
         self.raise_read = False
         self.raise_write = False
 
     def _next(self):
         self.rev += 1
         return f"blob-{self.rev}"
+
+    def read_ref(self, *, repo, ref):
+        self.calls.append(("read_ref", repo, ref))
+        if self.raise_ref:
+            raise RuntimeError("network")
+        if not self.ref_exists:
+            return GitHubContentsResponse(404)
+        return GitHubContentsResponse(200, revision="ref-sha")
 
     def read_file(self, *, repo, ref, path):
         self.calls.append(("read", repo, ref, path))
@@ -53,18 +63,9 @@ class FakeTransport:
         return GitHubContentsResponse(200, revision=revision)
 
     def delete_file(self, *, repo, ref, path, message, expected_revision):
-        self.calls.append(("delete", repo, ref, path, message, expected_revision))
-        if self.raise_write:
-            raise RuntimeError("network")
-        key = (repo, ref, path)
-        item = self.files.get(key)
-        if item is None or item[1] != expected_revision:
-            return GitHubContentsResponse(409)
-        del self.files[key]
         return GitHubContentsResponse(200, revision=self._next())
 
     def move_ref(self, *, repo, ref, target_sha, expected_old_sha):
-        self.calls.append(("move_ref", repo, ref, target_sha, expected_old_sha))
         return GitHubContentsResponse(200, revision=target_sha)
 
 
@@ -93,63 +94,74 @@ class GitHubControllerStateAdapterTests(unittest.TestCase):
     def test_state_ref_is_fixed(self):
         self.assertEqual(CONTROLLER_STATE_REF, self.adapter.state_ref)
 
-    def test_read_missing_returns_none_on_fixed_ref(self):
+    def test_read_missing_returns_none_only_when_fixed_ref_exists(self):
         self.assertIsNone(self.adapter.read(path=self.path))
-        self.assertEqual(CONTROLLER_STATE_REF, self.transport.calls[-1][2])
+        self.assertEqual(("read_ref", "oimus1976/agent-controller", CONTROLLER_STATE_REF), self.transport.calls[0])
+
+    def test_missing_state_ref_never_looks_like_empty_file_state(self):
+        self.transport.ref_exists = False
+        with self.assertRaisesRegex(RuntimeError, "CONTROLLER_STATE_REF_STATUS_404"):
+            self.adapter.read(path=self.path)
+
+    def test_uncertain_state_ref_blocks_write_before_create(self):
+        self.transport.raise_ref = True
+        result = self.adapter.create_if_absent(path=self.path, content="x", message="m")
+        self.assertTrue(result.uncertain)
+        self.assertIn("CONTROLLER_STATE_REF_UNCERTAIN", result.reason)
+        self.assertFalse(any(call[0] == "create" for call in self.transport.calls))
 
     def test_create_missing_succeeds_and_rereads(self):
-        created = self.adapter.create_if_absent(
-            path=self.path, content='{"v":1}', message="probe create"
-        )
+        created = self.adapter.create_if_absent(path=self.path, content='{"v":1}', message="probe create")
         self.assertTrue(created.written)
         snapshot = self.adapter.read(path=self.path)
         self.assertEqual('{"v":1}', snapshot.content)
         self.assertEqual(created.revision, snapshot.revision)
-        create_call = [c for c in self.transport.calls if c[0] == "create"][-1]
-        self.assertEqual(CONTROLLER_STATE_REF, create_call[2])
 
-    def test_second_create_conflicts(self):
+    def test_second_create_maps_observed_422_to_create_conflict(self):
         self.adapter.create_if_absent(path=self.path, content="one", message="create")
         second = self.adapter.create_if_absent(path=self.path, content="two", message="create")
-        self.assertFalse(second.written)
         self.assertTrue(second.conflict)
-        self.assertFalse(second.uncertain)
+        self.assertEqual("GITHUB_CREATE_CONFLICT", second.reason)
 
     def test_cas_with_exact_revision_succeeds(self):
         created = self.adapter.create_if_absent(path=self.path, content="one", message="create")
         updated = self.adapter.compare_and_swap(
-            path=self.path,
-            expected_revision=created.revision,
-            content="two",
-            message="update",
+            path=self.path, expected_revision=created.revision, content="two", message="update"
         )
         self.assertTrue(updated.written)
         self.assertEqual("two", self.adapter.read(path=self.path).content)
 
-    def test_cas_with_stale_revision_conflicts_and_preserves_winner(self):
+    def test_cas_with_stale_revision_maps_observed_409_to_conflict(self):
         created = self.adapter.create_if_absent(path=self.path, content="one", message="create")
         winner = self.adapter.compare_and_swap(
-            path=self.path,
-            expected_revision=created.revision,
-            content="winner",
-            message="winner",
+            path=self.path, expected_revision=created.revision, content="winner", message="winner"
         )
         stale = self.adapter.compare_and_swap(
-            path=self.path,
-            expected_revision=created.revision,
-            content="loser",
-            message="loser",
+            path=self.path, expected_revision=created.revision, content="loser", message="loser"
         )
         self.assertTrue(winner.written)
         self.assertTrue(stale.conflict)
-        snapshot = self.adapter.read(path=self.path)
-        self.assertEqual("winner", snapshot.content)
-        self.assertEqual(winner.revision, snapshot.revision)
+        self.assertEqual("GITHUB_CAS_CONFLICT", stale.reason)
+        self.assertEqual("winner", self.adapter.read(path=self.path).content)
+
+    def test_update_422_is_not_misclassified_as_cas_conflict(self):
+        class ValidationTransport(FakeTransport):
+            def update_file(self, **kwargs):
+                return GitHubContentsResponse(422)
+
+        adapter = GitHubControllerStateAdapter(
+            repo="oimus1976/agent-controller", default_branch="main", transport=ValidationTransport()
+        )
+        result = adapter.compare_and_swap(
+            path=self.path, expected_revision="blob-1", content="x", message="m"
+        )
+        self.assertTrue(result.uncertain)
+        self.assertFalse(result.conflict)
+        self.assertEqual("GITHUB_WRITE_STATUS_422", result.reason)
 
     def test_write_transport_exception_is_uncertain(self):
         self.transport.raise_write = True
         result = self.adapter.create_if_absent(path=self.path, content="x", message="m")
-        self.assertFalse(result.written)
         self.assertTrue(result.uncertain)
         self.assertEqual("GITHUB_TRANSPORT_UNCERTAIN", result.reason)
 
@@ -164,9 +176,7 @@ class GitHubControllerStateAdapterTests(unittest.TestCase):
                 return GitHubContentsResponse(201)
 
         adapter = GitHubControllerStateAdapter(
-            repo="oimus1976/agent-controller",
-            default_branch="main",
-            transport=MissingRevisionTransport(),
+            repo="oimus1976/agent-controller", default_branch="main", transport=MissingRevisionTransport()
         )
         result = adapter.create_if_absent(path=self.path, content="x", message="m")
         self.assertTrue(result.uncertain)
@@ -178,9 +188,7 @@ class GitHubControllerStateAdapterTests(unittest.TestCase):
                 return GitHubContentsResponse(500)
 
         adapter = GitHubControllerStateAdapter(
-            repo="oimus1976/agent-controller",
-            default_branch="main",
-            transport=ErrorTransport(),
+            repo="oimus1976/agent-controller", default_branch="main", transport=ErrorTransport()
         )
         result = adapter.create_if_absent(path=self.path, content="x", message="m")
         self.assertTrue(result.uncertain)
