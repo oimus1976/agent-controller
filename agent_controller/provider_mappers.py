@@ -10,43 +10,39 @@ from agent_controller.provider_contract import (
 )
 
 
-_SENSITIVE_KEY_PARTS = (
-    "token",
-    "secret",
-    "password",
-    "authorization",
-    "api_key",
-    "apikey",
-    "credential",
-    "cookie",
+_EVIDENCE_KEYS = frozenset(
+    {
+        "status",
+        "reason",
+        "result",
+        "updated_at",
+        "plan_id",
+        "artifact_id",
+        "result_id",
+        "task_id",
+    }
 )
-_REDACTED = "[REDACTED]"
 
 
 def _string(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value else None
 
 
-def _is_sensitive_key(key: Any) -> bool:
-    if not isinstance(key, str):
-        return False
-    normalized = key.lower().replace("-", "_")
-    return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
+def _evidence_projection(raw_state: Any) -> Any:
+    """Retain only provider fields explicitly approved for normalized evidence.
 
+    Arbitrary provider payload is intentionally not copied into normalized/audit
+    evidence because credentials may appear under innocuous keys or inside URLs,
+    headers, and free-form strings.
+    """
 
-def _sanitize_raw_state(value: Any) -> Any:
-    """Return evidence-safe provider state without secret/config credentials."""
-
-    if isinstance(value, Mapping):
-        return {
-            key: _REDACTED if _is_sensitive_key(key) else _sanitize_raw_state(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_sanitize_raw_state(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_sanitize_raw_state(item) for item in value)
-    return value
+    if not isinstance(raw_state, Mapping):
+        return {"raw_type": type(raw_state).__name__}
+    return {
+        key: value
+        for key, value in raw_state.items()
+        if key in _EVIDENCE_KEYS and isinstance(value, (str, int, float, bool, type(None)))
+    }
 
 
 def _refs(raw_state: Mapping[str, Any], keys: Sequence[str]) -> tuple[str, ...]:
@@ -72,7 +68,7 @@ def _uncertain(
         provider_operation_id=provider_operation_id,
         observed_at=observed_at,
         provider_updated_at=provider_updated_at,
-        provider_raw_state=_sanitize_raw_state(raw_state),
+        provider_raw_state=_evidence_projection(raw_state),
         mapped_state=ControllerState.UNCERTAIN,
         uncertainty_reason=reason,
     )
@@ -84,12 +80,7 @@ def map_jules_observation(
     raw_state: Any,
     observed_at: str,
 ) -> AgentObservation:
-    """Map a Jules fixture payload into the provider-neutral observation model.
-
-    This function is deliberately pure: it performs no I/O and treats unknown
-    or malformed provider states as UNCERTAIN rather than guessing. Raw state
-    retained as evidence is recursively redacted for credential-like keys.
-    """
+    """Map a Jules fixture payload into the provider-neutral observation model."""
 
     if not isinstance(raw_state, Mapping):
         return _uncertain(
@@ -119,7 +110,7 @@ def map_jules_observation(
         provider_operation_id=provider_operation_id,
         observed_at=observed_at,
         provider_updated_at=provider_updated_at,
-        provider_raw_state=_sanitize_raw_state(raw_state),
+        provider_raw_state=_evidence_projection(raw_state),
         provider_refs=_refs(raw_state, ("plan_id", "artifact_id", "result_id")),
     )
 
@@ -170,9 +161,8 @@ def map_codex_observation(
 ) -> AgentObservation:
     """Map a Codex fixture payload into the provider-neutral observation model.
 
-    This is a fixture vocabulary mapper, not a claim about a stable external
-    Codex API schema. Unknown inputs fail closed to UNCERTAIN. Raw state retained
-    as evidence is recursively redacted for credential-like keys.
+    This is fixture vocabulary, not a claim about a stable external Codex API.
+    Ambiguous completion without an explicit success result fails closed.
     """
 
     if not isinstance(raw_state, Mapping):
@@ -208,7 +198,7 @@ def map_codex_observation(
         provider_operation_id=provider_operation_id,
         observed_at=observed_at,
         provider_updated_at=provider_updated_at,
-        provider_raw_state=_sanitize_raw_state(raw_state),
+        provider_raw_state=_evidence_projection(raw_state),
         provider_refs=_refs(raw_state, ("task_id", "artifact_id", "result_id")),
     )
 
@@ -228,14 +218,15 @@ def map_codex_observation(
             awaiting_input=AwaitingInput.USER_FEEDBACK,
             **common,
         )
-    if normalized in {"done", "completed"} and result_normalized in {None, "success", "succeeded"}:
+    if normalized in {"done", "completed"} and result_normalized in {"success", "succeeded"}:
         return AgentObservation(
             mapped_state=ControllerState.ARTIFACT_READY,
             terminal_claim=TerminalClaim.SUCCESS,
             **common,
         )
     if normalized in {"failed", "error"} or (
-        normalized in {"done", "completed"} and result_normalized in {"failure", "failed", "error"}
+        normalized in {"done", "completed"}
+        and result_normalized in {"failure", "failed", "error"}
     ):
         return AgentObservation(
             mapped_state=ControllerState.BLOCKED,
