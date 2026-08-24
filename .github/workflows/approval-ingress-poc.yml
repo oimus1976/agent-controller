@@ -1,0 +1,85 @@
+name: Approval Ingress PoC
+
+on:
+  workflow_dispatch:
+    inputs:
+      controller_task_id:
+        description: Controller task ID
+        required: true
+        type: string
+      operation_id:
+        description: Operation ID
+        required: true
+        type: string
+      operation_version:
+        description: Operation version
+        required: true
+        type: string
+      approval_id:
+        description: Approval proposal ID
+        required: true
+        type: string
+      effect:
+        description: Exact effect
+        required: true
+        type: string
+      repo:
+        description: Exact repository
+        required: true
+        type: string
+      target_kind:
+        description: Target kind
+        required: true
+        type: string
+      target_id:
+        description: Target ID
+        required: true
+        type: string
+      expected_head_sha:
+        description: Expected head SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  record-approval-candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Emit bounded candidate provenance
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          ACTOR_ID: ${{ github.actor_id }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          CONTROLLER_TASK_ID: ${{ inputs.controller_task_id }}
+          OPERATION_ID: ${{ inputs.operation_id }}
+          OPERATION_VERSION: ${{ inputs.operation_version }}
+          APPROVAL_ID: ${{ inputs.approval_id }}
+          EFFECT: ${{ inputs.effect }}
+          REPO: ${{ inputs.repo }}
+          TARGET_KIND: ${{ inputs.target_kind }}
+          TARGET_ID: ${{ inputs.target_id }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+        run: |
+          python - <<'PY'
+          import json, os
+          keys = [
+              "EVENT_NAME", "ACTOR", "ACTOR_ID", "RUN_ID", "RUN_ATTEMPT",
+              "WORKFLOW_REF", "WORKFLOW_SHA", "CONTROLLER_TASK_ID", "OPERATION_ID",
+              "OPERATION_VERSION", "APPROVAL_ID", "EFFECT", "REPO", "TARGET_KIND",
+              "TARGET_ID", "EXPECTED_HEAD_SHA",
+          ]
+          payload = {k.lower(): os.environ[k] for k in keys}
+          payload["assurance"] = "SOURCE_AUTHENTICATED_ONLY"
+          print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+          PY
+
+      - name: State capability boundary
+        run: |
+          echo "PoC only: no Ready, merge, deploy, release, provider-plan, or owner-machine effect is executed."
