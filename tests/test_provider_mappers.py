@@ -80,7 +80,7 @@ class TestProviderMappers(unittest.TestCase):
             )
             self.assertEqual(observation.mapped_state, ControllerState.UNCERTAIN)
             self.assertEqual(observation.terminal_claim, TerminalClaim.NONE)
-            self.assertTrue(observation.uncertainty_reason.startswith("CODEX_STATE_UNKNOWN:"))
+            self.assertEqual(observation.uncertainty_reason, "CODEX_STATE_UNKNOWN")
 
     def test_failure_maps_to_blocked_terminal_claim(self):
         jules = map_jules_observation(
@@ -97,21 +97,26 @@ class TestProviderMappers(unittest.TestCase):
             self.assertEqual(observation.mapped_state, ControllerState.BLOCKED)
             self.assertEqual(observation.terminal_claim, TerminalClaim.FAILURE)
 
-    def test_unknown_states_fail_closed_to_uncertain(self):
+    def test_unknown_states_fail_closed_to_uncertain_without_echoing_unknown_text(self):
+        secret = "Bearer-super-secret"
         jules = map_jules_observation(
             provider_operation_id="jules-1",
-            raw_state={"status": "SOMETHING_NEW"},
+            raw_state={"status": secret},
             observed_at="2026-08-24T01:35:00Z",
         )
         codex = map_codex_observation(
             provider_operation_id="codex-1",
-            raw_state={"status": "mystery", "result": "maybe"},
+            raw_state={"status": "mystery", "reason": secret, "result": secret},
             observed_at="2026-08-24T01:35:00Z",
         )
         self.assertEqual(jules.mapped_state, ControllerState.UNCERTAIN)
-        self.assertTrue(jules.uncertainty_reason.startswith("JULES_STATUS_UNKNOWN:"))
+        self.assertEqual(jules.uncertainty_reason, "JULES_STATUS_UNKNOWN")
         self.assertEqual(codex.mapped_state, ControllerState.UNCERTAIN)
-        self.assertTrue(codex.uncertainty_reason.startswith("CODEX_STATE_UNKNOWN:"))
+        self.assertEqual(codex.uncertainty_reason, "CODEX_STATE_UNKNOWN")
+        for observation in (jules, codex):
+            serialized = repr(observation.to_dict())
+            self.assertNotIn(secret, serialized)
+            self.assertNotIn("mystery", serialized)
 
     def test_missing_or_malformed_states_fail_closed(self):
         cases = (
