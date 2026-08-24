@@ -6,7 +6,7 @@ from typing import Optional, Protocol, runtime_checkable
 
 
 CONTROLLER_STATE_REF = "controller-state"
-SCHEMA_VERSION = "agent-controller-shared-authorization-v1"
+SCHEMA_VERSION = "agent-controller-shared-authorization-v2"
 
 
 class AuthorizationState(str, Enum):
@@ -51,8 +51,10 @@ class AuthorizationProvenance:
     provenance_kind: str
     signer_key_id: str
     challenge_nonce: str
+    challenge_schema_version: str
     challenge_digest: str
     signature_digest: str
+    signature_b64: str
 
 
 @dataclass(frozen=True)
@@ -154,8 +156,10 @@ def _valid_provenance(provenance: AuthorizationProvenance) -> bool:
             provenance.provenance_kind,
             provenance.signer_key_id,
             provenance.challenge_nonce,
+            provenance.challenge_schema_version,
             provenance.challenge_digest,
             provenance.signature_digest,
+            provenance.signature_b64,
         )
     )
 
@@ -199,18 +203,10 @@ def _classify_write_result(write: object) -> str:
 
 
 def _safe_identity_component(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and bool(value)
-        and "/" not in value
-        and "\\" not in value
-        and value not in {".", ".."}
-    )
+    return isinstance(value, str) and bool(value) and "/" not in value and "\\" not in value and value not in {".", ".."}
 
 
-def operation_state_path_for_identity(
-    *, controller_task_id: str, operation_id: str, operation_version: str
-) -> str:
+def operation_state_path_for_identity(*, controller_task_id: str, operation_id: str, operation_version: str) -> str:
     for value in (controller_task_id, operation_id, operation_version):
         if not _safe_identity_component(value):
             raise ValueError("unsafe operation state path component")
@@ -228,11 +224,7 @@ def operation_state_path(binding: OperationAuthorizationBinding) -> str:
 
 
 def read_operation_by_identity(
-    *,
-    store: SharedAuthorizationStore,
-    controller_task_id: str,
-    operation_id: str,
-    operation_version: str,
+    *, store: SharedAuthorizationStore, controller_task_id: str, operation_id: str, operation_version: str
 ) -> SharedAuthorizationResult:
     try:
         path = operation_state_path_for_identity(
@@ -262,11 +254,7 @@ def read_operation(*, store: SharedAuthorizationStore, binding: OperationAuthori
     if result.decision is not AuthorizationDecision.PASS or result.snapshot is None:
         return result
     if result.snapshot.record.binding != binding:
-        return SharedAuthorizationResult(
-            AuthorizationDecision.BLOCKED,
-            result.snapshot,
-            "OPERATION_BINDING_CONFLICT",
-        )
+        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, result.snapshot, "OPERATION_BINDING_CONFLICT")
     return result
 
 
