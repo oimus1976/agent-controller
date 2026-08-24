@@ -91,7 +91,7 @@ class GitHubSharedAuthorizationBackendTests(unittest.TestCase):
         raw = next(iter(self.transport.files.values()))[0]
         parsed = json.loads(raw)
         self.assertEqual("PROPOSED", parsed["state"])
-        self.assertEqual("agent-controller-shared-authorization-v1", parsed["schema_version"])
+        self.assertEqual("agent-controller-shared-authorization-v2", parsed["schema_version"])
 
     def test_duplicate_propose_uses_github_create_conflict_then_reread(self):
         first = propose_operation(store=self.store, binding=self.binding)
@@ -99,16 +99,16 @@ class GitHubSharedAuthorizationBackendTests(unittest.TestCase):
         self.assertEqual(AuthorizationDecision.PASS, first.decision)
         self.assertEqual(AuthorizationDecision.REPLAYED, second.decision)
 
-    def test_corrupt_json_fails_closed_on_read(self):
+    def test_corrupt_authoritatively_read_json_is_blocked(self):
         propose_operation(store=self.store, binding=self.binding)
         key = next(iter(self.transport.files))
         _, revision = self.transport.files[key]
         self.transport.files[key] = ("not-json", revision)
         result = read_operation(store=self.store, binding=self.binding)
-        self.assertEqual(AuthorizationDecision.UNCERTAIN, result.decision)
-        self.assertEqual("STATE_READ_UNCERTAIN", result.reason)
+        self.assertEqual(AuthorizationDecision.BLOCKED, result.decision)
+        self.assertEqual("STATE_RECORD_INVALID", result.reason)
 
-    def test_extra_json_field_fails_closed(self):
+    def test_extra_json_field_is_blocked(self):
         propose_operation(store=self.store, binding=self.binding)
         key = next(iter(self.transport.files))
         raw, revision = self.transport.files[key]
@@ -116,7 +116,8 @@ class GitHubSharedAuthorizationBackendTests(unittest.TestCase):
         data["attacker_field"] = "ignored?"
         self.transport.files[key] = (json.dumps(data), revision)
         result = read_operation(store=self.store, binding=self.binding)
-        self.assertEqual(AuthorizationDecision.UNCERTAIN, result.decision)
+        self.assertEqual(AuthorizationDecision.BLOCKED, result.decision)
+        self.assertEqual("STATE_RECORD_INVALID", result.reason)
 
     def test_backend_rejects_non_controller_state_ref(self):
         with self.assertRaises(ValueError):
