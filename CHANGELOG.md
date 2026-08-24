@@ -50,6 +50,15 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
   - `CodexObservationAdapter`
 - production側の観測専用adapterを、`ProviderReadClient -> raw payload -> pure mapper -> AgentObservation` の構造で追加。
 - provider target mismatch を client read 前に拒否する deterministic test を追加。
+- `agent_controller/provider_artifacts.py` を追加。
+  - `ProviderArtifactReadClient`
+  - `map_jules_artifact()`
+  - `map_codex_artifact()`
+  - `JulesArtifactAdapter`
+  - `CodexArtifactAdapter`
+- provider-reported artifact の取得を observation client とは別 capability に分離。
+- `ProviderArtifactReadClient -> raw artifact -> pure artifact mapper -> ArtifactEvidence` の read-only 経路を追加。
+- Codex の review-only artifact を code publication なしで表現できる deterministic test を追加。
 
 #### Changed
 
@@ -60,6 +69,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
   - `collect_artifacts()`
 - optional capability は provider asymmetry を保ったまま、core mandatory protocol とは別に扱う方針を明確化。
 - read-only observation adapter は、不要な `dispatch()` のダミー実装を持たせず、現段階では意図的に full `AgentAdapter` を満たさない設計とした。
+- artifact read capability も operation observation と分離し、provider が一方だけを提供する場合に不要な capability を強制しない設計とした。
 
 #### Safety / trust boundary
 
@@ -71,6 +81,10 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - provider-specific network transport はこの proof slice では実装しない。
 - `ProviderReadClient` は approve / send / retry / cancel / dispatch / create / update / delete / merge / deploy 等の mutation surface を持たない。
 - observation adapter も dispatch / mutation authority を持たず、read-only slice に不要な権限を導入しない。
+- `ProviderArtifactReadClient` は artifact read のみを持ち、mutation surface を持たない。
+- provider が ref / SHA / content hash を報告しても、artifact mapper / adapter は `independently_verified=True` を設定しない。
+- unparseable artifact は `artifact_kind="unknown"` / `freshness_basis="provider_report_unparseable"` として保持し、成功や検証済み状態へ推定しない。
+- artifact adapter の provider target mismatch は client read 前に拒否する。
 
 #### Commits reconstructed for this slice
 
@@ -87,6 +101,9 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - `506e5548545e3a3339e5119e7deb5ed04f4c1447` — read-only client boundary tests を追加。
 - `bed1d852c7f9d155bf3b33b032ba5ad419a4ce13` — production read-only Jules / Codex observation adapters を追加。
 - `6460387d70d9eb95f51b01e51a1769cf15c9d517` — observation adapter responsibility / authority boundary tests を追加。
+- `9b3ba83ee51f180f819650d4d16c8bcf3611e5c8` — read-only observation boundary を CHANGELOG に記録。
+- `a1d244d017407787fbaf4023c15b5744bf3f5f9b` — provider artifact read / mapping / adapter boundaries を追加。
+- `200e29f51dd72c041f99f17a0e7f136cd3466491` — artifact trust / capability boundary tests を追加。
 
 ---
 
