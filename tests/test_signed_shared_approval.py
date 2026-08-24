@@ -10,7 +10,6 @@ from agent_controller.shared_authorization import (
     SharedAuthorizationRecord,
     SharedAuthorizationStore,
     SharedRecordSnapshot,
-    operation_state_path,
     propose_operation,
 )
 from agent_controller.signed_approval import ApprovalChallenge
@@ -114,9 +113,8 @@ class SignedSharedApprovalTests(unittest.TestCase):
         proposed = propose_operation(store=self.store, binding=self.binding)
         self.assertEqual(AuthorizationDecision.PASS, proposed.decision)
 
-    def approve(self, signature=SIGNATURE_B64, challenge=None, binding=None):
+    def approve(self, signature=SIGNATURE_B64, challenge=None):
         return self.controller.approve(
-            binding=self.binding if binding is None else binding,
             challenge=self.challenge if challenge is None else challenge,
             signature_b64=signature,
         )
@@ -134,6 +132,12 @@ class SignedSharedApprovalTests(unittest.TestCase):
         self.assertEqual(64, len(provenance.signature_digest))
         self.assertNotIn(SIGNATURE_B64, str(result.snapshot.record.to_dict()))
 
+    def test_shared_record_is_authoritative_binding_not_per_call_input(self):
+        params = set(inspect.signature(self.controller.approve).parameters)
+        self.assertEqual({"challenge", "signature_b64"}, params)
+        self.assertEqual("policy-level3-v1", self.backend.snapshot.record.binding.approval_policy_id)
+        self.assertEqual("MERGE_PR", self.backend.snapshot.record.binding.requested_capability)
+
     def test_repeated_same_signature_is_replay_without_second_target_read(self):
         first = self.approve()
         calls_after_first = self.reader.calls
@@ -148,9 +152,17 @@ class SignedSharedApprovalTests(unittest.TestCase):
         self.assertEqual(0, self.reader.calls)
         self.assertEqual(AuthorizationState.PROPOSED, self.backend.snapshot.record.state)
 
-    def test_challenge_binding_mismatch_blocks_before_signature_or_target(self):
-        changed = ApprovalChallenge(**{**self.challenge.__dict__, "effect": "DEPLOY"})
-        result = self.approve(challenge=changed)
+    def test_valid_signature_cannot_approve_mismatched_shared_binding(self):
+        changed_binding = OperationAuthorizationBinding(
+            **{**self.binding.__dict__, "effect": "DEPLOY"}
+        )
+        self.backend.snapshot = SharedRecordSnapshot(
+            SharedAuthorizationRecord(
+                binding=changed_binding, state=AuthorizationState.PROPOSED
+            ),
+            self.backend.snapshot.revision,
+        )
+        result = self.approve()
         self.assertEqual(AuthorizationDecision.BLOCKED, result.decision)
         self.assertEqual("CHALLENGE_BINDING_MISMATCH", result.reason)
         self.assertEqual(0, self.reader.calls)
@@ -214,10 +226,6 @@ class SignedSharedApprovalTests(unittest.TestCase):
         result = self.approve()
         self.assertEqual(AuthorizationDecision.UNCERTAIN, result.decision)
         self.assertEqual(AuthorizationState.PROPOSED, self.backend.snapshot.record.state)
-
-    def test_supported_approve_api_has_no_provenance_key_or_store_override(self):
-        params = set(inspect.signature(self.controller.approve).parameters)
-        self.assertEqual({"binding", "challenge", "signature_b64"}, params)
 
     def test_no_execution_claim_is_created(self):
         result = self.approve()
