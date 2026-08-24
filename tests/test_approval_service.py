@@ -92,6 +92,13 @@ class TestApprovalService(unittest.TestCase):
         self.assertEqual(uncertain.result, ApprovalResult.UNCERTAIN)
         self.assertEqual(uncertain.reason, "APPROVAL_SOURCE_READ_UNCERTAIN")
 
+    def test_malformed_source_payload_is_uncertain_not_exception(self):
+        for malformed in ("APPROVE FAKE-L3", {"approval_id": "approval-1"}, object()):
+            value, validation = run(FakeSource(malformed))
+            self.assertIsNone(value)
+            self.assertEqual(validation.result, ApprovalResult.UNCERTAIN)
+            self.assertEqual(validation.reason, "APPROVAL_SOURCE_PAYLOAD_INVALID")
+
     def test_source_cannot_swap_approval_identity(self):
         _, validation = run(FakeSource(approval(approval_id="other")))
         self.assertEqual(validation.result, ApprovalResult.BLOCKED)
