@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
+from agent_controller.binding_validator import validate_evidence_chain
 from agent_controller.inspector import evaluate_scope
 from agent_controller.provider_contract import (
     ArtifactEvidence,
+    ProviderOperationRef,
     TaskBinding,
     VerificationResult,
     VerificationSource,
@@ -66,15 +68,25 @@ def _uncertain(evidence: ArtifactEvidence) -> ArtifactEvidence:
 def verify_github_artifact(
     *,
     task: TaskBinding,
+    operation: ProviderOperationRef,
     evidence: ArtifactEvidence,
     github: GitHubArtifactReadClient,
 ) -> ArtifactEvidence:
     """Independently verify one provider-reported GitHub artifact.
 
-    Provider identity never changes the verification rules. Provider-reported
-    ref/SHA remain claims until GitHub resolves the ref and comparison facts
-    prove freshness, ancestry, and scope.
+    Binding is validated before any GitHub I/O. Provider identity never changes
+    the verification rules. Provider-reported ref/SHA remain claims until
+    GitHub resolves the ref and comparison facts prove freshness, ancestry,
+    and scope.
     """
+
+    binding = validate_evidence_chain(
+        task=task,
+        operation=operation,
+        artifact=evidence,
+    )
+    if not binding.valid:
+        return _blocked(evidence)
 
     if task.repo is None or task.expected_start_sha is None:
         return _blocked(evidence)
