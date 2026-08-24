@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Mapping, Optional, Protocol, runtime_checkable
 
 from agent_controller.approval_contract import ApprovalReceipt
+from agent_controller.approval_store import ApprovalLedgerStore
 from agent_controller.execution_contract import ExecutionClaimDecision, ExecutionClaimResult
 from agent_controller.execution_store import ExecutionClaimStore
 from agent_controller.provider_contract import TaskBinding
@@ -22,7 +23,8 @@ class ExecutionTargetReadClient(Protocol):
 
 def validate_and_claim_execution(
     *,
-    receipt: ApprovalReceipt,
+    approval_store: ApprovalLedgerStore,
+    approval_receipt_id: str,
     task: TaskBinding,
     expected_effect: str,
     expected_target_kind: str,
@@ -33,11 +35,26 @@ def validate_and_claim_execution(
     execution_claim_id: str,
     now: str,
 ) -> ExecutionClaimDecision:
-    """Validate a consumed approval receipt and claim one future execution attempt.
+    """Load one durable consumed approval receipt and claim one execution attempt.
+
+    The supported handoff API does not accept a caller-constructed ApprovalReceipt.
+    It reads the receipt from the Controller-configured PN2 approval ledger, then
+    re-reads objective target facts before committing a one-shot execution claim.
 
     No external effect is executed. A future executor must re-read the remote
     target again immediately before applying any high-impact mutation.
     """
+
+    if not isinstance(approval_store, ApprovalLedgerStore):
+        return ExecutionClaimDecision(False, ExecutionClaimResult.UNCERTAIN, "APPROVAL_STORE_INVALID")
+    if not isinstance(execution_store, ExecutionClaimStore):
+        return ExecutionClaimDecision(False, ExecutionClaimResult.UNCERTAIN, "EXECUTION_STORE_INVALID")
+
+    lookup = approval_store.get_consumed_receipt(approval_receipt_id)
+    receipt = lookup.receipt
+    if receipt is None:
+        result = ExecutionClaimResult.UNCERTAIN if lookup.result.value == "UNCERTAIN" else ExecutionClaimResult.BLOCKED
+        return ExecutionClaimDecision(False, result, lookup.reason or "APPROVAL_RECEIPT_UNAVAILABLE")
 
     if not isinstance(receipt, ApprovalReceipt):
         return ExecutionClaimDecision(False, ExecutionClaimResult.UNCERTAIN, "APPROVAL_RECEIPT_INVALID")
