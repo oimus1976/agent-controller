@@ -94,6 +94,12 @@ def verify_github_artifact(
     if evidence.provider_reported_ref is None:
         return _blocked(evidence)
 
+    if (
+        task.objective_scope.allowed_paths is None
+        and task.objective_scope.denied_paths is None
+    ):
+        return _blocked(evidence)
+
     try:
         resolved_sha = github.get_ref_sha(task.repo, evidence.provider_reported_ref)
     except Exception:
