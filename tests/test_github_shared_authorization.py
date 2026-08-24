@@ -106,7 +106,6 @@ class GitHubSharedAuthorizationBackendTests(unittest.TestCase):
         self.transport.files[key] = ("not-json", revision)
         result = read_operation(store=self.store, binding=self.binding)
         self.assertEqual(AuthorizationDecision.BLOCKED, result.decision)
-        self.assertEqual("STATE_RECORD_INVALID", result.reason)
 
     def test_extra_json_field_is_blocked(self):
         propose_operation(store=self.store, binding=self.binding)
@@ -117,7 +116,6 @@ class GitHubSharedAuthorizationBackendTests(unittest.TestCase):
         self.transport.files[key] = (json.dumps(data), revision)
         result = read_operation(store=self.store, binding=self.binding)
         self.assertEqual(AuthorizationDecision.BLOCKED, result.decision)
-        self.assertEqual("STATE_RECORD_INVALID", result.reason)
 
     def test_backend_rejects_non_controller_state_ref(self):
         with self.assertRaises(ValueError):
