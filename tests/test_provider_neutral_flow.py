@@ -1,8 +1,8 @@
+import inspect
 import unittest
 
 from agent_controller.provider_contract import (
     AgentAdapter,
-    AgentObservation,
     ArtifactEvidence,
     AwaitingInput,
     ControllerState,
@@ -10,6 +10,10 @@ from agent_controller.provider_contract import (
     ProviderOperationRef,
     TaskBinding,
     TerminalClaim,
+)
+from agent_controller.provider_mappers import (
+    map_codex_observation,
+    map_jules_observation,
 )
 
 
@@ -33,19 +37,15 @@ class JulesFixtureAdapter:
         )
 
     def observe(self, operation):
-        return AgentObservation(
-            provider="jules",
+        raw_state = {
+            "status": "AWAITING_PLAN_APPROVAL",
+            "plan_id": "plan-7",
+            "updated_at": "2026-08-24T01:29:59Z",
+        }
+        return map_jules_observation(
             provider_operation_id=operation.provider_operation_id,
+            raw_state=raw_state,
             observed_at="2026-08-24T01:30:00Z",
-            provider_updated_at="2026-08-24T01:29:59Z",
-            provider_raw_state={
-                "status": "AWAITING_PLAN_APPROVAL",
-                "plan_id": "plan-7",
-            },
-            mapped_state=ControllerState.PLAN_REVIEW_REQUIRED,
-            awaiting_input=AwaitingInput.PLAN_APPROVAL,
-            terminal_claim=TerminalClaim.NONE,
-            provider_refs=("plan-7",),
         )
 
     def collect_artifacts(self, operation):
@@ -63,19 +63,16 @@ class CodexFixtureAdapter:
         )
 
     def observe(self, operation):
-        return AgentObservation(
-            provider="codex",
+        raw_state = {
+            "status": "waiting_for_user",
+            "reason": "plan_review",
+            "task_id": "task-99",
+            "updated_at": "2026-08-24T01:29:58Z",
+        }
+        return map_codex_observation(
             provider_operation_id=operation.provider_operation_id,
+            raw_state=raw_state,
             observed_at="2026-08-24T01:30:00Z",
-            provider_updated_at="2026-08-24T01:29:58Z",
-            provider_raw_state={
-                "status": "waiting_for_user",
-                "reason": "plan_review",
-            },
-            mapped_state=ControllerState.PLAN_REVIEW_REQUIRED,
-            awaiting_input=AwaitingInput.PLAN_APPROVAL,
-            terminal_claim=TerminalClaim.NONE,
-            provider_refs=("task-99",),
         )
 
     def collect_artifacts(self, operation):
@@ -84,15 +81,15 @@ class CodexFixtureAdapter:
 
 class JulesArtifactFixtureAdapter(JulesFixtureAdapter):
     def observe(self, operation):
-        return AgentObservation(
-            provider="jules",
+        raw_state = {
+            "status": "COMPLETED",
+            "artifact_id": "jules-artifact-1",
+            "updated_at": "2026-08-24T01:34:59Z",
+        }
+        return map_jules_observation(
             provider_operation_id=operation.provider_operation_id,
+            raw_state=raw_state,
             observed_at="2026-08-24T01:35:00Z",
-            provider_updated_at="2026-08-24T01:34:59Z",
-            provider_raw_state={"status": "COMPLETED"},
-            mapped_state=ControllerState.ARTIFACT_READY,
-            terminal_claim=TerminalClaim.SUCCESS,
-            reported_effects=("CREATE_COMMIT",),
         )
 
     def collect_artifacts(self, operation):
@@ -113,15 +110,16 @@ class JulesArtifactFixtureAdapter(JulesFixtureAdapter):
 
 class CodexArtifactFixtureAdapter(CodexFixtureAdapter):
     def observe(self, operation):
-        return AgentObservation(
-            provider="codex",
+        raw_state = {
+            "status": "done",
+            "result": "success",
+            "artifact_id": "codex-artifact-1",
+            "updated_at": "2026-08-24T01:34:58Z",
+        }
+        return map_codex_observation(
             provider_operation_id=operation.provider_operation_id,
+            raw_state=raw_state,
             observed_at="2026-08-24T01:35:00Z",
-            provider_updated_at="2026-08-24T01:34:58Z",
-            provider_raw_state={"status": "done", "result": "success"},
-            mapped_state=ControllerState.ARTIFACT_READY,
-            terminal_claim=TerminalClaim.SUCCESS,
-            reported_effects=("CREATE_COMMIT",),
         )
 
     def collect_artifacts(self, operation):
@@ -180,10 +178,7 @@ class TestProviderNeutralFlow(unittest.TestCase):
             results[0].provider_raw_state,
             results[1].provider_raw_state,
         )
-        self.assertEqual(
-            results[0].mapped_state,
-            results[1].mapped_state,
-        )
+        self.assertEqual(results[0].mapped_state, results[1].mapped_state)
         self.assertEqual(results[0].mapped_state, ControllerState.PLAN_REVIEW_REQUIRED)
         self.assertEqual(results[0].awaiting_input, AwaitingInput.PLAN_APPROVAL)
         self.assertEqual(results[1].awaiting_input, AwaitingInput.PLAN_APPROVAL)
@@ -206,12 +201,11 @@ class TestProviderNeutralFlow(unittest.TestCase):
             self.assertIsNone(artifacts[0].verified_sha)
 
     def test_controller_flow_never_branches_on_provider_name(self):
-        providers = (
+        normalized = []
+        for provider, adapter in (
             ("jules", JulesFixtureAdapter()),
             ("codex", CodexFixtureAdapter()),
-        )
-        normalized = []
-        for provider, adapter in providers:
+        ):
             _, observation, _ = run_provider_neutral_flow(
                 adapter, self.make_task(provider)
             )
@@ -224,6 +218,15 @@ class TestProviderNeutralFlow(unittest.TestCase):
             )
 
         self.assertEqual(normalized[0], normalized[1])
+
+    def test_fixture_adapters_delegate_observation_mapping(self):
+        jules_source = inspect.getsource(JulesFixtureAdapter.observe)
+        codex_source = inspect.getsource(CodexFixtureAdapter.observe)
+
+        self.assertIn("map_jules_observation", jules_source)
+        self.assertIn("map_codex_observation", codex_source)
+        self.assertNotIn("AgentObservation(", jules_source)
+        self.assertNotIn("AgentObservation(", codex_source)
 
 
 if __name__ == "__main__":
