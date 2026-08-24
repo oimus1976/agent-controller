@@ -69,42 +69,39 @@ def validate_and_consume_human_approval(
         )
     except Exception:
         return ApprovalConsumeResult(
-            ApprovalValidation(
-                False,
-                ApprovalResult.UNCERTAIN,
-                "TARGET_READ_UNCERTAIN",
-                approval.approval_id,
-            ),
+            ApprovalValidation(False, ApprovalResult.UNCERTAIN, "TARGET_READ_UNCERTAIN", approval.approval_id),
             None,
         )
 
     if not isinstance(facts, Mapping):
         return ApprovalConsumeResult(
-            ApprovalValidation(
-                False,
-                ApprovalResult.UNCERTAIN,
-                "TARGET_FACTS_INVALID",
-                approval.approval_id,
-            ),
+            ApprovalValidation(False, ApprovalResult.UNCERTAIN, "TARGET_FACTS_INVALID", approval.approval_id),
             None,
         )
 
-    if facts.get("repo") != task.repo:
+    for key in ("repo", "target_kind", "target_id", "head_sha"):
+        if key not in facts:
+            return ApprovalConsumeResult(
+                ApprovalValidation(False, ApprovalResult.UNCERTAIN, f"TARGET_FACT_MISSING:{key}", approval.approval_id),
+                None,
+            )
+
+    if facts["repo"] != task.repo:
         return ApprovalConsumeResult(
             ApprovalValidation(False, ApprovalResult.STALE, "TARGET_REPO_STALE", approval.approval_id),
             None,
         )
-    if facts.get("target_kind") != expected_target_kind:
+    if facts["target_kind"] != expected_target_kind:
         return ApprovalConsumeResult(
             ApprovalValidation(False, ApprovalResult.STALE, "TARGET_KIND_STALE", approval.approval_id),
             None,
         )
-    if facts.get("target_id") != expected_target_id:
+    if facts["target_id"] != expected_target_id:
         return ApprovalConsumeResult(
             ApprovalValidation(False, ApprovalResult.STALE, "TARGET_ID_STALE", approval.approval_id),
             None,
         )
-    if facts.get("head_sha") != expected_head_sha:
+    if facts["head_sha"] != expected_head_sha:
         return ApprovalConsumeResult(
             ApprovalValidation(False, ApprovalResult.STALE, "TARGET_HEAD_STALE", approval.approval_id),
             None,
@@ -120,11 +117,6 @@ def validate_and_consume_human_approval(
         return ApprovalConsumeResult(validation, consumption)
 
     return ApprovalConsumeResult(
-        ApprovalValidation(
-            False,
-            consumption.result,
-            consumption.reason,
-            approval.approval_id,
-        ),
+        ApprovalValidation(False, consumption.result, consumption.reason, approval.approval_id),
         consumption,
     )
