@@ -1,6 +1,7 @@
 import inspect
 import unittest
 
+from agent_controller.provider_clients import ProviderReadClient
 from agent_controller.provider_contract import (
     AgentAdapter,
     ArtifactEvidence,
@@ -26,7 +27,26 @@ def run_provider_neutral_flow(adapter: AgentAdapter, task: TaskBinding):
     return operation, observation, artifacts
 
 
+class FixtureReadClient:
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls = []
+
+    def get_operation_raw(self, operation):
+        self.calls.append(operation.provider_operation_id)
+        return self.payload
+
+
 class JulesFixtureAdapter:
+    def __init__(self, client=None):
+        self.client = client or FixtureReadClient(
+            {
+                "status": "AWAITING_PLAN_APPROVAL",
+                "plan_id": "plan-7",
+                "updated_at": "2026-08-24T01:29:59Z",
+            }
+        )
+
     def dispatch(self, task):
         return ProviderOperationRef(
             provider="jules",
@@ -37,11 +57,7 @@ class JulesFixtureAdapter:
         )
 
     def observe(self, operation):
-        raw_state = {
-            "status": "AWAITING_PLAN_APPROVAL",
-            "plan_id": "plan-7",
-            "updated_at": "2026-08-24T01:29:59Z",
-        }
+        raw_state = self.client.get_operation_raw(operation)
         return map_jules_observation(
             provider_operation_id=operation.provider_operation_id,
             raw_state=raw_state,
@@ -53,6 +69,16 @@ class JulesFixtureAdapter:
 
 
 class CodexFixtureAdapter:
+    def __init__(self, client=None):
+        self.client = client or FixtureReadClient(
+            {
+                "status": "waiting_for_user",
+                "reason": "plan_review",
+                "task_id": "task-99",
+                "updated_at": "2026-08-24T01:29:58Z",
+            }
+        )
+
     def dispatch(self, task):
         return ProviderOperationRef(
             provider="codex",
@@ -63,12 +89,7 @@ class CodexFixtureAdapter:
         )
 
     def observe(self, operation):
-        raw_state = {
-            "status": "waiting_for_user",
-            "reason": "plan_review",
-            "task_id": "task-99",
-            "updated_at": "2026-08-24T01:29:58Z",
-        }
+        raw_state = self.client.get_operation_raw(operation)
         return map_codex_observation(
             provider_operation_id=operation.provider_operation_id,
             raw_state=raw_state,
@@ -80,16 +101,15 @@ class CodexFixtureAdapter:
 
 
 class JulesArtifactFixtureAdapter(JulesFixtureAdapter):
-    def observe(self, operation):
-        raw_state = {
-            "status": "COMPLETED",
-            "artifact_id": "jules-artifact-1",
-            "updated_at": "2026-08-24T01:34:59Z",
-        }
-        return map_jules_observation(
-            provider_operation_id=operation.provider_operation_id,
-            raw_state=raw_state,
-            observed_at="2026-08-24T01:35:00Z",
+    def __init__(self):
+        super().__init__(
+            FixtureReadClient(
+                {
+                    "status": "COMPLETED",
+                    "artifact_id": "jules-artifact-1",
+                    "updated_at": "2026-08-24T01:34:59Z",
+                }
+            )
         )
 
     def collect_artifacts(self, operation):
@@ -109,17 +129,16 @@ class JulesArtifactFixtureAdapter(JulesFixtureAdapter):
 
 
 class CodexArtifactFixtureAdapter(CodexFixtureAdapter):
-    def observe(self, operation):
-        raw_state = {
-            "status": "done",
-            "result": "success",
-            "artifact_id": "codex-artifact-1",
-            "updated_at": "2026-08-24T01:34:58Z",
-        }
-        return map_codex_observation(
-            provider_operation_id=operation.provider_operation_id,
-            raw_state=raw_state,
-            observed_at="2026-08-24T01:35:00Z",
+    def __init__(self):
+        super().__init__(
+            FixtureReadClient(
+                {
+                    "status": "done",
+                    "result": "success",
+                    "artifact_id": "codex-artifact-1",
+                    "updated_at": "2026-08-24T01:34:58Z",
+                }
+            )
         )
 
     def collect_artifacts(self, operation):
@@ -158,9 +177,36 @@ class TestProviderNeutralFlow(unittest.TestCase):
             created_at="2026-08-24T01:25:00Z",
         )
 
+    def test_read_client_contract_is_read_only_and_minimal(self):
+        client = FixtureReadClient({"status": "RUNNING"})
+        self.assertIsInstance(client, ProviderReadClient)
+        source = inspect.getsource(ProviderReadClient)
+        self.assertIn("def get_operation_raw", source)
+        for forbidden in ("approve", "send", "retry", "cancel", "dispatch", "create"):
+            self.assertNotIn(f"def {forbidden}", source)
+
     def test_jules_and_codex_satisfy_same_runtime_contract(self):
         self.assertIsInstance(JulesFixtureAdapter(), AgentAdapter)
         self.assertIsInstance(CodexFixtureAdapter(), AgentAdapter)
+
+    def test_adapter_observation_reads_client_then_maps(self):
+        jules_client = FixtureReadClient(
+            {"status": "RUNNING", "updated_at": "2026-08-24T01:30:00Z"}
+        )
+        codex_client = FixtureReadClient(
+            {"status": "running", "updated_at": "2026-08-24T01:30:00Z"}
+        )
+
+        jules = JulesFixtureAdapter(jules_client)
+        codex = CodexFixtureAdapter(codex_client)
+
+        jules_op = jules.dispatch(self.make_task("jules"))
+        codex_op = codex.dispatch(self.make_task("codex"))
+
+        self.assertEqual(jules.observe(jules_op).mapped_state, ControllerState.EXECUTING)
+        self.assertEqual(codex.observe(codex_op).mapped_state, ControllerState.EXECUTING)
+        self.assertEqual(jules_client.calls, ["jules-session-42"])
+        self.assertEqual(codex_client.calls, ["codex-task-99"])
 
     def test_different_provider_states_map_to_same_controller_state(self):
         results = []
@@ -174,10 +220,7 @@ class TestProviderNeutralFlow(unittest.TestCase):
             results.append(observation)
             self.assertEqual(artifacts, [])
 
-        self.assertNotEqual(
-            results[0].provider_raw_state,
-            results[1].provider_raw_state,
-        )
+        self.assertNotEqual(results[0].provider_raw_state, results[1].provider_raw_state)
         self.assertEqual(results[0].mapped_state, results[1].mapped_state)
         self.assertEqual(results[0].mapped_state, ControllerState.PLAN_REVIEW_REQUIRED)
         self.assertEqual(results[0].awaiting_input, AwaitingInput.PLAN_APPROVAL)
@@ -223,6 +266,8 @@ class TestProviderNeutralFlow(unittest.TestCase):
         jules_source = inspect.getsource(JulesFixtureAdapter.observe)
         codex_source = inspect.getsource(CodexFixtureAdapter.observe)
 
+        self.assertIn("get_operation_raw", jules_source)
+        self.assertIn("get_operation_raw", codex_source)
         self.assertIn("map_jules_observation", jules_source)
         self.assertIn("map_codex_observation", codex_source)
         self.assertNotIn("AgentObservation(", jules_source)
