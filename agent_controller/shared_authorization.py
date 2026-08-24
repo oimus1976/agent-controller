@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import Mapping, Optional, Protocol, runtime_checkable
+from typing import Optional, Protocol, runtime_checkable
 
 
 CONTROLLER_STATE_REF = "controller-state"
@@ -147,15 +147,75 @@ def _valid_binding(binding: OperationAuthorizationBinding) -> bool:
 def _valid_provenance(provenance: AuthorizationProvenance) -> bool:
     if not isinstance(provenance, AuthorizationProvenance):
         return False
-    fields = (
-        provenance.assurance,
-        provenance.provenance_kind,
-        provenance.signer_key_id,
-        provenance.challenge_nonce,
-        provenance.challenge_digest,
-        provenance.signature_digest,
+    return all(
+        _nonempty(value)
+        for value in (
+            provenance.assurance,
+            provenance.provenance_kind,
+            provenance.signer_key_id,
+            provenance.challenge_nonce,
+            provenance.challenge_digest,
+            provenance.signature_digest,
+        )
     )
-    return all(_nonempty(value) for value in fields)
+
+
+def _valid_record(record: SharedAuthorizationRecord) -> bool:
+    if not isinstance(record, SharedAuthorizationRecord):
+        return False
+    if record.schema_version != SCHEMA_VERSION or not _valid_binding(record.binding):
+        return False
+    if not isinstance(record.state, AuthorizationState):
+        return False
+
+    if record.state is AuthorizationState.PROPOSED:
+        return (
+            record.provenance is None
+            and record.execution_claim_id is None
+            and record.controller_run_id is None
+        )
+
+    if record.state is AuthorizationState.HUMAN_APPROVED:
+        return (
+            _valid_provenance(record.provenance)
+            and record.execution_claim_id is None
+            and record.controller_run_id is None
+        )
+
+    if record.state in {
+        AuthorizationState.EXECUTION_CLAIMED,
+        AuthorizationState.EFFECT_STARTED,
+        AuthorizationState.EFFECT_VERIFIED,
+        AuthorizationState.FAILED_AFTER_CLAIM,
+    }:
+        return (
+            _valid_provenance(record.provenance)
+            and _nonempty(record.execution_claim_id)
+            and _nonempty(record.controller_run_id)
+        )
+
+    return record.execution_claim_id is None and record.controller_run_id is None
+
+
+def _valid_snapshot(snapshot: object) -> bool:
+    return (
+        isinstance(snapshot, SharedRecordSnapshot)
+        and _nonempty(snapshot.revision)
+        and _valid_record(snapshot.record)
+    )
+
+
+def _classify_write_result(write: object) -> str:
+    if not isinstance(write, BackendWriteResult):
+        return "INVALID"
+    outcomes = int(bool(write.written)) + int(bool(write.conflict)) + int(bool(write.uncertain))
+    if outcomes != 1:
+        return "INVALID"
+    if write.written:
+        return "WRITTEN" if _nonempty(write.revision) else "INVALID"
+    if write.revision is not None:
+        return "INVALID"
+    return "CONFLICT" if write.conflict else "UNCERTAIN"
 
 
 def operation_state_path(binding: OperationAuthorizationBinding) -> str:
@@ -168,6 +228,23 @@ def operation_state_path(binding: OperationAuthorizationBinding) -> str:
         f"controller-state/operations/{binding.controller_task_id}/"
         f"{binding.operation_id}/{binding.operation_version}.json"
     )
+
+
+def read_operation(
+    *, store: SharedAuthorizationStore, binding: OperationAuthorizationBinding
+) -> SharedAuthorizationResult:
+    try:
+        path = operation_state_path(binding)
+        snapshot = store.backend.read(state_ref=store.state_ref, path=path)
+    except Exception:
+        return SharedAuthorizationResult(AuthorizationDecision.UNCERTAIN, reason="STATE_READ_UNCERTAIN")
+    if snapshot is None:
+        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, reason="STATE_MISSING")
+    if not _valid_snapshot(snapshot):
+        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, reason="STATE_RECORD_INVALID")
+    if snapshot.record.binding != binding:
+        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, snapshot, "OPERATION_BINDING_CONFLICT")
+    return SharedAuthorizationResult(AuthorizationDecision.PASS, snapshot)
 
 
 def propose_operation(
@@ -186,13 +263,14 @@ def propose_operation(
     except Exception:
         return SharedAuthorizationResult(AuthorizationDecision.UNCERTAIN, reason="STATE_CREATE_UNCERTAIN")
 
-    if write.written:
-        if not _nonempty(write.revision):
-            return SharedAuthorizationResult(AuthorizationDecision.UNCERTAIN, reason="STATE_REVISION_MISSING")
+    outcome = _classify_write_result(write)
+    if outcome == "INVALID":
+        return SharedAuthorizationResult(AuthorizationDecision.UNCERTAIN, reason="STATE_WRITE_RESULT_INVALID")
+    if outcome == "WRITTEN":
         return SharedAuthorizationResult(
             AuthorizationDecision.PASS, SharedRecordSnapshot(record, write.revision)
         )
-    if write.uncertain:
+    if outcome == "UNCERTAIN":
         return SharedAuthorizationResult(AuthorizationDecision.UNCERTAIN, reason="STATE_CREATE_UNCERTAIN")
 
     try:
@@ -201,71 +279,10 @@ def propose_operation(
         return SharedAuthorizationResult(AuthorizationDecision.UNCERTAIN, reason="STATE_REREAD_UNCERTAIN")
     if existing is None:
         return SharedAuthorizationResult(AuthorizationDecision.UNCERTAIN, reason="STATE_CREATE_CONFLICT_WITHOUT_RECORD")
+    if not _valid_snapshot(existing):
+        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, reason="STATE_RECORD_INVALID")
     if existing.record.binding != binding:
         return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, existing, "OPERATION_BINDING_CONFLICT")
+    if existing.record.state is not AuthorizationState.PROPOSED:
+        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, existing, "OPERATION_ALREADY_ADVANCED")
     return SharedAuthorizationResult(AuthorizationDecision.REPLAYED, existing, "OPERATION_ALREADY_PROPOSED")
-
-
-def approve_proposed_operation(
-    *,
-    store: SharedAuthorizationStore,
-    binding: OperationAuthorizationBinding,
-    provenance: AuthorizationProvenance,
-) -> SharedAuthorizationResult:
-    if not _valid_binding(binding) or not _valid_provenance(provenance):
-        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, reason="AUTHORIZATION_INPUT_INVALID")
-    if provenance.assurance != "VERIFIED_EVENT_PROVENANCE":
-        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, reason="ASSURANCE_NOT_VERIFIED")
-    if provenance.provenance_kind != "SIGNED_CHALLENGE":
-        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, reason="PROVENANCE_KIND_INVALID")
-
-    try:
-        path = operation_state_path(binding)
-        current = store.backend.read(state_ref=store.state_ref, path=path)
-    except Exception:
-        return SharedAuthorizationResult(AuthorizationDecision.UNCERTAIN, reason="STATE_READ_UNCERTAIN")
-    if current is None:
-        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, reason="PROPOSED_STATE_MISSING")
-    if current.record.binding != binding:
-        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, current, "OPERATION_BINDING_CONFLICT")
-
-    if current.record.state is AuthorizationState.HUMAN_APPROVED:
-        if current.record.provenance == provenance:
-            return SharedAuthorizationResult(AuthorizationDecision.REPLAYED, current, "APPROVAL_ALREADY_RECORDED")
-        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, current, "APPROVAL_PROVENANCE_CONFLICT")
-    if current.record.state is not AuthorizationState.PROPOSED:
-        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, current, "ILLEGAL_PRIOR_STATE")
-
-    approved = replace(current.record, state=AuthorizationState.HUMAN_APPROVED, provenance=provenance)
-    try:
-        write = store.backend.compare_and_swap(
-            state_ref=store.state_ref,
-            path=path,
-            expected_revision=current.revision,
-            record=approved,
-        )
-    except Exception:
-        return SharedAuthorizationResult(AuthorizationDecision.UNCERTAIN, reason="STATE_CAS_UNCERTAIN")
-
-    if write.written:
-        if not _nonempty(write.revision):
-            return SharedAuthorizationResult(AuthorizationDecision.UNCERTAIN, reason="STATE_REVISION_MISSING")
-        return SharedAuthorizationResult(
-            AuthorizationDecision.PASS, SharedRecordSnapshot(approved, write.revision)
-        )
-    if write.uncertain:
-        return SharedAuthorizationResult(AuthorizationDecision.UNCERTAIN, reason="STATE_CAS_UNCERTAIN")
-
-    try:
-        winner = store.backend.read(state_ref=store.state_ref, path=path)
-    except Exception:
-        return SharedAuthorizationResult(AuthorizationDecision.UNCERTAIN, reason="STATE_REREAD_UNCERTAIN")
-    if winner is None:
-        return SharedAuthorizationResult(AuthorizationDecision.UNCERTAIN, reason="STATE_CAS_CONFLICT_WITHOUT_RECORD")
-    if winner.record.binding != binding:
-        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, winner, "OPERATION_BINDING_CONFLICT")
-    if winner.record.state is AuthorizationState.HUMAN_APPROVED and winner.record.provenance == provenance:
-        return SharedAuthorizationResult(AuthorizationDecision.REPLAYED, winner, "APPROVAL_RACE_LOST_SAME_WINNER")
-    if winner.record.state is AuthorizationState.HUMAN_APPROVED:
-        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, winner, "APPROVAL_RACE_LOST_DIFFERENT_WINNER")
-    return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, winner, "APPROVAL_RACE_ILLEGAL_WINNER_STATE")
