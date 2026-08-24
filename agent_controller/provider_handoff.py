@@ -16,8 +16,10 @@ from agent_controller.binding_validator import (
 from agent_controller.provider_contract import (
     AgentObservation,
     ArtifactEvidence,
+    ControllerState,
     ProviderOperationRef,
     TaskBinding,
+    TerminalClaim,
 )
 
 
@@ -48,9 +50,11 @@ def run_verified_handoff(
 ) -> VerifiedHandoffResult:
     """Run the provider-neutral read-only handoff path after dispatch.
 
-    Identity binding is checked before provider reads. Observation and artifact
-    identities are checked before any artifact can be promoted by GitHub
-    verification. The flow never branches on provider name.
+    Identity binding is checked before provider reads. Artifact collection is
+    attempted only when the normalized provider observation claims terminal
+    success and is mapped to ARTIFACT_READY. Artifact identities are checked
+    before any artifact can be promoted by GitHub verification. The flow never
+    branches on provider name.
     """
 
     operation_binding = validate_operation_binding(task=task, operation=operation)
@@ -65,6 +69,16 @@ def run_verified_handoff(
     if not observation_binding.valid:
         return VerifiedHandoffResult(observation_binding, observation, ())
 
+    if (
+        observation.mapped_state is not ControllerState.ARTIFACT_READY
+        or observation.terminal_claim is not TerminalClaim.SUCCESS
+    ):
+        return VerifiedHandoffResult(
+            BindingValidation(False, "OBSERVATION_NOT_ARTIFACT_READY_SUCCESS"),
+            observation,
+            (),
+        )
+
     raw_artifacts = artifact_collector.collect_artifacts(operation)
     verified_artifacts = []
     for artifact in raw_artifacts:
@@ -73,10 +87,11 @@ def run_verified_handoff(
             artifact=artifact,
         )
         if not artifact_binding.valid:
+            # Never return partially verified evidence from an invalid chain.
             return VerifiedHandoffResult(
                 artifact_binding,
                 observation,
-                tuple(verified_artifacts),
+                (),
             )
 
         verified_artifacts.append(
