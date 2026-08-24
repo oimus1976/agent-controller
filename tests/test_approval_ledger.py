@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 from agent_controller.approval_contract import ApprovalBinding, ApprovalResult
-from agent_controller.approval_ledger import consume_approval_once
+from agent_controller.approval_ledger import _consume_validated_approval_once
 
 
 def approval(**overrides):
@@ -40,21 +40,23 @@ class TestApprovalLedger(unittest.TestCase):
         self.tempdir.cleanup()
 
     def consume(self, candidate=None, receipt_id="receipt-1"):
-        return consume_approval_once(
+        return _consume_validated_approval_once(
             ledger_path=self.path,
             approval=candidate or approval(),
             consumed_at="2026-08-24T06:30:00Z",
             receipt_id=receipt_id,
         )
 
-    def test_valid_approval_consumes_once_and_persists_receipt(self):
+    def test_valid_approval_consumes_once_and_persists_complete_receipt(self):
         result = self.consume()
         self.assertEqual(result.result, ApprovalResult.PASS)
-        self.assertIsNotNone(result.receipt)
         with open(self.path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
         self.assertEqual(len(data), 1)
         self.assertEqual(data[0]["approval_id"], "approval-1")
+        self.assertEqual(data[0]["approval_policy_id"], "policy-l3")
+        self.assertEqual(data[0]["provider"], "jules")
+        self.assertEqual(data[0]["requested_capability"], "MERGE_PR")
         self.assertEqual(data[0]["status"], "CONSUMED")
         self.assertNotIn("issuer_subject", data[0])
         self.assertNotIn("nonce", data[0])
@@ -78,22 +80,9 @@ class TestApprovalLedger(unittest.TestCase):
             self.assertEqual(handle.read(), "not-json")
 
     def test_existing_receipt_with_same_id_but_different_binding_fails_closed(self):
-        bad = [{
-            "approval_id": "approval-1",
-            "controller_task_id": "other-task",
-            "operation_id": "op-17",
-            "effect": "MERGE",
-            "repo": "oimus1976/agent-controller",
-            "target_kind": "PULL_REQUEST",
-            "target_id": "15",
-            "expected_head_sha": "head-sha",
-            "consumed_at": "2026-08-24T06:29:00Z",
-            "receipt_id": "old",
-            "status": "CONSUMED",
-        }]
-        with open(self.path, "w", encoding="utf-8") as handle:
-            json.dump(bad, handle)
-        result = self.consume()
+        good = self.consume()
+        self.assertEqual(good.result, ApprovalResult.PASS)
+        result = self.consume(approval(provider="codex"))
         self.assertEqual(result.result, ApprovalResult.BLOCKED)
         self.assertEqual(result.reason, "APPROVAL_RECEIPT_BINDING_MISMATCH")
 
@@ -111,7 +100,7 @@ class TestApprovalLedger(unittest.TestCase):
 
         def worker(index):
             barrier.wait()
-            value = consume_approval_once(
+            value = _consume_validated_approval_once(
                 ledger_path=self.path,
                 approval=approval(),
                 consumed_at="2026-08-24T06:30:00Z",
@@ -127,10 +116,7 @@ class TestApprovalLedger(unittest.TestCase):
             thread.join()
 
         self.assertEqual(results.count(ApprovalResult.PASS), 1)
-        self.assertEqual(
-            results.count(ApprovalResult.REPLAYED) + results.count(ApprovalResult.BLOCKED),
-            1,
-        )
+        self.assertEqual(results.count(ApprovalResult.REPLAYED) + results.count(ApprovalResult.BLOCKED), 1)
         with open(self.path, "r", encoding="utf-8") as handle:
             self.assertEqual(len(json.load(handle)), 1)
 
