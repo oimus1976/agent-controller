@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Protocol, runtime_checkable
 
-from agent_controller.repository_write_guard import RepositoryWritePurpose
+from agent_controller.repository_write_guard import (
+    RepositoryWriteGuard,
+    RepositoryWritePurpose,
+)
 from agent_controller.repository_writer import (
     GuardedRepositoryWriter,
     RepositoryWriteBackend,
@@ -88,7 +91,9 @@ def _map_write_response(response: object) -> RepositoryWriteResult:
         return RepositoryWriteResult(True, revision=response.revision)
     if response.status_code in {409, 422}:
         return RepositoryWriteResult(False, blocked=True, reason="GITHUB_WRITE_CONFLICT")
-    return RepositoryWriteResult(False, uncertain=True, reason=f"GITHUB_WRITE_STATUS_{response.status_code}")
+    return RepositoryWriteResult(
+        False, uncertain=True, reason=f"GITHUB_WRITE_STATUS_{response.status_code}"
+    )
 
 
 class GitHubRepositoryWriteBackend(RepositoryWriteBackend):
@@ -105,25 +110,33 @@ class GitHubRepositoryWriteBackend(RepositoryWriteBackend):
         try:
             return _map_write_response(self._transport.create_file(**kwargs))
         except Exception:
-            return RepositoryWriteResult(False, uncertain=True, reason="GITHUB_TRANSPORT_UNCERTAIN")
+            return RepositoryWriteResult(
+                False, uncertain=True, reason="GITHUB_TRANSPORT_UNCERTAIN"
+            )
 
     def update_file(self, **kwargs) -> RepositoryWriteResult:
         try:
             return _map_write_response(self._transport.update_file(**kwargs))
         except Exception:
-            return RepositoryWriteResult(False, uncertain=True, reason="GITHUB_TRANSPORT_UNCERTAIN")
+            return RepositoryWriteResult(
+                False, uncertain=True, reason="GITHUB_TRANSPORT_UNCERTAIN"
+            )
 
     def delete_file(self, **kwargs) -> RepositoryWriteResult:
         try:
             return _map_write_response(self._transport.delete_file(**kwargs))
         except Exception:
-            return RepositoryWriteResult(False, uncertain=True, reason="GITHUB_TRANSPORT_UNCERTAIN")
+            return RepositoryWriteResult(
+                False, uncertain=True, reason="GITHUB_TRANSPORT_UNCERTAIN"
+            )
 
     def move_ref(self, **kwargs) -> RepositoryWriteResult:
         try:
             return _map_write_response(self._transport.move_ref(**kwargs))
         except Exception:
-            return RepositoryWriteResult(False, uncertain=True, reason="GITHUB_TRANSPORT_UNCERTAIN")
+            return RepositoryWriteResult(
+                False, uncertain=True, reason="GITHUB_TRANSPORT_UNCERTAIN"
+            )
 
 
 class GitHubControllerStateAdapter:
@@ -135,15 +148,20 @@ class GitHubControllerStateAdapter:
         self,
         *,
         repo: str,
+        default_branch: str,
         transport: GitHubContentsTransport,
-        writer: GuardedRepositoryWriter,
     ) -> None:
         if not isinstance(repo, str) or not repo:
             raise ValueError("repo must be non-empty")
+        if not isinstance(default_branch, str) or not default_branch:
+            raise ValueError("default_branch must be non-empty")
         if not isinstance(transport, GitHubContentsTransport):
             raise TypeError("transport must satisfy GitHubContentsTransport")
-        if not isinstance(writer, GuardedRepositoryWriter):
-            raise TypeError("writer must be GuardedRepositoryWriter")
+        backend = GitHubRepositoryWriteBackend(transport=transport)
+        writer = GuardedRepositoryWriter(
+            guard=RepositoryWriteGuard(repo=repo, default_branch=default_branch),
+            backend=backend,
+        )
         self._repo = repo
         self._transport = transport
         self._writer = writer
@@ -188,7 +206,9 @@ class GitHubControllerStateAdapter:
         if result.reason == "GITHUB_WRITE_CONFLICT":
             return ControllerStateWriteResult(False, conflict=True, reason=result.reason)
         if result.blocked:
-            return ControllerStateWriteResult(False, conflict=False, uncertain=False, reason=result.reason)
+            return ControllerStateWriteResult(
+                False, conflict=False, uncertain=False, reason=result.reason
+            )
         return ControllerStateWriteResult(False, uncertain=True, reason=result.reason)
 
     def compare_and_swap(
@@ -212,5 +232,7 @@ class GitHubControllerStateAdapter:
         if result.reason == "GITHUB_WRITE_CONFLICT":
             return ControllerStateWriteResult(False, conflict=True, reason=result.reason)
         if result.blocked:
-            return ControllerStateWriteResult(False, conflict=False, uncertain=False, reason=result.reason)
+            return ControllerStateWriteResult(
+                False, conflict=False, uncertain=False, reason=result.reason
+            )
         return ControllerStateWriteResult(False, uncertain=True, reason=result.reason)
