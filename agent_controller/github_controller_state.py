@@ -26,6 +26,8 @@ class GitHubContentsResponse:
 
 @runtime_checkable
 class GitHubContentsTransport(Protocol):
+    def read_ref(self, *, repo: str, ref: str) -> GitHubContentsResponse: ...
+
     def read_file(self, *, repo: str, ref: str, path: str) -> GitHubContentsResponse: ...
 
     def create_file(
@@ -82,15 +84,15 @@ def _valid_response(response: object) -> bool:
     return isinstance(response, GitHubContentsResponse) and isinstance(response.status_code, int)
 
 
-def _map_write_response(response: object) -> RepositoryWriteResult:
+def _success(response: GitHubContentsResponse) -> RepositoryWriteResult:
+    if not isinstance(response.revision, str) or not response.revision:
+        return RepositoryWriteResult(False, uncertain=True, reason="GITHUB_REVISION_MISSING")
+    return RepositoryWriteResult(True, revision=response.revision)
+
+
+def _unexpected(response: object) -> RepositoryWriteResult:
     if not _valid_response(response):
         return RepositoryWriteResult(False, uncertain=True, reason="GITHUB_RESPONSE_INVALID")
-    if response.status_code in {200, 201}:
-        if not isinstance(response.revision, str) or not response.revision:
-            return RepositoryWriteResult(False, uncertain=True, reason="GITHUB_REVISION_MISSING")
-        return RepositoryWriteResult(True, revision=response.revision)
-    if response.status_code in {409, 422}:
-        return RepositoryWriteResult(False, blocked=True, reason="GITHUB_WRITE_CONFLICT")
     return RepositoryWriteResult(
         False, uncertain=True, reason=f"GITHUB_WRITE_STATUS_{response.status_code}"
     )
@@ -108,35 +110,57 @@ class GitHubRepositoryWriteBackend(RepositoryWriteBackend):
 
     def create_file(self, **kwargs) -> RepositoryWriteResult:
         try:
-            return _map_write_response(self._transport.create_file(**kwargs))
+            response = self._transport.create_file(**kwargs)
         except Exception:
-            return RepositoryWriteResult(
-                False, uncertain=True, reason="GITHUB_TRANSPORT_UNCERTAIN"
-            )
+            return RepositoryWriteResult(False, uncertain=True, reason="GITHUB_TRANSPORT_UNCERTAIN")
+        if not _valid_response(response):
+            return _unexpected(response)
+        if response.status_code == 201:
+            return _success(response)
+        # Live probe: duplicate create without sha on an existing path returns 422.
+        if response.status_code in {409, 422}:
+            return RepositoryWriteResult(False, blocked=True, reason="GITHUB_CREATE_CONFLICT")
+        return _unexpected(response)
 
     def update_file(self, **kwargs) -> RepositoryWriteResult:
         try:
-            return _map_write_response(self._transport.update_file(**kwargs))
+            response = self._transport.update_file(**kwargs)
         except Exception:
-            return RepositoryWriteResult(
-                False, uncertain=True, reason="GITHUB_TRANSPORT_UNCERTAIN"
-            )
+            return RepositoryWriteResult(False, uncertain=True, reason="GITHUB_TRANSPORT_UNCERTAIN")
+        if not _valid_response(response):
+            return _unexpected(response)
+        if response.status_code == 200:
+            return _success(response)
+        # Live probe: stale blob sha returns 409.
+        if response.status_code == 409:
+            return RepositoryWriteResult(False, blocked=True, reason="GITHUB_CAS_CONFLICT")
+        return _unexpected(response)
 
     def delete_file(self, **kwargs) -> RepositoryWriteResult:
         try:
-            return _map_write_response(self._transport.delete_file(**kwargs))
+            response = self._transport.delete_file(**kwargs)
         except Exception:
-            return RepositoryWriteResult(
-                False, uncertain=True, reason="GITHUB_TRANSPORT_UNCERTAIN"
-            )
+            return RepositoryWriteResult(False, uncertain=True, reason="GITHUB_TRANSPORT_UNCERTAIN")
+        if not _valid_response(response):
+            return _unexpected(response)
+        if response.status_code == 200:
+            return _success(response)
+        if response.status_code == 409:
+            return RepositoryWriteResult(False, blocked=True, reason="GITHUB_DELETE_CONFLICT")
+        return _unexpected(response)
 
     def move_ref(self, **kwargs) -> RepositoryWriteResult:
         try:
-            return _map_write_response(self._transport.move_ref(**kwargs))
+            response = self._transport.move_ref(**kwargs)
         except Exception:
-            return RepositoryWriteResult(
-                False, uncertain=True, reason="GITHUB_TRANSPORT_UNCERTAIN"
-            )
+            return RepositoryWriteResult(False, uncertain=True, reason="GITHUB_TRANSPORT_UNCERTAIN")
+        if not _valid_response(response):
+            return _unexpected(response)
+        if response.status_code == 200:
+            return _success(response)
+        if response.status_code == 409:
+            return RepositoryWriteResult(False, blocked=True, reason="GITHUB_REF_CONFLICT")
+        return _unexpected(response)
 
 
 class GitHubControllerStateAdapter:
@@ -170,9 +194,22 @@ class GitHubControllerStateAdapter:
     def state_ref(self) -> str:
         return CONTROLLER_STATE_REF
 
+    def _require_state_ref(self) -> None:
+        try:
+            response = self._transport.read_ref(repo=self._repo, ref=CONTROLLER_STATE_REF)
+        except Exception as exc:
+            raise RuntimeError("CONTROLLER_STATE_REF_UNCERTAIN") from exc
+        if not _valid_response(response):
+            raise RuntimeError("CONTROLLER_STATE_REF_RESPONSE_INVALID")
+        if response.status_code != 200:
+            raise RuntimeError(f"CONTROLLER_STATE_REF_STATUS_{response.status_code}")
+        if not isinstance(response.revision, str) or not response.revision:
+            raise RuntimeError("CONTROLLER_STATE_REF_REVISION_INVALID")
+
     def read(self, *, path: str) -> Optional[ControllerStateSnapshot]:
         if not isinstance(path, str) or not path:
             raise ValueError("path must be non-empty")
+        self._require_state_ref()
         try:
             response = self._transport.read_file(
                 repo=self._repo, ref=CONTROLLER_STATE_REF, path=path
@@ -194,6 +231,10 @@ class GitHubControllerStateAdapter:
     def create_if_absent(
         self, *, path: str, content: str, message: str
     ) -> ControllerStateWriteResult:
+        try:
+            self._require_state_ref()
+        except RuntimeError as exc:
+            return ControllerStateWriteResult(False, uncertain=True, reason=str(exc))
         result = self._writer.create_file(
             explicit_ref=CONTROLLER_STATE_REF,
             purpose=RepositoryWritePurpose.CONTROLLER_STATE,
@@ -203,12 +244,10 @@ class GitHubControllerStateAdapter:
         )
         if result.written:
             return ControllerStateWriteResult(True, revision=result.revision)
-        if result.reason == "GITHUB_WRITE_CONFLICT":
+        if result.reason == "GITHUB_CREATE_CONFLICT":
             return ControllerStateWriteResult(False, conflict=True, reason=result.reason)
         if result.blocked:
-            return ControllerStateWriteResult(
-                False, conflict=False, uncertain=False, reason=result.reason
-            )
+            return ControllerStateWriteResult(False, reason=result.reason)
         return ControllerStateWriteResult(False, uncertain=True, reason=result.reason)
 
     def compare_and_swap(
@@ -219,6 +258,10 @@ class GitHubControllerStateAdapter:
         content: str,
         message: str,
     ) -> ControllerStateWriteResult:
+        try:
+            self._require_state_ref()
+        except RuntimeError as exc:
+            return ControllerStateWriteResult(False, uncertain=True, reason=str(exc))
         result = self._writer.update_file(
             explicit_ref=CONTROLLER_STATE_REF,
             purpose=RepositoryWritePurpose.CONTROLLER_STATE,
@@ -229,10 +272,8 @@ class GitHubControllerStateAdapter:
         )
         if result.written:
             return ControllerStateWriteResult(True, revision=result.revision)
-        if result.reason == "GITHUB_WRITE_CONFLICT":
+        if result.reason == "GITHUB_CAS_CONFLICT":
             return ControllerStateWriteResult(False, conflict=True, reason=result.reason)
         if result.blocked:
-            return ControllerStateWriteResult(
-                False, conflict=False, uncertain=False, reason=result.reason
-            )
+            return ControllerStateWriteResult(False, reason=result.reason)
         return ControllerStateWriteResult(False, uncertain=True, reason=result.reason)
