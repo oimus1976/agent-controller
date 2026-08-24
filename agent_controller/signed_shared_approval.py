@@ -11,12 +11,11 @@ from agent_controller.shared_authorization import (
     AuthorizationState,
     BackendWriteResult,
     OperationAuthorizationBinding,
-    SharedAuthorizationRecord,
-    SharedAuthorizationResult,
     SharedAuthorizationStore,
     SharedRecordSnapshot,
     operation_state_path,
     read_operation,
+    read_operation_by_identity,
 )
 from agent_controller.signed_approval import (
     ApprovalChallenge,
@@ -94,10 +93,10 @@ def _write_outcome(write: object) -> str:
 class SignedSharedApprovalController:
     """Controller-composed signed approval transition service.
 
-    Low-level shared-state mutation authority and objective target reader are
-    fixed at composition. Per-call input contains only the independently bound
-    operation, signed challenge, and signature artifact. No caller-supplied
-    provenance/assurance/public key/store override exists.
+    Shared-state mutation authority and the objective target reader are fixed at
+    composition. Per-call input is only the signed challenge and signature. The
+    authoritative operation binding is loaded from existing shared PROPOSED
+    state; callers cannot replace policy/provider/capability/binding fields.
     """
 
     __slots__ = ("_store", "_target_reader")
@@ -118,13 +117,12 @@ class SignedSharedApprovalController:
     def approve(
         self,
         *,
-        binding: OperationAuthorizationBinding,
         challenge: ApprovalChallenge,
         signature_b64: str,
     ) -> SignedSharedApprovalResult:
-        if not _challenge_matches_binding(challenge, binding):
+        if not isinstance(challenge, ApprovalChallenge):
             return SignedSharedApprovalResult(
-                AuthorizationDecision.BLOCKED, reason="CHALLENGE_BINDING_MISMATCH"
+                AuthorizationDecision.BLOCKED, reason="CHALLENGE_INPUT_INVALID"
             )
         if not isinstance(signature_b64, str) or not signature_b64:
             return SignedSharedApprovalResult(
@@ -151,14 +149,28 @@ class SignedSharedApprovalController:
             )
         except Exception:
             return SignedSharedApprovalResult(
-                AuthorizationDecision.BLOCKED, reason="VERIFIED_SIGNATURE_ENCODING_INCONSISTENT"
+                AuthorizationDecision.BLOCKED,
+                reason="VERIFIED_SIGNATURE_ENCODING_INCONSISTENT",
             )
 
-        current = read_operation(store=self._store, binding=binding)
+        current = read_operation_by_identity(
+            store=self._store,
+            controller_task_id=challenge.controller_task_id,
+            operation_id=challenge.operation_id,
+            operation_version=challenge.operation_version,
+        )
         if current.decision is not AuthorizationDecision.PASS or current.snapshot is None:
             return SignedSharedApprovalResult(
                 current.decision, current.snapshot, current.reason
             )
+        binding = current.snapshot.record.binding
+        if not _challenge_matches_binding(challenge, binding):
+            return SignedSharedApprovalResult(
+                AuthorizationDecision.BLOCKED,
+                current.snapshot,
+                "CHALLENGE_BINDING_MISMATCH",
+            )
+
         current_record = current.snapshot.record
         if current_record.state is AuthorizationState.HUMAN_APPROVED:
             if current_record.provenance == provenance:
@@ -241,16 +253,17 @@ class SignedSharedApprovalController:
                 SharedRecordSnapshot(approved_record, write.revision),
             )
 
-        # Conflict or uncertain write: authoritative reread decides whether an
-        # exact winner is now durably present. Never infer success from the
-        # transport outcome itself.
         reread = read_operation(store=self._store, binding=binding)
         if reread.decision is not AuthorizationDecision.PASS or reread.snapshot is None:
             if outcome == "UNCERTAIN":
                 return SignedSharedApprovalResult(
-                    AuthorizationDecision.UNCERTAIN, reread.snapshot, "STATE_CAS_UNCERTAIN"
+                    AuthorizationDecision.UNCERTAIN,
+                    reread.snapshot,
+                    "STATE_CAS_UNCERTAIN",
                 )
-            return SignedSharedApprovalResult(reread.decision, reread.snapshot, reread.reason)
+            return SignedSharedApprovalResult(
+                reread.decision, reread.snapshot, reread.reason
+            )
         winner = reread.snapshot.record
         if winner.state is AuthorizationState.HUMAN_APPROVED:
             if winner.provenance == provenance:
