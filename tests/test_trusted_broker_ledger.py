@@ -16,6 +16,7 @@ from agent_controller.trusted_broker_ledger import (
 
 
 SIGNATURE_B64 = "XRURwOosCkwgQxER/5Rf1vzxCCgDFjzGLJPZy4N3DHMXcaQ2uOpn8kOznq9G3+z+bp1AoQLh/UoDzckgHCoUBg=="
+SIGNATURE_B64_3 = "uxUi39FFJ8lrblIrwR7sEo8V0kNLxDNZoxydyOoSidqPZDj5tLeSg7HwYFALDKofrrJMBGx6MUQGjrVJHuMxAg=="
 
 
 def challenge(**changes):
@@ -37,6 +38,25 @@ def challenge(**changes):
     )
     values.update(changes)
     return ApprovalChallenge(**values)
+
+
+def challenge3():
+    return ApprovalChallenge(
+        approval_id="approval-poc-3",
+        approval_policy_id="policy-level3-v1",
+        controller_task_id="task-poc-3",
+        operation_id="op-poc-3",
+        operation_version="v1",
+        provider="codex",
+        requested_capability="MERGE_PR",
+        effect="MERGE",
+        repo="oimus1976/agent-controller",
+        target_kind="PULL_REQUEST",
+        target_id="1000",
+        expected_head_sha="b" * 40,
+        challenge_nonce="nonce-poc-003",
+        signer_key_id="human-key-poc-3",
+    )
 
 
 class TrustedBrokerLedgerTests(unittest.TestCase):
@@ -109,38 +129,38 @@ class TrustedBrokerLedgerTests(unittest.TestCase):
             item.join()
         self.assertEqual(2, len(results))
         self.assertEqual(
-            [BrokerLedgerDecision.PASS, BrokerLedgerDecision.REPLAYED],
-            sorted((r.decision for r in results), key=lambda x: x.value),
+            {BrokerLedgerDecision.PASS, BrokerLedgerDecision.REPLAYED},
+            {r.decision for r in results},
         )
         self.assertEqual(1, len({r.record.attempt_id for r in results}))
 
-    def test_different_authorizations_are_independent(self):
+    def test_different_valid_authorizations_are_independent(self):
         first = self.claim()
-        # Existing fixture signature must not validate a changed challenge, so a
-        # different authorization requires its own separately signed artifact.
-        changed = challenge(operation_version="v2")
+        second_challenge = challenge3()
         second = self.ledger.claim_effect_attempt(
-            challenge=changed, signature_b64=SIGNATURE_B64
+            challenge=second_challenge, signature_b64=SIGNATURE_B64_3
         )
         self.assertEqual(BrokerLedgerDecision.PASS, first.decision)
-        self.assertEqual(BrokerLedgerDecision.BLOCKED, second.decision)
-        self.assertNotEqual(self.digest(), self.digest(changed))
+        self.assertEqual(BrokerLedgerDecision.PASS, second.decision)
+        self.assertNotEqual(first.record.authorization_digest, second.record.authorization_digest)
+        self.assertNotEqual(first.record.attempt_id, second.record.attempt_id)
 
     def test_duplicate_generated_attempt_id_fails_closed(self):
-        first_challenge = self.challenge
         first = self.claim()
-        # A second exact authorization is replayed before ID generation matters.
         self.assertEqual(BrokerLedgerDecision.PASS, first.decision)
         with mock.patch(
             "agent_controller.trusted_broker_ledger.secrets.token_urlsafe",
             return_value=first.record.attempt_id.removeprefix("attempt_"),
         ):
-            changed = challenge(operation_version="v2")
-            # Signature is invalid for changed challenge, so it fails even earlier.
             result = self.ledger.claim_effect_attempt(
-                challenge=changed, signature_b64=SIGNATURE_B64
+                challenge=challenge3(), signature_b64=SIGNATURE_B64_3
             )
         self.assertEqual(BrokerLedgerDecision.BLOCKED, result.decision)
+        self.assertEqual("BROKER_LEDGER_UNIQUENESS_CONFLICT", result.reason)
+        self.assertEqual(
+            BrokerLedgerDecision.BLOCKED,
+            self.ledger.read_attempt(authorization_digest=self.digest(challenge3())).decision,
+        )
 
     def test_existing_digest_with_tampered_audit_binding_blocks(self):
         first = self.claim()
@@ -208,10 +228,10 @@ class TrustedBrokerLedgerTests(unittest.TestCase):
         self.assertEqual(BrokerAttemptState.CLAIMED, result.record.state)
 
     def test_locked_database_claim_is_uncertain_not_pass(self):
+        impatient = TrustedBrokerAttemptLedger(db_path=self.db, timeout_seconds=0.01)
         blocker = sqlite3.connect(self.db, isolation_level=None)
         try:
             blocker.execute("BEGIN IMMEDIATE")
-            impatient = TrustedBrokerAttemptLedger(db_path=self.db, timeout_seconds=0.01)
             result = impatient.claim_effect_attempt(
                 challenge=self.challenge, signature_b64=SIGNATURE_B64
             )
