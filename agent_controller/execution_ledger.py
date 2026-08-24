@@ -16,6 +16,12 @@ _CLAIM_KEYS = frozenset({
     "controller_task_id", "operation_id", "provider", "requested_capability", "effect",
     "repo", "target_kind", "target_id", "expected_head_sha", "claimed_at", "status",
 })
+_REQUIRED_STRING_FIELDS = (
+    "execution_claim_id", "approval_id", "approval_receipt_id", "approval_policy_id",
+    "controller_task_id", "operation_id", "requested_capability", "effect",
+    "target_kind", "claimed_at", "status",
+)
+_OPTIONAL_STRING_FIELDS = ("provider", "repo", "target_id", "expected_head_sha")
 
 
 @dataclass(frozen=True)
@@ -59,14 +65,18 @@ def _validate_claims(data: object) -> bool:
     for item in data:
         if not isinstance(item, dict) or set(item.keys()) != _CLAIM_KEYS:
             return False
-        if item.get("status") != "CLAIMED":
+        for field in _REQUIRED_STRING_FIELDS:
+            value = item.get(field)
+            if not isinstance(value, str) or not value:
+                return False
+        for field in _OPTIONAL_STRING_FIELDS:
+            value = item.get(field)
+            if value is not None and not isinstance(value, str):
+                return False
+        if item["status"] != "CLAIMED":
             return False
-        receipt_id = item.get("approval_receipt_id")
-        claim_id = item.get("execution_claim_id")
-        if not isinstance(receipt_id, str) or not receipt_id:
-            return False
-        if not isinstance(claim_id, str) or not claim_id:
-            return False
+        receipt_id = item["approval_receipt_id"]
+        claim_id = item["execution_claim_id"]
         if receipt_id in receipt_ids or claim_id in claim_ids:
             return False
         receipt_ids.add(receipt_id)
