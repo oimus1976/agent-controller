@@ -5,6 +5,7 @@ import agent_controller.approval_consumption as approval_consumption
 import agent_controller.approval_contract as approval_contract
 import agent_controller.approval_ledger as approval_ledger
 import agent_controller.approval_service as approval_service
+import agent_controller.approval_store as approval_store
 import agent_controller.approval_validator as approval_validator
 from agent_controller.approval_contract import ApprovalBinding, ApprovalResult
 from agent_controller.approval_validator import validate_approval_binding
@@ -18,6 +19,7 @@ class TestApprovalBoundary(unittest.TestCase):
             approval_contract,
             approval_ledger,
             approval_service,
+            approval_store,
             approval_validator,
         )
         forbidden_method_names = {
