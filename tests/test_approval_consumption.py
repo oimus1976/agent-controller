@@ -87,7 +87,7 @@ class TestApprovalConsumption(unittest.TestCase):
     def tearDown(self):
         self.tempdir.cleanup()
 
-    def run(self, candidate=None, target_task=None, reader=None, receipt_id="receipt-1"):
+    def run_flow(self, candidate=None, target_task=None, reader=None, receipt_id="receipt-1"):
         candidate = candidate or approval()
         return validate_and_consume_human_approval(
             ingress=TrustedApprovalIngress(
@@ -107,7 +107,7 @@ class TestApprovalConsumption(unittest.TestCase):
         )
 
     def test_fresh_target_consumes_once_without_executing_effect(self):
-        result = self.run()
+        result = self.run_flow()
         self.assertTrue(result.validation.valid)
         self.assertEqual(result.consumption.result, ApprovalResult.PASS)
         with open(self.ledger, "r", encoding="utf-8") as handle:
@@ -116,7 +116,7 @@ class TestApprovalConsumption(unittest.TestCase):
         self.assertEqual(data[0]["status"], "CONSUMED")
 
     def test_head_changed_after_approval_is_stale_and_not_consumed(self):
-        result = self.run(reader=FakeTargetReader(fresh_facts(head_sha="new-head")))
+        result = self.run_flow(reader=FakeTargetReader(fresh_facts(head_sha="new-head")))
         self.assertFalse(result.validation.valid)
         self.assertEqual(result.validation.result, ApprovalResult.STALE)
         self.assertEqual(result.validation.reason, "TARGET_HEAD_STALE")
@@ -150,26 +150,26 @@ class TestApprovalConsumption(unittest.TestCase):
                 self.assertFalse(os.path.exists(path))
 
     def test_target_read_uncertainty_is_not_consumed(self):
-        result = self.run(reader=FakeTargetReader(error=RuntimeError("read")))
+        result = self.run_flow(reader=FakeTargetReader(error=RuntimeError("read")))
         self.assertEqual(result.validation.result, ApprovalResult.UNCERTAIN)
         self.assertEqual(result.validation.reason, "TARGET_READ_UNCERTAIN")
         self.assertFalse(os.path.exists(self.ledger))
 
     def test_invalid_target_payload_is_uncertain_and_not_consumed(self):
-        result = self.run(reader=FakeTargetReader(facts="not-a-mapping"))
+        result = self.run_flow(reader=FakeTargetReader(facts="not-a-mapping"))
         self.assertEqual(result.validation.result, ApprovalResult.UNCERTAIN)
         self.assertEqual(result.validation.reason, "TARGET_FACTS_INVALID")
         self.assertFalse(os.path.exists(self.ledger))
 
     def test_repeated_fresh_consume_is_replayed(self):
-        first = self.run(receipt_id="receipt-1")
-        second = self.run(receipt_id="receipt-2")
+        first = self.run_flow(receipt_id="receipt-1")
+        second = self.run_flow(receipt_id="receipt-2")
         self.assertEqual(first.consumption.result, ApprovalResult.PASS)
         self.assertEqual(second.validation.result, ApprovalResult.REPLAYED)
         self.assertEqual(second.consumption.result, ApprovalResult.REPLAYED)
 
     def test_same_flow_supports_codex_bound_operation(self):
-        result = self.run(candidate=approval(provider="codex"), target_task=task(provider="codex"))
+        result = self.run_flow(candidate=approval(provider="codex"), target_task=task(provider="codex"))
         self.assertTrue(result.validation.valid)
         self.assertEqual(result.consumption.result, ApprovalResult.PASS)
 
