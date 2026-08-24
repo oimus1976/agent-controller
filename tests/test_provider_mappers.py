@@ -152,6 +152,39 @@ class TestProviderMappers(unittest.TestCase):
             self.assertEqual(observation.awaiting_input, AwaitingInput.USER_FEEDBACK)
             self.assertNotEqual(observation.awaiting_input, AwaitingInput.PLAN_APPROVAL)
 
+    def test_secret_and_config_credentials_are_redacted_from_normalized_evidence(self):
+        raw = {
+            "status": "WORKING",
+            "access_token": "top-secret-token",
+            "nested": {
+                "api-key": "provider-key",
+                "Authorization": "Bearer abc",
+                "safe": "keep-me",
+            },
+            "items": [{"password": "hunter2"}, {"value": "visible"}],
+        }
+
+        for mapper, operation_id in (
+            (map_jules_observation, "jules-1"),
+            (map_codex_observation, "codex-1"),
+        ):
+            observation = mapper(
+                provider_operation_id=operation_id,
+                raw_state=raw,
+                observed_at="2026-08-24T01:35:00Z",
+            )
+            sanitized = observation.provider_raw_state
+            self.assertEqual(sanitized["access_token"], "[REDACTED]")
+            self.assertEqual(sanitized["nested"]["api-key"], "[REDACTED]")
+            self.assertEqual(sanitized["nested"]["Authorization"], "[REDACTED]")
+            self.assertEqual(sanitized["items"][0]["password"], "[REDACTED]")
+            self.assertEqual(sanitized["nested"]["safe"], "keep-me")
+            self.assertEqual(sanitized["items"][1]["value"], "visible")
+            self.assertNotIn("top-secret-token", repr(sanitized))
+            self.assertNotIn("provider-key", repr(sanitized))
+            self.assertNotIn("Bearer abc", repr(sanitized))
+            self.assertNotIn("hunter2", repr(sanitized))
+
 
 if __name__ == "__main__":
     unittest.main()
