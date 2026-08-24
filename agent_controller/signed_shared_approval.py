@@ -20,6 +20,7 @@ from agent_controller.shared_authorization import (
 from agent_controller.signed_approval import (
     ApprovalChallenge,
     ProvenanceAssurance,
+    SCHEMA_VERSION as CHALLENGE_SCHEMA_VERSION,
     canonicalize_approval_challenge,
     verify_signed_approval,
 )
@@ -39,6 +40,26 @@ class SignedSharedApprovalResult:
     reason: Optional[str] = None
 
 
+def _binding_complete_for_signature(binding: OperationAuthorizationBinding) -> bool:
+    return all(
+        isinstance(value, str) and bool(value)
+        for value in (
+            binding.approval_id,
+            binding.approval_policy_id,
+            binding.controller_task_id,
+            binding.operation_id,
+            binding.operation_version,
+            binding.provider,
+            binding.requested_capability,
+            binding.effect,
+            binding.repo,
+            binding.target_kind,
+            binding.target_id,
+            binding.expected_head_sha,
+        )
+    )
+
+
 def _challenge_matches_binding(
     challenge: ApprovalChallenge, binding: OperationAuthorizationBinding
 ) -> bool:
@@ -46,14 +67,16 @@ def _challenge_matches_binding(
         binding, OperationAuthorizationBinding
     ):
         return False
-    required_binding_strings = (binding.repo, binding.target_id, binding.expected_head_sha)
-    if any(not isinstance(value, str) or not value for value in required_binding_strings):
+    if not _binding_complete_for_signature(binding):
         return False
     return (
         challenge.approval_id == binding.approval_id
+        and challenge.approval_policy_id == binding.approval_policy_id
         and challenge.controller_task_id == binding.controller_task_id
         and challenge.operation_id == binding.operation_id
         and challenge.operation_version == binding.operation_version
+        and challenge.provider == binding.provider
+        and challenge.requested_capability == binding.requested_capability
         and challenge.effect == binding.effect
         and challenge.repo == binding.repo
         and challenge.target_kind == binding.target_kind
@@ -72,8 +95,98 @@ def _provenance_for_verified_signature(
         provenance_kind="SIGNED_CHALLENGE",
         signer_key_id=challenge.signer_key_id,
         challenge_nonce=challenge.challenge_nonce,
+        challenge_schema_version=challenge.schema_version,
         challenge_digest=hashlib.sha256(canonical).hexdigest(),
         signature_digest=hashlib.sha256(signature_bytes).hexdigest(),
+        signature_b64=signature_b64,
+    )
+
+
+def _challenge_from_stored_record(snapshot: SharedRecordSnapshot) -> ApprovalChallenge:
+    record = snapshot.record
+    binding = record.binding
+    provenance = record.provenance
+    if record.state is not AuthorizationState.HUMAN_APPROVED or provenance is None:
+        raise ValueError("record is not HUMAN_APPROVED with provenance")
+    if not _binding_complete_for_signature(binding):
+        raise ValueError("stored binding incomplete")
+    if provenance.challenge_schema_version != CHALLENGE_SCHEMA_VERSION:
+        raise ValueError("stored challenge schema unsupported")
+    return ApprovalChallenge(
+        approval_id=binding.approval_id,
+        approval_policy_id=binding.approval_policy_id,
+        controller_task_id=binding.controller_task_id,
+        operation_id=binding.operation_id,
+        operation_version=binding.operation_version,
+        provider=binding.provider,
+        requested_capability=binding.requested_capability,
+        effect=binding.effect,
+        repo=binding.repo,
+        target_kind=binding.target_kind,
+        target_id=binding.target_id,
+        expected_head_sha=binding.expected_head_sha,
+        challenge_nonce=provenance.challenge_nonce,
+        signer_key_id=provenance.signer_key_id,
+        schema_version=provenance.challenge_schema_version,
+    )
+
+
+def verify_stored_human_approval(snapshot: SharedRecordSnapshot) -> SignedSharedApprovalResult:
+    """Re-verify authority from an Agent-writable shared-state record.
+
+    HUMAN_APPROVED is only a coordination label. Authority comes from a valid
+    pinned-key signature over the exact immutable binding and challenge nonce.
+    Downstream claim/execution stages must call this before consuming approval.
+    """
+    if not isinstance(snapshot, SharedRecordSnapshot):
+        return SignedSharedApprovalResult(
+            AuthorizationDecision.BLOCKED, reason="STORED_APPROVAL_SNAPSHOT_INVALID"
+        )
+    record = snapshot.record
+    provenance = record.provenance
+    if record.state is not AuthorizationState.HUMAN_APPROVED or provenance is None:
+        return SignedSharedApprovalResult(
+            AuthorizationDecision.BLOCKED, snapshot, "STORED_APPROVAL_NOT_HUMAN_APPROVED"
+        )
+    if provenance.assurance != ProvenanceAssurance.VERIFIED_EVENT_PROVENANCE.value:
+        return SignedSharedApprovalResult(
+            AuthorizationDecision.BLOCKED, snapshot, "STORED_APPROVAL_ASSURANCE_INVALID"
+        )
+    if provenance.provenance_kind != "SIGNED_CHALLENGE":
+        return SignedSharedApprovalResult(
+            AuthorizationDecision.BLOCKED, snapshot, "STORED_APPROVAL_KIND_INVALID"
+        )
+    try:
+        challenge = _challenge_from_stored_record(snapshot)
+        canonical = canonicalize_approval_challenge(challenge)
+        signature_bytes = base64.b64decode(provenance.signature_b64, validate=True)
+    except Exception:
+        return SignedSharedApprovalResult(
+            AuthorizationDecision.BLOCKED, snapshot, "STORED_APPROVAL_EVIDENCE_INVALID"
+        )
+    if hashlib.sha256(canonical).hexdigest() != provenance.challenge_digest:
+        return SignedSharedApprovalResult(
+            AuthorizationDecision.BLOCKED, snapshot, "STORED_CHALLENGE_DIGEST_MISMATCH"
+        )
+    if hashlib.sha256(signature_bytes).hexdigest() != provenance.signature_digest:
+        return SignedSharedApprovalResult(
+            AuthorizationDecision.BLOCKED, snapshot, "STORED_SIGNATURE_DIGEST_MISMATCH"
+        )
+    verification = verify_signed_approval(
+        challenge=challenge, signature_b64=provenance.signature_b64
+    )
+    if (
+        not verification.valid
+        or verification.assurance is not ProvenanceAssurance.VERIFIED_EVENT_PROVENANCE
+        or verification.signer_key_id != provenance.signer_key_id
+    ):
+        return SignedSharedApprovalResult(
+            AuthorizationDecision.BLOCKED,
+            snapshot,
+            verification.reason or "STORED_SIGNATURE_NOT_VERIFIED",
+        )
+    return SignedSharedApprovalResult(
+        AuthorizationDecision.PASS, snapshot, "STORED_APPROVAL_CRYPTOGRAPHICALLY_VERIFIED"
     )
 
 
@@ -91,14 +204,6 @@ def _write_outcome(write: object) -> str:
 
 
 class SignedSharedApprovalController:
-    """Controller-composed signed approval transition service.
-
-    Shared-state mutation authority and the objective target reader are fixed at
-    composition. Per-call input is only the signed challenge and signature. The
-    authoritative operation binding is loaded from existing shared PROPOSED
-    state; callers cannot replace policy/provider/capability/binding fields.
-    """
-
     __slots__ = ("_store", "_target_reader")
 
     def __init__(
@@ -134,8 +239,7 @@ class SignedSharedApprovalController:
         )
         if (
             not verification.valid
-            or verification.assurance
-            is not ProvenanceAssurance.VERIFIED_EVENT_PROVENANCE
+            or verification.assurance is not ProvenanceAssurance.VERIFIED_EVENT_PROVENANCE
             or verification.signer_key_id != challenge.signer_key_id
         ):
             return SignedSharedApprovalResult(
@@ -143,6 +247,21 @@ class SignedSharedApprovalController:
                 reason=verification.reason or "SIGNATURE_NOT_VERIFIED",
             )
 
+        current = read_operation_by_identity(
+            store=self._store,
+            controller_task_id=challenge.controller_task_id,
+            operation_id=challenge.operation_id,
+            operation_version=challenge.operation_version,
+        )
+        if current.decision is not AuthorizationDecision.PASS or current.snapshot is None:
+            return SignedSharedApprovalResult(current.decision, current.snapshot, current.reason)
+        binding = current.snapshot.record.binding
+        if not _challenge_matches_binding(challenge, binding):
+            return SignedSharedApprovalResult(
+                AuthorizationDecision.BLOCKED,
+                current.snapshot,
+                "CHALLENGE_BINDING_MISMATCH",
+            )
         try:
             provenance = _provenance_for_verified_signature(
                 challenge=challenge, signature_b64=signature_b64
@@ -153,26 +272,11 @@ class SignedSharedApprovalController:
                 reason="VERIFIED_SIGNATURE_ENCODING_INCONSISTENT",
             )
 
-        current = read_operation_by_identity(
-            store=self._store,
-            controller_task_id=challenge.controller_task_id,
-            operation_id=challenge.operation_id,
-            operation_version=challenge.operation_version,
-        )
-        if current.decision is not AuthorizationDecision.PASS or current.snapshot is None:
-            return SignedSharedApprovalResult(
-                current.decision, current.snapshot, current.reason
-            )
-        binding = current.snapshot.record.binding
-        if not _challenge_matches_binding(challenge, binding):
-            return SignedSharedApprovalResult(
-                AuthorizationDecision.BLOCKED,
-                current.snapshot,
-                "CHALLENGE_BINDING_MISMATCH",
-            )
-
         current_record = current.snapshot.record
         if current_record.state is AuthorizationState.HUMAN_APPROVED:
+            stored = verify_stored_human_approval(current.snapshot)
+            if stored.decision is not AuthorizationDecision.PASS:
+                return stored
             if current_record.provenance == provenance:
                 return SignedSharedApprovalResult(
                     AuthorizationDecision.REPLAYED,
@@ -186,9 +290,7 @@ class SignedSharedApprovalController:
             )
         if current_record.state is not AuthorizationState.PROPOSED:
             return SignedSharedApprovalResult(
-                AuthorizationDecision.BLOCKED,
-                current.snapshot,
-                "ILLEGAL_PRIOR_STATE",
+                AuthorizationDecision.BLOCKED, current.snapshot, "ILLEGAL_PRIOR_STATE"
             )
 
         try:
@@ -248,24 +350,28 @@ class SignedSharedApprovalController:
                 AuthorizationDecision.UNCERTAIN, reason="STATE_WRITE_RESULT_INVALID"
             )
         if outcome == "WRITTEN":
-            return SignedSharedApprovalResult(
-                AuthorizationDecision.PASS,
-                SharedRecordSnapshot(approved_record, write.revision),
-            )
+            snapshot = SharedRecordSnapshot(approved_record, write.revision)
+            verified = verify_stored_human_approval(snapshot)
+            if verified.decision is not AuthorizationDecision.PASS:
+                return SignedSharedApprovalResult(
+                    AuthorizationDecision.UNCERTAIN,
+                    snapshot,
+                    "POST_WRITE_APPROVAL_REVERIFY_FAILED",
+                )
+            return SignedSharedApprovalResult(AuthorizationDecision.PASS, snapshot)
 
         reread = read_operation(store=self._store, binding=binding)
         if reread.decision is not AuthorizationDecision.PASS or reread.snapshot is None:
             if outcome == "UNCERTAIN":
                 return SignedSharedApprovalResult(
-                    AuthorizationDecision.UNCERTAIN,
-                    reread.snapshot,
-                    "STATE_CAS_UNCERTAIN",
+                    AuthorizationDecision.UNCERTAIN, reread.snapshot, "STATE_CAS_UNCERTAIN"
                 )
-            return SignedSharedApprovalResult(
-                reread.decision, reread.snapshot, reread.reason
-            )
+            return SignedSharedApprovalResult(reread.decision, reread.snapshot, reread.reason)
         winner = reread.snapshot.record
         if winner.state is AuthorizationState.HUMAN_APPROVED:
+            verified_winner = verify_stored_human_approval(reread.snapshot)
+            if verified_winner.decision is not AuthorizationDecision.PASS:
+                return verified_winner
             if winner.provenance == provenance:
                 if outcome == "CONFLICT":
                     return SignedSharedApprovalResult(
@@ -285,9 +391,7 @@ class SignedSharedApprovalController:
             )
         if outcome == "UNCERTAIN":
             return SignedSharedApprovalResult(
-                AuthorizationDecision.UNCERTAIN,
-                reread.snapshot,
-                "STATE_CAS_UNCERTAIN",
+                AuthorizationDecision.UNCERTAIN, reread.snapshot, "STATE_CAS_UNCERTAIN"
             )
         return SignedSharedApprovalResult(
             AuthorizationDecision.BLOCKED,
