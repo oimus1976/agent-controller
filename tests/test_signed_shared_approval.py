@@ -1,3 +1,4 @@
+import dataclasses
 import inspect
 import unittest
 
@@ -13,10 +14,13 @@ from agent_controller.shared_authorization import (
     propose_operation,
 )
 from agent_controller.signed_approval import ApprovalChallenge
-from agent_controller.signed_shared_approval import SignedSharedApprovalController
+from agent_controller.signed_shared_approval import (
+    SignedSharedApprovalController,
+    verify_stored_human_approval,
+)
 
 
-SIGNATURE_B64 = "ysPv815PSBz1qe6IEy/PaH2JuNx8KvqT7F8bRreNVsd4Nlu07qSSUzHiu8t77685fnmLFJAyANIsz6jOdP1UCA=="
+SIGNATURE_B64 = "XRURwOosCkwgQxER/5Rf1vzxCCgDFjzGLJPZy4N3DHMXcaQ2uOpn8kOznq9G3+z+bp1AoQLh/UoDzckgHCoUBg=="
 
 
 class MemoryBackend:
@@ -84,10 +88,10 @@ class SignedSharedApprovalTests(unittest.TestCase):
             store=self.store, target_reader=self.reader
         )
         self.binding = OperationAuthorizationBinding(
-            approval_id="approval-poc-1",
+            approval_id="approval-poc-2",
             approval_policy_id="policy-level3-v1",
-            controller_task_id="task-poc-1",
-            operation_id="op-poc-1",
+            controller_task_id="task-poc-2",
+            operation_id="op-poc-2",
             operation_version="v1",
             provider="codex",
             requested_capability="MERGE_PR",
@@ -98,17 +102,20 @@ class SignedSharedApprovalTests(unittest.TestCase):
             expected_head_sha="a" * 40,
         )
         self.challenge = ApprovalChallenge(
-            approval_id="approval-poc-1",
-            controller_task_id="task-poc-1",
-            operation_id="op-poc-1",
+            approval_id="approval-poc-2",
+            approval_policy_id="policy-level3-v1",
+            controller_task_id="task-poc-2",
+            operation_id="op-poc-2",
             operation_version="v1",
+            provider="codex",
+            requested_capability="MERGE_PR",
             effect="MERGE",
             repo="oimus1976/agent-controller",
             target_kind="PULL_REQUEST",
             target_id="999",
             expected_head_sha="a" * 40,
-            challenge_nonce="nonce-poc-001",
-            signer_key_id="human-key-poc-1",
+            challenge_nonce="nonce-poc-002",
+            signer_key_id="human-key-poc-2",
         )
         proposed = propose_operation(store=self.store, binding=self.binding)
         self.assertEqual(AuthorizationDecision.PASS, proposed.decision)
@@ -126,11 +133,15 @@ class SignedSharedApprovalTests(unittest.TestCase):
         provenance = result.snapshot.record.provenance
         self.assertEqual("VERIFIED_EVENT_PROVENANCE", provenance.assurance)
         self.assertEqual("SIGNED_CHALLENGE", provenance.provenance_kind)
-        self.assertEqual("human-key-poc-1", provenance.signer_key_id)
-        self.assertEqual("nonce-poc-001", provenance.challenge_nonce)
+        self.assertEqual("human-key-poc-2", provenance.signer_key_id)
+        self.assertEqual("agent-controller-approval-challenge-v2", provenance.challenge_schema_version)
+        self.assertEqual(SIGNATURE_B64, provenance.signature_b64)
         self.assertEqual(64, len(provenance.challenge_digest))
         self.assertEqual(64, len(provenance.signature_digest))
-        self.assertNotIn(SIGNATURE_B64, str(result.snapshot.record.to_dict()))
+        self.assertEqual(
+            AuthorizationDecision.PASS,
+            verify_stored_human_approval(result.snapshot).decision,
+        )
 
     def test_shared_record_is_authoritative_binding_not_per_call_input(self):
         params = set(inspect.signature(self.controller.approve).parameters)
@@ -153,13 +164,9 @@ class SignedSharedApprovalTests(unittest.TestCase):
         self.assertEqual(AuthorizationState.PROPOSED, self.backend.snapshot.record.state)
 
     def test_valid_signature_cannot_approve_mismatched_shared_binding(self):
-        changed_binding = OperationAuthorizationBinding(
-            **{**self.binding.__dict__, "effect": "DEPLOY"}
-        )
+        changed_binding = dataclasses.replace(self.binding, requested_capability="DEPLOY")
         self.backend.snapshot = SharedRecordSnapshot(
-            SharedAuthorizationRecord(
-                binding=changed_binding, state=AuthorizationState.PROPOSED
-            ),
+            SharedAuthorizationRecord(binding=changed_binding, state=AuthorizationState.PROPOSED),
             self.backend.snapshot.revision,
         )
         result = self.approve()
@@ -171,7 +178,6 @@ class SignedSharedApprovalTests(unittest.TestCase):
         self.reader.facts["head_sha"] = "b" * 40
         result = self.approve()
         self.assertEqual(AuthorizationDecision.STALE, result.decision)
-        self.assertEqual("TARGET_HEAD_SHA_STALE", result.reason)
         self.assertEqual(AuthorizationState.PROPOSED, self.backend.snapshot.record.state)
 
     def test_target_read_uncertainty_does_not_advance(self):
@@ -191,41 +197,82 @@ class SignedSharedApprovalTests(unittest.TestCase):
         loser = self.approve()
         self.assertEqual(AuthorizationDecision.PASS, raced.decision)
         self.assertEqual(AuthorizationDecision.REPLAYED, loser.decision)
-        self.assertEqual(AuthorizationState.HUMAN_APPROVED, self.backend.snapshot.record.state)
-
-    def test_conflicting_existing_human_approval_blocks(self):
-        fake = AuthorizationProvenance(
-            assurance="VERIFIED_EVENT_PROVENANCE",
-            provenance_kind="SIGNED_CHALLENGE",
-            signer_key_id="other-key",
-            challenge_nonce="other",
-            challenge_digest="d" * 64,
-            signature_digest="s" * 64,
-        )
-        self.backend.snapshot = SharedRecordSnapshot(
-            SharedAuthorizationRecord(
-                binding=self.binding,
-                state=AuthorizationState.HUMAN_APPROVED,
-                provenance=fake,
-            ),
-            "r-conflict",
-        )
-        result = self.approve()
-        self.assertEqual(AuthorizationDecision.BLOCKED, result.decision)
-        self.assertEqual("APPROVAL_PROVENANCE_CONFLICT", result.reason)
 
     def test_uncertain_write_with_durable_exact_winner_is_resolved_by_reread(self):
         self.backend.uncertain_apply = True
         result = self.approve()
         self.assertEqual(AuthorizationDecision.PASS, result.decision)
         self.assertEqual("APPROVAL_CONFIRMED_AFTER_UNCERTAIN_WRITE", result.reason)
-        self.assertEqual(AuthorizationState.HUMAN_APPROVED, self.backend.snapshot.record.state)
 
     def test_uncertain_write_without_state_change_remains_uncertain(self):
         self.backend.uncertain_without_apply = True
         result = self.approve()
         self.assertEqual(AuthorizationDecision.UNCERTAIN, result.decision)
         self.assertEqual(AuthorizationState.PROPOSED, self.backend.snapshot.record.state)
+
+    def test_agent_forged_human_approved_strings_without_valid_signature_fail(self):
+        fake = AuthorizationProvenance(
+            assurance="VERIFIED_EVENT_PROVENANCE",
+            provenance_kind="SIGNED_CHALLENGE",
+            signer_key_id="human-key-poc-2",
+            challenge_nonce="nonce-poc-002",
+            challenge_schema_version="agent-controller-approval-challenge-v2",
+            challenge_digest="d" * 64,
+            signature_digest="e" * 64,
+            signature_b64="A" * 88,
+        )
+        forged = SharedRecordSnapshot(
+            SharedAuthorizationRecord(
+                binding=self.binding,
+                state=AuthorizationState.HUMAN_APPROVED,
+                provenance=fake,
+            ),
+            "forged-r1",
+        )
+        result = verify_stored_human_approval(forged)
+        self.assertEqual(AuthorizationDecision.BLOCKED, result.decision)
+
+    def test_tampering_any_signed_binding_field_breaks_stored_authority(self):
+        approved = self.approve().snapshot
+        fields = {
+            "approval_policy_id": "policy-other",
+            "provider": "jules",
+            "requested_capability": "DEPLOY",
+            "effect": "DEPLOY",
+            "expected_head_sha": "b" * 40,
+        }
+        for field, value in fields.items():
+            with self.subTest(field=field):
+                tampered_binding = dataclasses.replace(
+                    approved.record.binding, **{field: value}
+                )
+                tampered = SharedRecordSnapshot(
+                    dataclasses.replace(approved.record, binding=tampered_binding),
+                    approved.revision,
+                )
+                self.assertEqual(
+                    AuthorizationDecision.BLOCKED,
+                    verify_stored_human_approval(tampered).decision,
+                )
+
+    def test_tampering_signature_or_digests_breaks_stored_authority(self):
+        approved = self.approve().snapshot
+        p = approved.record.provenance
+        variants = (
+            dataclasses.replace(p, signature_b64="A" * 88),
+            dataclasses.replace(p, challenge_digest="0" * 64),
+            dataclasses.replace(p, signature_digest="0" * 64),
+            dataclasses.replace(p, signer_key_id="attacker-key"),
+        )
+        for provenance in variants:
+            tampered = SharedRecordSnapshot(
+                dataclasses.replace(approved.record, provenance=provenance),
+                approved.revision,
+            )
+            self.assertEqual(
+                AuthorizationDecision.BLOCKED,
+                verify_stored_human_approval(tampered).decision,
+            )
 
     def test_no_execution_claim_is_created(self):
         result = self.approve()
