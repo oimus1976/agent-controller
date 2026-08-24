@@ -230,7 +230,7 @@ class TestExecutionHandoff(unittest.TestCase):
         plan_receipt = receipt(requested_capability="APPROVE_PLAN", effect="PROVIDER_PLAN_APPROVAL")
         plan_task = task(capability="APPROVE_PLAN", effect="PROVIDER_PLAN_APPROVAL")
         result = self.run_flow(candidate=plan_receipt, bound_task=plan_task)
-        self.assertEqual(result.reason, "CAPABILITY_MISMATCH")
+        self.assertEqual(result.reason, "EFFECT_MISMATCH")
 
     def test_pn3_public_surface_has_no_high_risk_effect_executor(self):
         modules = (execution_contract, execution_handoff, execution_ledger, execution_store)
