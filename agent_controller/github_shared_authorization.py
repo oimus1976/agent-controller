@@ -24,7 +24,7 @@ _BINDING_KEYS = frozenset({
 })
 _PROVENANCE_KEYS = frozenset({
     "assurance", "provenance_kind", "signer_key_id", "challenge_nonce",
-    "challenge_digest", "signature_digest",
+    "challenge_schema_version", "challenge_digest", "signature_digest", "signature_b64",
 })
 _RECORD_KEYS = frozenset({
     "binding", "state", "provenance", "execution_claim_id", "controller_run_id",
