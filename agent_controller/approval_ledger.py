@@ -10,6 +10,13 @@ from typing import Optional
 from agent_controller.approval_contract import ApprovalBinding, ApprovalReceipt, ApprovalResult
 
 
+_RECEIPT_KEYS = frozenset({
+    "approval_id", "approval_policy_id", "controller_task_id", "operation_id",
+    "provider", "requested_capability", "effect", "repo", "target_kind",
+    "target_id", "expected_head_sha", "consumed_at", "receipt_id", "status",
+})
+
+
 @dataclass(frozen=True)
 class ApprovalConsumption:
     result: ApprovalResult
@@ -43,13 +50,36 @@ class _LedgerLock:
         self.fd = None
 
 
+def _validate_receipts(data: object) -> bool:
+    if not isinstance(data, list):
+        return False
+    seen_approvals = set()
+    seen_receipts = set()
+    for item in data:
+        if not isinstance(item, dict) or set(item.keys()) != _RECEIPT_KEYS:
+            return False
+        if item.get("status") != "CONSUMED":
+            return False
+        approval_id = item.get("approval_id")
+        receipt_id = item.get("receipt_id")
+        if not isinstance(approval_id, str) or not approval_id:
+            return False
+        if not isinstance(receipt_id, str) or not receipt_id:
+            return False
+        if approval_id in seen_approvals or receipt_id in seen_receipts:
+            return False
+        seen_approvals.add(approval_id)
+        seen_receipts.add(receipt_id)
+    return True
+
+
 def _load(path: str) -> tuple[list[dict], bool]:
     if not os.path.exists(path):
         return [], False
     try:
         with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
-        if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
+        if not _validate_receipts(data):
             return [], True
         return data, False
     except Exception:
@@ -76,18 +106,18 @@ def _save(path: str, receipts: list[dict]) -> None:
 
 def _receipt_matches_binding(receipt: dict, approval: ApprovalBinding) -> bool:
     return (
-        receipt.get("approval_id") == approval.approval_id
-        and receipt.get("approval_policy_id") == approval.approval_policy_id
-        and receipt.get("controller_task_id") == approval.controller_task_id
-        and receipt.get("operation_id") == approval.operation_id
-        and receipt.get("provider") == approval.provider
-        and receipt.get("requested_capability") == approval.requested_capability
-        and receipt.get("effect") == approval.effect
-        and receipt.get("repo") == approval.repo
-        and receipt.get("target_kind") == approval.target_kind
-        and receipt.get("target_id") == approval.target_id
-        and receipt.get("expected_head_sha") == approval.expected_head_sha
-        and receipt.get("status") == "CONSUMED"
+        receipt["approval_id"] == approval.approval_id
+        and receipt["approval_policy_id"] == approval.approval_policy_id
+        and receipt["controller_task_id"] == approval.controller_task_id
+        and receipt["operation_id"] == approval.operation_id
+        and receipt["provider"] == approval.provider
+        and receipt["requested_capability"] == approval.requested_capability
+        and receipt["effect"] == approval.effect
+        and receipt["repo"] == approval.repo
+        and receipt["target_kind"] == approval.target_kind
+        and receipt["target_id"] == approval.target_id
+        and receipt["expected_head_sha"] == approval.expected_head_sha
+        and receipt["status"] == "CONSUMED"
     )
 
 
@@ -121,32 +151,26 @@ def _consume_validated_approval_once(
             return ApprovalConsumption(ApprovalResult.BLOCKED, reason="APPROVAL_LEDGER_CORRUPT")
 
         for existing in receipts:
-            if existing.get("receipt_id") == receipt_id and existing.get("approval_id") != approval.approval_id:
+            if existing["receipt_id"] == receipt_id and existing["approval_id"] != approval.approval_id:
                 return ApprovalConsumption(ApprovalResult.BLOCKED, reason="RECEIPT_ID_REUSED")
 
         for existing in receipts:
-            if existing.get("approval_id") != approval.approval_id:
+            if existing["approval_id"] != approval.approval_id:
                 continue
             if not _receipt_matches_binding(existing, approval):
                 return ApprovalConsumption(ApprovalResult.BLOCKED, reason="APPROVAL_RECEIPT_BINDING_MISMATCH")
-            required = (
-                "approval_id", "approval_policy_id", "controller_task_id", "operation_id",
-                "requested_capability", "effect", "target_kind", "consumed_at", "receipt_id", "status",
-            )
-            if any(key not in existing for key in required):
-                return ApprovalConsumption(ApprovalResult.BLOCKED, reason="APPROVAL_LEDGER_CORRUPT")
             receipt = ApprovalReceipt(
                 approval_id=existing["approval_id"],
                 approval_policy_id=existing["approval_policy_id"],
                 controller_task_id=existing["controller_task_id"],
                 operation_id=existing["operation_id"],
-                provider=existing.get("provider"),
+                provider=existing["provider"],
                 requested_capability=existing["requested_capability"],
                 effect=existing["effect"],
-                repo=existing.get("repo"),
+                repo=existing["repo"],
                 target_kind=existing["target_kind"],
-                target_id=existing.get("target_id"),
-                expected_head_sha=existing.get("expected_head_sha"),
+                target_id=existing["target_id"],
+                expected_head_sha=existing["expected_head_sha"],
                 consumed_at=existing["consumed_at"],
                 receipt_id=existing["receipt_id"],
                 status=existing["status"],
