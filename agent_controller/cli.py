@@ -41,6 +41,7 @@ def main():
     parser.add_argument("--task-id", help="Controller task identity")
     parser.add_argument("--source", help="Jules source resource name")
     parser.add_argument("--starting-branch", help="Jules session starting branch")
+    parser.add_argument("--artifact-branch", help="Expected published GitHub branch/artifact")
     parser.add_argument("--expected-starting-sha", help="Expected GitHub head SHA at starting branch")
     parser.add_argument("--prompt", help="Initial task prompt for Jules session")
     parser.add_argument("--message", help="Remediation message to send to Jules session")
@@ -161,19 +162,19 @@ def main():
             require_plan_approval=not args.no_require_plan_approval
         )
         print(json.dumps(res, indent=2))
-        if res.get("status") == "BLOCKED":
+        if res.get("status") in ["BLOCKED", "FAILED"]:
             sys.exit(1)
 
     elif args.command == "jules-status":
         res = jules_status(state_file=args.state_file)
         print(json.dumps(res, indent=2))
-        if res.get("status") == "BLOCKED":
+        if res.get("status") in ["BLOCKED", "FAILED"]:
             sys.exit(1)
 
     elif args.command == "jules-approve-plan":
         res = jules_approve_plan(state_file=args.state_file)
         print(json.dumps(res, indent=2))
-        if res.get("status") == "BLOCKED":
+        if res.get("status") in ["BLOCKED", "FAILED"]:
             sys.exit(1)
 
     elif args.command == "jules-send":
@@ -182,23 +183,26 @@ def main():
             sys.exit(1)
         res = jules_send(args.message, state_file=args.state_file)
         print(json.dumps(res, indent=2))
-        if res.get("status") == "BLOCKED":
+        if res.get("status") in ["BLOCKED", "FAILED"]:
             sys.exit(1)
 
     elif args.command == "jules-wait":
         res = jules_wait(state_file=args.state_file, interval=args.interval, max_attempts=args.max_attempts)
         print(json.dumps(res, indent=2))
-        if res.get("status") in ["BLOCKED", "TIMEOUT"]:
+        if res.get("status") in ["BLOCKED", "FAILED", "TIMEOUT"]:
             sys.exit(1)
 
     elif args.command == "jules-verify-handoff":
-        if not all([owner, repo, args.starting_branch, args.expected_starting_sha]):
-            print("Error: --repo, --starting-branch, and --expected-starting-sha are required for jules-verify-handoff", file=sys.stderr)
+        target_br = args.artifact_branch or args.starting_branch
+        if not all([owner, repo, target_br, args.expected_starting_sha]):
+            print("Error: --repo, --starting-branch (or --artifact-branch), and --expected-starting-sha are required for jules-verify-handoff", file=sys.stderr)
             sys.exit(1)
         res = verify_github_artifact(
             owner=owner,
             repo=repo,
-            target_branch=args.starting_branch,
+            starting_branch=args.starting_branch,
+            artifact_branch=args.artifact_branch,
+            target_branch=target_br,
             expected_starting_sha=args.expected_starting_sha,
             allowed_paths=args.allowed_paths,
             pr_number=args.pr

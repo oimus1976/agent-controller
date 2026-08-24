@@ -24,7 +24,8 @@ class TestJulesTransport(unittest.TestCase):
         self.owner = "testowner"
         self.repo = "testrepo"
         self.source = "sources/github/testowner/testrepo"
-        self.starting_branch = "feature-branch"
+        self.starting_branch = "main"
+        self.artifact_branch = "feature-branch"
         self.expected_starting_sha = "sha1111111111111111111111111111111111111"
         self.fake_api_key = "fake-secret-jules-key-xyz"
 
@@ -60,7 +61,7 @@ class TestJulesTransport(unittest.TestCase):
             self.assertIn("STARTING_SHA_MISMATCH", res["reason"])
             mock_jules_req.assert_not_called()
 
-    # 3. Create session success -> session identity persisted atomically
+    # 3. Create session success -> session identity persisted atomically with sourceContext
     @patch('agent_controller.jules_transport._jules_api_request')
     @patch('agent_controller.jules_transport.get_github_branch_head')
     def test_create_session_success_persisted(self, mock_get_head, mock_jules_req):
@@ -80,6 +81,14 @@ class TestJulesTransport(unittest.TestCase):
             self.assertEqual(res["status"], "SUCCESS")
             self.assertEqual(res["reason"], "SESSION_CREATED")
             self.assertEqual(res["session"]["session_id"], "sess-999")
+
+            # Check sourceContext in API request body
+            mock_jules_req.assert_called_once()
+            call_args = mock_jules_req.call_args
+            req_body = call_args[1].get("body") or call_args[0][2] if len(call_args[0]) > 2 else call_args[1].get("body")
+            self.assertIn("sourceContext", req_body)
+            self.assertEqual(req_body["sourceContext"]["source"], self.source)
+            self.assertEqual(req_body["sourceContext"]["startingBranch"], self.starting_branch)
 
             state, corrupt = _load_jules_state(self.state_file)
             self.assertFalse(corrupt)
@@ -290,7 +299,7 @@ class TestJulesTransport(unittest.TestCase):
             self.assertEqual(res["status"], "BLOCKED")
             self.assertIn("UNKNOWN_JULES_STATE", res["reason"])
 
-    # 13. FAILED -> terminal failure
+    # 13. FAILED -> terminal failure status returned
     @patch('agent_controller.jules_transport._jules_api_request')
     def test_terminal_failed_state(self, mock_jules_req):
         initial_state = {
@@ -306,7 +315,8 @@ class TestJulesTransport(unittest.TestCase):
 
         with patch.dict(os.environ, {"JULES_API_KEY": self.fake_api_key}):
             res = jules_status(state_file=self.state_file)
-            self.assertEqual(res["status"], "OK")
+            self.assertEqual(res["status"], "FAILED")
+            self.assertEqual(res["reason"], "JULES_SESSION_FAILED")
             self.assertEqual(res["session"]["current_state"], "FAILED")
 
     # 14. COMPLETED with outputs -> outputs parsed without trusting agent prose as authority
@@ -338,14 +348,13 @@ class TestJulesTransport(unittest.TestCase):
     # Phase 4B incident test fixture: UI shows ready/COMPLETED, but PR head SHA unchanged
     @patch('agent_controller.jules_transport.get_github_branch_head')
     def test_phase_4b_incident_github_artifact_not_published(self, mock_get_head):
-        # Starting SHA was sha111...
-        # Branch head is STILL sha111... even though Jules reported COMPLETED!
         mock_get_head.return_value = self.expected_starting_sha
 
         res = verify_github_artifact(
             owner=self.owner,
             repo=self.repo,
-            target_branch=self.starting_branch,
+            starting_branch=self.starting_branch,
+            artifact_branch=self.artifact_branch,
             expected_starting_sha=self.expected_starting_sha
         )
 
@@ -369,7 +378,8 @@ class TestJulesTransport(unittest.TestCase):
         res = verify_github_artifact(
             owner=self.owner,
             repo=self.repo,
-            target_branch=self.starting_branch,
+            starting_branch=self.starting_branch,
+            artifact_branch=self.artifact_branch,
             expected_starting_sha=self.expected_starting_sha,
             allowed_paths=["agent_controller/*"]
         )
@@ -396,7 +406,8 @@ class TestJulesTransport(unittest.TestCase):
         res = verify_github_artifact(
             owner=self.owner,
             repo=self.repo,
-            target_branch=self.starting_branch,
+            starting_branch=self.starting_branch,
+            artifact_branch=self.artifact_branch,
             expected_starting_sha=self.expected_starting_sha,
             allowed_paths=["agent_controller/*"]
         )

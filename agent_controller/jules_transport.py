@@ -162,10 +162,12 @@ def jules_start(task_id, owner, repo, source, starting_branch, expected_starting
             "session": None
         }
 
-    # 4. Create Jules session via REST API
+    # 4. Create Jules session via REST API using official sourceContext structure
     payload = {
-        "source": source,
-        "startingBranch": starting_branch,
+        "sourceContext": {
+            "source": source,
+            "startingBranch": starting_branch
+        },
         "prompt": prompt,
         "requirePlanApproval": require_plan_approval
     }
@@ -269,6 +271,13 @@ def jules_status(state_file=".jules_state.json", api_key_env="JULES_API_KEY"):
         state_data["outputs"] = res.get("outputs")
 
     _save_jules_state(state_file, state_data)
+
+    if new_state == "FAILED":
+        return {
+            "status": "FAILED",
+            "reason": "JULES_SESSION_FAILED",
+            "session": state_data
+        }
 
     return {
         "status": "OK",
@@ -407,7 +416,7 @@ def jules_wait(state_file=".jules_state.json", interval=5, max_attempts=10, cloc
 
     while attempts < max_attempts:
         status_res = jules_status(state_file, api_key_env=api_key_env)
-        if status_res.get("status") == "BLOCKED":
+        if status_res.get("status") in ["BLOCKED", "FAILED"]:
             return status_res
 
         session_data = status_res.get("session", {})
@@ -426,14 +435,23 @@ def jules_wait(state_file=".jules_state.json", interval=5, max_attempts=10, cloc
         "session": session_data if 'session_data' in locals() else None
     }
 
-def verify_github_artifact(owner, repo, target_branch, expected_starting_sha, allowed_paths=None, pr_number=None):
+def verify_github_artifact(owner, repo, expected_starting_sha, target_branch=None, artifact_branch=None, starting_branch=None, allowed_paths=None, pr_number=None):
     """
     Independent GitHub verification step.
-    Verifies that publication occurred on GitHub matching objective bounds.
+    Verifies that publication occurred on GitHub matching objective bounds, distinguishing starting branch from artifact branch.
     """
-    # 1. Fetch branch head SHA
+    pub_branch = artifact_branch or target_branch or starting_branch
+
+    if not pub_branch:
+        return {
+            "verified": False,
+            "reason": "NO_BRANCH_SPECIFIED",
+            "head_sha": None
+        }
+
+    # 1. Fetch artifact branch head SHA
     try:
-        head_sha = get_github_branch_head(owner, repo, target_branch)
+        head_sha = get_github_branch_head(owner, repo, pub_branch)
     except Exception as e:
         return {
             "verified": False,
@@ -448,7 +466,7 @@ def verify_github_artifact(owner, repo, target_branch, expected_starting_sha, al
             "head_sha": None
         }
 
-    # 2. Check if head SHA has moved from starting SHA
+    # 2. Check if head SHA has moved from expected starting SHA
     if head_sha == expected_starting_sha:
         return {
             "verified": False,
@@ -456,7 +474,7 @@ def verify_github_artifact(owner, repo, target_branch, expected_starting_sha, al
             "head_sha": head_sha
         }
 
-    # 3. Check commit ancestry / compare starting_sha with head_sha
+    # 3. Check commit ancestry / compare expected_starting_sha with head_sha
     compare_url = f"https://api.github.com/repos/{owner}/{repo}/compare/{expected_starting_sha}...{head_sha}"
     try:
         compare_data = _github_api_request(compare_url)
