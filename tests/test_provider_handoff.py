@@ -9,6 +9,7 @@ from agent_controller.provider_artifacts import (
     JulesArtifactAdapter,
 )
 from agent_controller.provider_contract import (
+    ArtifactEvidence,
     ControllerState,
     ObjectiveScope,
     ProviderOperationRef,
@@ -198,6 +199,43 @@ class TestProviderHandoff(unittest.TestCase):
         self.assertEqual(artifact_client.calls, 0)
         self.assertEqual(github.ref_calls, [])
 
+    def test_non_artifact_ready_observation_stops_before_artifact_or_github_reads(self):
+        for raw_state in (
+            {"status": "WORKING"},
+            {"status": "FAILED"},
+            {"status": "SOMETHING_NEW"},
+        ):
+            observation_client = FakeObservationClient(raw_state)
+            artifact_client = FakeArtifactClient([
+                {"kind": "commit", "ref": "refs/heads/work", "sha": "new-sha"}
+            ])
+            observer = JulesObservationAdapter(
+                observation_client, lambda: "2026-08-24T01:11:00Z"
+            )
+            collector = JulesArtifactAdapter(
+                artifact_client, lambda: "2026-08-24T01:12:00Z"
+            )
+            github = FakeGitHub()
+
+            result = run_verified_handoff(
+                task=task("jules"),
+                operation=operation("jules"),
+                observer=observer,
+                artifact_collector=collector,
+                github=github,
+            )
+
+            self.assertFalse(result.binding.valid)
+            self.assertEqual(
+                result.binding.reason,
+                "OBSERVATION_NOT_ARTIFACT_READY_SUCCESS",
+            )
+            self.assertEqual(result.artifacts, ())
+            self.assertEqual(observation_client.calls, 1)
+            self.assertEqual(artifact_client.calls, 0)
+            self.assertEqual(github.ref_calls, [])
+            self.assertEqual(github.compare_calls, [])
+
     def test_artifact_binding_failure_stops_before_github_verification(self):
         observation_client = FakeObservationClient(
             {"status": "COMPLETED", "updated_at": "2026-08-24T01:10:00Z"}
@@ -208,7 +246,6 @@ class TestProviderHandoff(unittest.TestCase):
 
         class WrongArtifactCollector:
             def collect_artifacts(self, op):
-                from agent_controller.provider_contract import ArtifactEvidence
                 return [
                     ArtifactEvidence(
                         provider="codex",
@@ -234,8 +271,57 @@ class TestProviderHandoff(unittest.TestCase):
 
         self.assertFalse(result.binding.valid)
         self.assertEqual(result.binding.reason, "ARTIFACT_PROVIDER_MISMATCH")
+        self.assertEqual(result.artifacts, ())
         self.assertEqual(github.ref_calls, [])
         self.assertEqual(github.compare_calls, [])
+
+    def test_late_artifact_binding_failure_discards_earlier_verified_artifacts(self):
+        observation_client = FakeObservationClient({"status": "COMPLETED"})
+        observer = JulesObservationAdapter(
+            observation_client, lambda: "2026-08-24T01:11:00Z"
+        )
+
+        class MixedArtifactCollector:
+            def collect_artifacts(self, op):
+                return [
+                    ArtifactEvidence(
+                        provider="jules",
+                        provider_operation_id=op.provider_operation_id,
+                        artifact_kind="commit",
+                        provider_artifact_id="good",
+                        provider_reported_ref="refs/heads/work",
+                        provider_reported_sha="new-sha",
+                        content_hash=None,
+                        observed_at="2026-08-24T01:12:00Z",
+                        freshness_basis="provider_report",
+                    ),
+                    ArtifactEvidence(
+                        provider="codex",
+                        provider_operation_id=op.provider_operation_id,
+                        artifact_kind="commit",
+                        provider_artifact_id="bad",
+                        provider_reported_ref="refs/heads/work",
+                        provider_reported_sha="new-sha",
+                        content_hash=None,
+                        observed_at="2026-08-24T01:12:01Z",
+                        freshness_basis="provider_report",
+                    ),
+                ]
+
+        github = FakeGitHub()
+        result = run_verified_handoff(
+            task=task("jules"),
+            operation=operation("jules"),
+            observer=observer,
+            artifact_collector=MixedArtifactCollector(),
+            github=github,
+        )
+
+        self.assertFalse(result.binding.valid)
+        self.assertEqual(result.binding.reason, "ARTIFACT_PROVIDER_MISMATCH")
+        self.assertEqual(result.artifacts, ())
+        self.assertEqual(len(github.ref_calls), 1)
+        self.assertEqual(len(github.compare_calls), 1)
 
 
 if __name__ == "__main__":
