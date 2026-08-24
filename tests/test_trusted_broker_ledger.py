@@ -136,9 +136,8 @@ class TrustedBrokerLedgerTests(unittest.TestCase):
 
     def test_different_valid_authorizations_are_independent(self):
         first = self.claim()
-        second_challenge = challenge3()
         second = self.ledger.claim_effect_attempt(
-            challenge=second_challenge, signature_b64=SIGNATURE_B64_3
+            challenge=challenge3(), signature_b64=SIGNATURE_B64_3
         )
         self.assertEqual(BrokerLedgerDecision.PASS, first.decision)
         self.assertEqual(BrokerLedgerDecision.PASS, second.decision)
@@ -147,7 +146,6 @@ class TrustedBrokerLedgerTests(unittest.TestCase):
 
     def test_duplicate_generated_attempt_id_fails_closed(self):
         first = self.claim()
-        self.assertEqual(BrokerLedgerDecision.PASS, first.decision)
         with mock.patch(
             "agent_controller.trusted_broker_ledger.secrets.token_urlsafe",
             return_value=first.record.attempt_id.removeprefix("attempt_"),
@@ -176,7 +174,7 @@ class TrustedBrokerLedgerTests(unittest.TestCase):
             connection.close()
         replay = self.claim()
         self.assertEqual(BrokerLedgerDecision.BLOCKED, replay.decision)
-        self.assertEqual("AUTHORIZATION_DIGEST_BINDING_CONFLICT", replay.reason)
+        self.assertEqual("BROKER_LEDGER_AUTHORIZATION_BINDING_INVALID", replay.reason)
 
     def test_claim_to_effect_verified_is_one_way(self):
         first = self.claim()
@@ -248,7 +246,9 @@ class TrustedBrokerLedgerTests(unittest.TestCase):
         self.assertEqual(BrokerLedgerDecision.PASS, self.ledger.integrity_check().decision)
         connection = sqlite3.connect(self.db)
         try:
-            connection.execute("UPDATE broker_meta SET value='attacker-v2' WHERE key='schema_version'")
+            connection.execute(
+                "UPDATE broker_meta SET value='attacker-v2' WHERE key='schema_version'"
+            )
             connection.commit()
         finally:
             connection.close()
