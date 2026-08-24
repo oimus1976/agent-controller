@@ -75,9 +75,9 @@ def verify_github_artifact(
     """Independently verify one provider-reported GitHub artifact.
 
     Binding is validated before any GitHub I/O. Provider identity never changes
-    the verification rules. Provider-reported ref/SHA remain claims until
-    GitHub resolves the ref and comparison facts prove freshness, ancestry,
-    and scope.
+    the verification rules. Both provider-reported ref and immutable SHA are
+    required so a mutable ref cannot be rebound to a different artifact between
+    provider publication and Controller verification.
     """
 
     binding = validate_evidence_chain(
@@ -91,13 +91,12 @@ def verify_github_artifact(
     if task.repo is None or task.expected_start_sha is None:
         return _blocked(evidence)
 
-    if evidence.provider_reported_ref is None:
+    if evidence.provider_reported_ref is None or evidence.provider_reported_sha is None:
         return _blocked(evidence)
 
-    if (
-        task.objective_scope.allowed_paths is None
-        and task.objective_scope.denied_paths is None
-    ):
+    allowed_paths = tuple(task.objective_scope.allowed_paths or ())
+    denied_paths = tuple(task.objective_scope.denied_paths or ())
+    if not allowed_paths and not denied_paths:
         return _blocked(evidence)
 
     try:
@@ -108,7 +107,7 @@ def verify_github_artifact(
     if resolved_sha is None:
         return _failed(evidence)
 
-    if evidence.provider_reported_sha is not None and resolved_sha != evidence.provider_reported_sha:
+    if resolved_sha != evidence.provider_reported_sha:
         return _failed(evidence)
 
     # Freshness: unchanged publication cannot satisfy a code-artifact handoff.
@@ -129,8 +128,8 @@ def verify_github_artifact(
         return _uncertain(evidence)
 
     scope_policy = {
-        "allowed_paths": list(task.objective_scope.allowed_paths or ()),
-        "denied_paths": list(task.objective_scope.denied_paths or ()),
+        "allowed_paths": list(allowed_paths),
+        "denied_paths": list(denied_paths),
         # Artifact verification is not a docs-only classifier. Permit docs-only
         # changes when they are otherwise inside the explicit path scope.
         "allow_docs_only": True,
