@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Protocol, Sequence, runtime_checkable
+from types import MappingProxyType
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
 
 class ControllerState(str, Enum):
@@ -46,10 +48,36 @@ class VerificationSource(str, Enum):
     NONE = "NONE"
 
 
+def _deep_freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(_deep_freeze(item) for item in value)
+    return deepcopy(value)
+
+
+def _to_plain(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _to_plain(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_to_plain(item) for item in value]
+    if isinstance(value, frozenset):
+        return sorted(_to_plain(item) for item in value)
+    return value
+
+
 @dataclass(frozen=True)
 class ObjectiveScope:
     allowed_paths: Optional[Sequence[str]] = None
     denied_paths: Optional[Sequence[str]] = None
+
+    def __post_init__(self):
+        if self.allowed_paths is not None:
+            object.__setattr__(self, "allowed_paths", tuple(self.allowed_paths))
+        if self.denied_paths is not None:
+            object.__setattr__(self, "denied_paths", tuple(self.denied_paths))
 
 
 @dataclass(frozen=True)
@@ -67,8 +95,12 @@ class TaskBinding:
     approval_policy_id: str
     created_at: str
 
+    def __post_init__(self):
+        object.__setattr__(self, "allowed_effects", tuple(self.allowed_effects))
+        object.__setattr__(self, "forbidden_effects", tuple(self.forbidden_effects))
+
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        return _to_plain(asdict(self))
 
 
 @dataclass(frozen=True)
@@ -97,11 +129,25 @@ class AgentObservation:
     provider_refs: Sequence[str] = field(default_factory=tuple)
     uncertainty_reason: Optional[str] = None
 
+    def __post_init__(self):
+        object.__setattr__(self, "provider_raw_state", _deep_freeze(self.provider_raw_state))
+        object.__setattr__(self, "reported_effects", tuple(self.reported_effects))
+        object.__setattr__(self, "provider_refs", tuple(self.provider_refs))
+
     def to_dict(self) -> Dict[str, Any]:
-        data = asdict(self)
-        data["mapped_state"] = self.mapped_state.value
-        data["awaiting_input"] = self.awaiting_input.value
-        data["terminal_claim"] = self.terminal_claim.value
+        data = {
+            "provider": self.provider,
+            "provider_operation_id": self.provider_operation_id,
+            "observed_at": self.observed_at,
+            "provider_updated_at": self.provider_updated_at,
+            "provider_raw_state": _to_plain(self.provider_raw_state),
+            "mapped_state": self.mapped_state.value,
+            "awaiting_input": self.awaiting_input.value,
+            "terminal_claim": self.terminal_claim.value,
+            "reported_effects": list(self.reported_effects),
+            "provider_refs": list(self.provider_refs),
+            "uncertainty_reason": self.uncertainty_reason,
+        }
         return data
 
 
