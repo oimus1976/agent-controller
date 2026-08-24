@@ -198,28 +198,76 @@ def _classify_write_result(write: object) -> str:
     return "CONFLICT" if write.conflict else "UNCERTAIN"
 
 
+def _safe_identity_component(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and "/" not in value
+        and "\\" not in value
+        and value not in {".", ".."}
+    )
+
+
+def operation_state_path_for_identity(
+    *, controller_task_id: str, operation_id: str, operation_version: str
+) -> str:
+    for value in (controller_task_id, operation_id, operation_version):
+        if not _safe_identity_component(value):
+            raise ValueError("unsafe operation state path component")
+    return f"controller-state/operations/{controller_task_id}/{operation_id}/{operation_version}.json"
+
+
 def operation_state_path(binding: OperationAuthorizationBinding) -> str:
     if not _valid_binding(binding):
         raise ValueError("invalid operation authorization binding")
-    for value in (binding.controller_task_id, binding.operation_id, binding.operation_version):
-        if "/" in value or "\\" in value or value in {".", ".."}:
-            raise ValueError("unsafe operation state path component")
-    return f"controller-state/operations/{binding.controller_task_id}/{binding.operation_id}/{binding.operation_version}.json"
+    return operation_state_path_for_identity(
+        controller_task_id=binding.controller_task_id,
+        operation_id=binding.operation_id,
+        operation_version=binding.operation_version,
+    )
 
 
-def read_operation(*, store: SharedAuthorizationStore, binding: OperationAuthorizationBinding) -> SharedAuthorizationResult:
+def read_operation_by_identity(
+    *,
+    store: SharedAuthorizationStore,
+    controller_task_id: str,
+    operation_id: str,
+    operation_version: str,
+) -> SharedAuthorizationResult:
     try:
-        path = operation_state_path(binding)
+        path = operation_state_path_for_identity(
+            controller_task_id=controller_task_id,
+            operation_id=operation_id,
+            operation_version=operation_version,
+        )
         snapshot = store.backend.read(state_ref=store.state_ref, path=path)
+    except ValueError as exc:
+        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, reason=str(exc))
     except Exception:
         return SharedAuthorizationResult(AuthorizationDecision.UNCERTAIN, reason="STATE_READ_UNCERTAIN")
     if snapshot is None:
         return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, reason="STATE_MISSING")
     if not _valid_snapshot(snapshot):
         return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, reason="STATE_RECORD_INVALID")
-    if snapshot.record.binding != binding:
-        return SharedAuthorizationResult(AuthorizationDecision.BLOCKED, snapshot, "OPERATION_BINDING_CONFLICT")
     return SharedAuthorizationResult(AuthorizationDecision.PASS, snapshot)
+
+
+def read_operation(*, store: SharedAuthorizationStore, binding: OperationAuthorizationBinding) -> SharedAuthorizationResult:
+    result = read_operation_by_identity(
+        store=store,
+        controller_task_id=binding.controller_task_id,
+        operation_id=binding.operation_id,
+        operation_version=binding.operation_version,
+    )
+    if result.decision is not AuthorizationDecision.PASS or result.snapshot is None:
+        return result
+    if result.snapshot.record.binding != binding:
+        return SharedAuthorizationResult(
+            AuthorizationDecision.BLOCKED,
+            result.snapshot,
+            "OPERATION_BINDING_CONFLICT",
+        )
+    return result
 
 
 def propose_operation(*, store: SharedAuthorizationStore, binding: OperationAuthorizationBinding) -> SharedAuthorizationResult:
