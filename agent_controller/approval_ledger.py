@@ -49,9 +49,7 @@ def _load(path: str) -> tuple[list[dict], bool]:
     try:
         with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
-        if not isinstance(data, list):
-            return [], True
-        if not all(isinstance(item, dict) for item in data):
+        if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
             return [], True
         return data, False
     except Exception:
@@ -117,6 +115,10 @@ def consume_approval_once(
         receipts, corrupt = _load(ledger_path)
         if corrupt:
             return ApprovalConsumption(ApprovalResult.BLOCKED, reason="APPROVAL_LEDGER_CORRUPT")
+
+        for existing in receipts:
+            if existing.get("receipt_id") == receipt_id and existing.get("approval_id") != approval.approval_id:
+                return ApprovalConsumption(ApprovalResult.BLOCKED, reason="RECEIPT_ID_REUSED")
 
         for existing in receipts:
             if existing.get("approval_id") != approval.approval_id:
