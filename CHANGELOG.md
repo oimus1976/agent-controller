@@ -42,6 +42,14 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
   - `map_codex_observation()`
 - Jules / Codex の provider-native raw state を pure mapper で `AgentObservation` に正規化するテストを追加。
 - fixture adapter の `observe()` を pure mapper 経由へ変更し、adapter が `AgentObservation` を直接組み立てない責務分離を固定。
+- `agent_controller/provider_clients.py` を追加し、観測専用の `ProviderReadClient` Protocol を導入。
+  - mandatory surface は `get_operation_raw()` の1メソッドのみ。
+  - official SDK / CLI / Action result / fixture のいずれでも薄くラップできる read-only 境界とした。
+- `agent_controller/provider_adapters.py` を追加。
+  - `JulesObservationAdapter`
+  - `CodexObservationAdapter`
+- production側の観測専用adapterを、`ProviderReadClient -> raw payload -> pure mapper -> AgentObservation` の構造で追加。
+- provider target mismatch を client read 前に拒否する deterministic test を追加。
 
 #### Changed
 
@@ -51,6 +59,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
   - `observe()`
   - `collect_artifacts()`
 - optional capability は provider asymmetry を保ったまま、core mandatory protocol とは別に扱う方針を明確化。
+- read-only observation adapter は、不要な `dispatch()` のダミー実装を持たせず、現段階では意図的に full `AgentAdapter` を満たさない設計とした。
 
 #### Safety / trust boundary
 
@@ -60,6 +69,8 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - provider が成功・完了・commit 作成を主張しても、それだけでは Controller PASS にしない。
 - `provider_reported_sha` と `verified_sha` を分離し、provider 自己申告 artifact を独立検証済みとして扱わない。
 - provider-specific network transport はこの proof slice では実装しない。
+- `ProviderReadClient` は approve / send / retry / cancel / dispatch / create / update / delete / merge / deploy 等の mutation surface を持たない。
+- observation adapter も dispatch / mutation authority を持たず、read-only slice に不要な権限を導入しない。
 
 #### Commits reconstructed for this slice
 
@@ -70,6 +81,12 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - `f2133e060e04a9a5b580e1662a8d9f4d0d408623` — pure Jules / Codex observation mapper を追加。
 - `9c6592502b85102d5ffbde4459ffa2ced9dc4cbd` — provider mapper tests を追加。
 - `f203a9e4611d78c3295c9449c4a5934ac04d2284` — fixture adapter を pure mapper 経由へ変更。
+- `20d4c77db832a7095863cc27ad0e3c747a69d420` — reconstructed `CHANGELOG.md` を導入。
+- `b55196f7ea7efbc874c8fa5a408073133570dd77` — read-only `ProviderReadClient` contract を追加。
+- `48bb4f823bdecae3d4807434ce686c7fcbfc2fdc` — fixture flow を injected read client 経由へ変更。
+- `506e5548545e3a3339e5119e7deb5ed04f4c1447` — read-only client boundary tests を追加。
+- `bed1d852c7f9d155bf3b33b032ba5ad419a4ce13` — production read-only Jules / Codex observation adapters を追加。
+- `6460387d70d9eb95f51b01e51a1769cf15c9d517` — observation adapter responsibility / authority boundary tests を追加。
 
 ---
 
