@@ -15,6 +15,11 @@ _RECEIPT_KEYS = frozenset({
     "provider", "requested_capability", "effect", "repo", "target_kind",
     "target_id", "expected_head_sha", "consumed_at", "receipt_id", "status",
 })
+_REQUIRED_STRING_FIELDS = (
+    "approval_id", "approval_policy_id", "controller_task_id", "operation_id",
+    "requested_capability", "effect", "target_kind", "consumed_at", "receipt_id", "status",
+)
+_OPTIONAL_STRING_FIELDS = ("provider", "repo", "target_id", "expected_head_sha")
 
 
 @dataclass(frozen=True)
@@ -58,14 +63,18 @@ def _validate_receipts(data: object) -> bool:
     for item in data:
         if not isinstance(item, dict) or set(item.keys()) != _RECEIPT_KEYS:
             return False
-        if item.get("status") != "CONSUMED":
+        for field in _REQUIRED_STRING_FIELDS:
+            value = item.get(field)
+            if not isinstance(value, str) or not value:
+                return False
+        for field in _OPTIONAL_STRING_FIELDS:
+            value = item.get(field)
+            if value is not None and not isinstance(value, str):
+                return False
+        if item["status"] != "CONSUMED":
             return False
-        approval_id = item.get("approval_id")
-        receipt_id = item.get("receipt_id")
-        if not isinstance(approval_id, str) or not approval_id:
-            return False
-        if not isinstance(receipt_id, str) or not receipt_id:
-            return False
+        approval_id = item["approval_id"]
+        receipt_id = item["receipt_id"]
         if approval_id in seen_approvals or receipt_id in seen_receipts:
             return False
         seen_approvals.add(approval_id)
