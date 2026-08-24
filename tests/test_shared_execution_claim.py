@@ -248,6 +248,23 @@ class SharedExecutionClaimTests(unittest.TestCase):
         result = self.do_claim()
         self.assertEqual(AuthorizationDecision.BLOCKED, result.decision)
 
+    def test_valid_signature_copied_into_forged_claim_is_coordination_replay_only(self):
+        approved = self.backend.snapshot.record
+        forged = dataclasses.replace(
+            approved,
+            state=AuthorizationState.EXECUTION_CLAIMED,
+            execution_claim_id="claim_attacker_selected",
+            controller_run_id="attacker-run",
+        )
+        self.backend.snapshot = SharedRecordSnapshot(forged, "forged-r3")
+        result = self.do_claim()
+        self.assertEqual(AuthorizationDecision.REPLAYED, result.decision)
+        self.assertEqual("EXECUTION_ALREADY_CLAIMED", result.reason)
+        self.assertEqual("claim_attacker_selected", result.snapshot.record.execution_claim_id)
+        self.assertEqual(0, self.reader.calls)
+        # This explicitly documents the boundary: claim origin is not authenticated
+        # by the human signature and this result must never authorize an effect.
+
     def test_public_claim_api_has_no_claim_id_or_authority_override(self):
         params = set(inspect.signature(self.claim.claim).parameters)
         self.assertEqual(
