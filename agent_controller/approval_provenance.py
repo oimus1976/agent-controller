@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Protocol, runtime_checkable
 
 
 class ProvenanceAssurance(str, Enum):
@@ -15,6 +15,7 @@ class ProvenanceAssurance(str, Enum):
 class ApprovalIngressProvenance:
     source_name: str
     source_event_id: str
+    source_created_at: str
     actor: str
     actor_id: str
     event_name: str
@@ -39,11 +40,29 @@ class ProvenanceValidation:
     provenance: Optional[ApprovalIngressProvenance] = None
 
 
+@runtime_checkable
+class GitHubWorkflowRunReader(Protocol):
+    """Read authoritative bounded workflow-run metadata by GitHub run id."""
+
+    def get_workflow_run(self, run_id: str) -> Mapping[str, object]:
+        ...
+
+
+@dataclass(frozen=True)
+class TrustedGitHubWorkflowIngress:
+    """Controller-owned trust configuration for one approval workflow."""
+
+    source_name: str
+    expected_workflow_ref: str
+    reader: GitHubWorkflowRunReader
+
+
 _REQUIRED_FIELDS = (
     "event_name",
     "actor",
     "actor_id",
     "run_id",
+    "created_at",
     "workflow_ref",
     "controller_task_id",
     "operation_id",
@@ -57,9 +76,12 @@ _REQUIRED_FIELDS = (
 )
 
 
-def validate_github_workflow_dispatch_candidate(
+def _validate_authoritative_workflow_record(
     *,
     record: Mapping[str, object],
+    source_name: str,
+    expected_workflow_ref: str,
+    expected_run_id: str,
     expected_controller_task_id: str,
     expected_operation_id: str,
     expected_operation_version: str,
@@ -70,14 +92,6 @@ def validate_github_workflow_dispatch_candidate(
     expected_target_id: str,
     expected_head_sha: str,
 ) -> ProvenanceValidation:
-    """Validate bounded GitHub workflow_dispatch metadata conservatively.
-
-    This PoC never emits VERIFIED_EVENT_PROVENANCE. A workflow run authenticates
-    a GitHub source/actor, but the application cannot prove that Agent Controller
-    credentials were unable to dispatch the workflow. That privilege-separation
-    fact must be established by deployment configuration outside this parser.
-    """
-
     if not isinstance(record, Mapping):
         return ProvenanceValidation(False, ProvenanceAssurance.PROVENANCE_UNAVAILABLE, "RECORD_INVALID")
 
@@ -94,6 +108,10 @@ def validate_github_workflow_dispatch_candidate(
 
     if values["event_name"] != "workflow_dispatch":
         return ProvenanceValidation(False, ProvenanceAssurance.PROVENANCE_UNAVAILABLE, "EVENT_TYPE_MISMATCH")
+    if values["run_id"] != expected_run_id:
+        return ProvenanceValidation(False, ProvenanceAssurance.PROVENANCE_UNAVAILABLE, "RUN_ID_MISMATCH")
+    if values["workflow_ref"] != expected_workflow_ref:
+        return ProvenanceValidation(False, ProvenanceAssurance.SOURCE_AUTHENTICATED_ONLY, "WORKFLOW_REF_MISMATCH")
 
     expected = {
         "controller_task_id": expected_controller_task_id,
@@ -115,8 +133,9 @@ def validate_github_workflow_dispatch_candidate(
             )
 
     provenance = ApprovalIngressProvenance(
-        source_name="github-workflow-dispatch",
+        source_name=source_name,
         source_event_id=values["run_id"],
+        source_created_at=values["created_at"],
         actor=values["actor"],
         actor_id=values["actor_id"],
         event_name=values["event_name"],
@@ -133,3 +152,55 @@ def validate_github_workflow_dispatch_candidate(
         assurance=ProvenanceAssurance.SOURCE_AUTHENTICATED_ONLY,
     )
     return ProvenanceValidation(True, provenance.assurance, provenance=provenance)
+
+
+def read_and_validate_github_workflow_dispatch_candidate(
+    *,
+    ingress: TrustedGitHubWorkflowIngress,
+    run_id: str,
+    expected_controller_task_id: str,
+    expected_operation_id: str,
+    expected_operation_version: str,
+    expected_approval_id: str,
+    expected_effect: str,
+    expected_repo: str,
+    expected_target_kind: str,
+    expected_target_id: str,
+    expected_head_sha: str,
+) -> ProvenanceValidation:
+    """Read one GitHub run through configured ingress, then validate it.
+
+    The supported API deliberately does not accept a caller-supplied Mapping.
+    This PoC never emits VERIFIED_EVENT_PROVENANCE. Even an authoritative GitHub
+    workflow run proves only source/account authentication until deployment
+    configuration independently proves that Agent Controller credentials cannot
+    dispatch the approval workflow.
+    """
+
+    if not isinstance(ingress, TrustedGitHubWorkflowIngress):
+        return ProvenanceValidation(False, ProvenanceAssurance.PROVENANCE_UNAVAILABLE, "INGRESS_INVALID")
+    if not run_id or not ingress.source_name or not ingress.expected_workflow_ref:
+        return ProvenanceValidation(False, ProvenanceAssurance.PROVENANCE_UNAVAILABLE, "INGRESS_BINDING_MISSING")
+    if not isinstance(ingress.reader, GitHubWorkflowRunReader):
+        return ProvenanceValidation(False, ProvenanceAssurance.PROVENANCE_UNAVAILABLE, "READER_INVALID")
+
+    try:
+        record = ingress.reader.get_workflow_run(run_id)
+    except Exception:
+        return ProvenanceValidation(False, ProvenanceAssurance.PROVENANCE_UNAVAILABLE, "SOURCE_READ_UNCERTAIN")
+
+    return _validate_authoritative_workflow_record(
+        record=record,
+        source_name=ingress.source_name,
+        expected_workflow_ref=ingress.expected_workflow_ref,
+        expected_run_id=run_id,
+        expected_controller_task_id=expected_controller_task_id,
+        expected_operation_id=expected_operation_id,
+        expected_operation_version=expected_operation_version,
+        expected_approval_id=expected_approval_id,
+        expected_effect=expected_effect,
+        expected_repo=expected_repo,
+        expected_target_kind=expected_target_kind,
+        expected_target_id=expected_target_id,
+        expected_head_sha=expected_head_sha,
+    )
