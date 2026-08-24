@@ -10,8 +10,43 @@ from agent_controller.provider_contract import (
 )
 
 
+_SENSITIVE_KEY_PARTS = (
+    "token",
+    "secret",
+    "password",
+    "authorization",
+    "api_key",
+    "apikey",
+    "credential",
+    "cookie",
+)
+_REDACTED = "[REDACTED]"
+
+
 def _string(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value else None
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    if not isinstance(key, str):
+        return False
+    normalized = key.lower().replace("-", "_")
+    return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
+
+
+def _sanitize_raw_state(value: Any) -> Any:
+    """Return evidence-safe provider state without secret/config credentials."""
+
+    if isinstance(value, Mapping):
+        return {
+            key: _REDACTED if _is_sensitive_key(key) else _sanitize_raw_state(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_raw_state(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_raw_state(item) for item in value)
+    return value
 
 
 def _refs(raw_state: Mapping[str, Any], keys: Sequence[str]) -> tuple[str, ...]:
@@ -37,7 +72,7 @@ def _uncertain(
         provider_operation_id=provider_operation_id,
         observed_at=observed_at,
         provider_updated_at=provider_updated_at,
-        provider_raw_state=raw_state,
+        provider_raw_state=_sanitize_raw_state(raw_state),
         mapped_state=ControllerState.UNCERTAIN,
         uncertainty_reason=reason,
     )
@@ -52,7 +87,8 @@ def map_jules_observation(
     """Map a Jules fixture payload into the provider-neutral observation model.
 
     This function is deliberately pure: it performs no I/O and treats unknown
-    or malformed provider states as UNCERTAIN rather than guessing.
+    or malformed provider states as UNCERTAIN rather than guessing. Raw state
+    retained as evidence is recursively redacted for credential-like keys.
     """
 
     if not isinstance(raw_state, Mapping):
@@ -83,7 +119,7 @@ def map_jules_observation(
         provider_operation_id=provider_operation_id,
         observed_at=observed_at,
         provider_updated_at=provider_updated_at,
-        provider_raw_state=raw_state,
+        provider_raw_state=_sanitize_raw_state(raw_state),
         provider_refs=_refs(raw_state, ("plan_id", "artifact_id", "result_id")),
     )
 
@@ -135,7 +171,8 @@ def map_codex_observation(
     """Map a Codex fixture payload into the provider-neutral observation model.
 
     This is a fixture vocabulary mapper, not a claim about a stable external
-    Codex API schema. Unknown inputs fail closed to UNCERTAIN.
+    Codex API schema. Unknown inputs fail closed to UNCERTAIN. Raw state retained
+    as evidence is recursively redacted for credential-like keys.
     """
 
     if not isinstance(raw_state, Mapping):
@@ -171,7 +208,7 @@ def map_codex_observation(
         provider_operation_id=provider_operation_id,
         observed_at=observed_at,
         provider_updated_at=provider_updated_at,
-        provider_raw_state=raw_state,
+        provider_raw_state=_sanitize_raw_state(raw_state),
         provider_refs=_refs(raw_state, ("task_id", "artifact_id", "result_id")),
     )
 
