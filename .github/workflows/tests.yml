@@ -1,6 +1,9 @@
 name: deterministic-tests
 
 on:
+  push:
+    branches:
+      - phase-4c-pn1-provider-neutral-proof
   pull_request:
     branches:
       - main
