@@ -64,6 +64,13 @@ def read_and_validate_human_approval(
             "APPROVAL_NOT_FOUND",
             approval_id,
         )
+    if not isinstance(approval, ApprovalBinding):
+        return None, ApprovalValidation(
+            False,
+            ApprovalResult.UNCERTAIN,
+            "APPROVAL_SOURCE_PAYLOAD_INVALID",
+            approval_id,
+        )
 
     if approval.approval_id != approval_id:
         return approval, ApprovalValidation(
