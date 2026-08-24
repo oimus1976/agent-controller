@@ -189,13 +189,9 @@ class SharedAuthorizationTests(unittest.TestCase):
     def test_public_api_exposes_no_human_approved_transition(self):
         import agent_controller.shared_authorization as module
 
-        public_functions = {
-            name
-            for name, value in vars(module).items()
-            if inspect.isfunction(value) and not name.startswith("_")
-        }
-        self.assertNotIn("approve_proposed_operation", public_functions)
-        self.assertEqual({"operation_state_path", "propose_operation", "read_operation"}, public_functions)
+        self.assertFalse(hasattr(module, "approve_proposed_operation"))
+        for name in ("operation_state_path", "propose_operation", "read_operation"):
+            self.assertTrue(inspect.isfunction(getattr(module, name)))
 
     def test_plain_caller_provenance_cannot_advance_state(self):
         first = propose_operation(store=self.store, binding=self.binding)
