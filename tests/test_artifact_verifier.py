@@ -7,6 +7,7 @@ from agent_controller.artifact_verifier import (
 from agent_controller.provider_contract import (
     ArtifactEvidence,
     ObjectiveScope,
+    ProviderOperationRef,
     TaskBinding,
     VerificationResult,
     VerificationSource,
@@ -69,10 +70,20 @@ def make_task(provider="jules"):
     )
 
 
-def make_evidence(provider="jules", *, ref="refs/heads/work", sha="new-sha"):
+def make_operation(provider="jules", provider_operation_id="provider-op-1"):
+    return ProviderOperationRef(
+        provider=provider,
+        provider_operation_id=provider_operation_id,
+        provider_url=None,
+        controller_task_id="task-1",
+        operation_id="op-1",
+    )
+
+
+def make_evidence(provider="jules", *, ref="refs/heads/work", sha="new-sha", provider_operation_id="provider-op-1"):
     return ArtifactEvidence(
         provider=provider,
-        provider_operation_id="provider-op-1",
+        provider_operation_id=provider_operation_id,
         artifact_kind="commit",
         provider_artifact_id="artifact-1",
         provider_reported_ref=ref,
@@ -80,6 +91,15 @@ def make_evidence(provider="jules", *, ref="refs/heads/work", sha="new-sha"):
         content_hash=None,
         observed_at="2026-08-24T01:30:00Z",
         freshness_basis="provider_report",
+    )
+
+
+def verify(provider="jules", *, task=None, operation=None, evidence=None, github=None):
+    return verify_github_artifact(
+        task=task or make_task(provider),
+        operation=operation or make_operation(provider),
+        evidence=evidence or make_evidence(provider),
+        github=github or FakeGitHub(),
     )
 
 
@@ -91,11 +111,7 @@ class TestArtifactVerifier(unittest.TestCase):
             self.assertNotIn(forbidden, source_names)
 
     def test_successful_verification_promotes_only_after_github_facts_pass(self):
-        github = FakeGitHub()
-        result = verify_github_artifact(
-            task=make_task(), evidence=make_evidence(), github=github
-        )
-
+        result = verify()
         self.assertTrue(result.independently_verified)
         self.assertEqual(result.verification_source, VerificationSource.GITHUB)
         self.assertEqual(result.verification_result, VerificationResult.PASS)
@@ -104,46 +120,31 @@ class TestArtifactVerifier(unittest.TestCase):
         self.assertEqual(result.verified_sha, "new-sha")
 
     def test_provider_name_does_not_change_verification_rules(self):
-        jules = verify_github_artifact(
-            task=make_task("jules"), evidence=make_evidence("jules"), github=FakeGitHub()
-        )
-        codex = verify_github_artifact(
-            task=make_task("codex"), evidence=make_evidence("codex"), github=FakeGitHub()
-        )
+        jules = verify("jules")
+        codex = verify("codex")
         self.assertEqual(jules.verification_result, codex.verification_result)
         self.assertEqual(jules.verified_sha, codex.verified_sha)
 
     def test_provider_reported_sha_mismatch_fails(self):
-        result = verify_github_artifact(
-            task=make_task(), evidence=make_evidence(sha="claimed-sha"), github=FakeGitHub()
-        )
+        result = verify(evidence=make_evidence(sha="claimed-sha"))
         self.assertFalse(result.independently_verified)
         self.assertEqual(result.verification_result, VerificationResult.FAIL)
 
     def test_unchanged_start_sha_fails_freshness(self):
-        result = verify_github_artifact(
-            task=make_task(),
+        result = verify(
             evidence=make_evidence(sha="start-sha"),
             github=FakeGitHub(ref_sha="start-sha"),
         )
         self.assertEqual(result.verification_result, VerificationResult.FAIL)
 
     def test_wrong_ancestry_fails(self):
-        result = verify_github_artifact(
-            task=make_task(),
-            evidence=make_evidence(),
-            github=FakeGitHub(merge_base_sha="other-base"),
-        )
+        result = verify(github=FakeGitHub(merge_base_sha="other-base"))
         self.assertEqual(result.verification_result, VerificationResult.FAIL)
 
     def test_scope_violation_fails_for_both_providers(self):
         files = [{"filename": "secrets/private.txt", "changes": 1}]
         for provider in ("jules", "codex"):
-            result = verify_github_artifact(
-                task=make_task(provider),
-                evidence=make_evidence(provider),
-                github=FakeGitHub(files=files),
-            )
+            result = verify(provider, github=FakeGitHub(files=files))
             self.assertEqual(result.verification_result, VerificationResult.FAIL)
             self.assertFalse(result.independently_verified)
 
@@ -164,33 +165,50 @@ class TestArtifactVerifier(unittest.TestCase):
             created_at=task.created_at,
         )
         github = FakeGitHub()
-        result = verify_github_artifact(task=task, evidence=make_evidence(), github=github)
+        result = verify(task=task, github=github)
         self.assertEqual(result.verification_result, VerificationResult.BLOCKED)
         self.assertEqual(github.ref_calls, [])
 
     def test_missing_provider_ref_is_blocked(self):
-        result = verify_github_artifact(
-            task=make_task(), evidence=make_evidence(ref=None), github=FakeGitHub()
-        )
+        result = verify(evidence=make_evidence(ref=None))
         self.assertEqual(result.verification_result, VerificationResult.BLOCKED)
 
     def test_ref_read_uncertainty_is_not_failure_or_pass(self):
         github = FakeGitHub()
         github.raise_ref = True
-        result = verify_github_artifact(
-            task=make_task(), evidence=make_evidence(), github=github
-        )
+        result = verify(github=github)
         self.assertEqual(result.verification_result, VerificationResult.UNCERTAIN)
         self.assertFalse(result.independently_verified)
 
     def test_compare_uncertainty_is_not_failure_or_pass(self):
         github = FakeGitHub()
         github.raise_compare = True
-        result = verify_github_artifact(
-            task=make_task(), evidence=make_evidence(), github=github
-        )
+        result = verify(github=github)
         self.assertEqual(result.verification_result, VerificationResult.UNCERTAIN)
         self.assertFalse(result.independently_verified)
+
+    def test_binding_mismatch_blocks_before_github_read(self):
+        github = FakeGitHub()
+        result = verify(
+            operation=make_operation("jules", provider_operation_id="provider-op-1"),
+            evidence=make_evidence("jules", provider_operation_id="other-provider-op"),
+            github=github,
+        )
+        self.assertEqual(result.verification_result, VerificationResult.BLOCKED)
+        self.assertFalse(result.independently_verified)
+        self.assertEqual(github.ref_calls, [])
+        self.assertEqual(github.compare_calls, [])
+
+    def test_cross_provider_artifact_blocks_before_github_read(self):
+        github = FakeGitHub()
+        result = verify(
+            task=make_task("jules"),
+            operation=make_operation("jules"),
+            evidence=make_evidence("codex"),
+            github=github,
+        )
+        self.assertEqual(result.verification_result, VerificationResult.BLOCKED)
+        self.assertEqual(github.ref_calls, [])
 
 
 if __name__ == "__main__":
