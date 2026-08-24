@@ -48,8 +48,11 @@ class ApprovalValidation:
 @dataclass(frozen=True)
 class ApprovalReceipt:
     approval_id: str
+    approval_policy_id: str
     controller_task_id: str
     operation_id: str
+    provider: Optional[str]
+    requested_capability: str
     effect: str
     repo: Optional[str]
     target_kind: str
