@@ -1,31 +1,33 @@
+import inspect
 import unittest
 
 from agent_controller.repository_write_guard import (
     CONTROLLER_STATE_REF,
     RepositoryWriteDecision,
-    RepositoryWritePolicy,
+    RepositoryWriteGuard,
     RepositoryWritePurpose,
     RepositoryWriteTarget,
-    validate_repository_write_target,
 )
 
 
 class RepositoryWriteGuardTests(unittest.TestCase):
     def setUp(self):
-        self.policy = RepositoryWritePolicy(
+        self.guard = RepositoryWriteGuard(
             repo="oimus1976/agent-controller",
             default_branch="main",
         )
 
-    def validate(self, ref, purpose=RepositoryWritePurpose.IMPLEMENTATION_BRANCH, policy=None):
-        return validate_repository_write_target(
-            policy=policy or self.policy,
+    def validate(self, ref, purpose=RepositoryWritePurpose.IMPLEMENTATION_BRANCH):
+        return self.guard.validate(
             target=RepositoryWriteTarget(
                 repo="oimus1976/agent-controller",
                 explicit_ref=ref,
                 purpose=purpose,
-            ),
+            )
         )
+
+    def test_supported_validate_api_has_no_per_call_policy_override(self):
+        self.assertEqual({"target"}, set(inspect.signature(self.guard.validate).parameters))
 
     def test_missing_or_empty_ref_is_blocked(self):
         for ref in (None, "", "   "):
@@ -44,15 +46,15 @@ class RepositoryWriteGuardTests(unittest.TestCase):
         self.assertEqual(RepositoryWriteDecision.PASS, result.decision)
         self.assertEqual("feature/x", result.normalized_ref)
 
-    def test_explicit_default_branch_is_blocked_for_normal_write(self):
-        result = self.validate("main")
-        self.assertEqual(RepositoryWriteDecision.BLOCKED, result.decision)
-        self.assertEqual("DEFAULT_BRANCH_WRITE_FORBIDDEN", result.reason)
+    def test_explicit_default_branch_is_always_blocked(self):
+        for ref in ("main", "refs/heads/main"):
+            with self.subTest(ref=ref):
+                result = self.validate(ref)
+                self.assertEqual(RepositoryWriteDecision.BLOCKED, result.decision)
+                self.assertEqual("DEFAULT_BRANCH_WRITE_FORBIDDEN", result.reason)
 
-    def test_default_branch_alias_cannot_bypass(self):
-        result = self.validate("refs/heads/main")
-        self.assertEqual(RepositoryWriteDecision.BLOCKED, result.decision)
-        self.assertEqual("DEFAULT_BRANCH_WRITE_FORBIDDEN", result.reason)
+    def test_generic_guard_exposes_no_direct_default_branch_admin_purpose(self):
+        self.assertNotIn("DIRECT_DEFAULT_BRANCH_ADMIN", RepositoryWritePurpose.__members__)
 
     def test_head_aliases_are_blocked(self):
         for ref in ("HEAD", "head", ".", ".."):
@@ -81,49 +83,13 @@ class RepositoryWriteGuardTests(unittest.TestCase):
         self.assertEqual(RepositoryWriteDecision.BLOCKED, result.decision)
         self.assertEqual("CONTROLLER_STATE_REF_MISMATCH", result.reason)
 
-    def test_direct_default_branch_admin_is_disabled_by_default(self):
-        result = self.validate(
-            "main",
-            purpose=RepositoryWritePurpose.DIRECT_DEFAULT_BRANCH_ADMIN,
-        )
-        self.assertEqual(RepositoryWriteDecision.BLOCKED, result.decision)
-        self.assertEqual("DIRECT_DEFAULT_BRANCH_ADMIN_DISABLED", result.reason)
-
-    def test_direct_default_branch_admin_requires_explicit_separate_policy(self):
-        enabled = RepositoryWritePolicy(
-            repo="oimus1976/agent-controller",
-            default_branch="main",
-            allow_direct_default_branch_admin=True,
-        )
-        result = self.validate(
-            "main",
-            purpose=RepositoryWritePurpose.DIRECT_DEFAULT_BRANCH_ADMIN,
-            policy=enabled,
-        )
-        self.assertEqual(RepositoryWriteDecision.PASS, result.decision)
-
-    def test_direct_default_branch_admin_cannot_target_other_branch(self):
-        enabled = RepositoryWritePolicy(
-            repo="oimus1976/agent-controller",
-            default_branch="main",
-            allow_direct_default_branch_admin=True,
-        )
-        result = self.validate(
-            "feature/x",
-            purpose=RepositoryWritePurpose.DIRECT_DEFAULT_BRANCH_ADMIN,
-            policy=enabled,
-        )
-        self.assertEqual(RepositoryWriteDecision.BLOCKED, result.decision)
-        self.assertEqual("DIRECT_DEFAULT_BRANCH_TARGET_MISMATCH", result.reason)
-
     def test_repo_mismatch_is_blocked(self):
-        result = validate_repository_write_target(
-            policy=self.policy,
+        result = self.guard.validate(
             target=RepositoryWriteTarget(
                 repo="other/repo",
                 explicit_ref="feature/x",
                 purpose=RepositoryWritePurpose.IMPLEMENTATION_BRANCH,
-            ),
+            )
         )
         self.assertEqual(RepositoryWriteDecision.BLOCKED, result.decision)
         self.assertEqual("WRITE_REPO_MISMATCH", result.reason)
@@ -135,13 +101,18 @@ class RepositoryWriteGuardTests(unittest.TestCase):
                 self.assertEqual(RepositoryWriteDecision.BLOCKED, result.decision)
                 self.assertEqual("WRITE_REF_INVALID", result.reason)
 
-    def test_controller_state_ref_is_fixed_by_composition(self):
-        with self.assertRaises(ValueError):
-            RepositoryWritePolicy(
-                repo="oimus1976/agent-controller",
-                default_branch="main",
-                controller_state_ref="main",
-            )
+    def test_composed_default_branch_is_read_only(self):
+        self.assertEqual("main", self.guard.default_branch)
+        with self.assertRaises(AttributeError):
+            self.guard.default_branch = "develop"
+
+    def test_caller_cannot_use_controller_state_purpose_for_main(self):
+        result = self.validate(
+            "main",
+            purpose=RepositoryWritePurpose.CONTROLLER_STATE,
+        )
+        self.assertEqual(RepositoryWriteDecision.BLOCKED, result.decision)
+        self.assertEqual("DEFAULT_BRANCH_WRITE_FORBIDDEN", result.reason)
 
 
 if __name__ == "__main__":
