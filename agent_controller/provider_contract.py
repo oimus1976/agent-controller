@@ -135,13 +135,9 @@ class ArtifactEvidence:
 class AgentAdapter(Protocol):
     """Minimum provider-neutral adapter contract.
 
-    Provider-specific lifecycle operations remain outside this protocol unless
-    exposed separately as optional capabilities.
+    Provider-specific lifecycle operations and capability discovery remain
+    outside this protocol unless exposed separately as optional capabilities.
     """
-
-    @property
-    def capabilities(self) -> Sequence[str]:
-        ...
 
     def dispatch(self, task: TaskBinding) -> ProviderOperationRef:
         ...
