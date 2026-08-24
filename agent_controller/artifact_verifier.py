@@ -16,16 +16,20 @@ from agent_controller.provider_contract import (
 
 @runtime_checkable
 class GitHubArtifactReadClient(Protocol):
-    """Minimal read-only GitHub facts required for artifact verification.
-
-    Network/API implementation is intentionally outside PN1. Tests inject
-    deterministic facts; future adapters may wrap existing GitHub primitives.
-    """
+    """Minimal read-only GitHub facts required for code artifact verification."""
 
     def get_ref_sha(self, repo: str, ref: str) -> Optional[str]:
         ...
 
     def compare_commits(self, repo: str, base_sha: str, head_sha: str) -> Mapping[str, Any]:
+        ...
+
+
+@runtime_checkable
+class GitHubPullRequestReadClient(Protocol):
+    """Optional read-only GitHub facts required for PR artifact verification."""
+
+    def get_pull_request(self, repo: str, pr_number: int) -> Mapping[str, Any]:
         ...
 
 
@@ -65,52 +69,24 @@ def _uncertain(evidence: ArtifactEvidence) -> ArtifactEvidence:
     )
 
 
-def verify_github_artifact(
-    *,
-    task: TaskBinding,
-    operation: ProviderOperationRef,
-    evidence: ArtifactEvidence,
-    github: GitHubArtifactReadClient,
-) -> ArtifactEvidence:
-    """Independently verify one provider-reported GitHub artifact.
-
-    Binding is validated before any GitHub I/O. Provider identity never changes
-    the verification rules. Both provider-reported ref and immutable SHA are
-    required so a mutable ref cannot be rebound to a different artifact between
-    provider publication and Controller verification.
-    """
-
-    binding = validate_evidence_chain(
-        task=task,
-        operation=operation,
-        artifact=evidence,
-    )
-    if not binding.valid:
-        return _blocked(evidence)
-
-    if task.repo is None or task.expected_start_sha is None:
-        return _blocked(evidence)
-
-    if evidence.provider_reported_ref is None or evidence.provider_reported_sha is None:
-        return _blocked(evidence)
-
+def _scope(task: TaskBinding):
     allowed_paths = tuple(task.objective_scope.allowed_paths or ())
     denied_paths = tuple(task.objective_scope.denied_paths or ())
     if not allowed_paths and not denied_paths:
-        return _blocked(evidence)
+        return None
+    return allowed_paths, denied_paths
 
-    try:
-        resolved_sha = github.get_ref_sha(task.repo, evidence.provider_reported_ref)
-    except Exception:
-        return _uncertain(evidence)
 
-    if resolved_sha is None:
-        return _failed(evidence)
-
+def _verify_sha_ancestry_and_scope(
+    *,
+    task: TaskBinding,
+    evidence: ArtifactEvidence,
+    resolved_sha: str,
+    github: GitHubArtifactReadClient,
+) -> ArtifactEvidence:
     if resolved_sha != evidence.provider_reported_sha:
         return _failed(evidence)
 
-    # Freshness: unchanged publication cannot satisfy a code-artifact handoff.
     if resolved_sha == task.expected_start_sha:
         return _failed(evidence)
 
@@ -119,22 +95,25 @@ def verify_github_artifact(
     except Exception:
         return _uncertain(evidence)
 
-    merge_base_sha = comparison.get("merge_base_sha")
-    if merge_base_sha != task.expected_start_sha:
+    if comparison.get("merge_base_sha") != task.expected_start_sha:
         return _failed(evidence)
 
     files = comparison.get("files")
     if not isinstance(files, Sequence) or isinstance(files, (str, bytes)):
         return _uncertain(evidence)
 
-    scope_policy = {
-        "allowed_paths": list(allowed_paths),
-        "denied_paths": list(denied_paths),
-        # Artifact verification is not a docs-only classifier. Permit docs-only
-        # changes when they are otherwise inside the explicit path scope.
-        "allow_docs_only": True,
-    }
-    scope_result = evaluate_scope(files, scope_policy)
+    scope = _scope(task)
+    if scope is None:
+        return _blocked(evidence)
+    allowed_paths, denied_paths = scope
+    scope_result = evaluate_scope(
+        files,
+        {
+            "allowed_paths": list(allowed_paths),
+            "denied_paths": list(denied_paths),
+            "allow_docs_only": True,
+        },
+    )
     if scope_result == "VIOLATION":
         return _failed(evidence)
     if scope_result != "SATISFIED":
@@ -148,4 +127,87 @@ def verify_github_artifact(
         verified_ref=evidence.provider_reported_ref,
         verified_sha=resolved_sha,
         verification_result=VerificationResult.PASS,
+    )
+
+
+def _verify_pull_request_artifact(
+    *,
+    task: TaskBinding,
+    evidence: ArtifactEvidence,
+    github: GitHubArtifactReadClient,
+) -> ArtifactEvidence:
+    if not isinstance(github, GitHubPullRequestReadClient):
+        return _blocked(evidence)
+
+    try:
+        pr_number = int(evidence.provider_artifact_id or "")
+    except ValueError:
+        return _blocked(evidence)
+    if pr_number <= 0:
+        return _blocked(evidence)
+
+    try:
+        pr = github.get_pull_request(task.repo, pr_number)
+    except Exception:
+        return _uncertain(evidence)
+
+    if pr.get("number") != pr_number:
+        return _failed(evidence)
+    if pr.get("state") != "open" or pr.get("merged") is not False:
+        return _failed(evidence)
+    if pr.get("head_ref") != evidence.provider_reported_ref:
+        return _failed(evidence)
+
+    head_sha = pr.get("head_sha")
+    if not isinstance(head_sha, str) or not head_sha:
+        return _uncertain(evidence)
+
+    return _verify_sha_ancestry_and_scope(
+        task=task,
+        evidence=evidence,
+        resolved_sha=head_sha,
+        github=github,
+    )
+
+
+def verify_github_artifact(
+    *,
+    task: TaskBinding,
+    operation: ProviderOperationRef,
+    evidence: ArtifactEvidence,
+    github: GitHubArtifactReadClient,
+) -> ArtifactEvidence:
+    """Independently verify one provider-reported GitHub artifact.
+
+    Binding is validated before any GitHub I/O. Provider identity never changes
+    the rules. Mutable refs must be paired with provider-reported immutable SHA.
+    PR artifacts additionally require objective PR identity/state and head facts.
+    """
+
+    binding = validate_evidence_chain(task=task, operation=operation, artifact=evidence)
+    if not binding.valid:
+        return _blocked(evidence)
+
+    if task.repo is None or task.expected_start_sha is None:
+        return _blocked(evidence)
+    if evidence.provider_reported_ref is None or evidence.provider_reported_sha is None:
+        return _blocked(evidence)
+    if _scope(task) is None:
+        return _blocked(evidence)
+
+    if evidence.artifact_kind.lower() in {"pull_request", "pr"}:
+        return _verify_pull_request_artifact(task=task, evidence=evidence, github=github)
+
+    try:
+        resolved_sha = github.get_ref_sha(task.repo, evidence.provider_reported_ref)
+    except Exception:
+        return _uncertain(evidence)
+    if resolved_sha is None:
+        return _failed(evidence)
+
+    return _verify_sha_ancestry_and_scope(
+        task=task,
+        evidence=evidence,
+        resolved_sha=resolved_sha,
+        github=github,
     )
