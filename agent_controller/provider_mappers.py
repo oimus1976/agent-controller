@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping, Optional, Sequence
 
 from agent_controller.provider_contract import (
@@ -10,45 +11,81 @@ from agent_controller.provider_contract import (
 )
 
 
-_EVIDENCE_KEYS = frozenset(
+_SAFE_NATIVE_VALUES = frozenset(
     {
-        "status",
-        "reason",
-        "result",
-        "updated_at",
-        "plan_id",
-        "artifact_id",
-        "result_id",
-        "task_id",
+        "PLANNING",
+        "PLAN_GENERATING",
+        "AWAITING_PLAN_APPROVAL",
+        "PLAN_REVIEW_REQUIRED",
+        "RUNNING",
+        "EXECUTING",
+        "WORKING",
+        "AWAITING_USER",
+        "NEEDS_USER_INPUT",
+        "COMPLETED",
+        "SUCCEEDED",
+        "FAILED",
+        "ERROR",
+        "planning",
+        "thinking",
+        "waiting_for_user",
+        "running",
+        "working",
+        "executing",
+        "done",
+        "completed",
+        "failed",
+        "error",
+        "plan_review",
+        "success",
+        "succeeded",
+        "failure",
     }
 )
+_SAFE_ID = re.compile(r"^[A-Za-z0-9._:/-]{1,256}$")
+_SAFE_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 
 
 def _string(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value else None
 
 
-def _evidence_projection(raw_state: Any) -> Any:
-    """Retain only provider fields explicitly approved for normalized evidence.
+def _safe_id(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and _SAFE_ID.fullmatch(value) else None
 
-    Arbitrary provider payload is intentionally not copied into normalized/audit
-    evidence because credentials may appear under innocuous keys or inside URLs,
-    headers, and free-form strings.
-    """
+
+def _safe_timestamp(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and _SAFE_TIMESTAMP.fullmatch(value) else None
+
+
+def _evidence_projection(raw_state: Any) -> Any:
+    """Retain only bounded structural evidence, never arbitrary provider text."""
 
     if not isinstance(raw_state, Mapping):
         return {"raw_type": type(raw_state).__name__}
-    return {
-        key: value
-        for key, value in raw_state.items()
-        if key in _EVIDENCE_KEYS and isinstance(value, (str, int, float, bool, type(None)))
-    }
+
+    projection = {}
+    for key in ("status", "reason", "result"):
+        value = raw_state.get(key)
+        if isinstance(value, str) and value in _SAFE_NATIVE_VALUES:
+            projection[key] = value
+
+    updated_at = _safe_timestamp(raw_state.get("updated_at"))
+    if updated_at is not None:
+        projection["updated_at"] = updated_at
+
+    for key in ("plan_id", "artifact_id", "result_id", "task_id"):
+        value = _safe_id(raw_state.get(key))
+        if value is not None:
+            projection[key] = value
+
+    return projection
 
 
 def _refs(raw_state: Mapping[str, Any], keys: Sequence[str]) -> tuple[str, ...]:
     refs = []
     for key in keys:
-        value = _string(raw_state.get(key))
+        value = _safe_id(raw_state.get(key))
         if value is not None:
             refs.append(value)
     return tuple(refs)
@@ -92,7 +129,7 @@ def map_jules_observation(
             reason="JULES_RAW_STATE_NOT_MAPPING",
         )
 
-    provider_updated_at = _string(raw_state.get("updated_at"))
+    provider_updated_at = _safe_timestamp(raw_state.get("updated_at"))
     status = _string(raw_state.get("status"))
     if status is None:
         return _uncertain(
@@ -149,7 +186,7 @@ def map_jules_observation(
         raw_state=raw_state,
         observed_at=observed_at,
         provider_updated_at=provider_updated_at,
-        reason=f"JULES_STATUS_UNKNOWN:{status}",
+        reason="JULES_STATUS_UNKNOWN",
     )
 
 
@@ -175,7 +212,7 @@ def map_codex_observation(
             reason="CODEX_RAW_STATE_NOT_MAPPING",
         )
 
-    provider_updated_at = _string(raw_state.get("updated_at"))
+    provider_updated_at = _safe_timestamp(raw_state.get("updated_at"))
     status = _string(raw_state.get("status"))
     reason = _string(raw_state.get("reason"))
     result = _string(raw_state.get("result"))
@@ -240,5 +277,5 @@ def map_codex_observation(
         raw_state=raw_state,
         observed_at=observed_at,
         provider_updated_at=provider_updated_at,
-        reason=f"CODEX_STATE_UNKNOWN:{status}:{reason or ''}:{result or ''}",
+        reason="CODEX_STATE_UNKNOWN",
     )
