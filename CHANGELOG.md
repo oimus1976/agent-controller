@@ -59,6 +59,12 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - provider-reported artifact の取得を observation client とは別 capability に分離。
 - `ProviderArtifactReadClient -> raw artifact -> pure artifact mapper -> ArtifactEvidence` の read-only 経路を追加。
 - Codex の review-only artifact を code publication なしで表現できる deterministic test を追加。
+- `agent_controller/artifact_verifier.py` を追加。
+  - read-only `GitHubArtifactReadClient` Protocol
+  - `verify_github_artifact()`
+- provider-reported artifact を provider 名に依存せず、GitHub objective facts で独立検証する共通経路を追加。
+- GitHub ref resolution、provider-reported SHA 一致、start SHA からの freshness、ancestry、changed-file scope を順に検証。
+- Phase 3A の `evaluate_scope()` を再利用し、path-scope policy を二重実装しない構造とした。
 
 #### Changed
 
@@ -70,6 +76,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - optional capability は provider asymmetry を保ったまま、core mandatory protocol とは別に扱う方針を明確化。
 - read-only observation adapter は、不要な `dispatch()` のダミー実装を持たせず、現段階では意図的に full `AgentAdapter` を満たさない設計とした。
 - artifact read capability も operation observation と分離し、provider が一方だけを提供する場合に不要な capability を強制しない設計とした。
+- artifact verification は provider adapter 内では行わず、共通の GitHub verifier へ分離した。
 
 #### Safety / trust boundary
 
@@ -85,6 +92,10 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - provider が ref / SHA / content hash を報告しても、artifact mapper / adapter は `independently_verified=True` を設定しない。
 - unparseable artifact は `artifact_kind="unknown"` / `freshness_basis="provider_report_unparseable"` として保持し、成功や検証済み状態へ推定しない。
 - artifact adapter の provider target mismatch は client read 前に拒否する。
+- GitHub verifier だけが `independently_verified=True` / `verification_result=PASS` へ昇格できる。
+- ref / SHA / ancestry / scope の明確な不一致は `FAIL`、必要binding不足は `BLOCKED`、GitHub read/compare不確実性は `UNCERTAIN` として区別する。
+- unchanged start SHA は fresh artifact と認めない。
+- Jules と Codex で verifier rules を分岐しない。
 
 #### Commits reconstructed for this slice
 
@@ -104,6 +115,9 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - `9b3ba83ee51f180f819650d4d16c8bcf3611e5c8` — read-only observation boundary を CHANGELOG に記録。
 - `a1d244d017407787fbaf4023c15b5744bf3f5f9b` — provider artifact read / mapping / adapter boundaries を追加。
 - `200e29f51dd72c041f99f17a0e7f136cd3466491` — artifact trust / capability boundary tests を追加。
+- `2e50e81d662268b17efffccf1b5f3e1e963bfecf` — provider artifact boundary を CHANGELOG に記録。
+- `5cc1588158e6b7cf52f12f8f2f8cf72b6df760a2` — provider-neutral GitHub artifact verifier を追加。
+- `6c7a35f1ca30fea6f47d4b3b0b47e22e37afca3b` — artifact verifier tests を追加。
 
 ---
 
