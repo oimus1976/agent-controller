@@ -45,6 +45,24 @@ class ApprovalValidation:
     approval_id: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class ApprovalReceipt:
+    approval_id: str
+    controller_task_id: str
+    operation_id: str
+    effect: str
+    repo: Optional[str]
+    target_kind: str
+    target_id: Optional[str]
+    expected_head_sha: Optional[str]
+    consumed_at: str
+    receipt_id: str
+    status: str = "CONSUMED"
+
+    def to_dict(self):
+        return asdict(self)
+
+
 @runtime_checkable
 class HumanApprovalSource(Protocol):
     """Trusted control-plane ingress for structured human approval facts.
