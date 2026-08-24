@@ -21,12 +21,13 @@ class ProvenanceAssurance(str, Enum):
     PROVENANCE_UNAVAILABLE = "PROVENANCE_UNAVAILABLE"
 
 
-# PoC-only Controller-pinned approval key for the v2 exact-binding fixture.
-# The private key was generated only to create the fixture signature and is not
+# PoC-only Controller-pinned approval keys for deterministic test fixtures.
+# Fixture private keys were generated only to create signatures and are not
 # stored in this repository. Production enrollment/rotation remains separate.
 _PINNED_APPROVAL_KEYS = MappingProxyType(
     {
         "human-key-poc-2": "Pxpq8/gqzFvE+96c3WI2QMsKIMHevr175Yy4e1EvS/E=",
+        "human-key-poc-3": "wATGr7gy8bzoYR/1D6qjXQOU4bYb9akZCm3X9p/jUJ4=",
     }
 )
 
