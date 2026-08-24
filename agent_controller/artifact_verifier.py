@@ -138,6 +138,8 @@ def _verify_pull_request_artifact(
 ) -> ArtifactEvidence:
     if not isinstance(github, GitHubPullRequestReadClient):
         return _blocked(evidence)
+    if task.expected_start_ref is None:
+        return _blocked(evidence)
 
     try:
         pr_number = int(evidence.provider_artifact_id or "")
@@ -155,6 +157,19 @@ def _verify_pull_request_artifact(
         return _failed(evidence)
     if pr.get("state") != "open" or pr.get("merged") is not False:
         return _failed(evidence)
+
+    base_repo = pr.get("base_repo")
+    base_ref = pr.get("base_ref")
+    base_sha = pr.get("base_sha")
+    if not all(isinstance(value, str) and value for value in (base_repo, base_ref, base_sha)):
+        return _uncertain(evidence)
+    if base_repo != task.repo:
+        return _failed(evidence)
+    if base_ref != task.expected_start_ref:
+        return _failed(evidence)
+    if base_sha != task.expected_start_sha:
+        return _failed(evidence)
+
     if pr.get("head_ref") != evidence.provider_reported_ref:
         return _failed(evidence)
 
@@ -181,7 +196,8 @@ def verify_github_artifact(
 
     Binding is validated before any GitHub I/O. Provider identity never changes
     the rules. Mutable refs must be paired with provider-reported immutable SHA.
-    PR artifacts additionally require objective PR identity/state and head facts.
+    PR artifacts additionally require objective PR identity, base/head target,
+    state, ancestry, and changed-file scope facts.
     """
 
     binding = validate_evidence_chain(task=task, operation=operation, artifact=evidence)
