@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Mapping, Optional, Protocol, runtime_checkable
 
 from agent_controller.approval_contract import ApprovalResult, ApprovalValidation
-from agent_controller.approval_ledger import ApprovalConsumption, consume_approval_once
+from agent_controller.approval_ledger import ApprovalConsumption, _consume_validated_approval_once
 from agent_controller.approval_service import TrustedApprovalIngress, read_and_validate_human_approval
 from agent_controller.provider_contract import TaskBinding
 
@@ -45,7 +45,10 @@ def validate_and_consume_human_approval(
 ) -> ApprovalConsumeResult:
     """Validate trusted approval, re-read objective target, then consume once.
 
-    No authorized effect is executed here.
+    This is the supported consumption API. No authorized effect is executed.
+    The objective read and local ledger commit are not a distributed transaction;
+    a future effect executor must independently re-read target facts again before
+    applying any high-impact effect.
     """
 
     approval, validation = read_and_validate_human_approval(
@@ -79,7 +82,10 @@ def validate_and_consume_human_approval(
             None,
         )
 
-    for key in ("repo", "target_kind", "target_id", "head_sha"):
+    required_keys = ["repo", "target_kind", "target_id"]
+    if expected_head_sha is not None:
+        required_keys.append("head_sha")
+    for key in required_keys:
         if key not in facts:
             return ApprovalConsumeResult(
                 ApprovalValidation(False, ApprovalResult.UNCERTAIN, f"TARGET_FACT_MISSING:{key}", approval.approval_id),
@@ -101,13 +107,13 @@ def validate_and_consume_human_approval(
             ApprovalValidation(False, ApprovalResult.STALE, "TARGET_ID_STALE", approval.approval_id),
             None,
         )
-    if facts["head_sha"] != expected_head_sha:
+    if expected_head_sha is not None and facts["head_sha"] != expected_head_sha:
         return ApprovalConsumeResult(
             ApprovalValidation(False, ApprovalResult.STALE, "TARGET_HEAD_STALE", approval.approval_id),
             None,
         )
 
-    consumption = consume_approval_once(
+    consumption = _consume_validated_approval_once(
         ledger_path=ledger_path,
         approval=approval,
         consumed_at=now,
