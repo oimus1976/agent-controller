@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 import tempfile
@@ -6,6 +7,7 @@ import unittest
 from agent_controller.approval_consumption import validate_and_consume_human_approval
 from agent_controller.approval_contract import ApprovalBinding, ApprovalResult
 from agent_controller.approval_service import TrustedApprovalIngress
+from agent_controller.approval_store import ApprovalLedgerStore
 from agent_controller.provider_contract import ObjectiveScope, TaskBinding
 
 
@@ -82,7 +84,8 @@ def fresh_facts(**overrides):
 class TestApprovalConsumption(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
-        self.ledger = os.path.join(self.tempdir.name, "ledger.json")
+        self.ledger_path = os.path.join(self.tempdir.name, "ledger.json")
+        self.ledger = ApprovalLedgerStore(self.ledger_path)
 
     def tearDown(self):
         self.tempdir.cleanup()
@@ -101,16 +104,26 @@ class TestApprovalConsumption(unittest.TestCase):
             expected_target_id="15",
             expected_head_sha="head-sha",
             target_reader=reader or FakeTargetReader(fresh_facts()),
-            ledger_path=self.ledger,
+            ledger=self.ledger,
             now="2026-08-24T06:30:00Z",
             receipt_id=receipt_id,
         )
+
+    def test_supported_api_has_no_per_call_ledger_path_override(self):
+        signature = inspect.signature(validate_and_consume_human_approval)
+        self.assertIn("ledger", signature.parameters)
+        self.assertNotIn("ledger_path", signature.parameters)
+
+    def test_store_canonicalizes_and_fixes_ledger_identity(self):
+        self.assertEqual(self.ledger.ledger_path, os.path.realpath(os.path.abspath(self.ledger_path)))
+        with self.assertRaises(Exception):
+            self.ledger.ledger_path = os.path.join(self.tempdir.name, "other.json")
 
     def test_fresh_target_consumes_once_without_executing_effect(self):
         result = self.run_flow()
         self.assertTrue(result.validation.valid)
         self.assertEqual(result.consumption.result, ApprovalResult.PASS)
-        with open(self.ledger, "r", encoding="utf-8") as handle:
+        with open(self.ledger.ledger_path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
         self.assertEqual(len(data), 1)
         self.assertEqual(data[0]["status"], "CONSUMED")
@@ -121,7 +134,7 @@ class TestApprovalConsumption(unittest.TestCase):
         self.assertEqual(result.validation.result, ApprovalResult.STALE)
         self.assertEqual(result.validation.reason, "TARGET_HEAD_STALE")
         self.assertIsNone(result.consumption)
-        self.assertFalse(os.path.exists(self.ledger))
+        self.assertFalse(os.path.exists(self.ledger.ledger_path))
 
     def test_other_target_fact_changes_are_stale_and_not_consumed(self):
         cases = (
@@ -131,7 +144,7 @@ class TestApprovalConsumption(unittest.TestCase):
         )
         for facts, reason in cases:
             with self.subTest(reason=reason):
-                path = self.ledger + reason
+                store = ApprovalLedgerStore(os.path.join(self.tempdir.name, f"ledger-{reason}.json"))
                 result = validate_and_consume_human_approval(
                     ingress=TrustedApprovalIngress("trusted-chat-control-plane", FakeSource(approval())),
                     approval_id="approval-1",
@@ -141,25 +154,25 @@ class TestApprovalConsumption(unittest.TestCase):
                     expected_target_id="15",
                     expected_head_sha="head-sha",
                     target_reader=FakeTargetReader(facts),
-                    ledger_path=path,
+                    ledger=store,
                     now="2026-08-24T06:30:00Z",
                     receipt_id="receipt-1",
                 )
                 self.assertEqual(result.validation.result, ApprovalResult.STALE)
                 self.assertEqual(result.validation.reason, reason)
-                self.assertFalse(os.path.exists(path))
+                self.assertFalse(os.path.exists(store.ledger_path))
 
     def test_target_read_uncertainty_is_not_consumed(self):
         result = self.run_flow(reader=FakeTargetReader(error=RuntimeError("read")))
         self.assertEqual(result.validation.result, ApprovalResult.UNCERTAIN)
         self.assertEqual(result.validation.reason, "TARGET_READ_UNCERTAIN")
-        self.assertFalse(os.path.exists(self.ledger))
+        self.assertFalse(os.path.exists(self.ledger.ledger_path))
 
     def test_invalid_target_payload_is_uncertain_and_not_consumed(self):
         result = self.run_flow(reader=FakeTargetReader(facts="not-a-mapping"))
         self.assertEqual(result.validation.result, ApprovalResult.UNCERTAIN)
         self.assertEqual(result.validation.reason, "TARGET_FACTS_INVALID")
-        self.assertFalse(os.path.exists(self.ledger))
+        self.assertFalse(os.path.exists(self.ledger.ledger_path))
 
     def test_repeated_fresh_consume_is_replayed(self):
         first = self.run_flow(receipt_id="receipt-1")
