@@ -11,7 +11,6 @@ CONTROLLER_STATE_REF = "controller-state"
 class RepositoryWritePurpose(str, Enum):
     IMPLEMENTATION_BRANCH = "IMPLEMENTATION_BRANCH"
     CONTROLLER_STATE = "CONTROLLER_STATE"
-    DIRECT_DEFAULT_BRANCH_ADMIN = "DIRECT_DEFAULT_BRANCH_ADMIN"
 
 
 class RepositoryWriteDecision(str, Enum):
@@ -25,22 +24,6 @@ class RepositoryWriteTarget:
     repo: str
     explicit_ref: Optional[str]
     purpose: RepositoryWritePurpose
-
-
-@dataclass(frozen=True)
-class RepositoryWritePolicy:
-    repo: str
-    default_branch: str
-    controller_state_ref: str = CONTROLLER_STATE_REF
-    allow_direct_default_branch_admin: bool = False
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.repo, str) or not self.repo:
-            raise ValueError("repo must be a non-empty string")
-        if not isinstance(self.default_branch, str) or not self.default_branch:
-            raise ValueError("default_branch must be a non-empty string")
-        if self.controller_state_ref != CONTROLLER_STATE_REF:
-            raise ValueError("controller_state_ref is fixed by Controller composition")
 
 
 @dataclass(frozen=True)
@@ -61,88 +44,93 @@ def _normalize_ref(value: Optional[str]) -> Optional[str]:
     return stripped or None
 
 
-def validate_repository_write_target(
-    *,
-    policy: RepositoryWritePolicy,
-    target: RepositoryWriteTarget,
-) -> RepositoryWriteValidation:
-    """Fail-closed policy gate for any repository content/ref mutation.
+class RepositoryWriteGuard:
+    """Controller-composed fail-closed gate for repository mutations.
 
-    This function does not perform a write. All write adapters must call it
-    before invoking a write-side API. Omitting a ref is never interpreted as
-    the repository default branch.
+    The protected repository/default-branch identity is fixed when the Controller
+    is composed. Per-mutation callers supply only a RepositoryWriteTarget and
+    cannot redefine the default branch or enable direct-default-branch writes.
+
+    Direct writes to the default branch are deliberately outside this generic
+    guard. If ever supported, they require a separate high-risk capability and
+    approval path.
     """
 
-    if not isinstance(policy, RepositoryWritePolicy):
-        return RepositoryWriteValidation(
-            RepositoryWriteDecision.UNCERTAIN, reason="WRITE_POLICY_INVALID"
-        )
-    if not isinstance(target, RepositoryWriteTarget):
-        return RepositoryWriteValidation(
-            RepositoryWriteDecision.BLOCKED, reason="WRITE_TARGET_INVALID"
-        )
-    if target.repo != policy.repo:
-        return RepositoryWriteValidation(
-            RepositoryWriteDecision.BLOCKED, reason="WRITE_REPO_MISMATCH"
-        )
-    if not isinstance(target.purpose, RepositoryWritePurpose):
-        return RepositoryWriteValidation(
-            RepositoryWriteDecision.BLOCKED, reason="WRITE_PURPOSE_INVALID"
-        )
+    __slots__ = ("_repo", "_default_branch")
 
-    ref = _normalize_ref(target.explicit_ref)
-    if ref is None:
-        return RepositoryWriteValidation(
-            RepositoryWriteDecision.BLOCKED, reason="EXPLICIT_REF_REQUIRED"
-        )
-    if ref in {"HEAD", "head", ".", ".."}:
-        return RepositoryWriteValidation(
-            RepositoryWriteDecision.BLOCKED, reason="WRITE_REF_ALIAS_FORBIDDEN"
-        )
-    if "\x00" in ref or ref.startswith("/") or ref.endswith("/"):
-        return RepositoryWriteValidation(
-            RepositoryWriteDecision.BLOCKED, reason="WRITE_REF_INVALID"
-        )
+    def __init__(self, *, repo: str, default_branch: str) -> None:
+        if not isinstance(repo, str) or not repo:
+            raise ValueError("repo must be a non-empty string")
+        if not isinstance(default_branch, str) or not default_branch:
+            raise ValueError("default_branch must be a non-empty string")
+        self._repo = repo
+        self._default_branch = default_branch
 
-    if target.purpose is RepositoryWritePurpose.IMPLEMENTATION_BRANCH:
-        if ref == policy.default_branch:
+    @property
+    def repo(self) -> str:
+        return self._repo
+
+    @property
+    def default_branch(self) -> str:
+        return self._default_branch
+
+    def validate(self, *, target: RepositoryWriteTarget) -> RepositoryWriteValidation:
+        if not isinstance(target, RepositoryWriteTarget):
+            return RepositoryWriteValidation(
+                RepositoryWriteDecision.BLOCKED, reason="WRITE_TARGET_INVALID"
+            )
+        if target.repo != self._repo:
+            return RepositoryWriteValidation(
+                RepositoryWriteDecision.BLOCKED, reason="WRITE_REPO_MISMATCH"
+            )
+        if not isinstance(target.purpose, RepositoryWritePurpose):
+            return RepositoryWriteValidation(
+                RepositoryWriteDecision.BLOCKED, reason="WRITE_PURPOSE_INVALID"
+            )
+
+        ref = _normalize_ref(target.explicit_ref)
+        if ref is None:
+            return RepositoryWriteValidation(
+                RepositoryWriteDecision.BLOCKED, reason="EXPLICIT_REF_REQUIRED"
+            )
+        if ref in {"HEAD", "head", ".", ".."}:
+            return RepositoryWriteValidation(
+                RepositoryWriteDecision.BLOCKED, reason="WRITE_REF_ALIAS_FORBIDDEN"
+            )
+        if "\x00" in ref or ref.startswith("/") or ref.endswith("/"):
+            return RepositoryWriteValidation(
+                RepositoryWriteDecision.BLOCKED, reason="WRITE_REF_INVALID"
+            )
+
+        if ref == self._default_branch:
             return RepositoryWriteValidation(
                 RepositoryWriteDecision.BLOCKED,
                 normalized_ref=ref,
                 reason="DEFAULT_BRANCH_WRITE_FORBIDDEN",
             )
-        if ref == policy.controller_state_ref:
-            return RepositoryWriteValidation(
-                RepositoryWriteDecision.BLOCKED,
-                normalized_ref=ref,
-                reason="CONTROLLER_STATE_REQUIRES_DEDICATED_PURPOSE",
-            )
-        return RepositoryWriteValidation(RepositoryWriteDecision.PASS, normalized_ref=ref)
 
-    if target.purpose is RepositoryWritePurpose.CONTROLLER_STATE:
-        if ref != policy.controller_state_ref:
+        if target.purpose is RepositoryWritePurpose.IMPLEMENTATION_BRANCH:
+            if ref == CONTROLLER_STATE_REF:
+                return RepositoryWriteValidation(
+                    RepositoryWriteDecision.BLOCKED,
+                    normalized_ref=ref,
+                    reason="CONTROLLER_STATE_REQUIRES_DEDICATED_PURPOSE",
+                )
             return RepositoryWriteValidation(
-                RepositoryWriteDecision.BLOCKED,
-                normalized_ref=ref,
-                reason="CONTROLLER_STATE_REF_MISMATCH",
+                RepositoryWriteDecision.PASS, normalized_ref=ref
             )
-        return RepositoryWriteValidation(RepositoryWriteDecision.PASS, normalized_ref=ref)
 
-    if target.purpose is RepositoryWritePurpose.DIRECT_DEFAULT_BRANCH_ADMIN:
-        if ref != policy.default_branch:
+        if target.purpose is RepositoryWritePurpose.CONTROLLER_STATE:
+            if ref != CONTROLLER_STATE_REF:
+                return RepositoryWriteValidation(
+                    RepositoryWriteDecision.BLOCKED,
+                    normalized_ref=ref,
+                    reason="CONTROLLER_STATE_REF_MISMATCH",
+                )
             return RepositoryWriteValidation(
-                RepositoryWriteDecision.BLOCKED,
-                normalized_ref=ref,
-                reason="DIRECT_DEFAULT_BRANCH_TARGET_MISMATCH",
+                RepositoryWriteDecision.PASS, normalized_ref=ref
             )
-        if not policy.allow_direct_default_branch_admin:
-            return RepositoryWriteValidation(
-                RepositoryWriteDecision.BLOCKED,
-                normalized_ref=ref,
-                reason="DIRECT_DEFAULT_BRANCH_ADMIN_DISABLED",
-            )
-        return RepositoryWriteValidation(RepositoryWriteDecision.PASS, normalized_ref=ref)
 
-    return RepositoryWriteValidation(
-        RepositoryWriteDecision.BLOCKED, reason="WRITE_PURPOSE_INVALID"
-    )
+        return RepositoryWriteValidation(
+            RepositoryWriteDecision.BLOCKED, reason="WRITE_PURPOSE_INVALID"
+        )
