@@ -71,13 +71,30 @@ class TestApprovalLedger(unittest.TestCase):
             self.assertEqual(len(json.load(handle)), 1)
 
     def test_corrupt_ledger_fails_closed_without_overwrite(self):
-        with open(self.path, "w", encoding="utf-8") as handle:
-            handle.write("not-json")
-        result = self.consume()
-        self.assertEqual(result.result, ApprovalResult.BLOCKED)
-        self.assertEqual(result.reason, "APPROVAL_LEDGER_CORRUPT")
+        for corrupt in ("not-json", "[{}]", '[{"approval_id":"orphan"}]'):
+            with self.subTest(corrupt=corrupt):
+                with open(self.path, "w", encoding="utf-8") as handle:
+                    handle.write(corrupt)
+                result = self.consume()
+                self.assertEqual(result.result, ApprovalResult.BLOCKED)
+                self.assertEqual(result.reason, "APPROVAL_LEDGER_CORRUPT")
+                with open(self.path, "r", encoding="utf-8") as handle:
+                    self.assertEqual(handle.read(), corrupt)
+
+    def test_duplicate_receipt_or_approval_identity_is_corrupt(self):
+        first = self.consume()
+        self.assertEqual(first.result, ApprovalResult.PASS)
         with open(self.path, "r", encoding="utf-8") as handle:
-            self.assertEqual(handle.read(), "not-json")
+            row = json.load(handle)[0]
+        for duplicate in (
+            [row, dict(row, receipt_id="receipt-2")],
+            [row, dict(row, approval_id="approval-2")],
+        ):
+            with open(self.path, "w", encoding="utf-8") as handle:
+                json.dump(duplicate, handle)
+            result = self.consume(approval(approval_id="approval-new"), receipt_id="receipt-new")
+            self.assertEqual(result.result, ApprovalResult.BLOCKED)
+            self.assertEqual(result.reason, "APPROVAL_LEDGER_CORRUPT")
 
     def test_existing_receipt_with_same_id_but_different_binding_fails_closed(self):
         good = self.consume()
