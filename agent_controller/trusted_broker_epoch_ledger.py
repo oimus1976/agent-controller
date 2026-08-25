@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import secrets
 import sqlite3
@@ -11,14 +12,16 @@ from typing import Optional
 from agent_controller.broker_epoch import EpochBoundApprovalGate
 from agent_controller.signed_approval import (
     ApprovalChallengeV3,
+    ProvenanceAssurance,
     SCHEMA_VERSION_V3,
     canonicalize_approval_challenge,
+    verify_signed_approval,
 )
 from agent_controller.trusted_broker_ledger import (
     BrokerAttemptState,
+    BrokerLedgerCorruptError,
     BrokerLedgerDecision,
     BrokerLedgerResult,
-    BrokerLedgerCorruptError,
 )
 
 
@@ -46,6 +49,7 @@ class EpochBoundBrokerAttemptRecord:
     broker_authority_id: str
     broker_epoch: str
     signature_digest: str
+    signature_b64: str
     attempt_id: str
     state: BrokerAttemptState
     failure_code: Optional[str] = None
@@ -92,6 +96,7 @@ _EXPECTED_ATTEMPT_COLUMNS = (
     ("broker_authority_id", "TEXT", 1, 0),
     ("broker_epoch", "TEXT", 1, 0),
     ("signature_digest", "TEXT", 1, 0),
+    ("signature_b64", "TEXT", 1, 0),
     ("attempt_id", "TEXT", 1, 0),
     ("state", "TEXT", 1, 0),
     ("failure_code", "TEXT", 0, 0),
@@ -101,9 +106,9 @@ _EXPECTED_ATTEMPT_COLUMNS = (
 class EpochBoundTrustedBrokerLedger:
     """V3-only broker-local anti-replay ledger.
 
-    This class deliberately does not migrate or reinterpret v1 ledgers. The
-    production claim entrypoint validates the immutable trusted epoch gate
-    before opening the database transaction.
+    Existing v1 databases are rejected rather than migrated. Every stored row
+    carries the public signature evidence needed to independently re-verify the
+    reconstructed human approval; no private signing material is stored.
     """
 
     __slots__ = ("_db_path", "_timeout_seconds", "_gate")
@@ -169,6 +174,7 @@ class EpochBoundTrustedBrokerLedger:
                         broker_authority_id TEXT NOT NULL,
                         broker_epoch TEXT NOT NULL,
                         signature_digest TEXT NOT NULL CHECK(length(signature_digest)=64),
+                        signature_b64 TEXT NOT NULL,
                         attempt_id TEXT NOT NULL UNIQUE,
                         state TEXT NOT NULL CHECK(state IN ('CLAIMED','EFFECT_VERIFIED','FAILED_AFTER_CLAIM')),
                         failure_code TEXT
@@ -212,6 +218,7 @@ class EpochBoundTrustedBrokerLedger:
         challenge: ApprovalChallengeV3,
         authorization_digest: str,
         signature_digest: str,
+        signature_b64: str,
     ) -> tuple[str, ...]:
         return (
             authorization_digest,
@@ -233,25 +240,26 @@ class EpochBoundTrustedBrokerLedger:
             challenge.broker_authority_id,
             challenge.broker_epoch,
             signature_digest,
+            signature_b64,
         )
 
     @staticmethod
     def _row_to_record(row: tuple[object, ...]) -> EpochBoundBrokerAttemptRecord:
-        if len(row) != 22:
+        if len(row) != 23:
             raise BrokerLedgerCorruptError("BROKER_LEDGER_ROW_INVALID")
-        if any(not isinstance(value, str) or not value for value in row[:21]):
+        if any(not isinstance(value, str) or not value for value in row[:22]):
             raise BrokerLedgerCorruptError("BROKER_LEDGER_ROW_FIELD_INVALID")
         if not _is_lower_hex_digest(row[0]) or not _is_lower_hex_digest(row[18]):
             raise BrokerLedgerCorruptError("BROKER_LEDGER_DIGEST_INVALID")
         if row[1] != SCHEMA_VERSION_V3:
             raise BrokerLedgerCorruptError("BROKER_LEDGER_CHALLENGE_SCHEMA_INVALID")
-        if not _valid_attempt_id(row[19]):
+        if not _valid_attempt_id(row[20]):
             raise BrokerLedgerCorruptError("BROKER_LEDGER_ATTEMPT_ID_INVALID")
         try:
-            state = BrokerAttemptState(row[20])
+            state = BrokerAttemptState(row[21])
         except (TypeError, ValueError) as exc:
             raise BrokerLedgerCorruptError("BROKER_LEDGER_STATE_INVALID") from exc
-        failure_code = row[21]
+        failure_code = row[22]
         if state in {BrokerAttemptState.CLAIMED, BrokerAttemptState.EFFECT_VERIFIED}:
             if failure_code is not None:
                 raise BrokerLedgerCorruptError("BROKER_LEDGER_FAILURE_STATE_INVALID")
@@ -280,7 +288,23 @@ class EpochBoundTrustedBrokerLedger:
         digest = hashlib.sha256(canonicalize_approval_challenge(reconstructed)).hexdigest()
         if digest != row[0]:
             raise BrokerLedgerCorruptError("BROKER_LEDGER_AUTHORIZATION_BINDING_INVALID")
-        return EpochBoundBrokerAttemptRecord(*row[:20], state, failure_code)
+        try:
+            signature_bytes = base64.b64decode(row[19], validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise BrokerLedgerCorruptError("BROKER_LEDGER_SIGNATURE_ENCODING_INVALID") from exc
+        if hashlib.sha256(signature_bytes).hexdigest() != row[18]:
+            raise BrokerLedgerCorruptError("BROKER_LEDGER_SIGNATURE_DIGEST_INVALID")
+        verification = verify_signed_approval(
+            challenge=reconstructed,
+            signature_b64=row[19],
+        )
+        if (
+            not verification.valid
+            or verification.assurance is not ProvenanceAssurance.VERIFIED_EVENT_PROVENANCE
+            or verification.signer_key_id != reconstructed.signer_key_id
+        ):
+            raise BrokerLedgerCorruptError("BROKER_LEDGER_SIGNATURE_INVALID")
+        return EpochBoundBrokerAttemptRecord(*row[:21], state, failure_code)
 
     @classmethod
     def _read_connection(
@@ -290,7 +314,7 @@ class EpochBoundTrustedBrokerLedger:
             "SELECT authorization_digest, challenge_schema_version, approval_id, approval_policy_id, "
             "controller_task_id, operation_id, operation_version, provider, requested_capability, "
             "effect, repo, target_kind, target_id, expected_head_sha, challenge_nonce, signer_key_id, "
-            "broker_authority_id, broker_epoch, signature_digest, attempt_id, state, failure_code "
+            "broker_authority_id, broker_epoch, signature_digest, signature_b64, attempt_id, state, failure_code "
             "FROM effect_attempts WHERE authorization_digest=?",
             (authorization_digest,),
         ).fetchone()
@@ -318,20 +342,26 @@ class EpochBoundTrustedBrokerLedger:
         self, *, challenge: ApprovalChallengeV3, signature_b64: str
     ) -> BrokerLedgerResult:
         validation = self._gate.validate_for_claim(
-            challenge=challenge, signature_b64=signature_b64
+            challenge=challenge,
+            signature_b64=signature_b64,
         )
         if not validation.valid or validation.authorization_digest is None:
             return BrokerLedgerResult(
                 BrokerLedgerDecision.BLOCKED,
                 reason=validation.reason or "EPOCH_BOUND_APPROVAL_INVALID",
             )
-        authorization_digest = validation.authorization_digest
         try:
             signature_bytes = base64.b64decode(signature_b64, validate=True)
-        except Exception:
+        except (binascii.Error, ValueError):
             return BrokerLedgerResult(BrokerLedgerDecision.BLOCKED, reason="SIGNATURE_ENCODING_INVALID")
+        authorization_digest = validation.authorization_digest
         signature_digest = hashlib.sha256(signature_bytes).hexdigest()
-        audit = self._audit_tuple(challenge, authorization_digest, signature_digest)
+        audit = self._audit_tuple(
+            challenge,
+            authorization_digest,
+            signature_digest,
+            signature_b64,
+        )
         attempt_id = "attempt_" + secrets.token_urlsafe(24)
 
         try:
@@ -354,7 +384,7 @@ class EpochBoundTrustedBrokerLedger:
                         "AUTHORIZATION_DIGEST_BINDING_CONFLICT",
                     )
                 connection.execute(
-                    "INSERT INTO effect_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+                    "INSERT INTO effect_attempts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
                     (*audit, attempt_id, BrokerAttemptState.CLAIMED.value),
                 )
                 connection.execute("COMMIT")
@@ -401,7 +431,8 @@ class EpochBoundTrustedBrokerLedger:
 
     @staticmethod
     def _record_matches_audit(
-        record: EpochBoundBrokerAttemptRecord, audit: tuple[str, ...]
+        record: EpochBoundBrokerAttemptRecord,
+        audit: tuple[str, ...],
     ) -> bool:
         return (
             record.authorization_digest,
@@ -423,4 +454,5 @@ class EpochBoundTrustedBrokerLedger:
             record.broker_authority_id,
             record.broker_epoch,
             record.signature_digest,
+            record.signature_b64,
         ) == audit
