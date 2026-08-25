@@ -60,13 +60,12 @@ class EvidencePointer:
             raise TypeError("freshness must be EvidenceFreshness")
         if not isinstance(self.source_ref, str) or not self.source_ref:
             raise ValueError("source_ref must be nonempty")
-        if self.content_digest is not None:
-            if (
-                not isinstance(self.content_digest, str)
-                or len(self.content_digest) != 64
-                or any(c not in "0123456789abcdef" for c in self.content_digest)
-            ):
-                raise ValueError("content_digest must be lowercase SHA-256 when present")
+        if self.content_digest is not None and (
+            not isinstance(self.content_digest, str)
+            or len(self.content_digest) != 64
+            or any(c not in "0123456789abcdef" for c in self.content_digest)
+        ):
+            raise ValueError("content_digest must be lowercase SHA-256 when present")
 
 
 @dataclass(frozen=True)
@@ -103,18 +102,14 @@ class ContextCapsule:
                 raise ValueError(f"{name} must be nonempty")
         if self.schema_version != CAPSULE_SCHEMA_VERSION:
             raise ValueError("unsupported context capsule schema")
-        if not isinstance(self.facts, tuple) or any(
-            not isinstance(item, CapsuleFact) for item in self.facts
-        ):
+        if not isinstance(self.facts, tuple) or any(not isinstance(item, CapsuleFact) for item in self.facts):
             raise TypeError("facts must be a tuple of CapsuleFact")
         keys = [fact.key for fact in self.facts]
         if len(set(keys)) != len(keys):
             raise ValueError("fact keys must be unique")
         for name in ("must_recheck", "unknowns"):
             values = getattr(self, name)
-            if not isinstance(values, tuple) or any(
-                not isinstance(item, str) or not item for item in values
-            ):
+            if not isinstance(values, tuple) or any(not isinstance(item, str) or not item for item in values):
                 raise TypeError(f"{name} must be a tuple of nonempty strings")
             if len(set(values)) != len(values):
                 raise ValueError(f"{name} values must be unique")
@@ -129,10 +124,8 @@ class RetrievalRequest:
     def __post_init__(self) -> None:
         if not isinstance(self.key, str) or not self.key:
             raise ValueError("key must be nonempty")
-        if not isinstance(self.relevant, bool):
-            raise TypeError("relevant must be bool")
-        if not isinstance(self.required_for_security_gate, bool):
-            raise TypeError("required_for_security_gate must be bool")
+        if not isinstance(self.relevant, bool) or not isinstance(self.required_for_security_gate, bool):
+            raise TypeError("retrieval flags must be bool")
 
 
 @dataclass(frozen=True)
@@ -143,14 +136,10 @@ class RetrievalDecision:
 
 
 @runtime_checkable
-class VerifiedImmutableEvidenceSource(Protocol):
-    """Read-only trust boundary for previously verified immutable evidence.
+class VerifiedImmutableFactSource(Protocol):
+    """Read-only trust boundary for whole previously verified immutable facts."""
 
-    Capsule data cannot create or mutate this source. Controller composition must
-    provide it independently of Agent/provider capsule input.
-    """
-
-    def is_verified(self, pointer: EvidencePointer) -> bool: ...
+    def is_verified_fact(self, fact_digest: str) -> bool: ...
 
 
 def _pointer_dict(pointer: EvidencePointer) -> dict[str, object]:
@@ -163,22 +152,34 @@ def _pointer_dict(pointer: EvidencePointer) -> dict[str, object]:
     }
 
 
+def canonicalize_capsule_fact(fact: CapsuleFact) -> bytes:
+    if not isinstance(fact, CapsuleFact):
+        raise TypeError("fact must be CapsuleFact")
+    evidence = sorted(
+        (_pointer_dict(pointer) for pointer in fact.evidence),
+        key=lambda item: (
+            str(item["source_kind"]),
+            str(item["source_ref"]),
+            str(item["content_digest"]),
+            str(item["authority_claim"]),
+            str(item["freshness"]),
+        ),
+    )
+    payload = {"evidence": evidence, "key": fact.key, "summary": fact.summary}
+    return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def capsule_fact_digest(fact: CapsuleFact) -> str:
+    return hashlib.sha256(canonicalize_capsule_fact(fact)).hexdigest()
+
+
 def canonicalize_context_capsule(capsule: ContextCapsule) -> bytes:
     if not isinstance(capsule, ContextCapsule):
         raise TypeError("capsule must be ContextCapsule")
-    facts = []
-    for fact in sorted(capsule.facts, key=lambda item: item.key):
-        evidence = sorted(
-            (_pointer_dict(pointer) for pointer in fact.evidence),
-            key=lambda item: (
-                str(item["source_kind"]),
-                str(item["source_ref"]),
-                str(item["content_digest"]),
-                str(item["authority_claim"]),
-                str(item["freshness"]),
-            ),
-        )
-        facts.append({"evidence": evidence, "key": fact.key, "summary": fact.summary})
+    facts = [
+        json.loads(canonicalize_capsule_fact(fact))
+        for fact in sorted(capsule.facts, key=lambda item: item.key)
+    ]
     payload = {
         "controller_task_id": capsule.controller_task_id,
         "facts": facts,
@@ -188,9 +189,7 @@ def canonicalize_context_capsule(capsule: ContextCapsule) -> bytes:
         "schema_version": capsule.schema_version,
         "unknowns": sorted(capsule.unknowns),
     }
-    return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(
-        "utf-8"
-    )
+    return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
 def context_capsule_digest(capsule: ContextCapsule) -> str:
@@ -198,25 +197,25 @@ def context_capsule_digest(capsule: ContextCapsule) -> str:
 
 
 class ContextRetrievalPlanner:
-    """Plan minimal reads without accepting capsule self-asserted verification."""
+    """Plan minimal reads without accepting capsule self-asserted truth."""
 
     __slots__ = ("_verified_source",)
 
-    def __init__(self, *, verified_source: VerifiedImmutableEvidenceSource) -> None:
-        if not isinstance(verified_source, VerifiedImmutableEvidenceSource):
-            raise TypeError("verified_source must satisfy VerifiedImmutableEvidenceSource")
+    def __init__(self, *, verified_source: VerifiedImmutableFactSource) -> None:
+        if not isinstance(verified_source, VerifiedImmutableFactSource):
+            raise TypeError("verified_source must satisfy VerifiedImmutableFactSource")
         self._verified_source = verified_source
 
-    def _reusable_pointer(self, pointer: EvidencePointer) -> bool:
-        if pointer.freshness is not EvidenceFreshness.IMMUTABLE:
+    def _reusable_fact(self, fact: CapsuleFact) -> bool:
+        if any(pointer.freshness is not EvidenceFreshness.IMMUTABLE for pointer in fact.evidence):
             return False
-        if pointer.authority not in {
-            EvidenceAuthority.OBJECTIVE_VERIFIED,
-            EvidenceAuthority.CONTROLLER_MEASURED,
-        }:
+        if any(
+            pointer.authority not in {EvidenceAuthority.OBJECTIVE_VERIFIED, EvidenceAuthority.CONTROLLER_MEASURED}
+            for pointer in fact.evidence
+        ):
             return False
         try:
-            return self._verified_source.is_verified(pointer) is True
+            return self._verified_source.is_verified_fact(capsule_fact_digest(fact)) is True
         except Exception:
             return False
 
@@ -231,15 +230,13 @@ class ContextRetrievalPlanner:
     ) -> tuple[RetrievalDecision, ...]:
         if not isinstance(capsule, ContextCapsule):
             raise TypeError("capsule must be ContextCapsule")
-        if (
-            capsule.controller_task_id,
-            capsule.operation_id,
-            capsule.operation_version,
-        ) != (controller_task_id, operation_id, operation_version):
-            raise ValueError("CONTEXT_CAPSULE_BINDING_MISMATCH")
-        if not isinstance(requests, tuple) or any(
-            not isinstance(request, RetrievalRequest) for request in requests
+        if (capsule.controller_task_id, capsule.operation_id, capsule.operation_version) != (
+            controller_task_id,
+            operation_id,
+            operation_version,
         ):
+            raise ValueError("CONTEXT_CAPSULE_BINDING_MISMATCH")
+        if not isinstance(requests, tuple) or any(not isinstance(request, RetrievalRequest) for request in requests):
             raise TypeError("requests must be a tuple of RetrievalRequest")
 
         facts = {fact.key: fact for fact in capsule.facts}
@@ -248,11 +245,7 @@ class ContextRetrievalPlanner:
         decisions: list[RetrievalDecision] = []
         for request in requests:
             if not request.relevant:
-                decisions.append(
-                    RetrievalDecision(
-                        request.key, RetrievalAction.OMIT_IRRELEVANT, "NOT_RELEVANT"
-                    )
-                )
+                decisions.append(RetrievalDecision(request.key, RetrievalAction.OMIT_IRRELEVANT, "NOT_RELEVANT"))
                 continue
             if request.required_for_security_gate:
                 decisions.append(
@@ -265,32 +258,23 @@ class ContextRetrievalPlanner:
                 continue
             if request.key in unknowns or request.key not in facts:
                 decisions.append(
-                    RetrievalDecision(
-                        request.key,
-                        RetrievalAction.FETCH_MISSING,
-                        "EVIDENCE_UNKNOWN_OR_MISSING",
-                    )
+                    RetrievalDecision(request.key, RetrievalAction.FETCH_MISSING, "EVIDENCE_UNKNOWN_OR_MISSING")
                 )
                 continue
             fact = facts[request.key]
             if request.key in must_recheck or any(
-                pointer.freshness is not EvidenceFreshness.IMMUTABLE
-                for pointer in fact.evidence
+                pointer.freshness is not EvidenceFreshness.IMMUTABLE for pointer in fact.evidence
             ):
                 decisions.append(
-                    RetrievalDecision(
-                        request.key,
-                        RetrievalAction.FETCH_MUTABLE,
-                        "MUTABLE_EVIDENCE_RECHECK_REQUIRED",
-                    )
+                    RetrievalDecision(request.key, RetrievalAction.FETCH_MUTABLE, "MUTABLE_EVIDENCE_RECHECK_REQUIRED")
                 )
                 continue
-            if all(self._reusable_pointer(pointer) for pointer in fact.evidence):
+            if self._reusable_fact(fact):
                 decisions.append(
                     RetrievalDecision(
                         request.key,
                         RetrievalAction.REUSE_VERIFIED_IMMUTABLE,
-                        "EXACT_VERIFIED_IMMUTABLE_EVIDENCE",
+                        "EXACT_VERIFIED_IMMUTABLE_FACT",
                     )
                 )
                 continue
@@ -298,7 +282,7 @@ class ContextRetrievalPlanner:
                 RetrievalDecision(
                     request.key,
                     RetrievalAction.FETCH_MISSING,
-                    "IMMUTABLE_IDENTITY_NOT_CONFIRMED_BY_VERIFICATION_SOURCE",
+                    "IMMUTABLE_FACT_NOT_CONFIRMED_BY_VERIFICATION_SOURCE",
                 )
             )
         return tuple(decisions)
