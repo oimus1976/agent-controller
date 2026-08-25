@@ -75,7 +75,7 @@ describe("effect-free broker Durable Object", () => {
     expect(await stub.count()).toBe(0);
   });
 
-  it("stored signature replacement blocks authoritative reread/replay", async () => {
+  it("stored signature replacement makes all later claims fail closed", async () => {
     const stub = env.BROKER.getByName("tamper-signature");
     const first = await stub.claim(challenge(), SIGNATURE);
     expect(first.decision).toBe("PASS");
@@ -87,10 +87,12 @@ describe("effect-free broker Durable Object", () => {
         first.authorization_digest,
       );
     });
-    expect((await stub.claim(challenge(), SIGNATURE)).reason).toBe("STORED_AUTHORIZATION_INVALID");
+    const replay = await stub.claim(challenge(), SIGNATURE);
+    expect(replay).toEqual({ decision: "BLOCKED", reason: "BROKER_LEDGER_INTEGRITY_FAILED" });
+    expect(await stub.count()).toBe(1);
   });
 
-  it("self-consistent challenge/digest tamper still fails stored signature verification", async () => {
+  it("self-consistent challenge/digest tamper cannot free the original approval for reuse", async () => {
     const stub = env.BROKER.getByName("tamper-binding");
     const first = await stub.claim(challenge(), SIGNATURE);
     expect(first.decision).toBe("PASS");
@@ -110,13 +112,9 @@ describe("effect-free broker Durable Object", () => {
         JSON.stringify(ordered), digest, first.authorization_digest,
       );
     });
-    const freshDigest = await runInDurableObject(stub, async (_instance, state) => {
-      return state.storage.sql.exec<{ authorization_digest: string }>("SELECT authorization_digest FROM attempts").one().authorization_digest;
-    });
     const replay = await stub.claim(challenge(), SIGNATURE);
-    expect(replay.decision).toBe("PASS");
-    expect(replay.authorization_digest).not.toBe(freshDigest);
-    expect(await stub.count()).toBe(2);
+    expect(replay).toEqual({ decision: "BLOCKED", reason: "BROKER_LEDGER_INTEGRITY_FAILED" });
+    expect(await stub.count()).toBe(1);
   });
 
   it("anti-replay survives Durable Object eviction", async () => {
