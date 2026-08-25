@@ -12,6 +12,7 @@ from agent_controller.context_capsule import (
     EvidenceSourceKind,
     RetrievalAction,
     RetrievalRequest,
+    bound_capsule_fact_digest,
     canonicalize_context_capsule,
     capsule_fact_digest,
     context_capsule_digest,
@@ -48,18 +49,20 @@ class FixtureVerifiedFactSource:
     def __init__(self, verified=()):
         self.verified = set(verified)
 
-    def is_verified_fact(self, fact_digest):
-        return fact_digest in self.verified
+    def is_verified_fact(self, bound_fact_digest):
+        return bound_fact_digest in self.verified
 
 
 class ExplodingVerifiedFactSource:
-    def is_verified_fact(self, fact_digest):
+    def is_verified_fact(self, bound_fact_digest):
         raise RuntimeError("source unavailable")
 
 
-def planner_for(*facts):
+def planner_for(*pairs):
     return ContextRetrievalPlanner(
-        verified_source=FixtureVerifiedFactSource(capsule_fact_digest(fact) for fact in facts)
+        verified_source=FixtureVerifiedFactSource(
+            bound_capsule_fact_digest(capsule=item, fact=fact) for item, fact in pairs
+        )
     )
 
 
@@ -81,32 +84,79 @@ class ContextCapsuleTests(unittest.TestCase):
 
     def test_binding_evidence_or_summary_change_changes_digest(self):
         base = capsule()
-        self.assertNotEqual(context_capsule_digest(base), context_capsule_digest(capsule(operation_version="v2")))
+        changed_binding = capsule(operation_version="v2")
         changed_evidence = capsule(
             facts=(CapsuleFact("architecture", "Reviewed architecture", (pointer(content_digest="b" * 64),)),)
         )
         changed_summary = capsule(
             facts=(CapsuleFact("architecture", "Attacker changed summary", (pointer(),)),)
         )
+        self.assertNotEqual(context_capsule_digest(base), context_capsule_digest(changed_binding))
         self.assertNotEqual(context_capsule_digest(base), context_capsule_digest(changed_evidence))
         self.assertNotEqual(context_capsule_digest(base), context_capsule_digest(changed_summary))
+        self.assertNotEqual(capsule_fact_digest(base.facts[0]), capsule_fact_digest(changed_summary.facts[0]))
         self.assertNotEqual(
-            capsule_fact_digest(base.facts[0]), capsule_fact_digest(changed_summary.facts[0])
+            bound_capsule_fact_digest(capsule=base, fact=base.facts[0]),
+            bound_capsule_fact_digest(capsule=changed_binding, fact=changed_binding.facts[0]),
         )
 
-    def test_mutable_pr_fact_always_fetches_without_verification_source_read(self):
-        mutable = CapsuleFact(
+    def test_verified_immutable_fact_may_be_reused_only_via_external_source(self):
+        item = capsule()
+        fact = item.facts[0]
+        decision = planner_for((item, fact)).plan(
+            capsule=item,
+            controller_task_id="task-1",
+            operation_id="op-1",
+            operation_version="v1",
+            requests=(RetrievalRequest("architecture"),),
+        )[0]
+        self.assertIs(RetrievalAction.REUSE_VERIFIED_IMMUTABLE, decision.action)
+
+    def test_verified_fact_from_other_operation_cannot_reuse(self):
+        original = capsule()
+        other = capsule(operation_id="op-2")
+        decision = planner_for((original, original.facts[0])).plan(
+            capsule=other,
+            controller_task_id="task-1",
+            operation_id="op-2",
+            operation_version="v1",
+            requests=(RetrievalRequest("architecture"),),
+        )[0]
+        self.assertIs(RetrievalAction.FETCH_MISSING, decision.action)
+
+    def test_verified_fact_from_other_version_cannot_reuse(self):
+        original = capsule()
+        other = capsule(operation_version="v2")
+        decision = planner_for((original, original.facts[0])).plan(
+            capsule=other,
+            controller_task_id="task-1",
+            operation_id="op-1",
+            operation_version="v2",
+            requests=(RetrievalRequest("architecture"),),
+        )[0]
+        self.assertIs(RetrievalAction.FETCH_MISSING, decision.action)
+
+    def test_real_verified_evidence_with_changed_summary_cannot_reuse(self):
+        original = capsule()
+        attacker_fact = CapsuleFact("architecture", "False summary", original.facts[0].evidence)
+        attacker = capsule(facts=(attacker_fact,))
+        decision = planner_for((original, original.facts[0])).plan(
+            capsule=attacker,
+            controller_task_id="task-1",
+            operation_id="op-1",
+            operation_version="v1",
+            requests=(RetrievalRequest("architecture"),),
+        )[0]
+        self.assertIs(RetrievalAction.FETCH_MISSING, decision.action)
+
+    def test_mutable_pr_fact_always_fetches(self):
+        fact = CapsuleFact(
             "pr_state",
             "PR was open",
-            (
-                pointer(
-                    source_kind=EvidenceSourceKind.PR_HEAD,
-                    freshness=EvidenceFreshness.MUTABLE_RECHECK_REQUIRED,
-                ),
-            ),
+            (pointer(source_kind=EvidenceSourceKind.PR_HEAD, freshness=EvidenceFreshness.MUTABLE_RECHECK_REQUIRED),),
         )
-        item = capsule(facts=(mutable,))
-        decision = planner_for(mutable).plan(
+        item = capsule(facts=(fact,))
+        decision = planner_for((item, fact)).plan(
             capsule=item,
             controller_task_id="task-1",
             operation_id="op-1",
@@ -115,49 +165,11 @@ class ContextCapsuleTests(unittest.TestCase):
         )[0]
         self.assertIs(RetrievalAction.FETCH_MUTABLE, decision.action)
 
-    def test_verified_immutable_fact_may_be_reused_only_via_external_source(self):
-        fact = capsule().facts[0]
-        decision = planner_for(fact).plan(
-            capsule=capsule(),
-            controller_task_id="task-1",
-            operation_id="op-1",
-            operation_version="v1",
-            requests=(RetrievalRequest("architecture"),),
-        )[0]
-        self.assertIs(RetrievalAction.REUSE_VERIFIED_IMMUTABLE, decision.action)
-
-    def test_real_verified_evidence_with_changed_summary_cannot_reuse(self):
-        verified_fact = capsule().facts[0]
-        attacker_fact = CapsuleFact("architecture", "False summary", verified_fact.evidence)
-        item = capsule(facts=(attacker_fact,))
-        decision = planner_for(verified_fact).plan(
+    def test_agent_reported_never_becomes_reusable_even_if_bound_digest_is_registered(self):
+        fact = CapsuleFact("claim", "Agent says done", (pointer(authority=EvidenceAuthority.AGENT_REPORTED),))
+        item = capsule(facts=(fact,))
+        decision = planner_for((item, fact)).plan(
             capsule=item,
-            controller_task_id="task-1",
-            operation_id="op-1",
-            operation_version="v1",
-            requests=(RetrievalRequest("architecture"),),
-        )[0]
-        self.assertIs(RetrievalAction.FETCH_MISSING, decision.action)
-
-    def test_capsule_self_assertion_cannot_create_verified_reuse(self):
-        fact = CapsuleFact("architecture", "I claim verified", (pointer(),))
-        decision = planner_for().plan(
-            capsule=capsule(facts=(fact,)),
-            controller_task_id="task-1",
-            operation_id="op-1",
-            operation_version="v1",
-            requests=(RetrievalRequest("architecture"),),
-        )[0]
-        self.assertIs(RetrievalAction.FETCH_MISSING, decision.action)
-
-    def test_agent_reported_never_becomes_reusable_even_if_fact_digest_is_registered(self):
-        claimed = CapsuleFact(
-            "claim",
-            "Agent says done",
-            (pointer(authority=EvidenceAuthority.AGENT_REPORTED),),
-        )
-        decision = planner_for(claimed).plan(
-            capsule=capsule(facts=(claimed,)),
             controller_task_id="task-1",
             operation_id="op-1",
             operation_version="v1",
@@ -176,9 +188,8 @@ class ContextCapsuleTests(unittest.TestCase):
         self.assertIs(RetrievalAction.FETCH_MISSING, decision.action)
 
     def test_unknown_and_missing_fetch_instead_of_inventing(self):
-        item = capsule(unknowns=("quota",))
         decisions = planner_for().plan(
-            capsule=item,
+            capsule=capsule(unknowns=("quota",)),
             controller_task_id="task-1",
             operation_id="op-1",
             operation_version="v1",
@@ -189,10 +200,10 @@ class ContextCapsuleTests(unittest.TestCase):
             tuple(item.action for item in decisions),
         )
 
-    def test_security_gate_always_fetches_even_for_externally_verified_immutable(self):
-        fact = capsule().facts[0]
-        decision = planner_for(fact).plan(
-            capsule=capsule(),
+    def test_security_gate_always_fetches_even_for_verified_immutable(self):
+        item = capsule()
+        decision = planner_for((item, item.facts[0])).plan(
+            capsule=item,
             controller_task_id="task-1",
             operation_id="op-1",
             operation_version="v1",
@@ -201,9 +212,9 @@ class ContextCapsuleTests(unittest.TestCase):
         self.assertIs(RetrievalAction.FETCH_FOR_SECURITY_GATE, decision.action)
 
     def test_explicit_must_recheck_overrides_immutable_reuse(self):
-        fact = capsule().facts[0]
-        decision = planner_for(fact).plan(
-            capsule=capsule(must_recheck=("architecture",)),
+        item = capsule(must_recheck=("architecture",))
+        decision = planner_for((item, item.facts[0])).plan(
+            capsule=item,
             controller_task_id="task-1",
             operation_id="op-1",
             operation_version="v1",
@@ -221,7 +232,7 @@ class ContextCapsuleTests(unittest.TestCase):
                 requests=(RetrievalRequest("architecture"),),
             )
 
-    def test_irrelevant_request_is_omitted_without_verified_evidence(self):
+    def test_irrelevant_request_is_omitted(self):
         decision = planner_for().plan(
             capsule=capsule(),
             controller_task_id="task-1",
@@ -232,10 +243,9 @@ class ContextCapsuleTests(unittest.TestCase):
         self.assertIs(RetrievalAction.OMIT_IRRELEVANT, decision.action)
 
     def test_planner_has_no_per_call_verified_source_override(self):
-        params = set(inspect.signature(ContextRetrievalPlanner.plan).parameters)
         self.assertEqual(
             {"self", "capsule", "controller_task_id", "operation_id", "operation_version", "requests"},
-            params,
+            set(inspect.signature(ContextRetrievalPlanner.plan).parameters),
         )
 
     def test_public_module_has_no_effect_or_model_routing_surface(self):
