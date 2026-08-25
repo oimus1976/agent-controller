@@ -34,6 +34,7 @@ describe("effect-free broker Durable Object", () => {
     const first = await stub.claim(challenge(), SIGNATURE);
     const second = await stub.claim(challenge(), SIGNATURE);
     expect(first.decision).toBe("PASS");
+    expect(first.attempt_id).toBe(`attempt_${first.authorization_digest}`);
     expect(second.decision).toBe("REPLAYED");
     expect(second.attempt_id).toBe(first.attempt_id);
     expect(await stub.count()).toBe(1);
@@ -84,6 +85,22 @@ describe("effect-free broker Durable Object", () => {
       state.storage.sql.exec(
         "UPDATE attempts SET signature_b64 = ? WHERE authorization_digest = ?",
         "AAAA",
+        first.authorization_digest,
+      );
+    });
+    const replay = await stub.claim(challenge(), SIGNATURE);
+    expect(replay).toEqual({ decision: "BLOCKED", reason: "BROKER_LEDGER_INTEGRITY_FAILED" });
+    expect(await stub.count()).toBe(1);
+  });
+
+  it("stored attempt identity replacement makes all later claims fail closed", async () => {
+    const stub = env.BROKER.getByName("tamper-attempt");
+    const first = await stub.claim(challenge(), SIGNATURE);
+    expect(first.decision).toBe("PASS");
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "UPDATE attempts SET attempt_id = ? WHERE authorization_digest = ?",
+        "attempt_attacker",
         first.authorization_digest,
       );
     });
