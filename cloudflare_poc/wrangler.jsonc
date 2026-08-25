@@ -4,10 +4,11 @@
   "compatibility_date": "2026-08-25",
   "durable_objects": {
     "bindings": [
-      { "name": "BROKER", "class_name": "BrokerDurableObject" }
+      { "name": "BROKER", "class_name": "BrokerDurableObject" },
+      { "name": "BROKER_SUSPENDED", "class_name": "SuspendedBrokerDurableObject" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["BrokerDurableObject"] }
+    { "tag": "v1", "new_sqlite_classes": ["BrokerDurableObject", "SuspendedBrokerDurableObject"] }
   ]
 }
