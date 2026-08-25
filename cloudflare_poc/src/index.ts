@@ -103,7 +103,8 @@ export class BrokerDurableObject extends DurableObject {
       const challenge = JSON.parse(row.challenge_json) as unknown;
       if (!validChallenge(challenge)) return false;
       if (challenge.schema_version !== SCHEMA) return false;
-      if (challenge.broker_authority_id !== AUTHORITY || challenge.broker_epoch !== EPOCH) return false;
+      if (challenge.broker_authority_id !== row.broker_authority_id) return false;
+      if (challenge.broker_epoch !== row.broker_epoch) return false;
       const authDigest = await sha256Hex(canonical(challenge));
       const sigDigest = await sha256Hex(b64bytes(row.signature_b64));
       if (authDigest !== row.authorization_digest || sigDigest !== row.signature_digest) return false;
@@ -111,6 +112,14 @@ export class BrokerDurableObject extends DurableObject {
     } catch {
       return false;
     }
+  }
+
+  private async validateLedger(): Promise<boolean> {
+    const rows = this.ctx.storage.sql.exec<Record<string, string>>("SELECT * FROM attempts").toArray();
+    for (const row of rows) {
+      if (!(await this.validateStored(row))) return false;
+    }
+    return true;
   }
 
   async claim(challenge: unknown, signatureB64: string): Promise<ClaimResult> {
@@ -128,6 +137,9 @@ export class BrokerDurableObject extends DurableObject {
     }
     if (typeof signatureB64 !== "string" || !(await verifySignature(challenge, signatureB64))) {
       return { decision: "BLOCKED", reason: "SIGNATURE_INVALID" };
+    }
+    if (!(await this.validateLedger())) {
+      return { decision: "BLOCKED", reason: "BROKER_LEDGER_INTEGRITY_FAILED" };
     }
 
     const authorizationDigest = await sha256Hex(canonical(challenge));
