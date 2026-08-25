@@ -23,4 +23,5 @@ jobs:
           cache: npm
           cache-dependency-path: cloudflare_poc/package.json
       - run: npm install --ignore-scripts
+      - run: npm ls --depth=0
       - run: npm test
