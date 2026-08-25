@@ -94,6 +94,10 @@ export class BrokerDurableObject extends DurableObject {
     `);
   }
 
+  protected continuityState(): "ACTIVE" | "RECOVERY_SUSPENDED" {
+    return "ACTIVE";
+  }
+
   private async validateStored(row: Record<string, string>): Promise<boolean> {
     try {
       const challenge = JSON.parse(row.challenge_json) as unknown;
@@ -110,6 +114,9 @@ export class BrokerDurableObject extends DurableObject {
   }
 
   async claim(challenge: unknown, signatureB64: string): Promise<ClaimResult> {
+    if (this.continuityState() !== "ACTIVE") {
+      return { decision: "BLOCKED", reason: "BROKER_RECOVERY_SUSPENDED" };
+    }
     if (!validChallenge(challenge) || challenge.schema_version !== SCHEMA) {
       return { decision: "BLOCKED", reason: "V3_CHALLENGE_REQUIRED" };
     }
@@ -173,8 +180,15 @@ export class BrokerDurableObject extends DurableObject {
   }
 }
 
+export class SuspendedBrokerDurableObject extends BrokerDurableObject {
+  protected continuityState(): "ACTIVE" | "RECOVERY_SUSPENDED" {
+    return "RECOVERY_SUSPENDED";
+  }
+}
+
 interface Env {
   BROKER: DurableObjectNamespace<BrokerDurableObject>;
+  BROKER_SUSPENDED: DurableObjectNamespace<SuspendedBrokerDurableObject>;
 }
 
 export default {
