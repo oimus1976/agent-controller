@@ -1,0 +1,92 @@
+name: cloudflare-command-proof
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/cloudflare-command-proof.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  prove-command:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudflare_poc
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Set up exact Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24.19.0"
+      - name: Install exact pinned Wrangler from generated retained lock
+        run: |
+          test ! -e package-lock.json
+          npm install --package-lock-only --ignore-scripts
+          npm ci --ignore-scripts
+          test "$(./node_modules/.bin/wrangler --version | sed -n 's/^.*wrangler \([0-9.]*\).*$/\1/p')" = "4.125.0"
+      - name: Prove required CLI flags are documented by exact binary
+        run: |
+          ./node_modules/.bin/wrangler deploy --help > ../wrangler-deploy-help.txt
+          grep -F -- '--no-bundle' ../wrangler-deploy-help.txt
+          grep -F -- '--experimental-provision' ../wrangler-deploy-help.txt
+          grep -F -- '--experimental-auto-create' ../wrangler-deploy-help.txt
+          grep -F -- '--upload-source-maps' ../wrangler-deploy-help.txt
+          grep -F -- '--dry-run' ../wrangler-deploy-help.txt
+      - name: Create deterministic prebuilt proof fixture
+        run: |
+          rm -rf ../command-proof
+          mkdir -p ../command-proof
+          cat > ../command-proof/index.js <<'JS'
+          export default { async fetch() { return new Response("command-proof"); } };
+          JS
+          cat > ../command-proof/wrangler.jsonc <<'JSON'
+          {"name":"agent-controller-command-proof","main":"./index.js","compatibility_date":"2026-08-25","no_bundle":true,"find_additional_modules":false,"upload_source_maps":false}
+          JSON
+          sha256sum ../command-proof/index.js ../command-proof/wrangler.jsonc
+      - name: Prove explicit false syntax and no-bundle dry-run
+        run: |
+          expected="$(sha256sum ../command-proof/index.js | awk '{print $1}')"
+          rm -rf ../command-proof-out
+          ./node_modules/.bin/wrangler deploy \
+            --dry-run \
+            --no-bundle \
+            --experimental-provision=false \
+            --experimental-auto-create=false \
+            --config ../command-proof/wrangler.jsonc \
+            --outdir ../command-proof-out
+          test ! -e ../command-proof/.wrangler/deploy/config.json
+          actual="$(sha256sum ../command-proof-out/index.js | awk '{print $1}')"
+          test "$expected" = "$actual"
+          js_count="$(find ../command-proof-out -type f -name '*.js' | wc -l | tr -d ' ')"
+          test "$js_count" = "1"
+          printf 'PROVEN_COMMAND_FLAGS=--no-bundle --experimental-provision=false --experimental-auto-create=false\n'
+          printf 'WORKER_SHA256=%s\n' "$actual"
+      - name: Reject prohibited command surfaces from proof workflow
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          text = Path("../.github/workflows/cloudflare-command-proof.yml").read_text(encoding="utf-8")
+          prohibited = [
+              "wrangler login",
+              "--temporary",
+              "--route ",
+              "--routes ",
+              "--domain ",
+              "--secrets-file",
+              "wrangler secret",
+          ]
+          for token in prohibited:
+              if token in text:
+                  raise SystemExit("PROHIBITED_COMMAND_SURFACE:" + token)
+          deploy_lines = [line.strip() for line in text.splitlines() if "wrangler deploy" in line and "--help" not in line]
+          if len(deploy_lines) != 1:
+              raise SystemExit(f"UNEXPECTED_DEPLOY_COMMAND_COUNT:{len(deploy_lines)}")
+          print("effect-free deploy command count: 1")
+          PY
