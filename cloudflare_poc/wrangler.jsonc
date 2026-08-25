@@ -1,0 +1,13 @@
+{
+  "name": "agent-controller-broker-poc",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-25",
+  "durable_objects": {
+    "bindings": [
+      { "name": "BROKER", "class_name": "BrokerDurableObject" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["BrokerDurableObject"] }
+  ]
+}
