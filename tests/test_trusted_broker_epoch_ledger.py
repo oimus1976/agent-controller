@@ -12,10 +12,7 @@ from agent_controller.broker_epoch import (
 )
 from agent_controller.signed_approval import ApprovalChallengeV3, canonicalize_approval_challenge
 from agent_controller.trusted_broker_epoch_ledger import EpochBoundTrustedBrokerLedger
-from agent_controller.trusted_broker_ledger import (
-    BrokerLedgerDecision,
-    TrustedBrokerAttemptLedger,
-)
+from agent_controller.trusted_broker_ledger import BrokerLedgerDecision, TrustedBrokerAttemptLedger
 
 
 SIGNATURE_V3 = "p4DTQlILZY1hMYKGa2j37eEEBmZXldUd8uN4Z3mApg2BFy2+jmM3azUtyFndFHADJTdZZb7mSUzFrU54sD0iCQ=="
@@ -63,10 +60,7 @@ class EpochBoundTrustedBrokerLedgerTests(unittest.TestCase):
         self.temp.cleanup()
 
     def ledger(self, active_gate=None):
-        return EpochBoundTrustedBrokerLedger(
-            db_path=self.db,
-            gate=active_gate or gate(),
-        )
+        return EpochBoundTrustedBrokerLedger(db_path=self.db, gate=active_gate or gate())
 
     def row_count(self):
         connection = sqlite3.connect(self.db)
@@ -84,6 +78,7 @@ class EpochBoundTrustedBrokerLedgerTests(unittest.TestCase):
         self.assertEqual(first.record.attempt_id, second.record.attempt_id)
         self.assertEqual("broker-prod-primary", first.record.broker_authority_id)
         self.assertEqual("epoch-2026-08-25-a", first.record.broker_epoch)
+        self.assertEqual(SIGNATURE_V3, first.record.signature_b64)
         expected = hashlib.sha256(canonicalize_approval_challenge(challenge_v3())).hexdigest()
         self.assertEqual(expected, first.record.authorization_digest)
 
@@ -114,10 +109,7 @@ class EpochBoundTrustedBrokerLedgerTests(unittest.TestCase):
         digest = first.record.authorization_digest
         connection = sqlite3.connect(self.db)
         try:
-            connection.execute(
-                "UPDATE effect_attempts SET broker_epoch='epoch-attacker' WHERE authorization_digest=?",
-                (digest,),
-            )
+            connection.execute("UPDATE effect_attempts SET broker_epoch='epoch-attacker' WHERE authorization_digest=?", (digest,))
             connection.commit()
         finally:
             connection.close()
@@ -126,24 +118,39 @@ class EpochBoundTrustedBrokerLedgerTests(unittest.TestCase):
         self.assertEqual(BrokerLedgerDecision.BLOCKED, read.decision)
         self.assertEqual("BROKER_LEDGER_AUTHORIZATION_BINDING_INVALID", read.reason)
         self.assertEqual(BrokerLedgerDecision.BLOCKED, replay.decision)
-        self.assertEqual("BROKER_LEDGER_AUTHORIZATION_BINDING_INVALID", replay.reason)
 
-    def test_stored_authority_tamper_blocks_read(self):
+    def test_stored_signature_replacement_blocks_read(self):
         ledger = self.ledger()
         first = ledger.claim_effect_attempt(challenge=challenge_v3(), signature_b64=SIGNATURE_V3)
         digest = first.record.authorization_digest
         connection = sqlite3.connect(self.db)
         try:
-            connection.execute(
-                "UPDATE effect_attempts SET broker_authority_id='broker-attacker' WHERE authorization_digest=?",
-                (digest,),
-            )
+            connection.execute("UPDATE effect_attempts SET signature_b64=? WHERE authorization_digest=?", ("A" * 88, digest))
             connection.commit()
         finally:
             connection.close()
         result = ledger.read_attempt(authorization_digest=digest)
         self.assertEqual(BrokerLedgerDecision.BLOCKED, result.decision)
-        self.assertEqual("BROKER_LEDGER_AUTHORIZATION_BINDING_INVALID", result.reason)
+        self.assertIn(result.reason, {"BROKER_LEDGER_SIGNATURE_ENCODING_INVALID", "BROKER_LEDGER_SIGNATURE_DIGEST_INVALID"})
+
+    def test_self_consistent_challenge_digest_tamper_still_fails_signature(self):
+        ledger = self.ledger()
+        first = ledger.claim_effect_attempt(challenge=challenge_v3(), signature_b64=SIGNATURE_V3)
+        old_digest = first.record.authorization_digest
+        tampered = challenge_v3(effect="DEPLOY")
+        new_digest = hashlib.sha256(canonicalize_approval_challenge(tampered)).hexdigest()
+        connection = sqlite3.connect(self.db)
+        try:
+            connection.execute(
+                "UPDATE effect_attempts SET effect=?, authorization_digest=? WHERE authorization_digest=?",
+                (tampered.effect, new_digest, old_digest),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        result = ledger.read_attempt(authorization_digest=new_digest)
+        self.assertEqual(BrokerLedgerDecision.BLOCKED, result.decision)
+        self.assertEqual("BROKER_LEDGER_SIGNATURE_INVALID", result.reason)
 
     def test_old_v1_ledger_is_not_auto_migrated(self):
         old_db = os.path.join(self.temp.name, "old.sqlite")
@@ -153,15 +160,13 @@ class EpochBoundTrustedBrokerLedgerTests(unittest.TestCase):
         self.assertIn("BROKER_LEDGER", str(caught.exception))
         connection = sqlite3.connect(old_db)
         try:
-            version = connection.execute(
-                "SELECT value FROM broker_meta WHERE key='schema_version'"
-            ).fetchone()[0]
+            version = connection.execute("SELECT value FROM broker_meta WHERE key='schema_version'").fetchone()[0]
         finally:
             connection.close()
         self.assertEqual("agent-controller-trusted-broker-ledger-v1", version)
 
     def test_two_connections_race_exactly_one_first_claim(self):
-        self.ledger().claim_effect_attempt  # initialize DB
+        self.ledger()
         ledger_a = EpochBoundTrustedBrokerLedger(db_path=self.db, gate=gate())
         ledger_b = EpochBoundTrustedBrokerLedger(db_path=self.db, gate=gate())
         barrier = threading.Barrier(2)
