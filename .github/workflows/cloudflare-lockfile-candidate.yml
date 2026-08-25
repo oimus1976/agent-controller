@@ -66,44 +66,90 @@ jobs:
         run: |
           rm -rf ../build-one .wrangler
           ./node_modules/.bin/wrangler deploy --dry-run --outdir ../build-one
-          if [ -e .wrangler/deploy/config.json ]; then
-            echo "Unexpected generated .wrangler/deploy/config.json" >&2
-            sha256sum .wrangler/deploy/config.json >&2
-            exit 1
-          fi
+          test ! -e .wrangler/deploy/config.json
       - name: Rebuild from same retained lock in cleaned dependency state
         run: |
           rm -rf node_modules .wrangler ../build-two
           cp ../review-artifact/package-lock.json package-lock.json
           npm ci --ignore-scripts
           ./node_modules/.bin/wrangler deploy --dry-run --outdir ../build-two
-          if [ -e .wrangler/deploy/config.json ]; then
-            echo "Unexpected generated .wrangler/deploy/config.json on rebuild" >&2
-            sha256sum .wrangler/deploy/config.json >&2
-            exit 1
-          fi
-      - name: Require byte-identical deployment outputs
+          test ! -e .wrangler/deploy/config.json
+      - name: Require byte-identical Worker code and record helper variance
         run: |
           python - <<'PY'
           import hashlib
+          import json
           from pathlib import Path
 
-          def snapshot(root: Path):
-              result = []
-              for path in sorted(p for p in root.rglob("*") if p.is_file()):
-                  raw = path.read_bytes()
-                  result.append((path.relative_to(root).as_posix(), len(raw), hashlib.sha256(raw).hexdigest()))
-              return result
+          def sha(path: Path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
 
-          one = snapshot(Path("../build-one"))
-          two = snapshot(Path("../build-two"))
-          if not one or one != two:
-              print("build-one:", one)
-              print("build-two:", two)
-              raise SystemExit("NON_REPRODUCIBLE_DEPLOY_OUTPUT")
-          print("reproducible files:", len(one))
-          for row in one:
-              print(*row)
+          one = Path("../build-one/index.js")
+          two = Path("../build-two/index.js")
+          if not one.is_file() or not two.is_file():
+              raise SystemExit("WORKER_CODE_OUTPUT_MISSING")
+          if one.read_bytes() != two.read_bytes():
+              raise SystemExit("NON_REPRODUCIBLE_WORKER_CODE")
+
+          helpers = []
+          for name in ("README.md", "index.js.map"):
+              left = Path("../build-one") / name
+              right = Path("../build-two") / name
+              helpers.append({
+                  "path": name,
+                  "first_sha256": sha(left) if left.is_file() else None,
+                  "second_sha256": sha(right) if right.is_file() else None,
+                  "same": left.is_file() and right.is_file() and left.read_bytes() == right.read_bytes(),
+              })
+          Path("../review-artifact/dry-run-helper-evidence.json").write_text(
+              json.dumps(helpers, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          print("reproducible Worker code:", len(one.read_bytes()), sha(one))
+          print("helper evidence:", json.dumps(helpers, sort_keys=True))
+          PY
+      - name: Create explicit prebuilt deployment payload
+        run: |
+          mkdir -p ../review-artifact/deploy
+          cp ../build-one/index.js ../review-artifact/deploy/index.js
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          source = json.loads(Path("wrangler.jsonc").read_text(encoding="utf-8"))
+          if source.get("upload_source_maps") is True:
+              raise SystemExit("SOURCE_MAP_UPLOAD_NOT_SUPPORTED_BY_REVIEW_ARTIFACT_V1")
+          allowed = {"name", "compatibility_date", "durable_objects", "migrations"}
+          unexpected = sorted(set(source) - allowed - {"main"})
+          if unexpected:
+              raise SystemExit("UNREVIEWED_WRANGLER_CONFIG_KEYS:" + ",".join(unexpected))
+          prebuilt = {key: source[key] for key in sorted(allowed) if key in source}
+          prebuilt["main"] = "./index.js"
+          prebuilt["no_bundle"] = True
+          Path("../review-artifact/deploy/wrangler.jsonc").write_text(
+              json.dumps(prebuilt, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+      - name: Prove no-bundle dry-run preserves reviewed Worker bytes
+        run: |
+          rm -rf ../prebuilt-check
+          cd ../review-artifact/deploy
+          ../../cloudflare_poc/node_modules/.bin/wrangler deploy \
+            --dry-run \
+            --no-bundle \
+            --config wrangler.jsonc \
+            --outdir ../../prebuilt-check
+          test ! -e .wrangler/deploy/config.json
+          python - <<'PY'
+          from pathlib import Path
+          expected = Path("index.js").read_bytes()
+          candidates = [p for p in Path("../../prebuilt-check").rglob("index.js") if p.is_file()]
+          if len(candidates) != 1:
+              raise SystemExit(f"PREBUILT_DRY_RUN_CODE_COUNT:{len(candidates)}")
+          if candidates[0].read_bytes() != expected:
+              raise SystemExit("NO_BUNDLE_CHANGED_REVIEWED_WORKER_BYTES")
+          print("no-bundle Worker byte parity: PASS")
           PY
       - name: Build canonical review manifest
         env:
@@ -113,7 +159,6 @@ jobs:
           import hashlib
           import json
           import os
-          import re
           import subprocess
           from pathlib import Path
 
@@ -130,18 +175,11 @@ jobs:
                   })
               return out
 
-          config_text = Path("wrangler.jsonc").read_text(encoding="utf-8")
-          match = re.search(r'"compatibility_date"\s*:\s*"([^"]+)"', config_text)
-          if not match:
-              raise SystemExit("COMPATIBILITY_DATE_NOT_FOUND")
-
-          node_version = subprocess.check_output(["node", "--version"], text=True).strip()
-          npm_version = subprocess.check_output(["npm", "--version"], text=True).strip()
-          wrangler_version = subprocess.check_output(["./node_modules/.bin/wrangler", "--version"], text=True).strip()
-
-          deployment_files = files(Path("../build-one"))
+          source_config = json.loads(Path("wrangler.jsonc").read_text(encoding="utf-8"))
           inventory = Path("../review-artifact/dependency-inventory.json")
           lock = Path("package-lock.json")
+          helper = Path("../review-artifact/dry-run-helper-evidence.json")
+          deploy_dir = Path("../review-artifact/deploy")
           manifest = {
               "schema": "agent-controller-cloudflare-review-artifact-v1",
               "source_head_sha": os.environ["SOURCE_HEAD_SHA"],
@@ -149,22 +187,25 @@ jobs:
                   "package_json_sha256": sha(Path("package.json")),
                   "package_lock_sha256": sha(lock),
                   "dependency_inventory_sha256": sha(inventory),
-                  "wrangler_config_sha256": sha(Path("wrangler.jsonc")),
+                  "wrangler_source_config_sha256": sha(Path("wrangler.jsonc")),
                   "source_index_sha256": sha(Path("src/index.ts")),
-                  "compatibility_date": match.group(1),
+                  "compatibility_date": source_config["compatibility_date"],
               },
               "toolchain": {
-                  "node": node_version,
-                  "npm": npm_version,
-                  "wrangler": wrangler_version,
+                  "node": subprocess.check_output(["node", "--version"], text=True).strip(),
+                  "npm": subprocess.check_output(["npm", "--version"], text=True).strip(),
+                  "wrangler": subprocess.check_output(["./node_modules/.bin/wrangler", "--version"], text=True).strip(),
               },
               "commands": {
                   "lock": "npm install --package-lock-only --ignore-scripts",
                   "install": "npm ci --ignore-scripts",
                   "test": "npm test",
                   "build": "wrangler deploy --dry-run --outdir <clean-dir>",
+                  "prebuilt_parity": "wrangler deploy --dry-run --no-bundle --config wrangler.jsonc --outdir <clean-dir>",
               },
-              "deployment_files": deployment_files,
+              "deployment_files": files(deploy_dir),
+              "dry_run_helper_evidence_sha256": sha(helper),
+              "source_maps_uploaded": False,
           }
           manifest_path = Path("../review-artifact/artifact-manifest.json")
           manifest_path.write_text(
@@ -176,9 +217,8 @@ jobs:
               digest + "  artifact-manifest.json\n", encoding="utf-8"
           )
           print("artifact manifest sha256:", digest)
+          print("deployment files:", json.dumps(manifest["deployment_files"], sort_keys=True))
           PY
-          mkdir -p ../review-artifact/deploy
-          cp -R ../build-one/. ../review-artifact/deploy/
           git diff --exit-code -- src package.json wrangler.jsonc vitest.config.ts
       - name: Audit lockfile as evidence only
         run: npm audit --package-lock-only --ignore-scripts
