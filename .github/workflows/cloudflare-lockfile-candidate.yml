@@ -1,37 +1,190 @@
-name: cloudflare-lockfile-candidate
+name: cloudflare-repro-artifact-candidate
 
 on:
   pull_request:
     paths:
-      - "cloudflare_poc/package.json"
+      - "cloudflare_poc/**"
       - ".github/workflows/cloudflare-lockfile-candidate.yml"
 
 permissions:
   contents: read
 
 jobs:
-  generate-lockfile:
+  build-review-artifact:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: cloudflare_poc
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - name: Checkout exact PR head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          node-version: "24"
-      - name: Record npm version
-        run: npm --version
-      - name: Require no preexisting candidate lockfile
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Set up exact Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24.19.0"
+      - name: Require no repository lockfile
         run: test ! -e package-lock.json
-      - name: Generate lockfile without lifecycle scripts
+      - name: Generate exact lock without lifecycle scripts
         run: npm install --package-lock-only --ignore-scripts
-      - name: Hash generated lockfile
-        run: sha256sum package-lock.json
-      - name: Upload generated lockfile candidate
+      - name: Capture dependency inventory
+        run: |
+          mkdir -p ../review-artifact
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          lock = json.loads(Path("package-lock.json").read_text(encoding="utf-8"))
+          rows = []
+          for path, meta in sorted(lock.get("packages", {}).items()):
+              if not path:
+                  continue
+              rows.append({
+                  "path": path,
+                  "version": meta.get("version"),
+                  "resolved": meta.get("resolved"),
+                  "integrity": meta.get("integrity"),
+                  "has_install_script": bool(meta.get("hasInstallScript", False)),
+                  "optional": bool(meta.get("optional", False)),
+                  "dev": bool(meta.get("dev", False)),
+              })
+          Path("../review-artifact/dependency-inventory.json").write_text(
+              json.dumps(rows, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          cp package-lock.json ../review-artifact/package-lock.json
+          sha256sum package-lock.json ../review-artifact/dependency-inventory.json
+      - name: Install from retained lock and run tests
+        run: |
+          npm ci --ignore-scripts
+          npm test
+      - name: Build first dry-run output
+        run: |
+          rm -rf ../build-one .wrangler
+          ./node_modules/.bin/wrangler deploy --dry-run --outdir ../build-one
+          if [ -e .wrangler/deploy/config.json ]; then
+            echo "Unexpected generated .wrangler/deploy/config.json" >&2
+            sha256sum .wrangler/deploy/config.json >&2
+            exit 1
+          fi
+      - name: Rebuild from same retained lock in cleaned dependency state
+        run: |
+          rm -rf node_modules .wrangler ../build-two
+          cp ../review-artifact/package-lock.json package-lock.json
+          npm ci --ignore-scripts
+          ./node_modules/.bin/wrangler deploy --dry-run --outdir ../build-two
+          if [ -e .wrangler/deploy/config.json ]; then
+            echo "Unexpected generated .wrangler/deploy/config.json on rebuild" >&2
+            sha256sum .wrangler/deploy/config.json >&2
+            exit 1
+          fi
+      - name: Require byte-identical deployment outputs
+        run: |
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          def snapshot(root: Path):
+              result = []
+              for path in sorted(p for p in root.rglob("*") if p.is_file()):
+                  raw = path.read_bytes()
+                  result.append((path.relative_to(root).as_posix(), len(raw), hashlib.sha256(raw).hexdigest()))
+              return result
+
+          one = snapshot(Path("../build-one"))
+          two = snapshot(Path("../build-two"))
+          if not one or one != two:
+              print("build-one:", one)
+              print("build-two:", two)
+              raise SystemExit("NON_REPRODUCIBLE_DEPLOY_OUTPUT")
+          print("reproducible files:", len(one))
+          for row in one:
+              print(*row)
+          PY
+      - name: Build canonical review manifest
+        env:
+          SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          def sha(path: Path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          def files(root: Path):
+              out = []
+              for path in sorted(p for p in root.rglob("*") if p.is_file()):
+                  out.append({
+                      "path": path.relative_to(root).as_posix(),
+                      "bytes": path.stat().st_size,
+                      "sha256": sha(path),
+                  })
+              return out
+
+          config_text = Path("wrangler.jsonc").read_text(encoding="utf-8")
+          match = re.search(r'"compatibility_date"\s*:\s*"([^"]+)"', config_text)
+          if not match:
+              raise SystemExit("COMPATIBILITY_DATE_NOT_FOUND")
+
+          node_version = subprocess.check_output(["node", "--version"], text=True).strip()
+          npm_version = subprocess.check_output(["npm", "--version"], text=True).strip()
+          wrangler_version = subprocess.check_output(["./node_modules/.bin/wrangler", "--version"], text=True).strip()
+
+          deployment_files = files(Path("../build-one"))
+          inventory = Path("../review-artifact/dependency-inventory.json")
+          lock = Path("package-lock.json")
+          manifest = {
+              "schema": "agent-controller-cloudflare-review-artifact-v1",
+              "source_head_sha": os.environ["SOURCE_HEAD_SHA"],
+              "inputs": {
+                  "package_json_sha256": sha(Path("package.json")),
+                  "package_lock_sha256": sha(lock),
+                  "dependency_inventory_sha256": sha(inventory),
+                  "wrangler_config_sha256": sha(Path("wrangler.jsonc")),
+                  "source_index_sha256": sha(Path("src/index.ts")),
+                  "compatibility_date": match.group(1),
+              },
+              "toolchain": {
+                  "node": node_version,
+                  "npm": npm_version,
+                  "wrangler": wrangler_version,
+              },
+              "commands": {
+                  "lock": "npm install --package-lock-only --ignore-scripts",
+                  "install": "npm ci --ignore-scripts",
+                  "test": "npm test",
+                  "build": "wrangler deploy --dry-run --outdir <clean-dir>",
+              },
+              "deployment_files": deployment_files,
+          }
+          manifest_path = Path("../review-artifact/artifact-manifest.json")
+          manifest_path.write_text(
+              json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          digest = sha(manifest_path)
+          Path("../review-artifact/artifact-manifest.sha256").write_text(
+              digest + "  artifact-manifest.json\n", encoding="utf-8"
+          )
+          print("artifact manifest sha256:", digest)
+          PY
+          mkdir -p ../review-artifact/deploy
+          cp -R ../build-one/. ../review-artifact/deploy/
+          git diff --exit-code -- src package.json wrangler.jsonc vitest.config.ts
+      - name: Audit lockfile as evidence only
+        run: npm audit --package-lock-only --ignore-scripts
+      - name: Upload complete review artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: cloudflare-package-lock-candidate
-          path: cloudflare_poc/package-lock.json
+          name: cloudflare-reviewed-deploy-candidate
+          path: review-artifact
           if-no-files-found: error
-          archive: false
