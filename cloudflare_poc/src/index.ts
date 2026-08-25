@@ -54,6 +54,10 @@ async function sha256Hex(data: Uint8Array): Promise<string> {
   return [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+function attemptIdFor(authorizationDigest: string): string {
+  return `attempt_${authorizationDigest}`;
+}
+
 async function verifySignature(challenge: ChallengeV3, signatureB64: string): Promise<boolean> {
   try {
     if (challenge.signer_key_id !== SIGNER) return false;
@@ -108,6 +112,7 @@ export class BrokerDurableObject extends DurableObject {
       const authDigest = await sha256Hex(canonical(challenge));
       const sigDigest = await sha256Hex(b64bytes(row.signature_b64));
       if (authDigest !== row.authorization_digest || sigDigest !== row.signature_digest) return false;
+      if (row.attempt_id !== attemptIdFor(authDigest) || row.state !== "CLAIMED") return false;
       return await verifySignature(challenge, row.signature_b64);
     } catch {
       return false;
@@ -115,11 +120,15 @@ export class BrokerDurableObject extends DurableObject {
   }
 
   private async validateLedger(): Promise<boolean> {
-    const rows = this.ctx.storage.sql.exec<Record<string, string>>("SELECT * FROM attempts").toArray();
-    for (const row of rows) {
-      if (!(await this.validateStored(row))) return false;
+    try {
+      const rows = this.ctx.storage.sql.exec<Record<string, string>>("SELECT * FROM attempts").toArray();
+      for (const row of rows) {
+        if (!(await this.validateStored(row))) return false;
+      }
+      return true;
+    } catch {
+      return false;
     }
-    return true;
   }
 
   async claim(challenge: unknown, signatureB64: string): Promise<ClaimResult> {
@@ -145,6 +154,7 @@ export class BrokerDurableObject extends DurableObject {
     const authorizationDigest = await sha256Hex(canonical(challenge));
     const signatureDigest = await sha256Hex(b64bytes(signatureB64));
     const challengeJson = new TextDecoder().decode(canonical(challenge)).trimEnd();
+    const attemptId = attemptIdFor(authorizationDigest);
 
     const existing = this.ctx.storage.sql.exec<Record<string, string>>(
       "SELECT * FROM attempts WHERE authorization_digest = ?", authorizationDigest,
@@ -159,7 +169,6 @@ export class BrokerDurableObject extends DurableObject {
       };
     }
 
-    const attemptId = `attempt_${crypto.randomUUID()}`;
     try {
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec(
