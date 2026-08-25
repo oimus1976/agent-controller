@@ -6,13 +6,14 @@ import json
 from dataclasses import asdict, dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import Optional
+from typing import Optional, Union
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 
 SCHEMA_VERSION = "agent-controller-approval-challenge-v2"
+SCHEMA_VERSION_V3 = "agent-controller-approval-challenge-v3"
 
 
 class ProvenanceAssurance(str, Enum):
@@ -28,6 +29,7 @@ _PINNED_APPROVAL_KEYS = MappingProxyType(
     {
         "human-key-poc-2": "Pxpq8/gqzFvE+96c3WI2QMsKIMHevr175Yy4e1EvS/E=",
         "human-key-poc-3": "wATGr7gy8bzoYR/1D6qjXQOU4bYb9akZCm3X9p/jUJ4=",
+        "human-key-poc-v3": "0CYe5bUlZrfXnmfDt/hP3qf8HigcnUdzyqwIXYUJa7E=",
     }
 )
 
@@ -52,6 +54,30 @@ class ApprovalChallenge:
 
 
 @dataclass(frozen=True)
+class ApprovalChallengeV3:
+    approval_id: str
+    approval_policy_id: str
+    controller_task_id: str
+    operation_id: str
+    operation_version: str
+    provider: str
+    requested_capability: str
+    effect: str
+    repo: str
+    target_kind: str
+    target_id: str
+    expected_head_sha: str
+    challenge_nonce: str
+    signer_key_id: str
+    broker_authority_id: str
+    broker_epoch: str
+    schema_version: str = SCHEMA_VERSION_V3
+
+
+ApprovalChallengeAny = Union[ApprovalChallenge, ApprovalChallengeV3]
+
+
+@dataclass(frozen=True)
 class SignedApprovalValidation:
     valid: bool
     assurance: ProvenanceAssurance
@@ -59,14 +85,17 @@ class SignedApprovalValidation:
     signer_key_id: Optional[str] = None
 
 
-def canonicalize_approval_challenge(challenge: ApprovalChallenge) -> bytes:
-    if not isinstance(challenge, ApprovalChallenge):
-        raise TypeError("challenge must be ApprovalChallenge")
+def canonicalize_approval_challenge(challenge: ApprovalChallengeAny) -> bytes:
+    if not isinstance(challenge, (ApprovalChallenge, ApprovalChallengeV3)):
+        raise TypeError("challenge must be an approval challenge")
     values = asdict(challenge)
     for key, value in values.items():
         if not isinstance(value, str) or not value:
             raise ValueError(f"challenge field missing or invalid: {key}")
-    if challenge.schema_version != SCHEMA_VERSION:
+    if isinstance(challenge, ApprovalChallengeV3):
+        if challenge.schema_version != SCHEMA_VERSION_V3:
+            raise ValueError("unsupported challenge schema")
+    elif challenge.schema_version != SCHEMA_VERSION:
         raise ValueError("unsupported challenge schema")
     return (
         json.dumps(values, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -75,7 +104,7 @@ def canonicalize_approval_challenge(challenge: ApprovalChallenge) -> bytes:
 
 
 def verify_signed_approval(
-    *, challenge: ApprovalChallenge, signature_b64: str
+    *, challenge: ApprovalChallengeAny, signature_b64: str
 ) -> SignedApprovalValidation:
     try:
         message = canonicalize_approval_challenge(challenge)
