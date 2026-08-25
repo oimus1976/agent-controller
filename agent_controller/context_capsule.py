@@ -137,9 +137,9 @@ class RetrievalDecision:
 
 @runtime_checkable
 class VerifiedImmutableFactSource(Protocol):
-    """Read-only trust boundary for whole previously verified immutable facts."""
+    """Read-only trust boundary for previously verified operation-bound facts."""
 
-    def is_verified_fact(self, fact_digest: str) -> bool: ...
+    def is_verified_fact(self, bound_fact_digest: str) -> bool: ...
 
 
 def _pointer_dict(pointer: EvidencePointer) -> dict[str, object]:
@@ -171,6 +171,22 @@ def canonicalize_capsule_fact(fact: CapsuleFact) -> bytes:
 
 def capsule_fact_digest(fact: CapsuleFact) -> str:
     return hashlib.sha256(canonicalize_capsule_fact(fact)).hexdigest()
+
+
+def bound_capsule_fact_digest(*, capsule: ContextCapsule, fact: CapsuleFact) -> str:
+    if not isinstance(capsule, ContextCapsule):
+        raise TypeError("capsule must be ContextCapsule")
+    if not isinstance(fact, CapsuleFact):
+        raise TypeError("fact must be CapsuleFact")
+    payload = {
+        "controller_task_id": capsule.controller_task_id,
+        "fact_digest": capsule_fact_digest(fact),
+        "operation_id": capsule.operation_id,
+        "operation_version": capsule.operation_version,
+        "schema_version": capsule.schema_version,
+    }
+    canonical = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def canonicalize_context_capsule(capsule: ContextCapsule) -> bytes:
@@ -206,7 +222,7 @@ class ContextRetrievalPlanner:
             raise TypeError("verified_source must satisfy VerifiedImmutableFactSource")
         self._verified_source = verified_source
 
-    def _reusable_fact(self, fact: CapsuleFact) -> bool:
+    def _reusable_fact(self, *, capsule: ContextCapsule, fact: CapsuleFact) -> bool:
         if any(pointer.freshness is not EvidenceFreshness.IMMUTABLE for pointer in fact.evidence):
             return False
         if any(
@@ -215,7 +231,9 @@ class ContextRetrievalPlanner:
         ):
             return False
         try:
-            return self._verified_source.is_verified_fact(capsule_fact_digest(fact)) is True
+            return self._verified_source.is_verified_fact(
+                bound_capsule_fact_digest(capsule=capsule, fact=fact)
+            ) is True
         except Exception:
             return False
 
@@ -269,12 +287,12 @@ class ContextRetrievalPlanner:
                     RetrievalDecision(request.key, RetrievalAction.FETCH_MUTABLE, "MUTABLE_EVIDENCE_RECHECK_REQUIRED")
                 )
                 continue
-            if self._reusable_fact(fact):
+            if self._reusable_fact(capsule=capsule, fact=fact):
                 decisions.append(
                     RetrievalDecision(
                         request.key,
                         RetrievalAction.REUSE_VERIFIED_IMMUTABLE,
-                        "EXACT_VERIFIED_IMMUTABLE_FACT",
+                        "EXACT_VERIFIED_OPERATION_BOUND_IMMUTABLE_FACT",
                     )
                 )
                 continue
@@ -282,7 +300,7 @@ class ContextRetrievalPlanner:
                 RetrievalDecision(
                     request.key,
                     RetrievalAction.FETCH_MISSING,
-                    "IMMUTABLE_FACT_NOT_CONFIRMED_BY_VERIFICATION_SOURCE",
+                    "OPERATION_BOUND_IMMUTABLE_FACT_NOT_CONFIRMED_BY_VERIFICATION_SOURCE",
                 )
             )
         return tuple(decisions)
