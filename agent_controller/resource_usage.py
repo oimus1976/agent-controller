@@ -89,18 +89,6 @@ class ResourceUsageObservation:
     def to_mapping(self) -> Mapping[str, object]:
         return MappingProxyType(asdict(self))
 
-    def known_token_total(self) -> Optional[int]:
-        values = (
-            self.uncached_input_tokens,
-            self.cached_input_tokens,
-            self.cache_write_tokens,
-            self.output_tokens,
-            self.reasoning_tokens,
-        )
-        if any(value is None for value in values):
-            return None
-        return sum(values)  # type: ignore[arg-type]
-
 
 def same_usage_identity(
     left: ResourceUsageObservation, right: ResourceUsageObservation
