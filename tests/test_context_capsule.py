@@ -5,6 +5,7 @@ import unittest
 from agent_controller.context_capsule import (
     CapsuleFact,
     ContextCapsule,
+    ContextRetrievalPlanner,
     EvidenceAuthority,
     EvidenceFreshness,
     EvidencePointer,
@@ -13,7 +14,6 @@ from agent_controller.context_capsule import (
     RetrievalRequest,
     canonicalize_context_capsule,
     context_capsule_digest,
-    plan_retrieval,
 )
 
 
@@ -27,7 +27,6 @@ def pointer(**changes):
         authority=EvidenceAuthority.OBJECTIVE_VERIFIED,
         freshness=EvidenceFreshness.IMMUTABLE,
         content_digest=DIGEST,
-        previously_verified=True,
     )
     values.update(changes)
     return EvidencePointer(**values)
@@ -42,6 +41,31 @@ def capsule(**changes):
     )
     values.update(changes)
     return ContextCapsule(**values)
+
+
+class FixtureVerifiedSource:
+    def __init__(self, verified=()):
+        self.verified = set(verified)
+
+    @staticmethod
+    def identity(item):
+        return (item.source_kind, item.source_ref, item.content_digest)
+
+    def is_verified(self, item):
+        return self.identity(item) in self.verified
+
+
+class ExplodingVerifiedSource:
+    def is_verified(self, item):
+        raise RuntimeError("source unavailable")
+
+
+def planner_for(*items):
+    return ContextRetrievalPlanner(
+        verified_source=FixtureVerifiedSource(
+            FixtureVerifiedSource.identity(item) for item in items
+        )
+    )
 
 
 class ContextCapsuleTests(unittest.TestCase):
@@ -68,22 +92,13 @@ class ContextCapsuleTests(unittest.TestCase):
         )
         self.assertNotEqual(context_capsule_digest(base), context_capsule_digest(changed))
 
-    def test_mutable_pr_fact_always_fetches(self):
-        item = capsule(
-            facts=(
-                CapsuleFact(
-                    "pr_state",
-                    "PR was open",
-                    (
-                        pointer(
-                            source_kind=EvidenceSourceKind.PR_HEAD,
-                            freshness=EvidenceFreshness.MUTABLE_RECHECK_REQUIRED,
-                        ),
-                    ),
-                ),
-            )
+    def test_mutable_pr_fact_always_fetches_without_verification_source_read(self):
+        mutable = pointer(
+            source_kind=EvidenceSourceKind.PR_HEAD,
+            freshness=EvidenceFreshness.MUTABLE_RECHECK_REQUIRED,
         )
-        decision = plan_retrieval(
+        item = capsule(facts=(CapsuleFact("pr_state", "PR was open", (mutable,)),))
+        decision = planner_for(mutable).plan(
             capsule=item,
             controller_task_id="task-1",
             operation_id="op-1",
@@ -92,8 +107,9 @@ class ContextCapsuleTests(unittest.TestCase):
         )[0]
         self.assertIs(RetrievalAction.FETCH_MUTABLE, decision.action)
 
-    def test_verified_immutable_evidence_may_be_reused(self):
-        decision = plan_retrieval(
+    def test_verified_immutable_evidence_may_be_reused_only_via_external_source(self):
+        exact = pointer()
+        decision = planner_for(exact).plan(
             capsule=capsule(),
             controller_task_id="task-1",
             operation_id="op-1",
@@ -102,22 +118,21 @@ class ContextCapsuleTests(unittest.TestCase):
         )[0]
         self.assertIs(RetrievalAction.REUSE_VERIFIED_IMMUTABLE, decision.action)
 
-    def test_agent_reported_never_becomes_reusable_authority(self):
-        item = capsule(
-            facts=(
-                CapsuleFact(
-                    "claim",
-                    "Agent says done",
-                    (
-                        pointer(
-                            authority=EvidenceAuthority.AGENT_REPORTED,
-                            previously_verified=True,
-                        ),
-                    ),
-                ),
-            )
-        )
-        decision = plan_retrieval(
+    def test_capsule_self_assertion_cannot_create_verified_reuse(self):
+        exact = pointer(authority=EvidenceAuthority.OBJECTIVE_VERIFIED)
+        decision = planner_for().plan(
+            capsule=capsule(facts=(CapsuleFact("architecture", "I claim verified", (exact,)),)),
+            controller_task_id="task-1",
+            operation_id="op-1",
+            operation_version="v1",
+            requests=(RetrievalRequest("architecture"),),
+        )[0]
+        self.assertIs(RetrievalAction.FETCH_MISSING, decision.action)
+
+    def test_agent_reported_never_becomes_reusable_even_if_external_source_contains_identity(self):
+        claimed = pointer(authority=EvidenceAuthority.AGENT_REPORTED)
+        item = capsule(facts=(CapsuleFact("claim", "Agent says done", (claimed,)),))
+        decision = planner_for(claimed).plan(
             capsule=item,
             controller_task_id="task-1",
             operation_id="op-1",
@@ -126,9 +141,19 @@ class ContextCapsuleTests(unittest.TestCase):
         )[0]
         self.assertIs(RetrievalAction.FETCH_MISSING, decision.action)
 
+    def test_verification_source_failure_fails_closed_to_fetch(self):
+        decision = ContextRetrievalPlanner(verified_source=ExplodingVerifiedSource()).plan(
+            capsule=capsule(),
+            controller_task_id="task-1",
+            operation_id="op-1",
+            operation_version="v1",
+            requests=(RetrievalRequest("architecture"),),
+        )[0]
+        self.assertIs(RetrievalAction.FETCH_MISSING, decision.action)
+
     def test_unknown_and_missing_fetch_instead_of_inventing(self):
         item = capsule(unknowns=("quota",))
-        decisions = plan_retrieval(
+        decisions = planner_for().plan(
             capsule=item,
             controller_task_id="task-1",
             operation_id="op-1",
@@ -140,8 +165,9 @@ class ContextCapsuleTests(unittest.TestCase):
             tuple(item.action for item in decisions),
         )
 
-    def test_security_gate_always_fetches_even_for_verified_immutable(self):
-        decision = plan_retrieval(
+    def test_security_gate_always_fetches_even_for_externally_verified_immutable(self):
+        exact = pointer()
+        decision = planner_for(exact).plan(
             capsule=capsule(),
             controller_task_id="task-1",
             operation_id="op-1",
@@ -151,7 +177,8 @@ class ContextCapsuleTests(unittest.TestCase):
         self.assertIs(RetrievalAction.FETCH_FOR_SECURITY_GATE, decision.action)
 
     def test_explicit_must_recheck_overrides_immutable_reuse(self):
-        decision = plan_retrieval(
+        exact = pointer()
+        decision = planner_for(exact).plan(
             capsule=capsule(must_recheck=("architecture",)),
             controller_task_id="task-1",
             operation_id="op-1",
@@ -162,7 +189,7 @@ class ContextCapsuleTests(unittest.TestCase):
 
     def test_binding_mismatch_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "CONTEXT_CAPSULE_BINDING_MISMATCH"):
-            plan_retrieval(
+            planner_for().plan(
                 capsule=capsule(),
                 controller_task_id="other",
                 operation_id="op-1",
@@ -170,8 +197,8 @@ class ContextCapsuleTests(unittest.TestCase):
                 requests=(RetrievalRequest("architecture"),),
             )
 
-    def test_irrelevant_request_is_omitted_without_fetch(self):
-        decision = plan_retrieval(
+    def test_irrelevant_request_is_omitted_without_verified_evidence(self):
+        decision = planner_for().plan(
             capsule=capsule(),
             controller_task_id="task-1",
             operation_id="op-1",
@@ -179,6 +206,13 @@ class ContextCapsuleTests(unittest.TestCase):
             requests=(RetrievalRequest("architecture", relevant=False),),
         )[0]
         self.assertIs(RetrievalAction.OMIT_IRRELEVANT, decision.action)
+
+    def test_planner_has_no_per_call_verified_source_override(self):
+        params = set(inspect.signature(ContextRetrievalPlanner.plan).parameters)
+        self.assertEqual(
+            {"self", "capsule", "controller_task_id", "operation_id", "operation_version", "requests"},
+            params,
+        )
 
     def test_public_module_has_no_effect_or_model_routing_surface(self):
         import agent_controller.context_capsule as module
@@ -195,10 +229,6 @@ class ContextCapsuleTests(unittest.TestCase):
             "throttle",
         ):
             self.assertNotIn(forbidden, names)
-        self.assertEqual(
-            {"capsule", "controller_task_id", "operation_id", "operation_version", "requests"},
-            set(inspect.signature(plan_retrieval).parameters),
-        )
 
 
 if __name__ == "__main__":
