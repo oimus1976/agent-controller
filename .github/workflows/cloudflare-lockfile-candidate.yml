@@ -1,0 +1,37 @@
+name: cloudflare-lockfile-candidate
+
+on:
+  pull_request:
+    paths:
+      - "cloudflare_poc/package.json"
+      - ".github/workflows/cloudflare-lockfile-candidate.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  generate-lockfile:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudflare_poc
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+      - name: Record npm version
+        run: npm --version
+      - name: Require no preexisting candidate lockfile
+        run: test ! -e package-lock.json
+      - name: Generate lockfile without lifecycle scripts
+        run: npm install --package-lock-only --ignore-scripts
+      - name: Hash generated lockfile
+        run: sha256sum package-lock.json
+      - name: Upload generated lockfile candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cloudflare-package-lock-candidate
+          path: cloudflare_poc/package-lock.json
+          if-no-files-found: error
+          archive: false
