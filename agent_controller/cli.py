@@ -1,16 +1,32 @@
 import argparse
 import json
 import sys
+from .attention_queue import AttentionCategory
 from .inspector import inspect_pr
 from .watcher import watch_pr_once, watch_pr_loop
 from .executor import plan_action, execute_action
 from .reconciler import reconcile_pr_once
+from .multi_watch import run_attention_watch
+
+
+def _require_single_pr_target(parser, args):
+    if not args.repo or args.pr is None:
+        parser.error(f"{args.command} requires --repo and --pr")
+    owner_repo = args.repo.split('/')
+    if len(owner_repo) != 2 or not all(owner_repo):
+        parser.error("--repo must be in OWNER/REPO format")
+    return owner_repo
+
 
 def main():
     parser = argparse.ArgumentParser(description="Agent Controller: PR Inspector")
-    parser.add_argument("command", choices=["inspect-pr", "watch-pr", "act-pr", "reconcile-pr"], help="Command to run")
-    parser.add_argument("--repo", required=True, help="Target repository in OWNER/REPO format")
-    parser.add_argument("--pr", required=True, type=int, help="Target pull request number")
+    parser.add_argument(
+        "command",
+        choices=["inspect-pr", "watch-pr", "act-pr", "reconcile-pr", "attention-queue"],
+        help="Command to run",
+    )
+    parser.add_argument("--repo", help="Target repository in OWNER/REPO format")
+    parser.add_argument("--pr", type=int, help="Target pull request number")
     parser.add_argument("--allowed-paths", nargs='*', help="List of allowed glob patterns for files (e.g. 'src/*' '*.py')")
     parser.add_argument("--denied-paths", nargs='*', help="List of denied glob patterns for files")
     parser.add_argument("--allow-docs-only", action='store_true', help="Allow PRs that only change documentation/config")
@@ -25,14 +41,25 @@ def main():
     parser.add_argument("--receipts-file", default=".action_receipts.json", help="Path to action receipts file (reconcile-pr)")
     parser.add_argument("--apply", action='store_true', help="Actually perform authorized GitHub writes")
 
+    # Argument for one-shot multi-PR attention aggregation
+    parser.add_argument("--targets-file", help="JSON target list for attention-queue")
+
     args = parser.parse_args()
 
-    owner_repo = args.repo.split('/')
-    if len(owner_repo) != 2:
-        print("Error: --repo must be in OWNER/REPO format", file=sys.stderr)
-        sys.exit(1)
+    if args.command == "attention-queue":
+        if not args.targets_file:
+            parser.error("attention-queue requires --targets-file")
+        try:
+            with open(args.targets_file, 'r', encoding='utf-8') as handle:
+                targets = json.load(handle)
+            queue = run_attention_watch(targets)
+            print(json.dumps(queue, indent=2))
+        except Exception as e:
+            print(f"Error building attention queue: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
 
-    owner, repo = owner_repo
+    owner, repo = _require_single_pr_target(parser, args)
 
     policy = {
         'allowed_paths': args.allowed_paths,
@@ -104,6 +131,7 @@ def main():
         except Exception as e:
             print(f"Error reconciling PR: {e}", file=sys.stderr)
             sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
