@@ -15,6 +15,44 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-08-27 — Live Codex read-only observation（Draft PR #103）
+
+関連: ADR Issue #12, ADR Issue #90, Issue #102, Draft PR #103
+
+### Added / changed
+
+- 既存の `ProviderReadClient -> CodexObservationAdapter -> map_codex_observation()` 経路へ、実Codex threadを一回だけ読む `CodexOfficialSdkReadClient` を追加。
+- 当初検討した bespoke stdio / JSON-RPC transport は採用せず、公式 `openai-codex` Python package 内の app-server client と typed `thread_read()` を再利用。
+- `observe-codex --thread-id ...` を追加し、既存thread IDを明示して一回だけ観測できるCLI境界を追加。
+- optional live-provider dependency を `requirements-codex.txt` に `openai-codex==0.147.0` として固定。低レベルapp-server client依存のversion driftはfail closedする。
+- optional `--codex-bin` で明示的なCodex executable pathを指定可能。未指定時は公式SDKがbundled/resolved runtimeを選ぶ。
+- official `thread/read` responseからprovider prose/item contentを保持せず、thread/turn statusとopaque thread IDだけを既存mapper vocabularyへ投影。
+- finite Controller-side timeoutを追加。upstream low-level request waiterが無期限に待つ場合はofficial clientをcloseしてfail closedする。
+
+### Safety / trust boundary
+
+- `thread.status` は既知の `notLoaded` / `idle` / `systemError` / `active` だけを受理し、missing/unknown statusは過去turnが`completed`でも成功claimへ昇格させない。
+- `active` は実行中、`systemError` はfailure、`idle/notLoaded`単独は成功と推定しない。
+- latest turn `completed` はprovider terminal success claim / `ARTIFACT_READY`までであり、Controller `PASS` ではない。
+- thread ID不一致、malformed response、SDK version/API drift、timeoutは成功へ推定せずfail closed。
+- official low-level `CodexClient` の既定approval handlerがapproval requestをacceptし得るため、その既定handlerを使用しない。read-only observerではserver-initiated requestを明示的に例外化し、approval/mutationへ進ませない。
+- このsliceは `start` / `initialize` / `thread_read` / `close` のapp-server lifecycle/read以外のprovider操作を要求しない。thread/turn start、resume、send、steer、interrupt、approval、dispatch、GitHub Ready/merge、deploy/release等は追加しない。
+- deterministic CIはfake SDK clientのみを使用し、live Codex account/binaryを要求しない。
+
+### Review remediation
+
+- initial exact-head Codex reviewで、live dependency未宣言（P1）とunknown thread statusからhistorical completed turnをsuccessへ昇格できる問題（P2）が指摘された。
+- P1は `requirements-codex.txt` の追加とSDK version固定で修正。
+- P2はknown thread status validationをterminal-turn判定より先に行うよう修正し、regression testを追加。
+- self-reviewで、公式low-level clientのconstructor契約・request timeout欠如・既定auto-approval handlerを一次ソースから確認し、explicit config / timeout / reject handlerへ修正。
+
+### Validation status
+
+- この項目はDraft PR #103の未merge実装を記録しており、mainへの採用済み状態を意味しない。
+- Ready / merge はADR #90に従いhuman-finalのまま。
+
+---
+
 ## 2026-08-26 — MVP human-final loop（Draft PR #101）
 
 関連: ADR Issue #90, Issue #100, Draft PR #101
@@ -315,8 +353,6 @@ Merged main: `dea58b77480e925237a5bfd3b1015741cde122bc`
 ## 2026-08-20 — Trust-boundary specification / pre-Controller experiment reconstruction
 
 関連: Issue #1
-
-### Phase 1A-1 observations preserved in Issue #1
 
 Agent Controller 本体の実装以前に、`oimus1976/calendar-csv2ics-converter` を使い、Jules を implementation worker、Codex を independent reviewer とする実験を実施。
 
