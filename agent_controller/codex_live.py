@@ -23,17 +23,26 @@ class CodexSdkClient(Protocol):
         ...
 
 
-CodexSdkFactory = Callable[[str], CodexSdkClient]
+CodexSdkFactory = Callable[[str | None], CodexSdkClient]
 
 
-def _default_sdk_factory(codex_bin: str) -> CodexSdkClient:
+def _reject_server_request(method: str, _params: Any) -> dict[str, Any]:
+    """Fail closed if app-server unexpectedly asks this observer to authorize anything."""
+
+    raise RuntimeError(
+        f"Unexpected Codex server request during read-only observation: {method}"
+    )
+
+
+def _default_sdk_factory(codex_bin: str | None) -> CodexSdkClient:
     try:
-        # Official openai-codex package. The high-level public Codex API does
-        # not currently expose a pure read-only thread discovery/read method,
-        # so this slice deliberately uses the package's official app-server
-        # client rather than resuming/starting a thread through the high-level
-        # API. Treat API drift as unavailable evidence rather than falling back
-        # to a mutating path.
+        # CodexConfig is part of the public Python SDK surface. CodexClient is
+        # official package code for the app-server JSON-RPC protocol, but it is
+        # intentionally lower-level than the curated high-level Codex API.
+        # We use it because the public high-level API currently exposes thread
+        # listing but no pure thread/read equivalent; thread_resume would be a
+        # lifecycle operation and is outside this read-only slice.
+        from openai_codex import CodexConfig
         from openai_codex.client import CodexClient
     except ImportError as exc:  # pragma: no cover - exercised only in live use
         raise RuntimeError(
@@ -41,7 +50,8 @@ def _default_sdk_factory(codex_bin: str) -> CodexSdkClient:
         ) from exc
 
     try:
-        return CodexClient(codex_bin=codex_bin)
+        config = CodexConfig(codex_bin=codex_bin)
+        return CodexClient(config=config, approval_handler=_reject_server_request)
     except TypeError as exc:  # pragma: no cover - version-drift protection
         raise RuntimeError(
             "Installed openai-codex package is incompatible with the read-only client contract"
@@ -123,33 +133,25 @@ class CodexOfficialSdkReadClient:
     """Concrete ProviderReadClient backed only by official Codex app-server reads."""
 
     sdk_factory: CodexSdkFactory = _default_sdk_factory
-    codex_bin: str = "codex"
+    codex_bin: str | None = None
     timeout_seconds: float = 15.0
 
     def __post_init__(self):
-        if not isinstance(self.codex_bin, str) or not self.codex_bin:
-            raise ValueError("codex_bin must be a nonempty string")
+        if self.codex_bin is not None and (
+            not isinstance(self.codex_bin, str) or not self.codex_bin
+        ):
+            raise ValueError("codex_bin must be None or a nonempty string")
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
 
-    def _read_once(self, operation: ProviderOperationRef) -> Any:
-        client = self.sdk_factory(self.codex_bin)
-        try:
-            for required in ("start", "initialize", "thread_read", "close"):
-                if not callable(getattr(client, required, None)):
-                    raise RuntimeError(
-                        "Installed openai-codex package is incompatible with the read-only client contract"
-                    )
-            client.start()
-            client.initialize()
-            response = client.thread_read(
-                operation.provider_operation_id,
-                include_turns=True,
-            )
-        finally:
-            client.close()
-
-        return response
+    @staticmethod
+    def _read_once(client: CodexSdkClient, operation: ProviderOperationRef) -> Any:
+        client.start()
+        client.initialize()
+        return client.thread_read(
+            operation.provider_operation_id,
+            include_turns=True,
+        )
 
     def get_operation_raw(self, operation: ProviderOperationRef) -> Any:
         if operation.provider != "codex":
@@ -157,19 +159,33 @@ class CodexOfficialSdkReadClient:
         if not operation.provider_operation_id:
             raise ValueError("provider_operation_id must be nonempty")
 
+        client = self.sdk_factory(self.codex_bin)
+        for required in ("start", "initialize", "thread_read", "close"):
+            if not callable(getattr(client, required, None)):
+                try:
+                    client.close()
+                finally:
+                    raise RuntimeError(
+                        "Installed openai-codex package is incompatible with the read-only client contract"
+                    )
+
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="codex-read")
-        future = executor.submit(self._read_once, operation)
+        future = executor.submit(self._read_once, client, operation)
         try:
             response = future.result(timeout=self.timeout_seconds)
         except FutureTimeoutError as exc:
+            # The upstream low-level request waiter has no timeout. Closing the
+            # official client terminates app-server and causes pending readers
+            # to fail rather than leaving the observer wedged indefinitely.
+            client.close()
             future.cancel()
             raise TimeoutError(
                 f"Codex thread/read exceeded {self.timeout_seconds:g}s timeout"
             ) from exc
         finally:
-            # Do not wait forever for a wedged SDK/app-server thread during
-            # fail-closed timeout handling. The worker's finally block still
-            # closes the provider client if/when the call returns.
-            executor.shutdown(wait=False, cancel_futures=True)
+            try:
+                client.close()
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
         return project_codex_thread_read(operation.provider_operation_id, response)
