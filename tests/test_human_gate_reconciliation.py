@@ -17,6 +17,8 @@ class HumanGateReconciliationTests(unittest.TestCase):
             "current_draft": True,
             "current_merged": False,
             "current_state_enum": "open",
+            "scope_status": "SATISFIED",
+            "graphql_error": False,
             "actions_ci_status": "PASS",
             "runtime_status": "OK",
             "transition": True,
@@ -41,6 +43,12 @@ class HumanGateReconciliationTests(unittest.TestCase):
         merge = self._attention(current_draft=False)
         self.assertEqual("MARK_READY_FOR_REVIEW", mark_ready.human_action)
         self.assertEqual("MERGE", merge.human_action)
+
+    def test_review_ready_gate_does_not_trust_classification_alone(self):
+        item = self._attention(actions_ci_status="FAIL")
+        self.assertEqual(AttentionCategory.NEEDS_ATTENTION, item.category)
+        self.assertEqual("CONTRADICTORY_REVIEW_READY_EVIDENCE", item.reason)
+        self.assertIsNone(item.human_action)
 
     @patch("agent_controller.watcher.inspect_pr")
     def test_watcher_exposes_fresh_authoritative_pr_state(self, mock_inspect):
