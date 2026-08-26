@@ -1,0 +1,5 @@
+# Optional live-provider dependency for Issue #102 / Draft PR #103.
+# Pinned because this slice intentionally uses the official package's low-level
+# app-server CodexClient.thread_read() surface, which is not part of the curated
+# high-level API and therefore must fail closed on version drift.
+openai-codex==0.147.0
