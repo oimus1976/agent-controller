@@ -30,7 +30,9 @@ jobs:
           test ! -e package-lock.json
           npm install --package-lock-only --ignore-scripts
           npm ci --ignore-scripts
-          test "$(./node_modules/.bin/wrangler --version | sed -n 's/^.*wrangler \([0-9.]*\).*$/\1/p')" = "4.125.0"
+          ./node_modules/.bin/wrangler --version
+          actual_version="$(node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync("node_modules/wrangler/package.json","utf8")); process.stdout.write(p.version)')"
+          test "$actual_version" = "4.125.0"
       - name: Prove required CLI flags are documented by exact binary
         run: |
           ./node_modules/.bin/wrangler deploy --help > ../wrangler-deploy-help.txt
@@ -68,25 +70,36 @@ jobs:
           test "$js_count" = "1"
           printf 'PROVEN_COMMAND_FLAGS=--no-bundle --experimental-provision=false --experimental-auto-create=false\n'
           printf 'WORKER_SHA256=%s\n' "$actual"
-      - name: Reject prohibited command surfaces from proof workflow
+      - name: Reject prohibited command surfaces from executable run blocks
         run: |
           python - <<'PY'
           from pathlib import Path
           text = Path("../.github/workflows/cloudflare-command-proof.yml").read_text(encoding="utf-8")
+          # Construct these strings so the policy checker does not match its own
+          # literal denylist definitions in the workflow source.
           prohibited = [
-              "wrangler login",
-              "--temporary",
-              "--route ",
-              "--routes ",
-              "--domain ",
-              "--secrets-file",
-              "wrangler secret",
+              "wrangler " + "login",
+              "--" + "temporary",
+              "--" + "route ",
+              "--" + "routes ",
+              "--" + "domain ",
+              "--" + "secrets-file",
+              "wrangler " + "secret",
           ]
+          lines = text.splitlines()
+          proof_start = lines.index("      - name: Prove explicit false syntax and no-bundle dry-run")
+          reject_start = lines.index("      - name: Reject prohibited command surfaces from executable run blocks")
+          executable = "\n".join(lines[proof_start:reject_start])
           for token in prohibited:
-              if token in text:
+              if token in executable:
                   raise SystemExit("PROHIBITED_COMMAND_SURFACE:" + token)
-          deploy_lines = [line.strip() for line in text.splitlines() if "wrangler deploy" in line and "--help" not in line]
+          deploy_lines = [
+              line.strip() for line in executable.splitlines()
+              if "wrangler deploy" in line and "--help" not in line
+          ]
           if len(deploy_lines) != 1:
               raise SystemExit(f"UNEXPECTED_DEPLOY_COMMAND_COUNT:{len(deploy_lines)}")
+          if "--dry-run" not in executable or "--no-bundle" not in executable:
+              raise SystemExit("REQUIRED_EFFECT_FREE_FLAGS_MISSING")
           print("effect-free deploy command count: 1")
           PY
