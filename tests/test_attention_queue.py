@@ -16,12 +16,14 @@ def observation(
     transition=True,
     reasons=("CLASSIFICATION_CHANGED",),
     head_sha="abc123",
-    actions_ci_status=None,
+    actions_ci_status="PASS",
+    scope_status="SATISFIED",
+    graphql_error=False,
     draft=False,
     merged=False,
     state="open",
 ):
-    result = {
+    return {
         "repo": repo,
         "pr": pr,
         "current_head_sha": head_sha,
@@ -29,19 +31,19 @@ def observation(
         "current_draft": draft,
         "current_merged": merged,
         "current_state_enum": state,
+        "scope_status": scope_status,
+        "graphql_error": graphql_error,
+        "actions_ci_status": actions_ci_status,
         "runtime_status": runtime_status,
         "transition": transition,
         "transition_reasons": list(reasons),
     }
-    if actions_ci_status is not None:
-        result["actions_ci_status"] = actions_ci_status
-    return result
 
 
 class AttentionQueueTests(unittest.TestCase):
     def test_review_ready_draft_requires_mark_ready(self):
         item = classify_attention(
-            observation(classification="REVIEW_READY", actions_ci_status="PASS", draft=True)
+            observation(classification="REVIEW_READY", draft=True)
         )
         self.assertEqual(AttentionCategory.HUMAN_ACTION, item.category)
         self.assertEqual("MARK_READY_FOR_REVIEW", item.human_action)
@@ -49,17 +51,44 @@ class AttentionQueueTests(unittest.TestCase):
 
     def test_review_ready_nondraft_requires_merge(self):
         item = classify_attention(
-            observation(classification="REVIEW_READY", actions_ci_status="PASS", draft=False)
+            observation(classification="REVIEW_READY", draft=False)
         )
         self.assertEqual(AttentionCategory.HUMAN_ACTION, item.category)
         self.assertEqual("MERGE", item.human_action)
         self.assertEqual("VERIFIED_REVIEW_READY_MERGE_REQUIRED", item.reason)
 
+    def test_review_ready_with_failed_ci_fails_closed(self):
+        item = classify_attention(
+            observation(classification="REVIEW_READY", actions_ci_status="FAIL")
+        )
+        self.assertEqual(AttentionCategory.NEEDS_ATTENTION, item.category)
+        self.assertEqual("CONTRADICTORY_REVIEW_READY_EVIDENCE", item.reason)
+        self.assertIsNone(item.human_action)
+
+    def test_review_ready_without_head_fails_closed(self):
+        item = classify_attention(
+            observation(classification="REVIEW_READY", head_sha=None)
+        )
+        self.assertEqual(AttentionCategory.NEEDS_ATTENTION, item.category)
+        self.assertEqual("CONTRADICTORY_REVIEW_READY_EVIDENCE", item.reason)
+        self.assertIsNone(item.human_action)
+
+    def test_review_ready_with_bad_scope_or_graphql_fails_closed(self):
+        bad_scope = classify_attention(
+            observation(classification="REVIEW_READY", scope_status="VIOLATION")
+        )
+        bad_graphql = classify_attention(
+            observation(classification="REVIEW_READY", graphql_error=True)
+        )
+        self.assertEqual(AttentionCategory.NEEDS_ATTENTION, bad_scope.category)
+        self.assertEqual(AttentionCategory.NEEDS_ATTENTION, bad_graphql.category)
+        self.assertIsNone(bad_scope.human_action)
+        self.assertIsNone(bad_graphql.human_action)
+
     def test_ready_then_merge_progression_uses_fresh_state_only(self):
         ready = classify_attention(
             observation(
                 classification="REVIEW_READY",
-                actions_ci_status="PASS",
                 draft=False,
                 transition=True,
                 reasons=("PR_STATE_CHANGED",),
@@ -106,7 +135,7 @@ class AttentionQueueTests(unittest.TestCase):
 
     def test_missing_pr_state_evidence_fails_closed(self):
         item = classify_attention(
-            observation(classification="REVIEW_READY", actions_ci_status="PASS", draft=None)
+            observation(classification="REVIEW_READY", draft=None)
         )
         self.assertEqual(AttentionCategory.NEEDS_ATTENTION, item.category)
         self.assertEqual("PR_STATE_EVIDENCE_MISSING_OR_MALFORMED", item.reason)
@@ -116,7 +145,6 @@ class AttentionQueueTests(unittest.TestCase):
         item = classify_attention(
             observation(
                 classification="REVIEW_READY",
-                actions_ci_status="PASS",
                 merged=True,
                 state="open",
             )
