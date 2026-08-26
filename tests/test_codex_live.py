@@ -94,6 +94,20 @@ class CodexLiveTests(unittest.TestCase):
             fake.calls,
         )
 
+    def test_unknown_thread_status_cannot_promote_historical_completed_turn(self):
+        raw = project_codex_thread_read(
+            "thr_123",
+            {
+                "thread": {
+                    "id": "thr_123",
+                    "status": {"type": "futureStatus"},
+                    "turns": [{"id": "turn-1", "status": "completed"}],
+                }
+            },
+        )
+        self.assertEqual("unknown", raw["status"])
+        self.assertNotIn("result", raw)
+
     def test_failed_or_interrupted_latest_turn_blocks(self):
         for turn_status in ("failed", "interrupted"):
             with self.subTest(turn_status=turn_status):
