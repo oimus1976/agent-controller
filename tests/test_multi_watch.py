@@ -30,6 +30,7 @@ class MultiWatchTests(unittest.TestCase):
                     f"{owner}/{repo}",
                     pr,
                     classification="REVIEW_READY",
+                    draft=True,
                 )
             return _observation(f"{owner}/{repo}", pr)
 
@@ -48,6 +49,7 @@ class MultiWatchTests(unittest.TestCase):
 
         self.assertEqual(2, len(calls))
         self.assertEqual("HUMAN_ACTION", queue[0]["category"])
+        self.assertEqual("MARK_READY_FOR_REVIEW", queue[0]["human_action"])
         self.assertEqual("a/repo", queue[0]["repo"])
         self.assertEqual("IN_PROGRESS", queue[1]["category"])
         self.assertEqual(["src/**"], calls[1][4]["allowed_paths"])
@@ -60,6 +62,9 @@ class MultiWatchTests(unittest.TestCase):
                     f"{owner}/{repo}",
                     pr,
                     runtime_status="EVIDENCE_UNAVAILABLE",
+                    draft=None,
+                    merged=None,
+                    state=None,
                 )
             return _observation(
                 f"{owner}/{repo}",
@@ -76,7 +81,9 @@ class MultiWatchTests(unittest.TestCase):
         )
         self.assertEqual(2, len(queue))
         self.assertEqual("HUMAN_ACTION", queue[0]["category"])
+        self.assertEqual("MERGE", queue[0]["human_action"])
         self.assertEqual("NEEDS_ATTENTION", queue[1]["category"])
+        self.assertIsNone(queue[1]["human_action"])
 
     def test_validation_rejects_bad_optional_types(self):
         with self.assertRaises(TypeError):
@@ -146,12 +153,21 @@ def _observation(
     *,
     classification="IMPLEMENTATION_READY",
     runtime_status="OK",
+    draft=False,
+    merged=False,
+    state="open",
 ):
     return {
         "repo": repo,
         "pr": pr,
         "current_head_sha": f"sha-{pr}",
         "current_classification": classification,
+        "current_draft": draft,
+        "current_merged": merged,
+        "current_state_enum": state,
+        "scope_status": "SATISFIED",
+        "graphql_error": False,
+        "actions_ci_status": "PASS",
         "runtime_status": runtime_status,
         "transition": True,
         "transition_reasons": ["CLASSIFICATION_CHANGED"],

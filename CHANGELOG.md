@@ -15,6 +15,36 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-08-26 — MVP human-final loop（Draft PR #101）
+
+関連: ADR Issue #90, Issue #100, Draft PR #101
+
+### Added / changed
+
+- watcher の fresh objective observation に `current_draft` / `current_merged` / `current_state_enum` を明示的に含める。
+- human-attention queue に表示専用の `human_action` を追加。
+- verified `REVIEW_READY` の Draft PR は `MARK_READY_FOR_REVIEW`、non-Draft open PR は `MERGE` を一つの明示的な人間操作として提示する。
+- human action 後は acknowledgement token を作らず、次の通常の read-only watch が GitHub authoritative state を再読して次の action または `DONE` へ進む。
+- closed-without-merge と merged terminal state を区別して表示する。
+- GitHub PR details で `draft` / `merged` が欠落した場合、`False` に補完せず unknown のまま fail closed する。
+
+### Safety / trust boundary
+
+- `human_action` は authorization ではなく表示情報のみ。
+- `human_action` の提示には nonempty current head、exact-head Actions `PASS`、`scope_status=SATISFIED`、`graphql_error=false`、coherent current PR state を要求する。
+- inspection/API failure 時は last-known-good の draft/merged/state を current action basis として再利用しない。
+- contradictory / missing evidence は `NEEDS_ATTENTION` に fail closed し、Ready / merge を提示しない。
+- Controller code に Ready / merge / auto-merge その他の LEVEL 3 mutation capability を追加しない。
+- Phase 4B の write-capable reconciler は LEVEL 3 human-final flow には再利用しない。
+
+### Validation status
+
+- exact head `ae1b2427af4924910dd6300237b3b2ab03bca210` で deterministic Actions CI success。
+- 同 head に対する Codex independent review は major issue なし。
+- この項目は Draft PR #101 の未merge実装を記録しており、main への採用済み状態を意味しない。
+
+---
+
 ## [Unreleased] — Phase 4C-PN1 provider-neutral proof
 
 ### 2026-08-24 — provider-neutral contract proof を実装中

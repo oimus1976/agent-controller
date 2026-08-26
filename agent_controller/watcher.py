@@ -31,9 +31,9 @@ def watch_pr_once(owner, repo, pr_number, state_file, scope_policy=None):
         current_evidence = {
             'head_sha': previous_state.get('head_sha'),
             'classification': 'NEEDS_REVIEW',
-            'draft': previous_state.get('draft'),
-            'merged': previous_state.get('merged'),
-            'state': previous_state.get('state_enum'),
+            'draft': None,
+            'merged': None,
+            'state': None,
             'graphql_error': True,
             'actions_ci_status': 'UNAVAILABLE',
             'check_runs_error': True,
@@ -43,8 +43,8 @@ def watch_pr_once(owner, repo, pr_number, state_file, scope_policy=None):
     current_head_sha = current_evidence.get('head_sha')
     current_classification = current_evidence.get('classification')
 
-    current_draft = current_evidence.get('draft', False)
-    current_merged = current_evidence.get('merged', False)
+    current_draft = current_evidence.get('draft')
+    current_merged = current_evidence.get('merged')
     current_state_enum = current_evidence.get('state')
 
     current_graphql_error = current_evidence.get('graphql_error', False)
@@ -99,6 +99,9 @@ def watch_pr_once(owner, repo, pr_number, state_file, scope_policy=None):
         "current_head_sha": current_head_sha,
         "previous_classification": previous_state.get('classification'),
         "current_classification": current_classification,
+        "current_draft": current_draft,
+        "current_merged": current_merged,
+        "current_state_enum": current_state_enum,
         "scope_status": current_scope_status,
         "graphql_error": current_graphql_error,
         "actions_ci_status": current_actions_ci_status,
