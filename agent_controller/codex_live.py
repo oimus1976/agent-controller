@@ -154,6 +154,25 @@ def _find_rollout(source_home: Path, thread_id: str) -> Path:
     return unique[0]
 
 
+def _resolve_snapshot_parent(source_home: Path, snapshot_parent: str | None) -> Path:
+    """Resolve the temp parent before creating anything and keep it outside source home."""
+
+    configured_parent = (
+        Path(snapshot_parent) if snapshot_parent is not None else Path(tempfile.gettempdir())
+    )
+    try:
+        resolved_parent = configured_parent.resolve(strict=True)
+    except (FileNotFoundError, OSError) as exc:
+        raise ValueError("snapshot_parent must resolve to an existing directory") from exc
+    if not resolved_parent.is_dir():
+        raise ValueError("snapshot_parent must resolve to an existing directory")
+    if resolved_parent == source_home or resolved_parent.is_relative_to(source_home):
+        raise RuntimeError(
+            "snapshot_parent must resolve outside source_codex_home before snapshot creation"
+        )
+    return resolved_parent
+
+
 def project_codex_thread_read(thread_id: str, response: Any) -> dict[str, Any]:
     """Project official thread/read evidence into the existing safe mapper vocabulary.
 
@@ -311,15 +330,22 @@ class CodexSnapshotReadClient:
         source_home = Path(self.source_codex_home).resolve(strict=True)
         if not source_home.is_dir():
             raise ValueError("source_codex_home must resolve to a directory")
+        snapshot_parent = _resolve_snapshot_parent(source_home, self.snapshot_parent)
         source_rollout = _find_rollout(source_home, thread_id)
         relative_rollout = source_rollout.relative_to(source_home)
         source_hash_before = _sha256_file(source_rollout)
 
         with tempfile.TemporaryDirectory(
             prefix="agent-controller-codex-snapshot-",
-            dir=self.snapshot_parent,
+            dir=str(snapshot_parent),
         ) as temporary_home:
-            snapshot_home = Path(temporary_home).resolve()
+            snapshot_home = Path(temporary_home).resolve(strict=True)
+            if snapshot_home.is_relative_to(source_home) or source_home.is_relative_to(
+                snapshot_home
+            ):
+                raise RuntimeError(
+                    "snapshot CODEX_HOME overlaps source_codex_home; refusing observation"
+                )
             snapshot_rollout = snapshot_home / relative_rollout
             snapshot_rollout.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source_rollout, snapshot_rollout)
