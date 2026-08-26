@@ -15,6 +15,43 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-08-27 — Codex observation source-home isolation（Issue #104 / Draft）
+
+関連: ADR Issue #12, ADR Issue #90, Issue #102, PR #103, Issue #104
+
+### Safety-boundary correction
+
+- PR #103 merge 後の Windows 実機 negative smoke で、公式 app-server に送った provider RPC が `thread/read` だけでも、app-server 起動時に `CODEX_HOME` へ `installation_id`、SQLite state/log/memory/queue DB、system skills、temporary helper files 等が作成されることを確認。
+- したがって、PR #103 でいう「read-only」は **provider lifecycle / model turn / approval / task mutation を行わない**という意味では維持されるが、**owner-machine / local filesystem write-free** を意味しない。以前の表現をこの点で訂正する。
+- exact upstream `0.147.0` を確認した結果、app-server startup の state persistence を無効化する公式 read-only / non-persistent mode は見つからなかった。`installation_id` は起動時に read+write+create で開かれ、state runtime も初期化/backfill される。
+- このため、実ユーザーの Codex Desktop / CLI `CODEX_HOME` を app-server に直接渡す運用を禁止し、positive real-thread smoke も source-home isolation 実装まで停止した。
+
+### Draft implementation
+
+- `CodexOfficialSdkReadClient` は app-server のローカル書込み先となる **明示的な absolute `codex_home`** を必須化し、継承/defaultの `CODEX_HOME` に依存しないよう変更。
+- 公式 Python SDK の `CodexConfig.env` を使い、app-server 子プロセスにのみ disposable `CODEX_HOME` を注入する。
+- 新しい `CodexSnapshotReadClient` は、明示した source Codex home から対象threadの persisted rolloutだけを検索し、一時 `CODEX_HOME` へ相対pathを保ってコピーしてから公式 `thread/read` を実行する。
+- source home の `state_*.sqlite`、WAL/SHM、installation state、skills、その他threadは snapshotへコピーしない。app-serverが必要とするDB/backfillは disposable snapshot側だけで生成させる。
+- rolloutは `sessions/` / `archived_sessions/` 配下の canonical UUID に一致する単一 `.jsonl` または `.jsonl.zst` に限定。missing / ambiguous / symlink / source-home外へのpath escape は fail closed。
+- source rolloutを copy前・copy後・観測後に SHA-256 で照合し、copy mismatch または観測中のsource変更を stale evidence としてfail closedする。
+- `observe-codex` CLI は `--source-codex-home` を必須化し、ユーザー向け経路を `CodexSnapshotReadClient` のみに変更。source homeそのものをSDK/app-serverへ渡す直接経路をCLIから除外。
+
+### Safety / trust boundary
+
+- `provider_read_only` と `owner_machine_write_free` を別の性質として扱う。公式 app-server のstartup writeは disposable Controller-owned pathのみに閉じ込める。
+- source Codex homeはController自身が対象rolloutをread/hash/copyするだけで、公式 app-server processには渡さない。
+- snapshotは evidence-at-copy-time として扱い、source evidenceが観測中に変化した場合は成功を推定しない。
+- provider completionは引き続き `ARTIFACT_READY` / terminal claimまでで、Controller `PASS` ではない。
+- approval handler reject、SDK version pin、timeout、unknown-status fail-closed、LEVEL 3 human-finalはPR #103の境界を維持する。
+
+### Validation status
+
+- deterministic testsを追加し、target rolloutのみのcopy、source DB/other rollout非copy、disposable SDK home、plain/compressed rollout、ambiguous/missing/invalid ID、観測中source変更のfail-closed、CLIのsnapshot-only routingを検証する。
+- この項目は Issue #104 の Draft 実装を記録しており、mainへの採用済み状態を意味しない。
+- exact-head CI / independent review / positive real-thread smoke は未完了。Ready / merge はADR #90に従いhuman-finalのまま。
+
+---
+
 ## 2026-08-27 — Live Codex read-only observation（Draft PR #103）
 
 関連: ADR Issue #12, ADR Issue #90, Issue #102, Draft PR #103
