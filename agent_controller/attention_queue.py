@@ -53,6 +53,8 @@ def classify_attention(observation: Mapping[str, object]) -> AttentionItem:
     runtime_status = _nonempty_string(observation.get("runtime_status"))
     head_sha = _nonempty_string(observation.get("current_head_sha"))
     actions_ci_status = _nonempty_string(observation.get("actions_ci_status"))
+    scope_status = _nonempty_string(observation.get("scope_status"))
+    graphql_error = observation.get("graphql_error")
     transition = observation.get("transition")
     reasons = observation.get("transition_reasons", ())
     current_draft = observation.get("current_draft")
@@ -108,13 +110,22 @@ def classify_attention(observation: Mapping[str, object]) -> AttentionItem:
         category = AttentionCategory.IN_PROGRESS
         reason = "CI_RUNNING_FOR_EXACT_HEAD"
     elif classification == "REVIEW_READY":
-        category = AttentionCategory.HUMAN_ACTION
-        if current_draft:
-            reason = "VERIFIED_REVIEW_READY_MARK_READY_REQUIRED"
-            human_action = "MARK_READY_FOR_REVIEW"
+        if (
+            head_sha is None
+            or actions_ci_status != "PASS"
+            or scope_status != "SATISFIED"
+            or graphql_error is not False
+        ):
+            category = AttentionCategory.NEEDS_ATTENTION
+            reason = "CONTRADICTORY_REVIEW_READY_EVIDENCE"
         else:
-            reason = "VERIFIED_REVIEW_READY_MERGE_REQUIRED"
-            human_action = "MERGE"
+            category = AttentionCategory.HUMAN_ACTION
+            if current_draft:
+                reason = "VERIFIED_REVIEW_READY_MARK_READY_REQUIRED"
+                human_action = "MARK_READY_FOR_REVIEW"
+            else:
+                reason = "VERIFIED_REVIEW_READY_MERGE_REQUIRED"
+                human_action = "MERGE"
     elif classification == "NEEDS_REVIEW":
         category = AttentionCategory.NEEDS_ATTENTION
         reason = "REVIEW_OR_REMEDIATION_REQUIRED"
