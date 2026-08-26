@@ -1,12 +1,17 @@
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
+
 from .attention_queue import AttentionCategory
+from .codex_live import CodexOfficialSdkReadClient
 from .inspector import inspect_pr
 from .watcher import watch_pr_once, watch_pr_loop
 from .executor import plan_action, execute_action
 from .reconciler import reconcile_pr_once
 from .multi_watch import run_attention_watch
+from .provider_adapters import CodexObservationAdapter
+from .provider_contract import ProviderOperationRef
 
 
 def _require_single_pr_target(parser, args):
@@ -18,11 +23,15 @@ def _require_single_pr_target(parser, args):
     return owner_repo
 
 
+def _observed_at_now():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Agent Controller: PR Inspector")
     parser.add_argument(
         "command",
-        choices=["inspect-pr", "watch-pr", "act-pr", "reconcile-pr", "attention-queue"],
+        choices=["inspect-pr", "watch-pr", "act-pr", "reconcile-pr", "attention-queue", "observe-codex"],
         help="Command to run",
     )
     parser.add_argument("--repo", help="Target repository in OWNER/REPO format")
@@ -44,6 +53,9 @@ def main():
     # Argument for one-shot multi-PR attention aggregation
     parser.add_argument("--targets-file", help="JSON target list for attention-queue")
 
+    # Argument for one-shot live Codex observation
+    parser.add_argument("--thread-id", help="Existing Codex thread id for observe-codex")
+
     args = parser.parse_args()
 
     if args.command == "attention-queue":
@@ -56,6 +68,28 @@ def main():
             print(json.dumps(queue, indent=2))
         except Exception as e:
             print(f"Error building attention queue: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.command == "observe-codex":
+        if not args.thread_id:
+            parser.error("observe-codex requires --thread-id")
+        try:
+            operation = ProviderOperationRef(
+                provider="codex",
+                provider_operation_id=args.thread_id,
+                provider_url=None,
+                controller_task_id=f"live-codex:{args.thread_id}",
+                operation_id=f"observe:{args.thread_id}",
+            )
+            adapter = CodexObservationAdapter(
+                client=CodexOfficialSdkReadClient(),
+                observed_at=_observed_at_now,
+            )
+            observation = adapter.observe(operation)
+            print(json.dumps(observation.to_dict(), indent=2))
+        except Exception as e:
+            print(f"Error observing Codex thread: {e}", file=sys.stderr)
             sys.exit(1)
         return
 
