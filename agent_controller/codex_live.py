@@ -2,17 +2,24 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
+import hashlib
+from pathlib import Path
+import shutil
+import tempfile
 from typing import Any, Callable, Mapping, Protocol
+import uuid
 
 from agent_controller.provider_contract import ProviderOperationRef
 
 
 SUPPORTED_CODEX_SDK_VERSION = "0.147.0"
 _KNOWN_THREAD_STATUSES = frozenset({"notLoaded", "idle", "systemError", "active"})
+_ROLLOUT_ROOTS = ("sessions", "archived_sessions")
+_ROLLOUT_SUFFIXES = (".jsonl", ".jsonl.zst")
 
 
 class CodexSdkClient(Protocol):
-    """Narrow read-only seam over the official openai-codex app-server client."""
+    """Narrow read-only RPC seam over the official openai-codex app-server client."""
 
     def start(self) -> None:
         ...
@@ -27,7 +34,7 @@ class CodexSdkClient(Protocol):
         ...
 
 
-CodexSdkFactory = Callable[[str | None], CodexSdkClient]
+CodexSdkFactory = Callable[[str | None, str], CodexSdkClient]
 
 
 def _reject_server_request(method: str, _params: Any) -> dict[str, Any]:
@@ -38,7 +45,7 @@ def _reject_server_request(method: str, _params: Any) -> dict[str, Any]:
     )
 
 
-def _default_sdk_factory(codex_bin: str | None) -> CodexSdkClient:
+def _default_sdk_factory(codex_bin: str | None, codex_home: str) -> CodexSdkClient:
     try:
         # CodexConfig/version are public Python SDK surfaces. CodexClient is
         # official package code for the app-server JSON-RPC protocol, but it is
@@ -63,7 +70,13 @@ def _default_sdk_factory(codex_bin: str | None) -> CodexSdkClient:
         )
 
     try:
-        config = CodexConfig(codex_bin=codex_bin)
+        # Important: app-server startup writes local runtime state even when the
+        # only RPC is thread/read. Callers must therefore pass an explicitly
+        # disposable Codex home; never rely on inherited/default CODEX_HOME.
+        config = CodexConfig(
+            codex_bin=codex_bin,
+            env={"CODEX_HOME": codex_home},
+        )
         return CodexClient(config=config, approval_handler=_reject_server_request)
     except TypeError as exc:  # pragma: no cover - version-drift protection
         raise RuntimeError(
@@ -91,6 +104,54 @@ def _tag(value: Any) -> str | None:
             if isinstance(candidate, str):
                 return candidate
     return None
+
+
+def _canonical_thread_id(thread_id: str) -> str:
+    try:
+        canonical = str(uuid.UUID(thread_id))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError("snapshot Codex thread id must be a UUID") from exc
+    if thread_id != canonical:
+        raise ValueError("snapshot Codex thread id must use canonical lowercase UUID form")
+    return canonical
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _find_rollout(source_home: Path, thread_id: str) -> Path:
+    matches: list[Path] = []
+    for root_name in _ROLLOUT_ROOTS:
+        root = source_home / root_name
+        if not root.is_dir():
+            continue
+        for candidate in root.rglob(f"*{thread_id}*"):
+            if not candidate.is_file():
+                continue
+            if not candidate.name.endswith(_ROLLOUT_SUFFIXES):
+                continue
+            if candidate.is_symlink():
+                raise RuntimeError("Codex rollout evidence must not be a symlink")
+            resolved = candidate.resolve(strict=True)
+            if not resolved.is_relative_to(source_home):
+                raise RuntimeError("Codex rollout evidence escapes the declared source home")
+            matches.append(resolved)
+
+    unique = sorted(set(matches))
+    if not unique:
+        raise FileNotFoundError(
+            f"No persisted Codex rollout found for thread {thread_id} under {source_home}"
+        )
+    if len(unique) != 1:
+        raise RuntimeError(
+            f"Ambiguous Codex rollout evidence for thread {thread_id}: found {len(unique)} files"
+        )
+    return unique[0]
 
 
 def project_codex_thread_read(thread_id: str, response: Any) -> dict[str, Any]:
@@ -146,13 +207,23 @@ def project_codex_thread_read(thread_id: str, response: Any) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class CodexOfficialSdkReadClient:
-    """Concrete ProviderReadClient backed only by official Codex app-server reads."""
+    """Low-level official app-server reader confined to an explicit writable Codex home.
 
+    The RPC surface is read-only, but app-server startup itself writes runtime
+    state. This class therefore requires an explicit absolute codex_home and is
+    intended to be used only with Controller-owned disposable state.
+    """
+
+    codex_home: str
     sdk_factory: CodexSdkFactory = _default_sdk_factory
     codex_bin: str | None = None
     timeout_seconds: float = 15.0
 
     def __post_init__(self):
+        if not isinstance(self.codex_home, str) or not self.codex_home:
+            raise ValueError("codex_home must be a nonempty absolute path")
+        if not Path(self.codex_home).is_absolute():
+            raise ValueError("codex_home must be an absolute path")
         if self.codex_bin is not None and (
             not isinstance(self.codex_bin, str) or not self.codex_bin
         ):
@@ -175,7 +246,7 @@ class CodexOfficialSdkReadClient:
         if not operation.provider_operation_id:
             raise ValueError("provider_operation_id must be nonempty")
 
-        client = self.sdk_factory(self.codex_bin)
+        client = self.sdk_factory(self.codex_bin, self.codex_home)
         for required in ("start", "initialize", "thread_read", "close"):
             if not callable(getattr(client, required, None)):
                 try:
@@ -205,3 +276,76 @@ class CodexOfficialSdkReadClient:
                 executor.shutdown(wait=False, cancel_futures=True)
 
         return project_codex_thread_read(operation.provider_operation_id, response)
+
+
+@dataclass(frozen=True)
+class CodexSnapshotReadClient:
+    """Observe one persisted Codex thread without exposing its source home to app-server.
+
+    Only the target rollout is copied into a disposable Codex home. Source
+    hashes are checked before/after the copy and again after observation, so an
+    actively changing or inconsistent source fails closed.
+    """
+
+    source_codex_home: str
+    sdk_factory: CodexSdkFactory = _default_sdk_factory
+    codex_bin: str | None = None
+    timeout_seconds: float = 15.0
+    snapshot_parent: str | None = None
+
+    def __post_init__(self):
+        if not isinstance(self.source_codex_home, str) or not self.source_codex_home:
+            raise ValueError("source_codex_home must be a nonempty absolute path")
+        if not Path(self.source_codex_home).is_absolute():
+            raise ValueError("source_codex_home must be an absolute path")
+        if self.snapshot_parent is not None and not Path(self.snapshot_parent).is_absolute():
+            raise ValueError("snapshot_parent must be None or an absolute path")
+        if self.timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+
+    def get_operation_raw(self, operation: ProviderOperationRef) -> Any:
+        if operation.provider != "codex":
+            raise ValueError("CodexSnapshotReadClient requires provider='codex'")
+        thread_id = _canonical_thread_id(operation.provider_operation_id)
+
+        source_home = Path(self.source_codex_home).resolve(strict=True)
+        if not source_home.is_dir():
+            raise ValueError("source_codex_home must resolve to a directory")
+        source_rollout = _find_rollout(source_home, thread_id)
+        relative_rollout = source_rollout.relative_to(source_home)
+        source_hash_before = _sha256_file(source_rollout)
+
+        with tempfile.TemporaryDirectory(
+            prefix="agent-controller-codex-snapshot-",
+            dir=self.snapshot_parent,
+        ) as temporary_home:
+            snapshot_home = Path(temporary_home).resolve()
+            snapshot_rollout = snapshot_home / relative_rollout
+            snapshot_rollout.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source_rollout, snapshot_rollout)
+
+            source_hash_after_copy = _sha256_file(source_rollout)
+            snapshot_hash = _sha256_file(snapshot_rollout)
+            if not (
+                source_hash_before == source_hash_after_copy == snapshot_hash
+            ):
+                raise RuntimeError(
+                    "Codex rollout changed during snapshot copy or snapshot hash mismatched"
+                )
+
+            reader = CodexOfficialSdkReadClient(
+                codex_home=str(snapshot_home),
+                sdk_factory=self.sdk_factory,
+                codex_bin=self.codex_bin,
+                timeout_seconds=self.timeout_seconds,
+            )
+            try:
+                raw = reader.get_operation_raw(operation)
+            finally:
+                source_hash_after_observation = _sha256_file(source_rollout)
+                if source_hash_after_observation != source_hash_before:
+                    raise RuntimeError(
+                        "Codex source rollout changed during observation; evidence is stale"
+                    )
+
+            return raw
