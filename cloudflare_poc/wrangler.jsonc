@@ -4,11 +4,11 @@
   "compatibility_date": "2026-08-25",
   "durable_objects": {
     "bindings": [
-      { "name": "BROKER", "class_name": "BrokerDurableObject" },
-      { "name": "BROKER_SUSPENDED", "class_name": "SuspendedBrokerDurableObject" }
+      { "name": "BROKER_LEDGER", "class_name": "BrokerLedgerDO" },
+      { "name": "BROKER_WITNESS", "class_name": "BrokerWitnessDO" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["BrokerDurableObject", "SuspendedBrokerDurableObject"] }
+    { "tag": "v1-dual-do-poc", "new_sqlite_classes": ["BrokerLedgerDO", "BrokerWitnessDO"] }
   ]
 }
