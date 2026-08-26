@@ -3,9 +3,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
 
-from agent_controller.artifact_verifier import GitHubArtifactReadClient
-from agent_controller.provider_contract import AgentObservation, ArtifactEvidence, ProviderOperationRef, TaskBinding
-from agent_controller.provider_handoff import ArtifactCollector, ObservationReader, VerifiedHandoffResult, run_verified_handoff
+from agent_controller.artifact_verifier import (
+    GitHubArtifactReadClient,
+    GitHubPullRequestReadClient,
+)
+from agent_controller.provider_contract import (
+    AgentObservation,
+    ArtifactEvidence,
+    ProviderOperationRef,
+    TaskBinding,
+)
+from agent_controller.provider_handoff import (
+    ArtifactCollector,
+    ObservationReader,
+    VerifiedHandoffResult,
+    run_verified_handoff,
+)
 from agent_controller.resource_meter import ControllerResourceMeter, ResourceMeterBinding
 from agent_controller.resource_usage import ResourceUsageObservation
 
@@ -31,6 +44,8 @@ class MeteredArtifactCollector:
 
 
 class MeteredGitHubArtifactReadClient:
+    """Meter the base GitHub artifact read protocol without widening capability."""
+
     def __init__(self, *, inner: GitHubArtifactReadClient, meter: ControllerResourceMeter) -> None:
         self._inner = inner
         self._meter = meter
@@ -43,18 +58,41 @@ class MeteredGitHubArtifactReadClient:
         self._meter.record_tool_call()
         return self._inner.compare_commits(repo, base_sha, head_sha)
 
+
+class MeteredGitHubPullRequestReadClient(MeteredGitHubArtifactReadClient):
+    """Add PR reads only when the wrapped client genuinely supports them."""
+
+    def __init__(
+        self,
+        *,
+        inner: GitHubPullRequestReadClient,
+        meter: ControllerResourceMeter,
+    ) -> None:
+        super().__init__(inner=inner, meter=meter)
+        self._pr_inner = inner
+
     def get_pull_request(self, repo: str, pr_number: int) -> Mapping[str, Any]:
-        method = getattr(self._inner, "get_pull_request", None)
-        if method is None:
-            raise AttributeError("wrapped GitHub client does not provide get_pull_request")
         self._meter.record_tool_call()
-        return method(repo, pr_number)
+        return self._pr_inner.get_pull_request(repo, pr_number)
 
 
 @dataclass(frozen=True)
 class MeteredVerifiedHandoffResult:
     handoff: VerifiedHandoffResult
     resource_usage: ResourceUsageObservation
+
+
+def _meter_github_client(
+    *,
+    github: GitHubArtifactReadClient,
+    meter: ControllerResourceMeter,
+) -> GitHubArtifactReadClient:
+    # Preserve the original runtime capability boundary. A wrapper around a
+    # ref/compare-only client must not accidentally satisfy the optional PR
+    # protocol merely because the wrapper defines a fallback method.
+    if isinstance(github, GitHubPullRequestReadClient):
+        return MeteredGitHubPullRequestReadClient(inner=github, meter=meter)
+    return MeteredGitHubArtifactReadClient(inner=github, meter=meter)
 
 
 def run_metered_verified_handoff(
@@ -88,6 +126,6 @@ def run_metered_verified_handoff(
         operation=operation,
         observer=MeteredObservationReader(inner=observer, meter=meter),
         artifact_collector=MeteredArtifactCollector(inner=artifact_collector, meter=meter),
-        github=MeteredGitHubArtifactReadClient(inner=github, meter=meter),
+        github=_meter_github_client(github=github, meter=meter),
     )
     return MeteredVerifiedHandoffResult(handoff=handoff, resource_usage=meter.finalize())
