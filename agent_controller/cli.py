@@ -53,8 +53,12 @@ def main():
     # Argument for one-shot multi-PR attention aggregation
     parser.add_argument("--targets-file", help="JSON target list for attention-queue")
 
-    # Argument for one-shot live Codex observation
+    # Arguments for one-shot live Codex observation
     parser.add_argument("--thread-id", help="Existing Codex thread id for observe-codex")
+    parser.add_argument(
+        "--codex-bin",
+        help="Optional explicit path to the Codex executable; otherwise use the runtime bundled/resolved by openai-codex",
+    )
 
     args = parser.parse_args()
 
@@ -83,7 +87,7 @@ def main():
                 operation_id=f"observe:{args.thread_id}",
             )
             adapter = CodexObservationAdapter(
-                client=CodexOfficialSdkReadClient(),
+                client=CodexOfficialSdkReadClient(codex_bin=args.codex_bin),
                 observed_at=_observed_at_now,
             )
             observation = adapter.observe(operation)
