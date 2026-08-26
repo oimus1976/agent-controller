@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import os
 from typing import Callable, Mapping, Sequence
 
 from agent_controller.attention_queue import build_attention_queue
@@ -8,6 +9,17 @@ from agent_controller.watcher import watch_pr_once
 
 
 WatchOnce = Callable[[str, str, int, str, Mapping[str, object] | None], Mapping[str, object]]
+
+_ALLOWED_TARGET_KEYS = frozenset(
+    {
+        "repo",
+        "pr",
+        "state_file",
+        "allowed_paths",
+        "denied_paths",
+        "allow_docs_only",
+    }
+)
 
 
 def _validate_string_list(name: str, value: object) -> tuple[str, ...] | None:
@@ -26,9 +38,17 @@ def validate_targets(raw_targets: object) -> tuple[dict[str, object], ...]:
         raise TypeError("targets must be a sequence")
 
     validated: list[dict[str, object]] = []
+    seen_targets: set[tuple[str, int]] = set()
+    seen_state_files: set[str] = set()
+
     for index, raw in enumerate(raw_targets):
         if not isinstance(raw, Mapping):
             raise TypeError(f"target[{index}] must be a mapping")
+
+        unknown_keys = set(raw) - _ALLOWED_TARGET_KEYS
+        if unknown_keys:
+            names = ", ".join(sorted(str(key) for key in unknown_keys))
+            raise ValueError(f"target[{index}] has unknown keys: {names}")
 
         repo = raw.get("repo")
         pr = raw.get("pr")
@@ -48,6 +68,16 @@ def validate_targets(raw_targets: object) -> tuple[dict[str, object], ...]:
             raise ValueError(f"target[{index}].state_file must be nonempty")
         if not isinstance(allow_docs_only, bool):
             raise ValueError(f"target[{index}].allow_docs_only must be bool")
+
+        target_identity = (repo.casefold(), pr)
+        if target_identity in seen_targets:
+            raise ValueError(f"target[{index}] duplicates repo/pr {repo}#{pr}")
+        seen_targets.add(target_identity)
+
+        state_identity = os.path.normcase(os.path.abspath(os.path.normpath(state_file)))
+        if state_identity in seen_state_files:
+            raise ValueError(f"target[{index}].state_file aliases another target")
+        seen_state_files.add(state_identity)
 
         validated.append(
             {
