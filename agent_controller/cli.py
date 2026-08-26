@@ -4,7 +4,7 @@ import sys
 from datetime import datetime, timezone
 
 from .attention_queue import AttentionCategory
-from .codex_live import CodexOfficialSdkReadClient
+from .codex_live import CodexSnapshotReadClient
 from .inspector import inspect_pr
 from .watcher import watch_pr_once, watch_pr_loop
 from .executor import plan_action, execute_action
@@ -53,8 +53,13 @@ def main():
     # Argument for one-shot multi-PR attention aggregation
     parser.add_argument("--targets-file", help="JSON target list for attention-queue")
 
-    # Arguments for one-shot live Codex observation
+    # Arguments for one-shot live Codex observation. The source home is only
+    # scanned/copied by Controller; app-server runs against a disposable snapshot.
     parser.add_argument("--thread-id", help="Existing Codex thread id for observe-codex")
+    parser.add_argument(
+        "--source-codex-home",
+        help="Absolute source Codex home containing the persisted thread; it is never passed directly to app-server",
+    )
     parser.add_argument(
         "--codex-bin",
         help="Optional explicit path to the Codex executable; otherwise use the runtime bundled/resolved by openai-codex",
@@ -78,6 +83,8 @@ def main():
     if args.command == "observe-codex":
         if not args.thread_id:
             parser.error("observe-codex requires --thread-id")
+        if not args.source_codex_home:
+            parser.error("observe-codex requires --source-codex-home")
         try:
             operation = ProviderOperationRef(
                 provider="codex",
@@ -87,7 +94,10 @@ def main():
                 operation_id=f"observe:{args.thread_id}",
             )
             adapter = CodexObservationAdapter(
-                client=CodexOfficialSdkReadClient(codex_bin=args.codex_bin),
+                client=CodexSnapshotReadClient(
+                    source_codex_home=args.source_codex_home,
+                    codex_bin=args.codex_bin,
+                ),
                 observed_at=_observed_at_now,
             )
             observation = adapter.observe(operation)
