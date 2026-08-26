@@ -17,32 +17,26 @@ class TestInspector(unittest.TestCase):
     def test_evaluate_scope(self):
         from agent_controller.inspector import evaluate_scope
 
-        # 1. No policy
         self.assertEqual(evaluate_scope([{'filename': 'src/code.py', 'changes': 1}], {}), "UNKNOWN")
 
-        # 2. allowed implementation path => SATISFIED
         policy = {'allowed_paths': ['src/*.py']}
         files = [{'filename': 'src/code.py', 'changes': 1}]
         self.assertEqual(evaluate_scope(files, policy), "SATISFIED")
 
-        # 3. denied/out-of-scope path => VIOLATION
         policy = {'denied_paths': ['tests/*'], 'allowed_paths': ['src/*.py']}
         files = [{'filename': 'tests/test_code.py', 'changes': 1}]
         self.assertEqual(evaluate_scope(files, policy), "VIOLATION")
 
-        # 4. mixed allowed+denied files => VIOLATION
         files = [{'filename': 'src/code.py', 'changes': 1}, {'filename': 'tests/test_code.py', 'changes': 1}]
         self.assertEqual(evaluate_scope(files, policy), "VIOLATION")
 
-        # 5. docs-only allowed vs disallowed
         policy = {'allowed_paths': ['*']}
         files = [{'filename': 'README.md', 'changes': 1}]
-        self.assertEqual(evaluate_scope(files, policy), "VIOLATION") # Not allowed by default
+        self.assertEqual(evaluate_scope(files, policy), "VIOLATION")
 
         policy = {'allowed_paths': ['*'], 'allow_docs_only': True}
         self.assertEqual(evaluate_scope(files, policy), "SATISFIED")
 
-        # 6. missing/ambiguous policy => UNKNOWN
         self.assertEqual(evaluate_scope(files, None), "UNKNOWN")
 
     def test_classify_pr_implementation_ready_reachable(self):
@@ -75,7 +69,6 @@ class TestInspector(unittest.TestCase):
         self.assertEqual(classify_pr(evidence), "NEEDS_REVIEW")
 
     def test_classify_pr_stale_review(self):
-        # Review is clean but bound to an old commit
         evidence = {
             'head_sha': 'current_head_sha_98765',
             'scope_status': 'SATISFIED',
@@ -107,11 +100,10 @@ class TestInspector(unittest.TestCase):
             ],
             'reviews': []
         }
-        self.assertEqual(classify_pr(evidence), "IMPLEMENTATION_READY") # Reachable because no actual review found
+        self.assertEqual(classify_pr(evidence), "IMPLEMENTATION_READY")
 
     def test_classify_pr_resolved_vs_unresolved_inline_codex_thread(self):
         head_sha = "12345"
-        # Unresolved thread
         evidence_unresolved = {
             'head_sha': head_sha,
             'scope_status': 'SATISFIED',
@@ -126,7 +118,6 @@ class TestInspector(unittest.TestCase):
         }
         self.assertEqual(classify_pr(evidence_unresolved), "NEEDS_REVIEW")
 
-        # Resolved thread
         evidence_resolved = {
             'head_sha': head_sha,
             'scope_status': 'SATISFIED',
@@ -142,7 +133,7 @@ class TestInspector(unittest.TestCase):
                 }
             ]
         }
-        self.assertEqual(classify_pr(evidence_resolved), "NEEDS_REVIEW") # Should be NEEDS_REVIEW because it doesn't have clean evidence either
+        self.assertEqual(classify_pr(evidence_resolved), "NEEDS_REVIEW")
 
     def test_classify_pr_current_head_changes_requested_blocking(self):
         evidence = {
@@ -171,7 +162,6 @@ class TestInspector(unittest.TestCase):
                 }
             ]
         }
-        # Even with clean comment, if graphql_error is True, block REVIEW_READY
         self.assertEqual(classify_pr(evidence), "NEEDS_REVIEW")
 
     def test_classify_pr_check_run_error_blocking(self):
@@ -207,17 +197,13 @@ class TestInspector(unittest.TestCase):
                 }
             ]
         }
-        # A reaction without explicit SHA binding must not yield REVIEW_READY
         self.assertNotEqual(classify_pr(evidence), "REVIEW_READY")
-        # Since it has a review interaction but we failed closed on binding it, it should be NEEDS_REVIEW
         self.assertEqual(classify_pr(evidence), "NEEDS_REVIEW")
 
     @patch('agent_controller.inspector._github_graphql_request')
     def test_graphql_pagination(self, mock_gql):
-        # Mocking > 100 threads and > 100 comments
         from agent_controller.inspector import get_pr_review_threads_graphql
 
-        # First call gets threads page 1
         call1 = {
             'data': {'repository': {'pullRequest': {'reviewThreads': {
                 'pageInfo': {'hasNextPage': True, 'endCursor': 't_cursor1'},
@@ -226,14 +212,12 @@ class TestInspector(unittest.TestCase):
                 ]
             }}}}
         }
-        # Second call is the nested comments for t1
         call2 = {
             'data': {'node': {'comments': {
                 'pageInfo': {'hasNextPage': False, 'endCursor': 'c_cursor2'},
                 'nodes': [{'body': 'c2'}]
             }}}
         }
-        # Third call is threads page 2
         call3 = {
             'data': {'repository': {'pullRequest': {'reviewThreads': {
                 'pageInfo': {'hasNextPage': False, 'endCursor': 't_cursor2'},
@@ -253,12 +237,6 @@ class TestInspector(unittest.TestCase):
         self.assertEqual(len(threads[1]['comments']['nodes']), 1)
 
     def test_classify_pr_current_head_review_binding(self):
-        # Known expected fixture facts for oimus1976/calendar-csv2ics-converter PR #5
-        # head SHA: b201119ec5b82aef81630ec375d208d2c113f033
-        # Draft, open, unmerged
-        # non-empty test-only diff
-        # latest-head Codex top-level clean comment contains: "Didn't find any major issues"
-        # that comment explicitly identifies reviewed commit b201119ec5
         head_sha = "b201119ec5b82aef81630ec375d208d2c113f033"
         evidence = {
             'head_sha': head_sha,
@@ -276,15 +254,16 @@ class TestInspector(unittest.TestCase):
         self.assertEqual(classify_pr(evidence), "REVIEW_READY")
 
     @patch('agent_controller.inspector.get_pr_files')
-    @patch('agent_controller.inspector.get_check_runs')
+    @patch('agent_controller.inspector.get_actions_runs')
     @patch('agent_controller.inspector.get_pr_review_threads_graphql')
     @patch('agent_controller.inspector.get_pr_issue_comments')
     @patch('agent_controller.inspector.get_pr_review_comments')
     @patch('agent_controller.inspector.get_pr_reviews')
     @patch('agent_controller.inspector.get_pr_details')
-    def test_inspect_pr_end_to_end_mocked(self, mock_details, mock_reviews, mock_review_comments, mock_issue_comments, mock_graphql, mock_check_runs, mock_files):
+    def test_inspect_pr_end_to_end_mocked(self, mock_details, mock_reviews, mock_review_comments, mock_issue_comments, mock_graphql, mock_actions_runs, mock_files):
+        head_sha = 'b201119ec5b82aef81630ec375d208d2c113f033'
         mock_details.return_value = {
-            'head': {'sha': 'b201119ec5b82aef81630ec375d208d2c113f033'},
+            'head': {'sha': head_sha},
             'base': {'ref': 'main'},
             'draft': True,
             'merged': False,
@@ -301,22 +280,31 @@ class TestInspector(unittest.TestCase):
             }
         ]
         mock_graphql.return_value = None
-        mock_check_runs.return_value = {'check_runs': []}
+        mock_actions_runs.return_value = {
+            'total_count': 1,
+            'workflow_runs': [{
+                'id': 1,
+                'head_sha': head_sha,
+                'event': 'pull_request',
+                'status': 'completed',
+                'conclusion': 'success'
+            }]
+        }
 
-        # Pass a policy that will evaluate to SATISFIED
         result = inspect_pr("oimus1976", "calendar-csv2ics-converter", 5, scope_policy={'allowed_paths': ['*']})
         self.assertEqual(result['classification'], "REVIEW_READY")
-        self.assertEqual(result['head_sha'], "b201119ec5b82aef81630ec375d208d2c113f033")
+        self.assertEqual(result['head_sha'], head_sha)
+        self.assertEqual(result['actions_ci_status'], "PASS")
         self.assertFalse(result['check_runs_error'])
 
     @patch('agent_controller.inspector.get_pr_files')
-    @patch('agent_controller.inspector.get_check_runs')
+    @patch('agent_controller.inspector.get_actions_runs')
     @patch('agent_controller.inspector.get_pr_review_threads_graphql')
     @patch('agent_controller.inspector.get_pr_issue_comments')
     @patch('agent_controller.inspector.get_pr_review_comments')
     @patch('agent_controller.inspector.get_pr_reviews')
     @patch('agent_controller.inspector.get_pr_details')
-    def test_inspect_pr_check_run_fetch_failure(self, mock_details, mock_reviews, mock_review_comments, mock_issue_comments, mock_graphql, mock_check_runs, mock_files):
+    def test_inspect_pr_check_run_fetch_failure(self, mock_details, mock_reviews, mock_review_comments, mock_issue_comments, mock_graphql, mock_actions_runs, mock_files):
         mock_details.return_value = {
             'head': {'sha': 'b201119ec5b82aef81630ec375d208d2c113f033'},
             'base': {'ref': 'main'},
@@ -330,11 +318,12 @@ class TestInspector(unittest.TestCase):
         mock_review_comments.return_value = []
         mock_issue_comments.return_value = []
         mock_graphql.return_value = None
-        mock_check_runs.side_effect = Exception("API Error")
+        mock_actions_runs.side_effect = Exception("API Error")
 
         result = inspect_pr("oimus1976", "calendar-csv2ics-converter", 5, scope_policy={'allowed_paths': ['*']})
         self.assertTrue(result['check_runs_error'])
         self.assertIsNone(result['check_runs'])
+        self.assertEqual(result['actions_ci_status'], "UNAVAILABLE")
         self.assertEqual(result['classification'], "NEEDS_REVIEW")
 
 if __name__ == '__main__':

@@ -115,7 +115,6 @@ def get_pr_review_threads_graphql(owner, repo, pr_number):
             threads_data = response['data']['repository']['pullRequest']['reviewThreads']
             nodes = threads_data['nodes']
             for thread in nodes:
-                # check if comments need pagination
                 has_next_comment = thread['comments']['pageInfo']['hasNextPage']
                 comment_cursor = thread['comments']['pageInfo']['endCursor']
 
@@ -149,7 +148,6 @@ def get_pr_reviews(owner, repo, pr_number):
     return _github_api_request(url)
 
 def get_pr_review_comments(owner, repo, pr_number):
-    # Need reactions for review comments
     url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments?per_page=100"
     return _github_api_request_paginated(url, headers={"Accept": "application/vnd.github.squirrel-girl-preview+json"})
 
@@ -167,9 +165,53 @@ def get_issue_comment_reactions(owner, repo, comment_id):
 
 import fnmatch
 
-def get_check_runs(owner, repo, ref):
-    url = f"https://api.github.com/repos/{owner}/{repo}/commits/{ref}/check-runs"
+def get_actions_runs(owner, repo, ref):
+    url = (
+        f"https://api.github.com/repos/{owner}/{repo}/actions/runs"
+        f"?head_sha={ref}&event=pull_request&per_page=100"
+    )
     return _github_api_request(url)
+
+
+def evaluate_actions_ci(actions_response, expected_head_sha):
+    """Return PASS/FAIL/PENDING/MISSING/UNAVAILABLE for exact-head PR Actions runs."""
+    if not isinstance(actions_response, dict):
+        return "UNAVAILABLE"
+
+    runs = actions_response.get("workflow_runs")
+    total_count = actions_response.get("total_count")
+    if not isinstance(runs, list) or not isinstance(total_count, int) or total_count < 0:
+        return "UNAVAILABLE"
+    if total_count != len(runs):
+        # Do not accept partial evidence (including >100 runs not represented here).
+        return "UNAVAILABLE"
+    if not runs:
+        return "MISSING"
+
+    saw_pending = False
+    saw_failure = False
+    for run in runs:
+        if not isinstance(run, dict):
+            return "UNAVAILABLE"
+        if run.get("head_sha") != expected_head_sha or run.get("event") != "pull_request":
+            return "UNAVAILABLE"
+
+        status = run.get("status")
+        if not isinstance(status, str):
+            return "UNAVAILABLE"
+        if status != "completed":
+            saw_pending = True
+            continue
+
+        conclusion = run.get("conclusion")
+        if conclusion != "success":
+            saw_failure = True
+
+    if saw_failure:
+        return "FAIL"
+    if saw_pending:
+        return "PENDING"
+    return "PASS"
 
 def evaluate_scope(files, policy):
     if not policy or (policy.get('allowed_paths') is None and policy.get('denied_paths') is None and not policy.get('allow_docs_only')):
@@ -188,12 +230,10 @@ def evaluate_scope(files, policy):
     for f in files:
         filename = f.get('filename', '')
 
-        # Check denied paths first
         for pattern in denied_paths:
             if fnmatch.fnmatch(filename, pattern):
                 return "VIOLATION"
 
-        # Check allowed paths
         if allowed_paths:
             matched = False
             for pattern in allowed_paths:
@@ -203,7 +243,6 @@ def evaluate_scope(files, policy):
             if not matched:
                 return "VIOLATION"
 
-        # Check docs only
         if f.get('changes', 0) > 0:
             _, ext = os.path.splitext(filename)
             if ext.lower() not in docs_extensions:
@@ -215,9 +254,7 @@ def evaluate_scope(files, policy):
     return "SATISFIED"
 
 def inspect_pr(owner, repo, pr_number, scope_policy=None):
-    """
-    Inspects a GitHub PR for objective evidence and classifies its state.
-    """
+    """Inspects a GitHub PR for objective evidence and classifies its state."""
     if scope_policy is None:
         scope_policy = {}
 
@@ -234,7 +271,6 @@ def inspect_pr(owner, repo, pr_number, scope_policy=None):
     review_comments = get_pr_review_comments(owner, repo, pr_number)
     issue_comments = get_pr_issue_comments(owner, repo, pr_number)
 
-    # Enrich issue comments with reactions
     for comment in issue_comments:
         comment_id = comment.get('id')
         if comment_id:
@@ -246,9 +282,7 @@ def inspect_pr(owner, repo, pr_number, scope_policy=None):
 
     files = get_pr_files(owner, repo, pr_number)
 
-    # Generic file scope analysis
     diff_summary = []
-
     if isinstance(files, list):
         for f in files:
             filename = f.get('filename', '')
@@ -267,16 +301,18 @@ def inspect_pr(owner, repo, pr_number, scope_policy=None):
     graphql_error = False
     try:
         review_threads_graphql = get_pr_review_threads_graphql(owner, repo, pr_number)
-    except Exception as e:
+    except Exception:
         review_threads_graphql = None
         graphql_error = True
 
-    check_runs_error = False
+    actions_ci_status = "UNAVAILABLE"
+    actions_runs = None
     try:
-        check_runs = get_check_runs(owner, repo, head_sha)
+        actions_runs = get_actions_runs(owner, repo, head_sha)
+        actions_ci_status = evaluate_actions_ci(actions_runs, head_sha)
     except Exception:
-        check_runs = None
-        check_runs_error = True
+        actions_runs = None
+        actions_ci_status = "UNAVAILABLE"
 
     evidence = {
         'head_sha': head_sha,
@@ -293,24 +329,24 @@ def inspect_pr(owner, repo, pr_number, scope_policy=None):
         'issue_comments': issue_comments,
         'review_threads_graphql': review_threads_graphql,
         'graphql_error': graphql_error,
-        'check_runs': check_runs,
-        'check_runs_error': check_runs_error
+        'actions_runs': actions_runs,
+        'actions_ci_status': actions_ci_status,
+        # Compatibility signal for existing watcher/state consumers. It now means
+        # CI evidence could not be read/validated, not that the Checks API failed.
+        'check_runs_error': actions_ci_status == "UNAVAILABLE",
+        'check_runs': None,
     }
 
-    classification = classify_pr(evidence)
-
-    evidence['classification'] = classification
+    evidence['classification'] = classify_pr(evidence)
     return evidence
 
 def classify_pr(evidence):
     head_sha = evidence.get('head_sha')
 
-    # Check for Codex top-level comments bound to current head
     has_clean_codex_review_on_head = False
     has_unresolved_codex_findings_on_head = False
     has_changes_requested_on_head = False
 
-    # 1. Analyze issue comments (top-level PR comments)
     issue_comments = evidence.get('issue_comments', [])
     has_any_review = False
 
@@ -321,22 +357,15 @@ def classify_pr(evidence):
 
         if user == 'chatgpt-codex-connector[bot]':
             has_any_review = True
-            # Check if it binds to the current head
             if head_sha and (head_sha in body or head_sha[:10] in body):
                 if "Didn't find any major issues" in body:
                     has_clean_codex_review_on_head = True
         elif "@codex review" in body.lower():
-            # Check for Codex reaction on a trigger comment
             for reaction in reactions:
                 reaction_user = reaction.get('user', {}).get('login')
                 if reaction_user == 'chatgpt-codex-connector[bot]' and reaction.get('content') in ['+1', 'thumbsup', '👍']:
-                    # We can only accept this if there's explicit proof it's bound to the current head.
-                    # Since reactions don't have built-in head SHAs, and we don't have reliable timestamp comparison yet,
-                    # we must fail closed and NOT treat a naked reaction as clean review evidence for REVIEW_READY.
-                    # It may mean a review happened, but we can't prove it's on *this* head.
                     has_any_review = True
 
-    # 2. Analyze formal reviews
     reviews = evidence.get('reviews', [])
     for review in reviews:
         user = review.get('user', {}).get('login', '')
@@ -352,14 +381,11 @@ def classify_pr(evidence):
                 elif state == 'CHANGES_REQUESTED':
                     has_changes_requested_on_head = True
 
-    # 3. Analyze inline review comments via GraphQL to get resolved state
     if evidence.get('graphql_error'):
-        # Fail-closed for GraphQL errors
         pass
     else:
         review_threads_graphql = evidence.get('review_threads_graphql')
         if review_threads_graphql is not None:
-            # review_threads_graphql is a list of thread dicts now due to our pagination logic
             for thread in review_threads_graphql:
                 if not thread.get('isResolved'):
                     comments = thread.get('comments', {}).get('nodes', [])
@@ -372,42 +398,40 @@ def classify_pr(evidence):
                                 has_unresolved_codex_findings_on_head = True
                                 break
         else:
-            # Fallback to REST API if GraphQL not available (e.g. mock missing it completely)
             review_comments = evidence.get('review_comments', [])
             for comment in review_comments:
                 user = comment.get('user', {}).get('login', '')
                 commit_id = comment.get('commit_id')
 
-                if user == 'chatgpt-codex-connector[bot]':
-                    if commit_id == head_sha:
-                        has_unresolved_codex_findings_on_head = True
+                if user == 'chatgpt-codex-connector[bot]' and commit_id == head_sha:
+                    has_unresolved_codex_findings_on_head = True
 
-    # Classification Logic
     if evidence.get('merged') or evidence.get('state') == 'closed':
         return "CLOSED"
 
-    scope_status = evidence.get('scope_status')
-
-    if scope_status != "SATISFIED":
+    if evidence.get('scope_status') != "SATISFIED":
         return "NEEDS_REVIEW"
 
-    # Blocking current-head findings => NEEDS_REVIEW
     if has_unresolved_codex_findings_on_head or has_changes_requested_on_head:
         return "NEEDS_REVIEW"
 
-    # Unavailable/contradictory evidence => NEEDS_REVIEW
-    if evidence.get('graphql_error') or evidence.get('check_runs_error'):
+    if evidence.get('graphql_error'):
         return "NEEDS_REVIEW"
 
-    # Valid current-head clean review evidence => REVIEW_READY
+    # Backward-compatible default for direct legacy callers that do not yet
+    # supply actions_ci_status. inspect_pr always supplies the explicit status.
+    ci_status = evidence.get('actions_ci_status')
+    if ci_status is None:
+        ci_status = "UNAVAILABLE" if evidence.get('check_runs_error') else "PASS"
+
+    if ci_status != "PASS":
+        return "NEEDS_REVIEW"
+
     if has_clean_codex_review_on_head:
         return "REVIEW_READY"
 
-    # If it's open, unmerged, has an implementation diff, and NO review evidence on head,
-    # and no general review evidence at all (or we couldn't bind it), it's implementation ready.
     if evidence.get('state') == 'open' and not evidence.get('merged'):
         if not has_any_review:
             return "IMPLEMENTATION_READY"
 
-    # Fallback
     return "NEEDS_REVIEW"
