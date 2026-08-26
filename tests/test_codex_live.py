@@ -2,6 +2,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 from agent_controller.codex_live import (
     CodexOfficialSdkReadClient,
@@ -270,6 +271,81 @@ class CodexLiveTests(unittest.TestCase):
             self.assertEqual(original_target, target_rollout.read_bytes())
             self.assertEqual(1, len(seen))
             self.assertFalse(seen[0][1].exists())
+
+    def test_snapshot_parent_inside_source_is_rejected_before_temp_creation(self):
+        with tempfile.TemporaryDirectory() as source_dir:
+            source_home = Path(source_dir).resolve()
+            self.make_rollout(source_home)
+            descendant = source_home / "snapshot-parent"
+            descendant.mkdir()
+            factory_calls = []
+
+            for parent in (source_home, descendant):
+                with self.subTest(parent=parent):
+                    before = {path.name for path in parent.iterdir()}
+                    client = CodexSnapshotReadClient(
+                        source_codex_home=str(source_home),
+                        snapshot_parent=str(parent),
+                        sdk_factory=lambda codex_bin, home: factory_calls.append(
+                            (codex_bin, home)
+                        )
+                        or FakeSdkClient({}),
+                    )
+                    with self.assertRaisesRegex(RuntimeError, "outside source_codex_home"):
+                        client.get_operation_raw(self.snapshot_operation())
+                    self.assertEqual(before, {path.name for path in parent.iterdir()})
+
+            self.assertEqual([], factory_calls)
+
+    def test_default_temp_resolving_inside_source_is_rejected_before_temp_creation(self):
+        with tempfile.TemporaryDirectory() as source_dir:
+            source_home = Path(source_dir).resolve()
+            self.make_rollout(source_home)
+            fake_default_temp = source_home / "default-temp"
+            fake_default_temp.mkdir()
+            before = list(fake_default_temp.iterdir())
+            factory_calls = []
+            client = CodexSnapshotReadClient(
+                source_codex_home=str(source_home),
+                sdk_factory=lambda codex_bin, home: factory_calls.append((codex_bin, home))
+                or FakeSdkClient({}),
+            )
+
+            with patch(
+                "agent_controller.codex_live.tempfile.gettempdir",
+                return_value=str(fake_default_temp),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "outside source_codex_home"):
+                    client.get_operation_raw(self.snapshot_operation())
+
+            self.assertEqual(before, list(fake_default_temp.iterdir()))
+            self.assertEqual([], factory_calls)
+
+    def test_snapshot_parent_symlink_into_source_is_rejected(self):
+        with tempfile.TemporaryDirectory() as root_dir:
+            root = Path(root_dir).resolve()
+            source_home = root / "source"
+            source_home.mkdir()
+            self.make_rollout(source_home)
+            descendant = source_home / "snapshot-parent"
+            descendant.mkdir()
+            symlink_parent = root / "snapshot-link"
+            try:
+                symlink_parent.symlink_to(descendant, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlink unavailable on this platform: {exc}")
+
+            factory_calls = []
+            client = CodexSnapshotReadClient(
+                source_codex_home=str(source_home),
+                snapshot_parent=str(symlink_parent),
+                sdk_factory=lambda codex_bin, home: factory_calls.append((codex_bin, home))
+                or FakeSdkClient({}),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "outside source_codex_home"):
+                client.get_operation_raw(self.snapshot_operation())
+            self.assertEqual([], factory_calls)
 
     def test_snapshot_observer_supports_compressed_rollout_representation(self):
         with tempfile.TemporaryDirectory() as source_dir:
