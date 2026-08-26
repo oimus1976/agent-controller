@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from agent_controller.inspector import evaluate_actions_ci, inspect_pr
+from agent_controller.inspector import evaluate_actions_ci, get_actions_runs, inspect_pr
 
 
 HEAD = "abc123"
@@ -22,6 +22,13 @@ def run(status="completed", conclusion="success", head_sha=HEAD, event="pull_req
 
 
 class ActionsCiTests(unittest.TestCase):
+    def test_actions_query_is_bound_to_exact_head_and_pr_event(self):
+        with patch("agent_controller.inspector._github_api_request", return_value=response()) as request:
+            get_actions_runs("owner", "repo", HEAD)
+        request.assert_called_once_with(
+            f"https://api.github.com/repos/owner/repo/actions/runs?head_sha={HEAD}&event=pull_request&per_page=100"
+        )
+
     def test_pass_requires_all_exact_head_pr_runs_successful(self):
         self.assertEqual(evaluate_actions_ci(response(run(), run()), HEAD), "PASS")
 
