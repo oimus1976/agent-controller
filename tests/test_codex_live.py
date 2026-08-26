@@ -1,6 +1,11 @@
+import threading
 import unittest
 
-from agent_controller.codex_live import CodexOfficialSdkReadClient, project_codex_thread_read
+from agent_controller.codex_live import (
+    CodexOfficialSdkReadClient,
+    _reject_server_request,
+    project_codex_thread_read,
+)
 from agent_controller.provider_adapters import CodexObservationAdapter
 from agent_controller.provider_contract import ControllerState, ProviderOperationRef, TerminalClaim
 
@@ -23,6 +28,21 @@ class FakeSdkClient:
 
     def close(self):
         self.calls.append(("close",))
+
+
+class BlockingFakeSdkClient(FakeSdkClient):
+    def __init__(self):
+        super().__init__({})
+        self.released = threading.Event()
+
+    def thread_read(self, thread_id, include_turns=False):
+        self.calls.append(("thread_read", thread_id, include_turns))
+        self.released.wait(timeout=1.0)
+        return self.response
+
+    def close(self):
+        self.calls.append(("close",))
+        self.released.set()
 
 
 class CodexLiveTests(unittest.TestCase):
@@ -52,13 +72,18 @@ class CodexLiveTests(unittest.TestCase):
                 }
             }
         )
-        client = CodexOfficialSdkReadClient(sdk_factory=lambda: fake)
+        seen_bins = []
+        client = CodexOfficialSdkReadClient(
+            sdk_factory=lambda codex_bin: seen_bins.append(codex_bin) or fake,
+            codex_bin="C:/Tools/codex.exe",
+        )
         adapter = CodexObservationAdapter(client=client, observed_at=lambda: "2026-08-27T00:00:00Z")
 
         observation = adapter.observe(self.operation())
 
         self.assertEqual(ControllerState.ARTIFACT_READY, observation.mapped_state)
         self.assertEqual(TerminalClaim.SUCCESS, observation.terminal_claim)
+        self.assertEqual(["C:/Tools/codex.exe"], seen_bins)
         self.assertEqual(
             [
                 ("start",),
@@ -89,7 +114,7 @@ class CodexLiveTests(unittest.TestCase):
         fake = FakeSdkClient(
             {"thread": {"id": "thr_123", "status": {"type": "idle"}, "turns": []}}
         )
-        client = CodexOfficialSdkReadClient(sdk_factory=lambda: fake)
+        client = CodexOfficialSdkReadClient(sdk_factory=lambda _codex_bin: fake)
         adapter = CodexObservationAdapter(client=client, observed_at=lambda: "2026-08-27T00:00:00Z")
 
         observation = adapter.observe(self.operation())
@@ -105,8 +130,10 @@ class CodexLiveTests(unittest.TestCase):
         self.assertEqual("unknown", raw["status"])
 
     def test_wrong_provider_is_rejected_before_sdk_use(self):
-        fake = FakeSdkClient({})
-        client = CodexOfficialSdkReadClient(sdk_factory=lambda: fake)
+        factory_calls = []
+        client = CodexOfficialSdkReadClient(
+            sdk_factory=lambda codex_bin: factory_calls.append(codex_bin) or FakeSdkClient({})
+        )
         operation = ProviderOperationRef(
             provider="jules",
             provider_operation_id="thr_123",
@@ -117,7 +144,35 @@ class CodexLiveTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             client.get_operation_raw(operation)
-        self.assertEqual([], fake.calls)
+        self.assertEqual([], factory_calls)
+
+    def test_unexpected_server_request_is_rejected_not_approved(self):
+        for method in (
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval",
+            "item/permissions/requestApproval",
+        ):
+            with self.subTest(method=method):
+                with self.assertRaisesRegex(RuntimeError, "read-only observation"):
+                    _reject_server_request(method, {})
+
+    def test_timeout_closes_provider_client_and_fails_closed(self):
+        fake = BlockingFakeSdkClient()
+        client = CodexOfficialSdkReadClient(
+            sdk_factory=lambda _codex_bin: fake,
+            timeout_seconds=0.01,
+        )
+
+        with self.assertRaisesRegex(TimeoutError, "thread/read exceeded"):
+            client.get_operation_raw(self.operation())
+
+        self.assertIn(("close",), fake.calls)
+
+    def test_invalid_configuration_is_rejected(self):
+        with self.assertRaises(ValueError):
+            CodexOfficialSdkReadClient(codex_bin="")
+        with self.assertRaises(ValueError):
+            CodexOfficialSdkReadClient(timeout_seconds=0)
 
 
 if __name__ == "__main__":
