@@ -1,3 +1,4 @@
+import os
 import unittest
 
 from agent_controller.multi_watch import run_attention_watch, validate_targets
@@ -86,6 +87,57 @@ class MultiWatchTests(unittest.TestCase):
             validate_targets(
                 [{"repo": "a/repo", "pr": 1, "state_file": "a.json", "allow_docs_only": "yes"}]
             )
+
+    def test_unknown_keys_fail_closed_before_watch(self):
+        calls = []
+
+        def fake_watch(*args):
+            calls.append(args)
+            return _observation("a/repo", 1)
+
+        targets = [
+            {
+                "repo": "a/repo",
+                "pr": 1,
+                "state_file": "a.json",
+                "deneid_paths": ["secrets/**"],
+            }
+        ]
+        with self.assertRaises(ValueError):
+            run_attention_watch(targets, watch_once=fake_watch)
+        self.assertEqual([], calls)
+
+    def test_duplicate_repo_pr_fails_closed_before_watch(self):
+        calls = []
+
+        def fake_watch(*args):
+            calls.append(args)
+            return _observation("a/repo", 1)
+
+        targets = [
+            {"repo": "a/repo", "pr": 1, "state_file": "one.json"},
+            {"repo": "A/REPO", "pr": 1, "state_file": "two.json"},
+        ]
+        with self.assertRaises(ValueError):
+            run_attention_watch(targets, watch_once=fake_watch)
+        self.assertEqual([], calls)
+
+    def test_state_file_alias_fails_closed_before_watch(self):
+        calls = []
+
+        def fake_watch(*args):
+            calls.append(args)
+            return _observation("a/repo", 1)
+
+        shared = os.path.join("state", "pr.json")
+        alias = os.path.join("state", ".", "pr.json")
+        targets = [
+            {"repo": "a/repo", "pr": 1, "state_file": shared},
+            {"repo": "b/repo", "pr": 2, "state_file": alias},
+        ]
+        with self.assertRaises(ValueError):
+            run_attention_watch(targets, watch_once=fake_watch)
+        self.assertEqual([], calls)
 
 
 def _observation(
