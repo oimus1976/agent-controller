@@ -34,6 +34,20 @@ class FakeGitHub:
         }
 
 
+class FakePullRequestGitHub(FakeGitHub):
+    def get_pull_request(self, repo, pr_number):
+        return {
+            "number": pr_number,
+            "state": "open",
+            "merged": False,
+            "base_repo": repo,
+            "base_ref": "refs/heads/main",
+            "base_sha": "start-sha",
+            "head_ref": "refs/heads/work",
+            "head_sha": "new-sha",
+        }
+
+
 def task():
     return TaskBinding(
         controller_task_id="task-1",
@@ -72,18 +86,17 @@ def observer(payload=None):
 
 
 def collector(payloads=None):
+    if payloads is None:
+        payloads = [
+            {
+                "kind": "commit",
+                "id": "artifact-1",
+                "ref": "refs/heads/work",
+                "sha": "new-sha",
+            }
+        ]
     return JulesArtifactAdapter(
-        FakeArtifactClient(
-            payloads
-            or [
-                {
-                    "kind": "commit",
-                    "id": "artifact-1",
-                    "ref": "refs/heads/work",
-                    "sha": "new-sha",
-                }
-            ]
-        ),
+        FakeArtifactClient(payloads),
         lambda: "2026-08-26T00:03:00Z",
     )
 
@@ -153,6 +166,46 @@ class MeteredVerifiedHandoffTests(unittest.TestCase):
 
         self.assertEqual(VerificationResult.BLOCKED, result.handoff.verification_result)
         self.assertEqual(2, result.resource_usage.tool_call_count)
+
+    def test_metering_does_not_widen_optional_pr_read_capability(self):
+        result = run_metered_verified_handoff(
+            task=task(),
+            operation=operation(),
+            observer=observer(),
+            artifact_collector=collector([
+                {
+                    "kind": "pull_request",
+                    "id": "17",
+                    "ref": "refs/heads/work",
+                    "sha": "new-sha",
+                }
+            ]),
+            github=FakeGitHub(),
+            controller_run_id="run-5",
+        )
+
+        self.assertEqual(VerificationResult.BLOCKED, result.handoff.verification_result)
+        self.assertEqual(2, result.resource_usage.tool_call_count)
+
+    def test_real_pr_read_capability_is_measured_when_present(self):
+        result = run_metered_verified_handoff(
+            task=task(),
+            operation=operation(),
+            observer=observer(),
+            artifact_collector=collector([
+                {
+                    "kind": "pull_request",
+                    "id": "17",
+                    "ref": "refs/heads/work",
+                    "sha": "new-sha",
+                }
+            ]),
+            github=FakePullRequestGitHub(),
+            controller_run_id="run-6",
+        )
+
+        self.assertEqual(VerificationResult.PASS, result.handoff.verification_result)
+        self.assertEqual(4, result.resource_usage.tool_call_count)
 
 
 if __name__ == "__main__":
