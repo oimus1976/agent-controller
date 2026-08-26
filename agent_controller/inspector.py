@@ -262,8 +262,8 @@ def inspect_pr(owner, repo, pr_number, scope_policy=None):
 
     head_sha = pr_data.get('head', {}).get('sha')
     base_branch = pr_data.get('base', {}).get('ref')
-    is_draft = pr_data.get('draft', False)
-    is_merged = pr_data.get('merged', False)
+    is_draft = pr_data.get('draft')
+    is_merged = pr_data.get('merged')
     state = pr_data.get('state')
     changed_files = pr_data.get('changed_files', 0)
 
