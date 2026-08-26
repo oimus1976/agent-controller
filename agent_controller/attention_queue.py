@@ -34,6 +34,8 @@ _PRIORITY = {
     AttentionCategory.NO_CHANGE: 4,
 }
 
+_VALID_ACTIONS_CI_STATUSES = frozenset({"PASS", "FAIL", "PENDING", "MISSING", "UNAVAILABLE"})
+
 
 def _nonempty_string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
@@ -48,6 +50,7 @@ def classify_attention(observation: Mapping[str, object]) -> AttentionItem:
     classification = _nonempty_string(observation.get("current_classification"))
     runtime_status = _nonempty_string(observation.get("runtime_status"))
     head_sha = _nonempty_string(observation.get("current_head_sha"))
+    actions_ci_status = _nonempty_string(observation.get("actions_ci_status"))
     transition = observation.get("transition")
     reasons = observation.get("transition_reasons", ())
 
@@ -59,6 +62,8 @@ def classify_attention(observation: Mapping[str, object]) -> AttentionItem:
         classification = "UNKNOWN"
     if runtime_status is None:
         runtime_status = "UNKNOWN"
+    if actions_ci_status is not None and actions_ci_status not in _VALID_ACTIONS_CI_STATUSES:
+        raise ValueError("actions_ci_status is invalid")
     if not isinstance(transition, bool):
         raise ValueError("transition must be bool")
     if not isinstance(reasons, Sequence) or isinstance(reasons, (str, bytes)):
@@ -71,6 +76,9 @@ def classify_attention(observation: Mapping[str, object]) -> AttentionItem:
     elif classification == "CLOSED":
         category = AttentionCategory.DONE
         reason = "TARGET_CLOSED_OR_MERGED"
+    elif actions_ci_status == "PENDING":
+        category = AttentionCategory.IN_PROGRESS
+        reason = "CI_RUNNING_FOR_EXACT_HEAD"
     elif classification == "REVIEW_READY":
         category = AttentionCategory.HUMAN_ACTION
         reason = "VERIFIED_REVIEW_READY_HUMAN_GATE_CANDIDATE"
