@@ -16,8 +16,9 @@ def observation(
     transition=True,
     reasons=("CLASSIFICATION_CHANGED",),
     head_sha="abc123",
+    actions_ci_status=None,
 ):
-    return {
+    result = {
         "repo": repo,
         "pr": pr,
         "current_head_sha": head_sha,
@@ -26,16 +27,27 @@ def observation(
         "transition": transition,
         "transition_reasons": list(reasons),
     }
+    if actions_ci_status is not None:
+        result["actions_ci_status"] = actions_ci_status
+    return result
 
 
 class AttentionQueueTests(unittest.TestCase):
     def test_review_ready_is_human_action_not_authorization(self):
-        item = classify_attention(observation(classification="REVIEW_READY"))
+        item = classify_attention(observation(classification="REVIEW_READY", actions_ci_status="PASS"))
         self.assertEqual(AttentionCategory.HUMAN_ACTION, item.category)
-        self.assertEqual(
-            "VERIFIED_REVIEW_READY_HUMAN_GATE_CANDIDATE",
-            item.reason,
+        self.assertEqual("VERIFIED_REVIEW_READY_HUMAN_GATE_CANDIDATE", item.reason)
+
+    def test_pending_ci_is_in_progress_not_human_attention(self):
+        item = classify_attention(
+            observation(classification="NEEDS_REVIEW", actions_ci_status="PENDING")
         )
+        self.assertEqual(AttentionCategory.IN_PROGRESS, item.category)
+        self.assertEqual("CI_RUNNING_FOR_EXACT_HEAD", item.reason)
+
+    def test_invalid_ci_status_is_rejected(self):
+        with self.assertRaises(ValueError):
+            classify_attention(observation(actions_ci_status="MAYBE"))
 
     def test_evidence_unavailable_never_becomes_done_or_safe(self):
         item = classify_attention(
