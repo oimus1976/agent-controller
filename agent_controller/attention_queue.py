@@ -91,9 +91,6 @@ def classify_attention(observation: Mapping[str, object]) -> AttentionItem:
     elif current_merged and current_state_enum != "closed":
         category = AttentionCategory.NEEDS_ATTENTION
         reason = "CONTRADICTORY_PR_STATE"
-    elif current_state_enum == "closed" and current_draft:
-        category = AttentionCategory.NEEDS_ATTENTION
-        reason = "CONTRADICTORY_PR_STATE"
     elif classification == "CLOSED":
         if current_state_enum != "closed":
             category = AttentionCategory.NEEDS_ATTENTION
