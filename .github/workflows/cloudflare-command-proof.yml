@@ -33,12 +33,10 @@ jobs:
           ./node_modules/.bin/wrangler --version
           actual_version="$(node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync("node_modules/wrangler/package.json","utf8")); process.stdout.write(p.version)')"
           test "$actual_version" = "4.125.0"
-      - name: Prove required CLI flags are documented by exact binary
+      - name: Capture exact deploy help evidence
         run: |
           ./node_modules/.bin/wrangler deploy --help > ../wrangler-deploy-help.txt
           grep -F -- '--no-bundle' ../wrangler-deploy-help.txt
-          grep -F -- '--experimental-provision' ../wrangler-deploy-help.txt
-          grep -F -- '--experimental-auto-create' ../wrangler-deploy-help.txt
           grep -F -- '--upload-source-maps' ../wrangler-deploy-help.txt
           grep -F -- '--dry-run' ../wrangler-deploy-help.txt
       - name: Create deterministic prebuilt proof fixture
@@ -52,15 +50,16 @@ jobs:
           {"name":"agent-controller-command-proof","main":"./index.js","compatibility_date":"2026-08-25","no_bundle":true,"find_additional_modules":false,"upload_source_maps":false}
           JSON
           sha256sum ../command-proof/index.js ../command-proof/wrangler.jsonc
-      - name: Prove explicit false syntax and no-bundle dry-run
+      - name: Prove global explicit false syntax and no-bundle dry-run
         run: |
           expected="$(sha256sum ../command-proof/index.js | awk '{print $1}')"
           rm -rf ../command-proof-out
-          ./node_modules/.bin/wrangler deploy \
-            --dry-run \
-            --no-bundle \
+          ./node_modules/.bin/wrangler \
             --experimental-provision=false \
             --experimental-auto-create=false \
+            deploy \
+            --dry-run \
+            --no-bundle \
             --config ../command-proof/wrangler.jsonc \
             --outdir ../command-proof-out
           test ! -e ../command-proof/.wrangler/deploy/config.json
@@ -68,15 +67,14 @@ jobs:
           test "$expected" = "$actual"
           js_count="$(find ../command-proof-out -type f -name '*.js' | wc -l | tr -d ' ')"
           test "$js_count" = "1"
-          printf 'PROVEN_COMMAND_FLAGS=--no-bundle --experimental-provision=false --experimental-auto-create=false\n'
+          printf 'PROVEN_GLOBAL_FLAGS=--experimental-provision=false --experimental-auto-create=false\n'
+          printf 'PROVEN_DEPLOY_FLAGS=--dry-run --no-bundle\n'
           printf 'WORKER_SHA256=%s\n' "$actual"
       - name: Reject prohibited command surfaces from executable run blocks
         run: |
           python - <<'PY'
           from pathlib import Path
           text = Path("../.github/workflows/cloudflare-command-proof.yml").read_text(encoding="utf-8")
-          # Construct these strings so the policy checker does not match its own
-          # literal denylist definitions in the workflow source.
           prohibited = [
               "wrangler " + "login",
               "--" + "temporary",
@@ -87,19 +85,21 @@ jobs:
               "wrangler " + "secret",
           ]
           lines = text.splitlines()
-          proof_start = lines.index("      - name: Prove explicit false syntax and no-bundle dry-run")
+          proof_start = lines.index("      - name: Prove global explicit false syntax and no-bundle dry-run")
           reject_start = lines.index("      - name: Reject prohibited command surfaces from executable run blocks")
           executable = "\n".join(lines[proof_start:reject_start])
           for token in prohibited:
               if token in executable:
                   raise SystemExit("PROHIBITED_COMMAND_SURFACE:" + token)
-          deploy_lines = [
-              line.strip() for line in executable.splitlines()
-              if "wrangler deploy" in line and "--help" not in line
-          ]
-          if len(deploy_lines) != 1:
-              raise SystemExit(f"UNEXPECTED_DEPLOY_COMMAND_COUNT:{len(deploy_lines)}")
-          if "--dry-run" not in executable or "--no-bundle" not in executable:
-              raise SystemExit("REQUIRED_EFFECT_FREE_FLAGS_MISSING")
+          if executable.count("deploy ") != 1:
+              raise SystemExit("UNEXPECTED_DEPLOY_COMMAND_COUNT")
+          for required in (
+              "--dry-run",
+              "--no-bundle",
+              "--experimental-provision=false",
+              "--experimental-auto-create=false",
+          ):
+              if required not in executable:
+                  raise SystemExit("REQUIRED_FLAG_MISSING:" + required)
           print("effect-free deploy command count: 1")
           PY
