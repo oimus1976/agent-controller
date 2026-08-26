@@ -7,6 +7,10 @@ from typing import Any, Callable, Mapping, Protocol
 from agent_controller.provider_contract import ProviderOperationRef
 
 
+SUPPORTED_CODEX_SDK_VERSION = "0.147.0"
+_KNOWN_THREAD_STATUSES = frozenset({"notLoaded", "idle", "systemError", "active"})
+
+
 class CodexSdkClient(Protocol):
     """Narrow read-only seam over the official openai-codex app-server client."""
 
@@ -36,18 +40,27 @@ def _reject_server_request(method: str, _params: Any) -> dict[str, Any]:
 
 def _default_sdk_factory(codex_bin: str | None) -> CodexSdkClient:
     try:
-        # CodexConfig is part of the public Python SDK surface. CodexClient is
+        # CodexConfig/version are public Python SDK surfaces. CodexClient is
         # official package code for the app-server JSON-RPC protocol, but it is
         # intentionally lower-level than the curated high-level Codex API.
         # We use it because the public high-level API currently exposes thread
         # listing but no pure thread/read equivalent; thread_resume would be a
         # lifecycle operation and is outside this read-only slice.
+        import openai_codex
         from openai_codex import CodexConfig
         from openai_codex.client import CodexClient
     except ImportError as exc:  # pragma: no cover - exercised only in live use
         raise RuntimeError(
-            "Live Codex observation requires the official 'openai-codex' Python package"
+            "Live Codex observation requires 'openai-codex==0.147.0'; "
+            "install requirements-codex.txt"
         ) from exc
+
+    installed_version = getattr(openai_codex, "__version__", None)
+    if installed_version != SUPPORTED_CODEX_SDK_VERSION:  # pragma: no cover - live only
+        raise RuntimeError(
+            "Unsupported openai-codex version for read-only observation: "
+            f"expected {SUPPORTED_CODEX_SDK_VERSION}, found {installed_version!r}"
+        )
 
     try:
         config = CodexConfig(codex_bin=codex_bin)
@@ -100,6 +113,9 @@ def project_codex_thread_read(thread_id: str, response: Any) -> dict[str, Any]:
         return {"status": "unknown", "task_id": thread_id}
 
     thread_status = _tag(thread.get("status"))
+    if thread_status not in _KNOWN_THREAD_STATUSES:
+        return {"status": "unknown", "task_id": thread_id}
+
     turns = thread.get("turns")
     latest_turn = turns[-1] if isinstance(turns, list) and turns else None
     turn_status = _tag(latest_turn.get("status")) if isinstance(latest_turn, Mapping) else None
