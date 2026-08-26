@@ -1,13 +1,20 @@
+from pathlib import Path
+import tempfile
 import threading
 import unittest
 
 from agent_controller.codex_live import (
     CodexOfficialSdkReadClient,
+    CodexSnapshotReadClient,
     _reject_server_request,
     project_codex_thread_read,
 )
 from agent_controller.provider_adapters import CodexObservationAdapter
 from agent_controller.provider_contract import ControllerState, ProviderOperationRef, TerminalClaim
+
+
+THREAD_ID = "123e4567-e89b-12d3-a456-426614174000"
+OTHER_THREAD_ID = "123e4567-e89b-12d3-a456-426614174001"
 
 
 class FakeSdkClient:
@@ -45,6 +52,16 @@ class BlockingFakeSdkClient(FakeSdkClient):
         self.released.set()
 
 
+class MutatingFakeSdkClient(FakeSdkClient):
+    def __init__(self, response, mutate):
+        super().__init__(response)
+        self.mutate = mutate
+
+    def thread_read(self, thread_id, include_turns=False):
+        self.mutate()
+        return super().thread_read(thread_id, include_turns)
+
+
 class CodexLiveTests(unittest.TestCase):
     def operation(self):
         return ProviderOperationRef(
@@ -55,6 +72,35 @@ class CodexLiveTests(unittest.TestCase):
             operation_id="op-1",
         )
 
+    def snapshot_operation(self):
+        return ProviderOperationRef(
+            provider="codex",
+            provider_operation_id=THREAD_ID,
+            provider_url=None,
+            controller_task_id="task-snapshot",
+            operation_id="op-snapshot",
+        )
+
+    def disposable_home(self):
+        return str(Path(tempfile.gettempdir()).resolve() / "agent-controller-codex-test")
+
+    def completed_response(self, thread_id="thr_123"):
+        return {
+            "thread": {
+                "id": thread_id,
+                "status": {"type": "idle"},
+                "turns": [{"id": "turn-1", "status": "completed"}],
+            }
+        }
+
+    def make_rollout(self, source_home: Path, thread_id=THREAD_ID, *, compressed=False):
+        sessions = source_home / "sessions" / "2026" / "08" / "27"
+        sessions.mkdir(parents=True, exist_ok=True)
+        suffix = ".jsonl.zst" if compressed else ".jsonl"
+        rollout = sessions / f"rollout-2026-08-27T00-00-00-{thread_id}{suffix}"
+        rollout.write_bytes(b'{"type":"session_meta"}\n')
+        return rollout
+
     def test_active_thread_projects_to_running(self):
         raw = project_codex_thread_read(
             "thr_123",
@@ -63,18 +109,12 @@ class CodexLiveTests(unittest.TestCase):
         self.assertEqual("running", raw["status"])
 
     def test_completed_latest_turn_projects_to_success_claim(self):
-        fake = FakeSdkClient(
-            {
-                "thread": {
-                    "id": "thr_123",
-                    "status": {"type": "idle"},
-                    "turns": [{"id": "turn-1", "status": "completed"}],
-                }
-            }
-        )
-        seen_bins = []
+        fake = FakeSdkClient(self.completed_response())
+        seen = []
+        codex_home = self.disposable_home()
         client = CodexOfficialSdkReadClient(
-            sdk_factory=lambda codex_bin: seen_bins.append(codex_bin) or fake,
+            codex_home=codex_home,
+            sdk_factory=lambda codex_bin, home: seen.append((codex_bin, home)) or fake,
             codex_bin="C:/Tools/codex.exe",
         )
         adapter = CodexObservationAdapter(client=client, observed_at=lambda: "2026-08-27T00:00:00Z")
@@ -83,7 +123,7 @@ class CodexLiveTests(unittest.TestCase):
 
         self.assertEqual(ControllerState.ARTIFACT_READY, observation.mapped_state)
         self.assertEqual(TerminalClaim.SUCCESS, observation.terminal_claim)
-        self.assertEqual(["C:/Tools/codex.exe"], seen_bins)
+        self.assertEqual([("C:/Tools/codex.exe", codex_home)], seen)
         self.assertEqual(
             [
                 ("start",),
@@ -128,7 +168,10 @@ class CodexLiveTests(unittest.TestCase):
         fake = FakeSdkClient(
             {"thread": {"id": "thr_123", "status": {"type": "idle"}, "turns": []}}
         )
-        client = CodexOfficialSdkReadClient(sdk_factory=lambda _codex_bin: fake)
+        client = CodexOfficialSdkReadClient(
+            codex_home=self.disposable_home(),
+            sdk_factory=lambda _codex_bin, _home: fake,
+        )
         adapter = CodexObservationAdapter(client=client, observed_at=lambda: "2026-08-27T00:00:00Z")
 
         observation = adapter.observe(self.operation())
@@ -146,7 +189,9 @@ class CodexLiveTests(unittest.TestCase):
     def test_wrong_provider_is_rejected_before_sdk_use(self):
         factory_calls = []
         client = CodexOfficialSdkReadClient(
-            sdk_factory=lambda codex_bin: factory_calls.append(codex_bin) or FakeSdkClient({})
+            codex_home=self.disposable_home(),
+            sdk_factory=lambda codex_bin, home: factory_calls.append((codex_bin, home))
+            or FakeSdkClient({}),
         )
         operation = ProviderOperationRef(
             provider="jules",
@@ -173,7 +218,8 @@ class CodexLiveTests(unittest.TestCase):
     def test_timeout_closes_provider_client_and_fails_closed(self):
         fake = BlockingFakeSdkClient()
         client = CodexOfficialSdkReadClient(
-            sdk_factory=lambda _codex_bin: fake,
+            codex_home=self.disposable_home(),
+            sdk_factory=lambda _codex_bin, _home: fake,
             timeout_seconds=0.01,
         )
 
@@ -182,11 +228,127 @@ class CodexLiveTests(unittest.TestCase):
 
         self.assertIn(("close",), fake.calls)
 
-    def test_invalid_configuration_is_rejected(self):
+    def test_low_level_reader_requires_explicit_absolute_codex_home(self):
         with self.assertRaises(ValueError):
-            CodexOfficialSdkReadClient(codex_bin="")
+            CodexOfficialSdkReadClient(codex_home="")
         with self.assertRaises(ValueError):
-            CodexOfficialSdkReadClient(timeout_seconds=0)
+            CodexOfficialSdkReadClient(codex_home="relative/path")
+        with self.assertRaises(ValueError):
+            CodexOfficialSdkReadClient(codex_home=self.disposable_home(), codex_bin="")
+        with self.assertRaises(ValueError):
+            CodexOfficialSdkReadClient(codex_home=self.disposable_home(), timeout_seconds=0)
+
+    def test_snapshot_observer_copies_only_target_rollout_and_never_uses_source_as_sdk_home(self):
+        with tempfile.TemporaryDirectory() as source_dir:
+            source_home = Path(source_dir).resolve()
+            target_rollout = self.make_rollout(source_home)
+            unrelated_rollout = self.make_rollout(source_home, OTHER_THREAD_ID)
+            source_db = source_home / "state_5.sqlite"
+            source_db.write_bytes(b"must-not-be-copied")
+            original_target = target_rollout.read_bytes()
+            seen = []
+            fake = FakeSdkClient(self.completed_response(THREAD_ID))
+
+            def factory(codex_bin, sdk_home):
+                sdk_home_path = Path(sdk_home).resolve()
+                self.assertNotEqual(source_home, sdk_home_path)
+                copied_target = sdk_home_path / target_rollout.relative_to(source_home)
+                self.assertTrue(copied_target.is_file())
+                self.assertEqual(original_target, copied_target.read_bytes())
+                self.assertFalse((sdk_home_path / unrelated_rollout.relative_to(source_home)).exists())
+                self.assertFalse((sdk_home_path / source_db.relative_to(source_home)).exists())
+                seen.append((codex_bin, sdk_home_path))
+                return fake
+
+            client = CodexSnapshotReadClient(
+                source_codex_home=str(source_home),
+                sdk_factory=factory,
+            )
+            raw = client.get_operation_raw(self.snapshot_operation())
+
+            self.assertEqual("done", raw["status"])
+            self.assertEqual(original_target, target_rollout.read_bytes())
+            self.assertEqual(1, len(seen))
+            self.assertFalse(seen[0][1].exists())
+
+    def test_snapshot_observer_supports_compressed_rollout_representation(self):
+        with tempfile.TemporaryDirectory() as source_dir:
+            source_home = Path(source_dir).resolve()
+            target_rollout = self.make_rollout(source_home, compressed=True)
+            fake = FakeSdkClient(self.completed_response(THREAD_ID))
+
+            def factory(_codex_bin, sdk_home):
+                copied_target = Path(sdk_home) / target_rollout.relative_to(source_home)
+                self.assertTrue(copied_target.is_file())
+                return fake
+
+            client = CodexSnapshotReadClient(
+                source_codex_home=str(source_home),
+                sdk_factory=factory,
+            )
+            raw = client.get_operation_raw(self.snapshot_operation())
+            self.assertEqual("done", raw["status"])
+
+    def test_snapshot_observer_rejects_ambiguous_rollout_before_sdk_start(self):
+        with tempfile.TemporaryDirectory() as source_dir:
+            source_home = Path(source_dir).resolve()
+            self.make_rollout(source_home)
+            self.make_rollout(source_home, compressed=True)
+            factory_calls = []
+            client = CodexSnapshotReadClient(
+                source_codex_home=str(source_home),
+                sdk_factory=lambda codex_bin, home: factory_calls.append((codex_bin, home))
+                or FakeSdkClient({}),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "Ambiguous Codex rollout evidence"):
+                client.get_operation_raw(self.snapshot_operation())
+            self.assertEqual([], factory_calls)
+
+    def test_snapshot_observer_rejects_missing_or_noncanonical_thread_before_sdk_start(self):
+        with tempfile.TemporaryDirectory() as source_dir:
+            source_home = Path(source_dir).resolve()
+            factory_calls = []
+            client = CodexSnapshotReadClient(
+                source_codex_home=str(source_home),
+                sdk_factory=lambda codex_bin, home: factory_calls.append((codex_bin, home))
+                or FakeSdkClient({}),
+            )
+
+            with self.assertRaises(FileNotFoundError):
+                client.get_operation_raw(self.snapshot_operation())
+
+            invalid_operation = ProviderOperationRef(
+                provider="codex",
+                provider_operation_id=THREAD_ID.upper(),
+                provider_url=None,
+                controller_task_id="task-invalid",
+                operation_id="op-invalid",
+            )
+            with self.assertRaisesRegex(ValueError, "canonical lowercase UUID"):
+                client.get_operation_raw(invalid_operation)
+            self.assertEqual([], factory_calls)
+
+    def test_snapshot_observer_fails_closed_if_source_changes_during_observation(self):
+        with tempfile.TemporaryDirectory() as source_dir:
+            source_home = Path(source_dir).resolve()
+            target_rollout = self.make_rollout(source_home)
+
+            def mutate_source():
+                with target_rollout.open("ab") as handle:
+                    handle.write(b'{"type":"late-write"}\n')
+
+            fake = MutatingFakeSdkClient(
+                self.completed_response(THREAD_ID),
+                mutate=mutate_source,
+            )
+            client = CodexSnapshotReadClient(
+                source_codex_home=str(source_home),
+                sdk_factory=lambda _codex_bin, _home: fake,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "source rollout changed during observation"):
+                client.get_operation_raw(self.snapshot_operation())
 
 
 if __name__ == "__main__":
