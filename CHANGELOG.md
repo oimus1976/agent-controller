@@ -48,7 +48,10 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 - deterministic testsを追加し、target rolloutのみのcopy、source DB/other rollout非copy、disposable SDK home、plain/compressed rollout、ambiguous/missing/invalid ID、観測中source変更のfail-closed、CLIのsnapshot-only routingを検証する。
 - この項目は Issue #104 の Draft 実装を記録しており、mainへの採用済み状態を意味しない。
-- exact-head CI / independent review / positive real-thread smoke は未完了。Ready / merge はADR #90に従いhuman-finalのまま。
+- initial Codex reviewで、snapshot parentがsource home配下へ解決される場合にapp-server startup writeが実homeへ戻り得るP1を検出した。
+- P1は、effective temp parentをTemporaryDirectory作成前にresolveし、source homeと同一・配下・symlink経由・default temp経由のoverlapをSDK起動前にfail closedするよう修正。exact-head `0769b4607a9f13824a643da0086055e846e9998f` のCodex re-reviewでmajor issueなしを確認し、review threadをresolvedとした。
+- 同code treeをWindows実機で deterministic suite 335 tests 実行し、全件OKを確認した。
+- merge gateとしてfinal exact-head CI、final exact-head independent review、positive real-thread smokeを要求し、prior-head evidenceから成功を推定しない。Ready / merge はADR #90に従いhuman-finalのまま。
 
 ---
 
