@@ -201,6 +201,7 @@ def main():
                 observer=observer,
                 target=GitHubTargetExpectation(repo=repo, ref=args.target_ref),
                 github=GitHubRestTargetReadClient(),
+                github_observed_at=_observed_at_now,
             )
             print(json.dumps(result.to_dict(), indent=2))
             if result.verification_result is not VerificationResult.PASS:
