@@ -14,6 +14,7 @@ from agent_controller.review_request_mutator import codex_review_request_marker
 
 HEAD = "a" * 40
 NEW_HEAD = "b" * 40
+TRUSTED_AUTHOR = "oimus1976"
 
 
 def _inspection(**overrides):
@@ -23,6 +24,7 @@ def _inspection(**overrides):
         "merged": False,
         "state": "open",
         "scope_status": "SATISFIED",  # legacy field; planner recomputes from files
+        "changed_files": 1,
         "files": [{"filename": "agent_controller/example.py", "changes": 1}],
         "actions_ci_status": "PASS",
         "graphql_error": False,
@@ -34,11 +36,28 @@ def _inspection(**overrides):
     return values
 
 
+def _pr_snapshot(**overrides):
+    values = {
+        "head": {"sha": HEAD},
+        "draft": True,
+        "merged": False,
+        "state": "open",
+    }
+    values.update(overrides)
+    return values
+
+
 class CodexReviewRequestTests(unittest.TestCase):
     def setUp(self):
         fd, self.policy_path = tempfile.mkstemp()
         with os.fdopen(fd, "w") as handle:
-            json.dump({"allowed_actions": [ACTION]}, handle)
+            json.dump(
+                {
+                    "allowed_actions": [ACTION],
+                    "trusted_review_request_authors": [TRUSTED_AUTHOR],
+                },
+                handle,
+            )
         self.scope = {
             "allowed_paths": ["agent_controller/*", "tests/*"],
             "denied_paths": ["secrets/*"],
@@ -64,6 +83,7 @@ class CodexReviewRequestTests(unittest.TestCase):
         self.assertEqual("EXECUTABLE", plan["decision"])
         self.assertEqual("READY_TO_REQUEST_CODEX_REVIEW", plan["reason"])
         self.assertEqual("SATISFIED", plan["scope_status"])
+        self.assertEqual([TRUSTED_AUTHOR], plan["trusted_review_request_authors"])
 
     def test_missing_policy_blocks_before_evidence_fetch(self):
         with patch("agent_controller.review_request.inspect_pr") as inspect:
@@ -81,11 +101,36 @@ class CodexReviewRequestTests(unittest.TestCase):
         fd, path = tempfile.mkstemp()
         try:
             with os.fdopen(fd, "w") as handle:
-                json.dump({"allowed_actions": ["ENSURE_DRAFT"]}, handle)
+                json.dump(
+                    {
+                        "allowed_actions": ["ENSURE_DRAFT"],
+                        "trusted_review_request_authors": [TRUSTED_AUTHOR],
+                    },
+                    handle,
+                )
             self.assertEqual("ACTION_NOT_ALLOWLISTED", self._plan(policy_path=path)["reason"])
         finally:
             if os.path.exists(path):
                 os.remove(path)
+
+    def test_trusted_request_authors_are_required_and_strict(self):
+        cases = [
+            {"allowed_actions": [ACTION]},
+            {"allowed_actions": [ACTION], "trusted_review_request_authors": []},
+            {"allowed_actions": [ACTION], "trusted_review_request_authors": [""]},
+            {"allowed_actions": [ACTION], "trusted_review_request_authors": [TRUSTED_AUTHOR, TRUSTED_AUTHOR]},
+        ]
+        for policy in cases:
+            fd, path = tempfile.mkstemp()
+            try:
+                with os.fdopen(fd, "w") as handle:
+                    json.dump(policy, handle)
+                plan = self._plan(policy_path=path)
+                self.assertEqual("BLOCKED", plan["decision"])
+                self.assertEqual("TRUSTED_REQUEST_AUTHORS_MISSING_OR_MALFORMED", plan["reason"])
+            finally:
+                if os.path.exists(path):
+                    os.remove(path)
 
     def test_pr_state_gates_fail_closed(self):
         cases = [
@@ -116,15 +161,23 @@ class CodexReviewRequestTests(unittest.TestCase):
             "previous_filename": "secrets/key.py",
             "changes": 1,
         }]
-        plan = self._plan(_inspection(files=files, scope_status="SATISFIED"))
+        plan = self._plan(_inspection(files=files, changed_files=1, scope_status="SATISFIED"))
         self.assertEqual("BLOCKED", plan["decision"])
         self.assertEqual("SCOPE_NOT_SATISFIED", plan["reason"])
         self.assertEqual("VIOLATION", plan["scope_status"])
 
     def test_malformed_changed_file_evidence_blocks(self):
-        plan = self._plan(_inspection(files=[{}], scope_status="SATISFIED"))
-        self.assertEqual("BLOCKED", plan["decision"])
-        self.assertEqual("SCOPE_EVIDENCE_MALFORMED", plan["reason"])
+        cases = [
+            _inspection(files=[{}], changed_files=1, scope_status="SATISFIED"),
+            _inspection(files=[{"filename": "agent_controller/example.py", "changes": 1}], changed_files=2),
+            _inspection(changed_files=True),
+            _inspection(changed_files=-1),
+        ]
+        for evidence in cases:
+            with self.subTest(evidence=evidence):
+                plan = self._plan(evidence)
+                self.assertEqual("BLOCKED", plan["decision"])
+                self.assertEqual("SCOPE_EVIDENCE_MALFORMED", plan["reason"])
 
     def test_exact_head_ci_must_pass(self):
         for status in ("FAIL", "PENDING", "MISSING", "UNAVAILABLE"):
@@ -136,26 +189,34 @@ class CodexReviewRequestTests(unittest.TestCase):
         plan = self._plan(_inspection(graphql_error=True, review_threads_graphql=None))
         self.assertEqual("REVIEW_EVIDENCE_UNAVAILABLE", plan["reason"])
 
-    def test_same_head_controller_request_is_noop(self):
+    def test_same_head_trusted_controller_request_is_noop(self):
         comment = {
             "body": f"@codex review\n\n{codex_review_request_marker(HEAD)}",
-            "user": {"login": "oimus1976"},
+            "user": {"login": TRUSTED_AUTHOR},
         }
         plan = self._plan(_inspection(issue_comments=[comment]))
         self.assertEqual("NOOP", plan["decision"])
         self.assertEqual("REVIEW_ALREADY_REQUESTED_FOR_HEAD", plan["reason"])
 
+    def test_untrusted_spoofed_marker_does_not_suppress(self):
+        comment = {
+            "body": f"@codex review\n\n{codex_review_request_marker(HEAD)}",
+            "user": {"login": "untrusted-author"},
+        }
+        plan = self._plan(_inspection(issue_comments=[comment]))
+        self.assertEqual("EXECUTABLE", plan["decision"])
+
     def test_marker_without_command_does_not_suppress(self):
         comment = {
             "body": codex_review_request_marker(HEAD),
-            "user": {"login": "oimus1976"},
+            "user": {"login": TRUSTED_AUTHOR},
         }
         self.assertEqual("EXECUTABLE", self._plan(_inspection(issue_comments=[comment]))["decision"])
 
     def test_old_head_request_does_not_suppress_current_head(self):
         comment = {
             "body": f"@codex review\n\n{codex_review_request_marker(NEW_HEAD)}",
-            "user": {"login": "oimus1976"},
+            "user": {"login": TRUSTED_AUTHOR},
         }
         self.assertEqual("EXECUTABLE", self._plan(_inspection(issue_comments=[comment]))["decision"])
 
@@ -218,13 +279,16 @@ class CodexReviewRequestTests(unittest.TestCase):
         self.assertEqual("STALE_HEAD_SHA", result["failure_reason"])
         post.assert_not_called()
 
+    @patch("agent_controller.review_request.get_pr_details")
     @patch("agent_controller.review_request.get_pr_issue_comments")
     @patch("agent_controller.review_request.post_codex_review_request")
     @patch("agent_controller.review_request.inspect_pr")
-    def test_apply_posts_once_and_verifies_marker(self, inspect, post, get_comments):
+    def test_apply_posts_once_and_verifies_trusted_marker_and_head(self, inspect, post, get_comments, get_pr):
         inspect.return_value = _inspection()
+        get_pr.side_effect = [_pr_snapshot(), _pr_snapshot()]
         get_comments.return_value = [{
-            "body": f"@codex review\n\n{codex_review_request_marker(HEAD)}"
+            "body": f"@codex review\n\n{codex_review_request_marker(HEAD)}",
+            "user": {"login": TRUSTED_AUTHOR},
         }]
         result = execute_codex_review_request(
             plan=self._plan(), owner="oimus1976", repo="agent-controller",
@@ -233,13 +297,50 @@ class CodexReviewRequestTests(unittest.TestCase):
         self.assertEqual("SUCCESS", result["final_outcome"])
         self.assertTrue(result["postcondition_result"])
         post.assert_called_once_with("oimus1976", "agent-controller", 109, HEAD)
+        self.assertEqual(2, get_pr.call_count)
+
+    @patch("agent_controller.review_request.get_pr_details")
+    @patch("agent_controller.review_request.post_codex_review_request")
+    @patch("agent_controller.review_request.inspect_pr")
+    def test_final_pre_mutation_pr_reread_blocks_mid_inspection_drift(self, inspect, post, get_pr):
+        inspect.return_value = _inspection()
+        get_pr.return_value = _pr_snapshot(head={"sha": NEW_HEAD})
+        result = execute_codex_review_request(
+            plan=self._plan(), owner="oimus1976", repo="agent-controller",
+            pr_number=109, policy_path=self.policy_path, apply=True,
+        )
+        self.assertEqual("BLOCKED", result["final_outcome"])
+        self.assertEqual("STALE_HEAD_SHA", result["failure_reason"])
+        post.assert_not_called()
+
+    @patch("agent_controller.review_request.get_pr_details")
+    @patch("agent_controller.review_request.get_pr_issue_comments")
+    @patch("agent_controller.review_request.post_codex_review_request")
+    @patch("agent_controller.review_request.inspect_pr")
+    def test_postcondition_fails_if_pr_head_changes_after_post(self, inspect, post, get_comments, get_pr):
+        inspect.return_value = _inspection()
+        get_pr.side_effect = [
+            _pr_snapshot(),
+            _pr_snapshot(head={"sha": NEW_HEAD}),
+        ]
+        get_comments.return_value = [{
+            "body": f"@codex review\n\n{codex_review_request_marker(HEAD)}",
+            "user": {"login": TRUSTED_AUTHOR},
+        }]
+        result = execute_codex_review_request(
+            plan=self._plan(), owner="oimus1976", repo="agent-controller",
+            pr_number=109, policy_path=self.policy_path, apply=True,
+        )
+        self.assertEqual("FAILED", result["final_outcome"])
+        self.assertEqual("POSTCONDITION_STALE_HEAD_SHA", result["failure_reason"])
+        self.assertFalse(result["postcondition_result"])
 
     @patch("agent_controller.review_request.post_codex_review_request")
     @patch("agent_controller.review_request.inspect_pr")
     def test_fresh_same_head_request_becomes_noop_before_mutation(self, inspect, post):
         comment = {
             "body": f"@codex review\n\n{codex_review_request_marker(HEAD)}",
-            "user": {"login": "oimus1976"},
+            "user": {"login": TRUSTED_AUTHOR},
         }
         inspect.return_value = _inspection(issue_comments=[comment])
         result = execute_codex_review_request(
@@ -255,7 +356,13 @@ class CodexReviewRequestTests(unittest.TestCase):
     def test_policy_revocation_blocks_before_mutation(self, inspect, post):
         plan = self._plan()
         with open(self.policy_path, "w") as handle:
-            json.dump({"allowed_actions": []}, handle)
+            json.dump(
+                {
+                    "allowed_actions": [],
+                    "trusted_review_request_authors": [TRUSTED_AUTHOR],
+                },
+                handle,
+            )
         inspect.return_value = _inspection()
         result = execute_codex_review_request(
             plan=plan, owner="oimus1976", repo="agent-controller",
@@ -264,10 +371,12 @@ class CodexReviewRequestTests(unittest.TestCase):
         self.assertEqual("ACTION_NOT_ALLOWLISTED", result["failure_reason"])
         post.assert_not_called()
 
+    @patch("agent_controller.review_request.get_pr_details")
     @patch("agent_controller.review_request.post_codex_review_request")
     @patch("agent_controller.review_request.inspect_pr")
-    def test_mutation_failure_does_not_report_success(self, inspect, post):
+    def test_mutation_failure_does_not_report_success(self, inspect, post, get_pr):
         inspect.return_value = _inspection()
+        get_pr.return_value = _pr_snapshot()
         post.side_effect = RuntimeError("api failed")
         result = execute_codex_review_request(
             plan=self._plan(), owner="oimus1976", repo="agent-controller",
@@ -276,12 +385,32 @@ class CodexReviewRequestTests(unittest.TestCase):
         self.assertEqual("MUTATION_FAILED", result["failure_reason"])
         self.assertEqual("BLOCKED", result["final_outcome"])
 
+    @patch("agent_controller.review_request.get_pr_details")
     @patch("agent_controller.review_request.get_pr_issue_comments")
     @patch("agent_controller.review_request.post_codex_review_request")
     @patch("agent_controller.review_request.inspect_pr")
-    def test_postcondition_failure_is_explicit(self, inspect, post, get_comments):
+    def test_postcondition_failure_is_explicit(self, inspect, post, get_comments, get_pr):
         inspect.return_value = _inspection()
+        get_pr.side_effect = [_pr_snapshot(), _pr_snapshot()]
         get_comments.return_value = []
+        result = execute_codex_review_request(
+            plan=self._plan(), owner="oimus1976", repo="agent-controller",
+            pr_number=109, policy_path=self.policy_path, apply=True,
+        )
+        self.assertEqual("FAILED", result["final_outcome"])
+        self.assertEqual("POSTCONDITION_FAILED", result["failure_reason"])
+
+    @patch("agent_controller.review_request.get_pr_details")
+    @patch("agent_controller.review_request.get_pr_issue_comments")
+    @patch("agent_controller.review_request.post_codex_review_request")
+    @patch("agent_controller.review_request.inspect_pr")
+    def test_postcondition_untrusted_marker_is_not_success(self, inspect, post, get_comments, get_pr):
+        inspect.return_value = _inspection()
+        get_pr.side_effect = [_pr_snapshot(), _pr_snapshot()]
+        get_comments.return_value = [{
+            "body": f"@codex review\n\n{codex_review_request_marker(HEAD)}",
+            "user": {"login": "untrusted-author"},
+        }]
         result = execute_codex_review_request(
             plan=self._plan(), owner="oimus1976", repo="agent-controller",
             pr_number=109, policy_path=self.policy_path, apply=True,
