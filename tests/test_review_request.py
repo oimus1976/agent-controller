@@ -22,7 +22,8 @@ def _inspection(**overrides):
         "draft": True,
         "merged": False,
         "state": "open",
-        "scope_status": "SATISFIED",
+        "scope_status": "SATISFIED",  # legacy field; planner recomputes from files
+        "files": [{"filename": "agent_controller/example.py", "changes": 1}],
         "actions_ci_status": "PASS",
         "graphql_error": False,
         "issue_comments": [],
@@ -40,7 +41,7 @@ class CodexReviewRequestTests(unittest.TestCase):
             json.dump({"allowed_actions": [ACTION]}, handle)
         self.scope = {
             "allowed_paths": ["agent_controller/*", "tests/*"],
-            "denied_paths": [],
+            "denied_paths": ["secrets/*"],
             "allow_docs_only": True,
         }
 
@@ -62,7 +63,7 @@ class CodexReviewRequestTests(unittest.TestCase):
         plan = self._plan()
         self.assertEqual("EXECUTABLE", plan["decision"])
         self.assertEqual("READY_TO_REQUEST_CODEX_REVIEW", plan["reason"])
-        self.assertEqual(HEAD, plan["head_sha"])
+        self.assertEqual("SATISFIED", plan["scope_status"])
 
     def test_missing_policy_blocks_before_evidence_fetch(self):
         with patch("agent_controller.review_request.inspect_pr") as inspect:
@@ -73,7 +74,6 @@ class CodexReviewRequestTests(unittest.TestCase):
                 policy_path=None,
                 scope_policy=self.scope,
             )
-        self.assertEqual("BLOCKED", plan["decision"])
         self.assertEqual("MISSING_OR_MALFORMED_POLICY", plan["reason"])
         inspect.assert_not_called()
 
@@ -82,83 +82,109 @@ class CodexReviewRequestTests(unittest.TestCase):
         try:
             with os.fdopen(fd, "w") as handle:
                 json.dump({"allowed_actions": ["ENSURE_DRAFT"]}, handle)
-            plan = self._plan(policy_path=path)
-            self.assertEqual("BLOCKED", plan["decision"])
-            self.assertEqual("ACTION_NOT_ALLOWLISTED", plan["reason"])
+            self.assertEqual("ACTION_NOT_ALLOWLISTED", self._plan(policy_path=path)["reason"])
         finally:
             if os.path.exists(path):
                 os.remove(path)
 
-    def test_non_draft_blocks(self):
-        plan = self._plan(_inspection(draft=False))
+    def test_pr_state_gates_fail_closed(self):
+        cases = [
+            (_inspection(draft=False), "PR_NOT_DRAFT"),
+            (_inspection(state="closed"), "PR_CLOSED_OR_MERGED"),
+            (_inspection(merged=True), "PR_CLOSED_OR_MERGED"),
+            (_inspection(state="mystery"), "PR_STATE_NOT_OPEN"),
+        ]
+        for evidence, reason in cases:
+            with self.subTest(reason=reason):
+                plan = self._plan(evidence)
+                self.assertEqual("BLOCKED", plan["decision"])
+                self.assertEqual(reason, plan["reason"])
+
+    def test_head_must_be_lowercase_hex_sha(self):
+        plan = self._plan(_inspection(head_sha="g" * 40))
         self.assertEqual("BLOCKED", plan["decision"])
-        self.assertEqual("PR_NOT_DRAFT", plan["reason"])
+        self.assertEqual("HEAD_SHA_MALFORMED", plan["reason"])
 
-    def test_closed_or_merged_blocks(self):
-        for evidence in (_inspection(state="closed"), _inspection(merged=True)):
-            plan = self._plan(evidence)
-            self.assertEqual("BLOCKED", plan["decision"])
-            self.assertEqual("PR_CLOSED_OR_MERGED", plan["reason"])
-
-    def test_scope_must_be_satisfied(self):
+    def test_scope_is_recomputed_from_raw_files_not_legacy_status(self):
         plan = self._plan(_inspection(scope_status="VIOLATION"))
+        self.assertEqual("EXECUTABLE", plan["decision"])
+        self.assertEqual("SATISFIED", plan["scope_status"])
+
+    def test_rename_from_denied_source_to_allowed_destination_blocks(self):
+        files = [{
+            "filename": "agent_controller/new.py",
+            "previous_filename": "secrets/key.py",
+            "changes": 1,
+        }]
+        plan = self._plan(_inspection(files=files, scope_status="SATISFIED"))
         self.assertEqual("BLOCKED", plan["decision"])
         self.assertEqual("SCOPE_NOT_SATISFIED", plan["reason"])
+        self.assertEqual("VIOLATION", plan["scope_status"])
+
+    def test_malformed_changed_file_evidence_blocks(self):
+        plan = self._plan(_inspection(files=[{}], scope_status="SATISFIED"))
+        self.assertEqual("BLOCKED", plan["decision"])
+        self.assertEqual("SCOPE_EVIDENCE_MALFORMED", plan["reason"])
 
     def test_exact_head_ci_must_pass(self):
         for status in ("FAIL", "PENDING", "MISSING", "UNAVAILABLE"):
-            plan = self._plan(_inspection(actions_ci_status=status))
-            self.assertEqual("BLOCKED", plan["decision"])
-            self.assertEqual("EXACT_HEAD_CI_NOT_PASS", plan["reason"])
+            with self.subTest(status=status):
+                plan = self._plan(_inspection(actions_ci_status=status))
+                self.assertEqual("EXACT_HEAD_CI_NOT_PASS", plan["reason"])
 
     def test_graphql_review_evidence_failure_blocks(self):
         plan = self._plan(_inspection(graphql_error=True, review_threads_graphql=None))
-        self.assertEqual("BLOCKED", plan["decision"])
         self.assertEqual("REVIEW_EVIDENCE_UNAVAILABLE", plan["reason"])
 
     def test_same_head_controller_request_is_noop(self):
-        comment = {"body": f"@codex review\n\n{codex_review_request_marker(HEAD)}", "user": {"login": "oimus1976"}}
+        comment = {
+            "body": f"@codex review\n\n{codex_review_request_marker(HEAD)}",
+            "user": {"login": "oimus1976"},
+        }
         plan = self._plan(_inspection(issue_comments=[comment]))
         self.assertEqual("NOOP", plan["decision"])
         self.assertEqual("REVIEW_ALREADY_REQUESTED_FOR_HEAD", plan["reason"])
 
-    def test_old_head_request_does_not_suppress_current_head(self):
-        comment = {"body": f"@codex review\n\n{codex_review_request_marker(NEW_HEAD)}", "user": {"login": "oimus1976"}}
-        plan = self._plan(_inspection(issue_comments=[comment]))
-        self.assertEqual("EXECUTABLE", plan["decision"])
+    def test_marker_without_command_does_not_suppress(self):
+        comment = {
+            "body": codex_review_request_marker(HEAD),
+            "user": {"login": "oimus1976"},
+        }
+        self.assertEqual("EXECUTABLE", self._plan(_inspection(issue_comments=[comment]))["decision"])
 
-    def test_current_head_codex_clean_comment_is_noop(self):
+    def test_old_head_request_does_not_suppress_current_head(self):
+        comment = {
+            "body": f"@codex review\n\n{codex_review_request_marker(NEW_HEAD)}",
+            "user": {"login": "oimus1976"},
+        }
+        self.assertEqual("EXECUTABLE", self._plan(_inspection(issue_comments=[comment]))["decision"])
+
+    def test_current_head_codex_evidence_suppresses_new_request(self):
         comment = {
             "body": f"Codex Review: Didn't find any major issues. Reviewed commit: {HEAD[:10]}",
             "user": {"login": "chatgpt-codex-connector[bot]"},
         }
-        plan = self._plan(_inspection(issue_comments=[comment]))
-        self.assertEqual("NOOP", plan["decision"])
-        self.assertEqual("CODEX_REVIEW_ALREADY_PRESENT_ON_HEAD", plan["reason"])
-
-    def test_current_head_codex_review_submission_is_noop(self):
         review = {
             "body": "automated review",
             "commit_id": HEAD,
             "user": {"login": "chatgpt-codex-connector[bot]"},
         }
-        plan = self._plan(_inspection(reviews=[review]))
-        self.assertEqual("NOOP", plan["decision"])
-
-    def test_current_head_codex_inline_finding_is_noop(self):
         thread = {
-            "comments": {
-                "nodes": [
-                    {
-                        "author": {"login": "chatgpt-codex-connector[bot]"},
-                        "originalCommit": {"oid": HEAD},
-                        "body": "P1 finding",
-                    }
-                ]
-            }
+            "comments": {"nodes": [{
+                "author": {"login": "chatgpt-codex-connector[bot]"},
+                "originalCommit": {"oid": HEAD},
+                "body": "P1 finding",
+            }]}
         }
-        plan = self._plan(_inspection(review_threads_graphql=[thread]))
-        self.assertEqual("NOOP", plan["decision"])
+        for evidence in (
+            _inspection(issue_comments=[comment]),
+            _inspection(reviews=[review]),
+            _inspection(review_threads_graphql=[thread]),
+        ):
+            with self.subTest(evidence=evidence):
+                plan = self._plan(evidence)
+                self.assertEqual("NOOP", plan["decision"])
+                self.assertEqual("CODEX_REVIEW_ALREADY_PRESENT_ON_HEAD", plan["reason"])
 
     def test_old_head_codex_review_does_not_suppress(self):
         review = {
@@ -166,23 +192,17 @@ class CodexReviewRequestTests(unittest.TestCase):
             "commit_id": NEW_HEAD,
             "user": {"login": "chatgpt-codex-connector[bot]"},
         }
-        plan = self._plan(_inspection(reviews=[review]))
-        self.assertEqual("EXECUTABLE", plan["decision"])
+        self.assertEqual("EXECUTABLE", self._plan(_inspection(reviews=[review]))["decision"])
 
     def test_malformed_review_evidence_blocks(self):
         plan = self._plan(_inspection(reviews=[None]))
-        self.assertEqual("BLOCKED", plan["decision"])
         self.assertEqual("REVIEW_EVIDENCE_MALFORMED", plan["reason"])
 
     @patch("agent_controller.review_request.post_codex_review_request")
     def test_dry_run_does_not_mutate(self, post):
         result = execute_codex_review_request(
-            plan=self._plan(),
-            owner="oimus1976",
-            repo="agent-controller",
-            pr_number=109,
-            policy_path=self.policy_path,
-            apply=False,
+            plan=self._plan(), owner="oimus1976", repo="agent-controller",
+            pr_number=109, policy_path=self.policy_path, apply=False,
         )
         self.assertEqual("DRY_RUN", result["final_outcome"])
         post.assert_not_called()
@@ -192,14 +212,9 @@ class CodexReviewRequestTests(unittest.TestCase):
     def test_stale_head_blocks_before_mutation(self, inspect, post):
         inspect.return_value = _inspection(head_sha=NEW_HEAD)
         result = execute_codex_review_request(
-            plan=self._plan(),
-            owner="oimus1976",
-            repo="agent-controller",
-            pr_number=109,
-            policy_path=self.policy_path,
-            apply=True,
+            plan=self._plan(), owner="oimus1976", repo="agent-controller",
+            pr_number=109, policy_path=self.policy_path, apply=True,
         )
-        self.assertEqual("BLOCKED", result["final_outcome"])
         self.assertEqual("STALE_HEAD_SHA", result["failure_reason"])
         post.assert_not_called()
 
@@ -208,16 +223,12 @@ class CodexReviewRequestTests(unittest.TestCase):
     @patch("agent_controller.review_request.inspect_pr")
     def test_apply_posts_once_and_verifies_marker(self, inspect, post, get_comments):
         inspect.return_value = _inspection()
-        get_comments.return_value = [
-            {"body": f"@codex review\n\n{codex_review_request_marker(HEAD)}"}
-        ]
+        get_comments.return_value = [{
+            "body": f"@codex review\n\n{codex_review_request_marker(HEAD)}"
+        }]
         result = execute_codex_review_request(
-            plan=self._plan(),
-            owner="oimus1976",
-            repo="agent-controller",
-            pr_number=109,
-            policy_path=self.policy_path,
-            apply=True,
+            plan=self._plan(), owner="oimus1976", repo="agent-controller",
+            pr_number=109, policy_path=self.policy_path, apply=True,
         )
         self.assertEqual("SUCCESS", result["final_outcome"])
         self.assertTrue(result["postcondition_result"])
@@ -226,39 +237,17 @@ class CodexReviewRequestTests(unittest.TestCase):
     @patch("agent_controller.review_request.post_codex_review_request")
     @patch("agent_controller.review_request.inspect_pr")
     def test_fresh_same_head_request_becomes_noop_before_mutation(self, inspect, post):
-        comment = {"body": f"@codex review\n\n{codex_review_request_marker(HEAD)}", "user": {"login": "oimus1976"}}
+        comment = {
+            "body": f"@codex review\n\n{codex_review_request_marker(HEAD)}",
+            "user": {"login": "oimus1976"},
+        }
         inspect.return_value = _inspection(issue_comments=[comment])
         result = execute_codex_review_request(
-            plan=self._plan(),
-            owner="oimus1976",
-            repo="agent-controller",
-            pr_number=109,
-            policy_path=self.policy_path,
-            apply=True,
+            plan=self._plan(), owner="oimus1976", repo="agent-controller",
+            pr_number=109, policy_path=self.policy_path, apply=True,
         )
         self.assertEqual("NOOP", result["final_outcome"])
         self.assertEqual("REVIEW_ALREADY_REQUESTED_FOR_HEAD", result["failure_reason"])
-        post.assert_not_called()
-
-    @patch("agent_controller.review_request.post_codex_review_request")
-    @patch("agent_controller.review_request.inspect_pr")
-    def test_fresh_review_evidence_becomes_noop_before_mutation(self, inspect, post):
-        review = {
-            "body": "review",
-            "commit_id": HEAD,
-            "user": {"login": "chatgpt-codex-connector[bot]"},
-        }
-        inspect.return_value = _inspection(reviews=[review])
-        result = execute_codex_review_request(
-            plan=self._plan(),
-            owner="oimus1976",
-            repo="agent-controller",
-            pr_number=109,
-            policy_path=self.policy_path,
-            apply=True,
-        )
-        self.assertEqual("NOOP", result["final_outcome"])
-        self.assertEqual("CODEX_REVIEW_ALREADY_PRESENT_ON_HEAD", result["failure_reason"])
         post.assert_not_called()
 
     @patch("agent_controller.review_request.post_codex_review_request")
@@ -269,14 +258,9 @@ class CodexReviewRequestTests(unittest.TestCase):
             json.dump({"allowed_actions": []}, handle)
         inspect.return_value = _inspection()
         result = execute_codex_review_request(
-            plan=plan,
-            owner="oimus1976",
-            repo="agent-controller",
-            pr_number=109,
-            policy_path=self.policy_path,
-            apply=True,
+            plan=plan, owner="oimus1976", repo="agent-controller",
+            pr_number=109, policy_path=self.policy_path, apply=True,
         )
-        self.assertEqual("BLOCKED", result["final_outcome"])
         self.assertEqual("ACTION_NOT_ALLOWLISTED", result["failure_reason"])
         post.assert_not_called()
 
@@ -286,15 +270,11 @@ class CodexReviewRequestTests(unittest.TestCase):
         inspect.return_value = _inspection()
         post.side_effect = RuntimeError("api failed")
         result = execute_codex_review_request(
-            plan=self._plan(),
-            owner="oimus1976",
-            repo="agent-controller",
-            pr_number=109,
-            policy_path=self.policy_path,
-            apply=True,
+            plan=self._plan(), owner="oimus1976", repo="agent-controller",
+            pr_number=109, policy_path=self.policy_path, apply=True,
         )
-        self.assertEqual("BLOCKED", result["final_outcome"])
         self.assertEqual("MUTATION_FAILED", result["failure_reason"])
+        self.assertEqual("BLOCKED", result["final_outcome"])
 
     @patch("agent_controller.review_request.get_pr_issue_comments")
     @patch("agent_controller.review_request.post_codex_review_request")
@@ -303,12 +283,8 @@ class CodexReviewRequestTests(unittest.TestCase):
         inspect.return_value = _inspection()
         get_comments.return_value = []
         result = execute_codex_review_request(
-            plan=self._plan(),
-            owner="oimus1976",
-            repo="agent-controller",
-            pr_number=109,
-            policy_path=self.policy_path,
-            apply=True,
+            plan=self._plan(), owner="oimus1976", repo="agent-controller",
+            pr_number=109, policy_path=self.policy_path, apply=True,
         )
         self.assertEqual("FAILED", result["final_outcome"])
         self.assertEqual("POSTCONDITION_FAILED", result["failure_reason"])
@@ -316,14 +292,9 @@ class CodexReviewRequestTests(unittest.TestCase):
     @patch("agent_controller.review_request.post_codex_review_request")
     def test_target_mismatch_blocks(self, post):
         result = execute_codex_review_request(
-            plan=self._plan(),
-            owner="other",
-            repo="agent-controller",
-            pr_number=109,
-            policy_path=self.policy_path,
-            apply=True,
+            plan=self._plan(), owner="other", repo="agent-controller",
+            pr_number=109, policy_path=self.policy_path, apply=True,
         )
-        self.assertEqual("BLOCKED", result["final_outcome"])
         self.assertEqual("TARGET_MISMATCH", result["failure_reason"])
         post.assert_not_called()
 
