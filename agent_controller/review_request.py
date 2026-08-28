@@ -416,8 +416,8 @@ def execute_codex_review_request(
         result["failure_reason"] = "STALE_HEAD_SHA"
         return result
 
-    # Re-read the lightweight authoritative PR identity/state after the multi-request
-    # eligibility sweep and immediately before the mutation.
+    # Keep the existing early fail-closed target/policy checks so obvious drift
+    # avoids an unnecessary identity lookup.
     try:
         pre_mutation_pr = get_pr_details(owner, repo, pr_number)
     except Exception:
@@ -428,8 +428,44 @@ def execute_codex_review_request(
         result["failure_reason"] = pre_mutation_error
         return result
 
-    # Local authorization is mutable too. Re-read it after all remote evidence
-    # collection and refuse to mutate if it changed since fresh planning.
+    pre_identity_policy = load_policy(policy_path)
+    if (
+        not isinstance(pre_identity_policy, Mapping)
+        or pre_identity_policy != fresh_plan.get("policy_provenance")
+    ):
+        result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
+        return result
+    pre_identity_trusted_authors = _trusted_request_authors(pre_identity_policy)
+    if pre_identity_trusted_authors is None:
+        result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
+        return result
+    allowed_actions = pre_identity_policy.get("allowed_actions")
+    if not isinstance(allowed_actions, list) or ACTION not in allowed_actions:
+        result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
+        return result
+
+    # Resolve the exact token principal before the final target/policy gate. The
+    # identity lookup is a network read and therefore cannot sit after the last
+    # mutable-state validation.
+    try:
+        posting_login = get_authenticated_github_login()
+    except Exception:
+        result["failure_reason"] = "POSTING_IDENTITY_READ_FAILED"
+        return result
+
+    # Final mutation gate: after every other network read, re-read the mutable PR
+    # target and local authorization consecutively, then POST without another
+    # pre-effect network operation.
+    try:
+        final_pr = get_pr_details(owner, repo, pr_number)
+    except Exception:
+        result["failure_reason"] = "PRE_MUTATION_TARGET_READ_FAILED"
+        return result
+    final_pr_error = _validate_exact_pr_snapshot(final_pr, plan["head_sha"])
+    if final_pr_error is not None:
+        result["failure_reason"] = final_pr_error
+        return result
+
     final_policy = load_policy(policy_path)
     if not isinstance(final_policy, Mapping) or final_policy != fresh_plan.get("policy_provenance"):
         result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
@@ -441,13 +477,6 @@ def execute_codex_review_request(
     allowed_actions = final_policy.get("allowed_actions")
     if not isinstance(allowed_actions, list) or ACTION not in allowed_actions:
         result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
-        return result
-
-    # Verify the exact token principal before the quota-consuming side effect.
-    try:
-        posting_login = get_authenticated_github_login()
-    except Exception:
-        result["failure_reason"] = "POSTING_IDENTITY_READ_FAILED"
         return result
     if posting_login not in set(final_trusted_authors):
         result["failure_reason"] = "UNTRUSTED_POSTING_IDENTITY"
