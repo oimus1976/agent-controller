@@ -22,6 +22,10 @@ from .provider_contract import (
     TaskBinding,
     VerificationResult,
 )
+from .review_request import (
+    execute_codex_review_request,
+    plan_codex_review_request,
+)
 
 
 def _require_single_pr_target(parser, args):
@@ -58,6 +62,7 @@ def main():
             "attention-queue",
             "observe-codex",
             "verify-codex-target",
+            "request-codex-review",
         ],
         help="Command to run",
     )
@@ -72,7 +77,7 @@ def main():
     parser.add_argument("--state-file", default=".pr_state.json", help="Path to local state/evidence file")
     parser.add_argument("--interval", type=int, default=60, help="Polling interval in seconds for loop mode")
 
-    # Arguments for act-pr and reconcile-pr
+    # Arguments for bounded GitHub actions and reconcile-pr
     parser.add_argument("--policy", help="Path to explicit local policy JSON file")
     parser.add_argument("--receipts-file", default=".action_receipts.json", help="Path to action receipts file (reconcile-pr)")
     parser.add_argument("--apply", action='store_true', help="Actually perform authorized GitHub writes")
@@ -259,6 +264,35 @@ def main():
                 sys.exit(1)
         except Exception as e:
             print(f"Error acting on PR: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif args.command == "request-codex-review":
+        try:
+            plan = plan_codex_review_request(
+                owner=owner,
+                repo=repo,
+                pr_number=args.pr,
+                policy_path=args.policy,
+                scope_policy=policy,
+            )
+            print("PLAN:")
+            print(json.dumps(plan, indent=2))
+
+            result = execute_codex_review_request(
+                plan=plan,
+                owner=owner,
+                repo=repo,
+                pr_number=args.pr,
+                policy_path=args.policy,
+                apply=args.apply,
+            )
+            print("EXECUTION:")
+            print(json.dumps(result, indent=2))
+
+            if result.get("final_outcome") in ["BLOCKED", "FAILED"]:
+                sys.exit(1)
+        except Exception as e:
+            print(f"Error requesting Codex review: {e}", file=sys.stderr)
             sys.exit(1)
 
     elif args.command == "reconcile-pr":
