@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Protocol, Sequence
+from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from agent_controller.binding_validator import (
     BindingValidation,
@@ -35,6 +35,9 @@ class GitHubTargetReadClient(Protocol):
         ...
 
 
+ObservedAtFactory = Callable[[], str]
+
+
 @dataclass(frozen=True)
 class GitHubTargetExpectation:
     """Controller-owned target identity, never a provider artifact claim."""
@@ -48,6 +51,7 @@ class ObjectiveGitHubTargetEvidence:
     repo: str
     target_ref: str
     resolved_sha: Optional[str]
+    github_observed_at: Optional[str]
     verification_source: VerificationSource
     verification_result: VerificationResult
     reason: Optional[str] = None
@@ -57,6 +61,7 @@ class ObjectiveGitHubTargetEvidence:
             "repo": self.repo,
             "target_ref": self.target_ref,
             "resolved_sha": self.resolved_sha,
+            "github_observed_at": self.github_observed_at,
             "verification_source": self.verification_source.value,
             "verification_result": self.verification_result.value,
             "reason": self.reason,
@@ -91,11 +96,13 @@ def _evidence(
     result: VerificationResult,
     reason: str,
     resolved_sha: str | None = None,
+    github_observed_at: str | None = None,
 ) -> ObjectiveGitHubTargetEvidence:
     return ObjectiveGitHubTargetEvidence(
         repo=target.repo,
         target_ref=target.ref,
         resolved_sha=resolved_sha,
+        github_observed_at=github_observed_at,
         verification_source=VerificationSource.GITHUB,
         verification_result=result,
         reason=reason,
@@ -123,6 +130,7 @@ def verify_explicit_github_target(
     task: TaskBinding,
     target: GitHubTargetExpectation,
     github: GitHubTargetReadClient,
+    github_observed_at: str,
 ) -> ObjectiveGitHubTargetEvidence:
     """Verify a Controller-owned GitHub branch target using GitHub-owned facts.
 
@@ -138,6 +146,12 @@ def verify_explicit_github_target(
             result=VerificationResult.BLOCKED,
             reason=binding.reason or "TARGET_BINDING_INVALID",
         )
+    if not isinstance(github_observed_at, str) or not github_observed_at:
+        return _evidence(
+            target=target,
+            result=VerificationResult.BLOCKED,
+            reason="GITHUB_OBSERVED_AT_MISSING",
+        )
 
     try:
         resolved_sha = github.get_ref_sha(target.repo, target.ref)
@@ -146,6 +160,7 @@ def verify_explicit_github_target(
             target=target,
             result=VerificationResult.UNCERTAIN,
             reason="GITHUB_REF_READ_UNAVAILABLE",
+            github_observed_at=github_observed_at,
         )
 
     if resolved_sha is None:
@@ -153,12 +168,14 @@ def verify_explicit_github_target(
             target=target,
             result=VerificationResult.FAIL,
             reason="TARGET_REF_NOT_FOUND",
+            github_observed_at=github_observed_at,
         )
     if not isinstance(resolved_sha, str) or not resolved_sha:
         return _evidence(
             target=target,
             result=VerificationResult.UNCERTAIN,
             reason="GITHUB_REF_RESPONSE_MALFORMED",
+            github_observed_at=github_observed_at,
         )
     if resolved_sha == task.expected_start_sha:
         return _evidence(
@@ -166,6 +183,7 @@ def verify_explicit_github_target(
             result=VerificationResult.FAIL,
             reason="TARGET_UNCHANGED_FROM_START",
             resolved_sha=resolved_sha,
+            github_observed_at=github_observed_at,
         )
 
     try:
@@ -176,6 +194,7 @@ def verify_explicit_github_target(
             result=VerificationResult.UNCERTAIN,
             reason="GITHUB_COMPARE_UNAVAILABLE",
             resolved_sha=resolved_sha,
+            github_observed_at=github_observed_at,
         )
 
     if not isinstance(comparison, Mapping):
@@ -184,6 +203,7 @@ def verify_explicit_github_target(
             result=VerificationResult.UNCERTAIN,
             reason="GITHUB_COMPARE_MALFORMED",
             resolved_sha=resolved_sha,
+            github_observed_at=github_observed_at,
         )
 
     merge_base_sha = comparison.get("merge_base_sha")
@@ -193,6 +213,7 @@ def verify_explicit_github_target(
             result=VerificationResult.UNCERTAIN,
             reason="GITHUB_MERGE_BASE_MALFORMED",
             resolved_sha=resolved_sha,
+            github_observed_at=github_observed_at,
         )
     if merge_base_sha != task.expected_start_sha:
         return _evidence(
@@ -200,6 +221,7 @@ def verify_explicit_github_target(
             result=VerificationResult.FAIL,
             reason="TARGET_DIVERGED_FROM_EXPECTED_START",
             resolved_sha=resolved_sha,
+            github_observed_at=github_observed_at,
         )
 
     files = comparison.get("files")
@@ -209,6 +231,7 @@ def verify_explicit_github_target(
             result=VerificationResult.UNCERTAIN,
             reason="GITHUB_CHANGED_FILES_MALFORMED",
             resolved_sha=resolved_sha,
+            github_observed_at=github_observed_at,
         )
 
     scope_result = evaluate_scope(
@@ -225,6 +248,7 @@ def verify_explicit_github_target(
             result=VerificationResult.FAIL,
             reason="OBJECTIVE_SCOPE_VIOLATION",
             resolved_sha=resolved_sha,
+            github_observed_at=github_observed_at,
         )
     if scope_result != "SATISFIED":
         return _evidence(
@@ -232,6 +256,7 @@ def verify_explicit_github_target(
             result=VerificationResult.UNCERTAIN,
             reason="OBJECTIVE_SCOPE_UNCERTAIN",
             resolved_sha=resolved_sha,
+            github_observed_at=github_observed_at,
         )
 
     return _evidence(
@@ -239,6 +264,7 @@ def verify_explicit_github_target(
         result=VerificationResult.PASS,
         reason="GITHUB_TARGET_VERIFIED",
         resolved_sha=resolved_sha,
+        github_observed_at=github_observed_at,
     )
 
 
@@ -249,6 +275,7 @@ def run_objective_target_handoff(
     observer: ObservationReader,
     target: GitHubTargetExpectation,
     github: GitHubTargetReadClient,
+    github_observed_at: ObservedAtFactory,
 ) -> ObjectiveTargetHandoffResult:
     """Use provider completion only as a trigger for objective GitHub verification."""
 
@@ -289,6 +316,17 @@ def run_objective_target_handoff(
             ),
         )
 
+    if not isinstance(observation, AgentObservation):
+        return ObjectiveTargetHandoffResult(
+            binding=BindingValidation(True),
+            observation=None,
+            target_evidence=_evidence(
+                target=target,
+                result=VerificationResult.UNCERTAIN,
+                reason="PROVIDER_OBSERVATION_MALFORMED",
+            ),
+        )
+
     observation_binding = validate_observation_binding(
         operation=operation,
         observation=observation,
@@ -318,6 +356,19 @@ def run_objective_target_handoff(
             ),
         )
 
+    try:
+        observed_at = github_observed_at()
+    except Exception:
+        return ObjectiveTargetHandoffResult(
+            binding=BindingValidation(True),
+            observation=observation,
+            target_evidence=_evidence(
+                target=target,
+                result=VerificationResult.UNCERTAIN,
+                reason="GITHUB_OBSERVED_AT_UNAVAILABLE",
+            ),
+        )
+
     return ObjectiveTargetHandoffResult(
         binding=BindingValidation(True),
         observation=observation,
@@ -325,5 +376,6 @@ def run_objective_target_handoff(
             task=task,
             target=target,
             github=github,
+            github_observed_at=observed_at,
         ),
     )
