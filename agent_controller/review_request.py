@@ -276,9 +276,13 @@ def execute_codex_review_request(
         policy_path=policy_path,
         scope_policy=scope_policy,
     )
-    result["execution_head_sha"] = fresh_plan.get("head_sha")
+    fresh_head = fresh_plan.get("head_sha")
+    result["execution_head_sha"] = fresh_head
 
-    if fresh_plan.get("head_sha") != plan.get("head_sha"):
+    # Only call a head stale if a fresh objective head was actually observed.
+    # A policy or evidence gate can block before any GitHub read; None in that
+    # case is not evidence that the head changed.
+    if fresh_head is not None and fresh_head != plan.get("head_sha"):
         result["failure_reason"] = "STALE_HEAD_SHA"
         return result
     if fresh_plan.get("decision") == "NOOP":
@@ -287,6 +291,9 @@ def execute_codex_review_request(
         return result
     if fresh_plan.get("decision") != "EXECUTABLE":
         result["failure_reason"] = fresh_plan.get("reason")
+        return result
+    if fresh_head != plan.get("head_sha"):
+        result["failure_reason"] = "STALE_HEAD_SHA"
         return result
 
     result["mutation_attempted"] = True
