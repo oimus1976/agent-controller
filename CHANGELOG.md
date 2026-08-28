@@ -15,6 +15,42 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-08-28 — Objective GitHub target verification after live Codex completion（Issue #106 / Draft PR #107）
+
+関連: ADR Issue #12, ADR Issue #90, Issue #55, Issue #91, Issue #106, Draft PR #107
+
+### Added / changed
+
+- live Codex の terminal `ARTIFACT_READY` + `SUCCESS` を、成果物の成功証明ではなく **objective GitHub verification を開始する trigger** として利用する one-shot composition を追加。
+- Controller が明示的に保持する `GitHubTargetExpectation(repo, ref)` と、GitHub fresh read から得る `ObjectiveGitHubTargetEvidence` を分離。
+- explicit branch ref を GitHub から fresh resolve し、immutable candidate SHA、`expected_start_sha` からの ancestry、changed-file scope を独立検証する read-only 経路を追加。
+- GitHub evidence に `github_observed_at` を保持し、point-in-time の objective evidence として freshness / audit の基礎を残す。
+- `verify-codex-target` CLI を追加し、PR #105 の disposable Codex snapshot observation と objective GitHub target verification を接続。
+- GitHub read adapter は既存 authenticated GET transport を再利用し、branch ref / compare の read-only surface のみに限定。
+- GitHub compare の changed-file set が 300 件に達する場合は truncation の可能性を理由に scope PASS を推定せず fail closed。
+
+### Authority / safety boundary
+
+- `ArtifactEvidence.provider_reported_ref` / `provider_reported_sha` に Controller 設定値を偽装して流用しない。
+- Codex assistant prose、command output、item content、thread `gitInfo` は final GitHub artifact identity の authority としない。
+- target identity は Controller-owned task/config input、resolved SHA / ancestry / scope は GitHub-owned objective facts として区別する。
+- provider terminal success だけでは Controller PASS にしない。provider completion後も GitHub target が unchanged / divergent / scope violation / malformed / unavailable なら PASS しない。
+- provider observation / binding が不整合・malformed・unavailable の場合、GitHub verification を開始せず BLOCKED / UNCERTAIN に fail closed。
+- source Codex home isolation、approval reject、finite timeout、SDK pin、unknown-status fail-closed は PR #105 の境界を維持する。
+- provider dispatch / continued turn / remediation、GitHub write、review trigger、Ready、merge、auto-merge、workflow dispatch、release / deploy は追加しない。
+- Ready / merge は ADR #90 に従い human-final のまま。
+
+### Validation status
+
+- deterministic testsで terminal provider success が必要条件だが十分条件ではないこと、Controller explicit target が provider `gitInfo` より優先されること、unchanged / divergent / scope violation / read failure / malformed observation が PASS しないことを検証する。
+- self-review で初期実装の GitHub evidence に観測時刻がない freshness / audit 欠落を検出し、`github_observed_at` を追加して修正。
+- exact-head `efa94a0904217f67fdc6ecbf329ac46b6278ff4b` のCodex reviewで、rename時に`previous_filename`をscope判定していないP1と、malformed changed-file entryがdenied-only policyでPASSし得るP2を検出。
+- P1/P2は、GitHub changed-file entryの`filename` / `changes` / 任意`previous_filename`をscope評価前に検証し、renameのsource/destination双方を既存`evaluate_scope()`へ渡すよう修正。denied sourceからallowed destinationへのrenameとmalformed entryの回帰テストを追加。
+- この項目は Draft PR #107 の未merge実装を記録しており、mainへの採用済み状態を意味しない。
+- final merge gate は review remediation反映後の exact-head deterministic CI と exact-head independent re-review。Ready / merge は human-final。
+
+---
+
 ## 2026-08-27 — Codex observation source-home isolation（Issue #104 / Draft）
 
 関連: ADR Issue #12, ADR Issue #90, Issue #102, PR #103, Issue #104
