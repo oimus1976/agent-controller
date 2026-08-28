@@ -5,13 +5,23 @@ from datetime import datetime, timezone
 
 from .attention_queue import AttentionCategory
 from .codex_live import CodexSnapshotReadClient
+from .github_target_client import GitHubRestTargetReadClient
 from .inspector import inspect_pr
 from .watcher import watch_pr_once, watch_pr_loop
 from .executor import plan_action, execute_action
 from .reconciler import reconcile_pr_once
 from .multi_watch import run_attention_watch
+from .objective_target import (
+    GitHubTargetExpectation,
+    run_objective_target_handoff,
+)
 from .provider_adapters import CodexObservationAdapter
-from .provider_contract import ProviderOperationRef
+from .provider_contract import (
+    ObjectiveScope,
+    ProviderOperationRef,
+    TaskBinding,
+    VerificationResult,
+)
 
 
 def _require_single_pr_target(parser, args):
@@ -23,6 +33,15 @@ def _require_single_pr_target(parser, args):
     return owner_repo
 
 
+def _require_repo(parser, repo):
+    if not repo:
+        parser.error("--repo is required")
+    owner_repo = repo.split('/')
+    if len(owner_repo) != 2 or not all(owner_repo):
+        parser.error("--repo must be in OWNER/REPO format")
+    return repo
+
+
 def _observed_at_now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -31,7 +50,15 @@ def main():
     parser = argparse.ArgumentParser(description="Agent Controller: PR Inspector")
     parser.add_argument(
         "command",
-        choices=["inspect-pr", "watch-pr", "act-pr", "reconcile-pr", "attention-queue", "observe-codex"],
+        choices=[
+            "inspect-pr",
+            "watch-pr",
+            "act-pr",
+            "reconcile-pr",
+            "attention-queue",
+            "observe-codex",
+            "verify-codex-target",
+        ],
         help="Command to run",
     )
     parser.add_argument("--repo", help="Target repository in OWNER/REPO format")
@@ -55,7 +82,7 @@ def main():
 
     # Arguments for one-shot live Codex observation. The source home is only
     # scanned/copied by Controller; app-server runs against a disposable snapshot.
-    parser.add_argument("--thread-id", help="Existing Codex thread id for observe-codex")
+    parser.add_argument("--thread-id", help="Existing Codex thread id for observe-codex / verify-codex-target")
     parser.add_argument(
         "--source-codex-home",
         help="Absolute source Codex home containing the persisted thread; it is never passed directly to app-server",
@@ -63,6 +90,16 @@ def main():
     parser.add_argument(
         "--codex-bin",
         help="Optional explicit path to the Codex executable; otherwise use the runtime bundled/resolved by openai-codex",
+    )
+
+    # Arguments for objective GitHub target verification after provider completion.
+    parser.add_argument(
+        "--target-ref",
+        help="Explicit Controller-owned GitHub branch ref to verify after provider completion",
+    )
+    parser.add_argument(
+        "--expected-start-sha",
+        help="Immutable GitHub start SHA that the verified target must descend from and differ from",
     )
 
     args = parser.parse_args()
@@ -104,6 +141,72 @@ def main():
             print(json.dumps(observation.to_dict(), indent=2))
         except Exception as e:
             print(f"Error observing Codex thread: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.command == "verify-codex-target":
+        if not args.thread_id:
+            parser.error("verify-codex-target requires --thread-id")
+        if not args.source_codex_home:
+            parser.error("verify-codex-target requires --source-codex-home")
+        repo = _require_repo(parser, args.repo)
+        if not args.target_ref:
+            parser.error("verify-codex-target requires --target-ref")
+        if not args.expected_start_sha:
+            parser.error("verify-codex-target requires --expected-start-sha")
+        if not (args.allowed_paths or args.denied_paths):
+            parser.error("verify-codex-target requires --allowed-paths and/or --denied-paths")
+
+        try:
+            controller_task_id = f"live-codex-target:{args.thread_id}"
+            operation_id = f"verify-target:{args.thread_id}"
+            task = TaskBinding(
+                controller_task_id=controller_task_id,
+                operation_id=operation_id,
+                provider="codex",
+                repo=repo,
+                expected_start_ref=None,
+                expected_start_sha=args.expected_start_sha,
+                objective_scope=ObjectiveScope(
+                    allowed_paths=args.allowed_paths,
+                    denied_paths=args.denied_paths,
+                ),
+                requested_capability="verify_explicit_github_target_after_provider_completion",
+                allowed_effects=(),
+                forbidden_effects=(
+                    "provider_mutation",
+                    "github_write",
+                    "level3_effect",
+                ),
+                approval_policy_id="adr-90-human-final",
+                created_at=_observed_at_now(),
+            )
+            operation = ProviderOperationRef(
+                provider="codex",
+                provider_operation_id=args.thread_id,
+                provider_url=None,
+                controller_task_id=controller_task_id,
+                operation_id=operation_id,
+            )
+            observer = CodexObservationAdapter(
+                client=CodexSnapshotReadClient(
+                    source_codex_home=args.source_codex_home,
+                    codex_bin=args.codex_bin,
+                ),
+                observed_at=_observed_at_now,
+            )
+            result = run_objective_target_handoff(
+                task=task,
+                operation=operation,
+                observer=observer,
+                target=GitHubTargetExpectation(repo=repo, ref=args.target_ref),
+                github=GitHubRestTargetReadClient(),
+            )
+            print(json.dumps(result.to_dict(), indent=2))
+            if result.verification_result is not VerificationResult.PASS:
+                sys.exit(1)
+        except Exception as e:
+            print(f"Error verifying Codex GitHub target: {e}", file=sys.stderr)
             sys.exit(1)
         return
 
