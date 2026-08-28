@@ -5,7 +5,6 @@ from typing import Any, Mapping
 from .executor import load_policy
 from .inspector import (
     evaluate_actions_ci,
-    evaluate_scope,
     get_actions_runs,
     get_pr_details,
     get_pr_files,
@@ -17,8 +16,8 @@ from .remediation_request_mutator import (
     codex_remediation_request_marker,
     post_codex_remediation_request,
 )
+from .review_request import _safe_scope_status, _trusted_request_authors
 from .review_request_mutator import get_authenticated_github_login
-from .scope_evidence import normalize_github_scope_files
 
 
 ACTION = "REQUEST_CODEX_REMEDIATION"
@@ -32,35 +31,18 @@ def _is_codex_login(login: Any) -> bool:
     return isinstance(login, str) and login in _CODEX_BOT_LOGINS
 
 
-def _trusted_request_authors(policy: Mapping[str, Any]) -> tuple[str, ...] | None:
-    value = policy.get("trusted_review_request_authors")
-    if not isinstance(value, list) or not value:
+def _repo_full_name(repo_data: Any) -> str | None:
+    if not isinstance(repo_data, Mapping):
         return None
-    if any(not isinstance(item, str) or not item for item in value):
-        return None
-    if len(set(value)) != len(value):
-        return None
-    return tuple(value)
+    full_name = repo_data.get("full_name")
+    return full_name if isinstance(full_name, str) and full_name else None
 
 
-def _safe_scope_status(
-    inspection: Mapping[str, Any], scope_policy: Mapping[str, Any]
-) -> str:
-    files = inspection.get("files")
-    changed_files = inspection.get("changed_files")
-    if not isinstance(files, list):
-        return "MALFORMED"
-    if (
-        isinstance(changed_files, bool)
-        or not isinstance(changed_files, int)
-        or changed_files < 0
-        or changed_files != len(files)
-    ):
-        return "MALFORMED"
-    normalized = normalize_github_scope_files(files)
-    if normalized is None:
-        return "MALFORMED"
-    return evaluate_scope(normalized, dict(scope_policy))
+def _default_branch(repo_data: Any) -> str | None:
+    if not isinstance(repo_data, Mapping):
+        return None
+    branch = repo_data.get("default_branch")
+    return branch if isinstance(branch, str) and branch else None
 
 
 def _has_same_source_head_request(
@@ -87,7 +69,9 @@ def _has_same_source_head_request(
     return False
 
 
-def _thread_has_current_head_codex_finding(thread: Mapping[str, Any], head_sha: str) -> bool:
+def _thread_has_current_head_codex_finding(
+    thread: Mapping[str, Any], head_sha: str
+) -> bool:
     resolved = thread.get("isResolved")
     if resolved is None:
         resolved = thread.get("is_resolved")
@@ -115,17 +99,24 @@ def _thread_has_current_head_codex_finding(thread: Mapping[str, Any], head_sha: 
     return False
 
 
-def _review_is_current_head_codex_finding(review: Mapping[str, Any], head_sha: str) -> bool:
+def _review_is_current_head_codex_finding(
+    review: Mapping[str, Any], head_sha: str
+) -> bool:
     user = review.get("user")
     if not isinstance(user, Mapping) or not _is_codex_login(user.get("login")):
         return False
     if review.get("commit_id") != head_sha:
         return False
     state = review.get("state")
-    return isinstance(state, str) and state.upper() in {"CHANGES_REQUESTED", "REQUEST_CHANGES"}
+    return isinstance(state, str) and state.upper() in {
+        "CHANGES_REQUESTED",
+        "REQUEST_CHANGES",
+    }
 
 
-def _has_current_head_codex_finding(inspection: Mapping[str, Any], head_sha: str) -> bool:
+def _has_current_head_codex_finding(
+    inspection: Mapping[str, Any], head_sha: str
+) -> bool:
     reviews = inspection.get("reviews")
     threads = inspection.get("review_threads_graphql")
     if not isinstance(reviews, list) or not isinstance(threads, list):
@@ -145,7 +136,11 @@ def _has_current_head_codex_finding(inspection: Mapping[str, Any], head_sha: str
     return False
 
 
-def _validate_safe_pr_snapshot(pr_data: Any, expected_head_sha: str) -> str | None:
+def _validate_safe_pr_snapshot(
+    pr_data: Any,
+    expected_head_sha: str,
+    expected_repo: str,
+) -> str | None:
     if not isinstance(pr_data, Mapping):
         return "PR_SNAPSHOT_MALFORMED"
     head = pr_data.get("head")
@@ -156,15 +151,23 @@ def _validate_safe_pr_snapshot(pr_data: Any, expected_head_sha: str) -> str | No
     head_sha = head.get("sha")
     head_ref = head.get("ref")
     base_ref = base.get("ref")
+    head_repo = _repo_full_name(head.get("repo"))
+    base_repo_data = base.get("repo")
+    base_repo = _repo_full_name(base_repo_data)
+    default_branch = _default_branch(base_repo_data)
     draft = pr_data.get("draft")
     merged = pr_data.get("merged")
     state = pr_data.get("state")
+
     if (
         not isinstance(head_sha, str)
         or not isinstance(head_ref, str)
         or not head_ref
         or not isinstance(base_ref, str)
         or not base_ref
+        or head_repo is None
+        or base_repo is None
+        or default_branch is None
         or not isinstance(draft, bool)
         or not isinstance(merged, bool)
         or not isinstance(state, str)
@@ -178,17 +181,23 @@ def _validate_safe_pr_snapshot(pr_data: Any, expected_head_sha: str) -> str | No
         return "PR_STATE_NOT_OPEN"
     if draft is not True:
         return "PR_NOT_DRAFT"
-    if head_ref == base_ref or head_ref in {"main", "master"}:
+    if head_repo != expected_repo or base_repo != expected_repo:
+        return "UNSAFE_IMPLEMENTATION_REPOSITORY"
+    if head_ref in {base_ref, default_branch}:
         return "UNSAFE_IMPLEMENTATION_BRANCH"
     return None
 
 
-def _inspect_remediation_request(owner: str, repo: str, pr_number: int) -> dict[str, Any]:
+def _inspect_remediation_request(
+    owner: str, repo: str, pr_number: int
+) -> dict[str, Any]:
     pr_data = get_pr_details(owner, repo, pr_number)
     if not isinstance(pr_data, Mapping):
         raise ValueError("PR details malformed")
     head = pr_data.get("head")
     base = pr_data.get("base")
+    head_repo_data = head.get("repo") if isinstance(head, Mapping) else None
+    base_repo_data = base.get("repo") if isinstance(base, Mapping) else None
     head_sha = head.get("sha") if isinstance(head, Mapping) else None
 
     reviews = get_pr_reviews(owner, repo, pr_number)
@@ -210,7 +219,10 @@ def _inspect_remediation_request(owner: str, repo: str, pr_number: int) -> dict[
     return {
         "head_sha": head_sha,
         "head_ref": head.get("ref") if isinstance(head, Mapping) else None,
+        "head_repo": _repo_full_name(head_repo_data),
         "base_ref": base.get("ref") if isinstance(base, Mapping) else None,
+        "base_repo": _repo_full_name(base_repo_data),
+        "default_branch": _default_branch(base_repo_data),
         "draft": pr_data.get("draft"),
         "merged": pr_data.get("merged"),
         "state": pr_data.get("state"),
@@ -233,15 +245,19 @@ def plan_codex_remediation_request(
     scope_policy: Mapping[str, Any],
     inspection: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    expected_repo = f"{owner}/{repo}"
     plan: dict[str, Any] = {
-        "repo": f"{owner}/{repo}",
+        "repo": expected_repo,
         "pr": pr_number,
         "requested_action": ACTION,
         "decision": "BLOCKED",
         "reason": None,
         "source_head_sha": None,
         "head_ref": None,
+        "head_repo": None,
         "base_ref": None,
+        "base_repo": None,
+        "default_branch": None,
         "draft": None,
         "scope_status": None,
         "actions_ci_status": None,
@@ -279,7 +295,10 @@ def plan_codex_remediation_request(
 
     head_sha = inspection.get("head_sha")
     head_ref = inspection.get("head_ref")
+    head_repo = inspection.get("head_repo")
     base_ref = inspection.get("base_ref")
+    base_repo = inspection.get("base_repo")
+    default_branch = inspection.get("default_branch")
     draft = inspection.get("draft")
     merged = inspection.get("merged")
     state = inspection.get("state")
@@ -289,7 +308,10 @@ def plan_codex_remediation_request(
 
     plan["source_head_sha"] = head_sha
     plan["head_ref"] = head_ref
+    plan["head_repo"] = head_repo
     plan["base_ref"] = base_ref
+    plan["base_repo"] = base_repo
+    plan["default_branch"] = default_branch
     plan["draft"] = draft
     plan["actions_ci_status"] = actions_ci_status
 
@@ -298,8 +320,14 @@ def plan_codex_remediation_request(
         or len(head_sha) != 40
         or not isinstance(head_ref, str)
         or not head_ref
+        or not isinstance(head_repo, str)
+        or not head_repo
         or not isinstance(base_ref, str)
         or not base_ref
+        or not isinstance(base_repo, str)
+        or not base_repo
+        or not isinstance(default_branch, str)
+        or not default_branch
         or not isinstance(draft, bool)
         or not isinstance(merged, bool)
         or not isinstance(state, str)
@@ -324,7 +352,10 @@ def plan_codex_remediation_request(
     if draft is not True:
         plan["reason"] = "PR_NOT_DRAFT"
         return plan
-    if head_ref == base_ref or head_ref in {"main", "master"}:
+    if head_repo != expected_repo or base_repo != expected_repo:
+        plan["reason"] = "UNSAFE_IMPLEMENTATION_REPOSITORY"
+        return plan
+    if head_ref in {base_ref, default_branch}:
         plan["reason"] = "UNSAFE_IMPLEMENTATION_BRANCH"
         return plan
     if graphql_error:
@@ -370,6 +401,7 @@ def execute_codex_remediation_request(
     policy_path: str | None,
     apply: bool = False,
 ) -> dict[str, Any]:
+    expected_repo = f"{owner}/{repo}"
     source_head = plan.get("source_head_sha")
     result: dict[str, Any] = {
         "planned_source_head_sha": source_head,
@@ -381,7 +413,7 @@ def execute_codex_remediation_request(
         "failure_reason": None,
     }
 
-    if plan.get("repo") != f"{owner}/{repo}" or plan.get("pr") != pr_number:
+    if plan.get("repo") != expected_repo or plan.get("pr") != pr_number:
         result["failure_reason"] = "TARGET_MISMATCH"
         return result
     if plan.get("decision") == "NOOP":
@@ -429,7 +461,9 @@ def execute_codex_remediation_request(
     except Exception:
         result["failure_reason"] = "PRE_MUTATION_TARGET_READ_FAILED"
         return result
-    snapshot_error = _validate_safe_pr_snapshot(pre_identity_pr, source_head)
+    snapshot_error = _validate_safe_pr_snapshot(
+        pre_identity_pr, source_head, expected_repo
+    )
     if snapshot_error is not None:
         result["failure_reason"] = snapshot_error
         return result
@@ -460,13 +494,13 @@ def execute_codex_remediation_request(
         return result
 
     # Final mutable-state gate after identity resolution. No network read is
-    # permitted between this target/policy gate and the fixed POST.
+    # permitted between this exact target/policy gate and the fixed POST.
     try:
         final_pr = get_pr_details(owner, repo, pr_number)
     except Exception:
         result["failure_reason"] = "FINAL_TARGET_READ_FAILED"
         return result
-    snapshot_error = _validate_safe_pr_snapshot(final_pr, source_head)
+    snapshot_error = _validate_safe_pr_snapshot(final_pr, source_head, expected_repo)
     if snapshot_error is not None:
         result["failure_reason"] = snapshot_error
         return result
