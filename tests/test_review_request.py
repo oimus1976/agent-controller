@@ -351,7 +351,7 @@ class CodexReviewRequestTests(unittest.TestCase):
     ):
         inspect.return_value = _inspection()
         identity.return_value = TRUSTED_AUTHOR
-        get_pr.side_effect = [_pr_snapshot(), _pr_snapshot()]
+        get_pr.side_effect = [_pr_snapshot(), _pr_snapshot(), _pr_snapshot()]
         get_comments.return_value = [
             {
                 "body": f"@codex review\n\n{codex_review_request_marker(HEAD)}",
@@ -370,7 +370,7 @@ class CodexReviewRequestTests(unittest.TestCase):
         self.assertTrue(result["postcondition_result"])
         identity.assert_called_once_with()
         post.assert_called_once_with("oimus1976", "agent-controller", 109, HEAD)
-        self.assertEqual(2, get_pr.call_count)
+        self.assertEqual(3, get_pr.call_count)
 
     @patch("agent_controller.review_request.get_pr_details")
     @patch("agent_controller.review_request.post_codex_review_request")
@@ -492,7 +492,7 @@ class CodexReviewRequestTests(unittest.TestCase):
     ):
         inspect.return_value = _inspection()
         identity.return_value = TRUSTED_AUTHOR
-        get_pr.side_effect = [_pr_snapshot(), _pr_snapshot()]
+        get_pr.side_effect = [_pr_snapshot(), _pr_snapshot(), _pr_snapshot()]
         get_comments.return_value = [
             {
                 "body": f"@codex review\n\n{codex_review_request_marker(HEAD)}",
