@@ -15,21 +15,28 @@ class ReviewRequestConcurrencyBoundaryTests(unittest.TestCase):
 
         Two Controller instances that both inspect the same GitHub snapshot before
         either POSTs cannot atomically claim the right to request review. Both can
-        therefore plan EXECUTABLE. The exact-head marker deduplicates later/replayed
-        runs after one request becomes visible, but this slice does not claim global
-        exactly-once semantics for a truly simultaneous race.
+        therefore plan EXECUTABLE. The trusted exact-head marker deduplicates
+        later/replayed runs after one request becomes visible, but this slice does
+        not claim global exactly-once semantics for a truly simultaneous race.
         """
 
         fd, policy_path = tempfile.mkstemp()
         try:
             with os.fdopen(fd, "w") as handle:
-                json.dump({"allowed_actions": [ACTION]}, handle)
+                json.dump(
+                    {
+                        "allowed_actions": [ACTION],
+                        "trusted_review_request_authors": ["oimus1976"],
+                    },
+                    handle,
+                )
 
             inspection = {
                 "head_sha": HEAD,
                 "draft": True,
                 "merged": False,
                 "state": "open",
+                "changed_files": 1,
                 "files": [{"filename": "agent_controller/example.py", "changes": 1}],
                 "actions_ci_status": "PASS",
                 "graphql_error": False,
