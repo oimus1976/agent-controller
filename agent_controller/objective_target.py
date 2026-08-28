@@ -118,11 +118,47 @@ def _target_binding(task: TaskBinding, target: GitHubTargetExpectation) -> Bindi
         return BindingValidation(False, "TARGET_REF_MISSING")
     if not isinstance(task.expected_start_sha, str) or not task.expected_start_sha:
         return BindingValidation(False, "EXPECTED_START_SHA_MISSING")
+    if task.objective_scope is None:
+        return BindingValidation(False, "OBJECTIVE_SCOPE_MISSING")
     allowed_paths = tuple(task.objective_scope.allowed_paths or ())
     denied_paths = tuple(task.objective_scope.denied_paths or ())
     if not allowed_paths and not denied_paths:
         return BindingValidation(False, "OBJECTIVE_SCOPE_MISSING")
     return BindingValidation(True)
+
+
+def _normalize_scope_files(files: Sequence[Any]) -> list[dict[str, Any]] | None:
+    """Validate GitHub file facts and expose both sides of a rename to scope policy.
+
+    ``evaluate_scope`` predates this objective-target path and only inspects
+    ``filename`` plus ``changes``. GitHub represents a rename with the new path
+    in ``filename`` and the source in ``previous_filename``. Feeding the raw
+    list through unchanged would therefore let an out-of-scope source path
+    disappear from the decision. Malformed entries must also never degrade to
+    empty-string filenames that can accidentally satisfy a denied-only policy.
+    """
+
+    normalized: list[dict[str, Any]] = []
+    for item in files:
+        if not isinstance(item, Mapping):
+            return None
+
+        filename = item.get("filename")
+        changes = item.get("changes")
+        if not isinstance(filename, str) or not filename:
+            return None
+        if isinstance(changes, bool) or not isinstance(changes, int) or changes < 0:
+            return None
+
+        normalized.append({"filename": filename, "changes": changes})
+
+        if "previous_filename" in item:
+            previous_filename = item.get("previous_filename")
+            if not isinstance(previous_filename, str) or not previous_filename:
+                return None
+            normalized.append({"filename": previous_filename, "changes": changes})
+
+    return normalized
 
 
 def verify_explicit_github_target(
@@ -234,8 +270,18 @@ def verify_explicit_github_target(
             github_observed_at=github_observed_at,
         )
 
+    scope_files = _normalize_scope_files(files)
+    if scope_files is None:
+        return _evidence(
+            target=target,
+            result=VerificationResult.UNCERTAIN,
+            reason="GITHUB_CHANGED_FILE_ENTRY_MALFORMED",
+            resolved_sha=resolved_sha,
+            github_observed_at=github_observed_at,
+        )
+
     scope_result = evaluate_scope(
-        files,
+        scope_files,
         {
             "allowed_paths": list(task.objective_scope.allowed_paths or ()),
             "denied_paths": list(task.objective_scope.denied_paths or ()),
