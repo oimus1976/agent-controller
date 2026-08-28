@@ -15,6 +15,40 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-08-28 — Exact-head Codex review request（Issue #109 / Draft PR #110）
+
+関連: ADR Issue #12, ADR Issue #90, Issue #55, Issue #109, Draft PR #110
+
+### Added / changed
+
+- repositoryで既に利用しているCodex GitHub integrationの `@codex review` triggerを再利用し、current PR headに対する独立review要求をControllerから行うbounded action `REQUEST_CODEX_REVIEW` を追加。
+- `request-codex-review` CLIを追加し、明示policy allowlist、Draft/open PR、exact current head、exact-head Actions `PASS`、safe scope `SATISFIED`、current-head review/request不存在を満たす場合だけ実行可能にする。
+- comment write capabilityは汎用化せず、固定本文 `@codex review` と deterministicな不可視exact-head markerだけを投稿する専用mutatorに限定。
+- apply直前にpolicyとGitHub evidenceをfreshに再読し、head/state/CI/scope/review evidenceが変化した場合はwriteせずBLOCKED/NOOPへ落とす。
+- same-head markerまたはcurrent-head Codex review evidenceがGitHubに存在する場合、再実行・後続別instanceはNOOPとしてreview quotaの重複消費を抑制する。
+- PR #107 reviewで見つかったrename/malformed changed-file classを再導入しないよう、新actionはlegacy `inspect_pr.scope_status`をauthorityにせず、raw GitHub filesを検証し `previous_filename` を含むsource/destination双方をscope評価する。
+
+### Safety / efficiency boundary
+
+- Codex review requestはコード承認・Controller PASS・Ready/merge authorizationではない。human-final境界はADR #90のまま。
+- Codex local SDK/model turn、provider dispatch、Ready、merge、auto-merge、workflow dispatch/re-run、deploy/releaseは追加しない。
+- arbitrary PR comment capabilityを公開せず、review trigger以外の本文をcallerから注入できない。
+- GitHub comment creationには「same-head markerが存在しない」こととのatomic compare-and-setがないため、**global exactly-onceは主張しない**。2 Controller、またはreview結果到着とrequest writeが完全同時に競合すると、同一headへ重複review要求が発生し得る。
+- marker/review evidenceがGitHubへ反映された後のretry/replay/serial cross-instance runはdeterministicにdedupeする。完全同時raceの残余効果はreview/quota重複に限定され、Ready/merge等のauthorityへ昇格しない。
+- このbounded raceだけを消すためのdistributed lock/claim serviceは、実運用で痛みが確認されるまで導入しない。
+- token数は推定・捏造せず、review requestの存在とhead bindingをGitHub evidenceとして扱う。
+
+### Validation status
+
+- deterministic testsでpolicy/PR state/exact-head CI/scope/review evidence gates、old-head vs current-head semantics、fixed comment surface、pre-write stale detection、policy revocation、postcondition、replay dedupeを検証する。
+- concurrency testは同じpre-write snapshotを同時に見た2 instanceが双方EXECUTABLEになり得ることを意図的に固定し、このsliceがdistributed exactly-onceを保証しないことを契約化する。
+- self-reviewで、PR #107のsafe rename normalizationが`objective_target.py`のprivate pathに閉じ、legacy `inspect_pr.scope_status`には波及していないことを検出。新review-request経路ではraw filesを独立にsafe normalizeしてから既存`evaluate_scope()`へ渡すよう修正。
+- initial deterministic CI #186は391 tests中1件失敗。pre-write policy revocationでGitHub headを未読のまま`None`を`STALE_HEAD_SHA`と誤分類していたため、「fresh headを実際に観測した場合だけstale判定する」よう修正し、次headのCI #187はSUCCESS。
+- この項目はDraft PR #110の未merge実装を記録しており、mainへの採用済み状態を意味しない。
+- final merge gateはCHANGELOG反映後のexact-head deterministic CIと、同headへのindependent Codex review。Ready / mergeはhuman-final。
+
+---
+
 ## 2026-08-28 — Objective GitHub target verification after live Codex completion（Issue #106 / Draft PR #107）
 
 関連: ADR Issue #12, ADR Issue #90, Issue #55, Issue #91, Issue #106, Draft PR #107
@@ -245,7 +279,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 - `6eeded2aa3ea93be7b0dfd7306829377b2e23f13` — provider-neutral contract models を追加。
 - `a3e59e23244f91d033d1550f8a04c1a7233ff9ea` — `AgentAdapter` mandatory surface を3操作へ修正。
-- `816ea118835f20694f730574375c1b5ab98c3620` — provider-neutral contract tests を追加。
+- `816ea118835f20694f7306829377b2e23f13` — provider-neutral contract tests を追加。
 - `1ac0d5c35d8369bc467951df512fb4617ad0c93f` — Jules / Codex dual-provider contract flow proof を追加。
 - `f2133e060e04a9a5b580e1662a8d9f4d0d408623` — pure Jules / Codex observation mapper を追加。
 - `9c6592502b85102d5ffbde4459ffa2ced9dc4cbd` — provider mapper tests を追加。
