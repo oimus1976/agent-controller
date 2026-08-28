@@ -11,6 +11,7 @@ from agent_controller.remediation_request_mutator import codex_remediation_reque
 
 HEAD = "a" * 40
 NEW_HEAD = "b" * 40
+REPO = "oimus1976/agent-controller"
 POLICY = {
     "allowed_actions": [ACTION],
     "trusted_review_request_authors": ["oimus1976"],
@@ -41,7 +42,10 @@ def inspection(**overrides):
     value = {
         "head_sha": HEAD,
         "head_ref": "mvp-111-codex-remediation-request",
+        "head_repo": REPO,
         "base_ref": "main",
+        "base_repo": REPO,
+        "default_branch": "main",
         "draft": True,
         "merged": False,
         "state": "open",
@@ -61,6 +65,23 @@ def inspection(**overrides):
     }
     value.update(overrides)
     return value
+
+
+def safe_pr(head_sha=HEAD, head_ref="mvp-111-codex-remediation-request"):
+    return {
+        "head": {
+            "sha": head_sha,
+            "ref": head_ref,
+            "repo": {"full_name": REPO},
+        },
+        "base": {
+            "ref": "main",
+            "repo": {"full_name": REPO, "default_branch": "main"},
+        },
+        "draft": True,
+        "merged": False,
+        "state": "open",
+    }
 
 
 class RemediationRequestPlanTests(unittest.TestCase):
@@ -155,18 +176,54 @@ class RemediationRequestPlanTests(unittest.TestCase):
         self.assertEqual("EXECUTABLE", plan["decision"])
 
     @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
-    def test_unsafe_branch_is_blocked(self, _load):
-        for head_ref in ("main", "master"):
+    def test_base_and_custom_default_branch_are_blocked(self, _load):
+        cases = [
+            inspection(head_ref="main"),
+            inspection(head_ref="trunk", base_ref="release", default_branch="trunk"),
+        ]
+        for evidence in cases:
             plan = plan_codex_remediation_request(
                 owner="oimus1976",
                 repo="agent-controller",
                 pr_number=111,
                 policy_path="policy.json",
                 scope_policy=SCOPE,
-                inspection=inspection(head_ref=head_ref),
+                inspection=evidence,
             )
             self.assertEqual("BLOCKED", plan["decision"])
             self.assertEqual("UNSAFE_IMPLEMENTATION_BRANCH", plan["reason"])
+
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    def test_fork_or_wrong_head_repository_is_blocked(self, _load):
+        for head_repo in ("attacker/fork", "other/agent-controller"):
+            plan = plan_codex_remediation_request(
+                owner="oimus1976",
+                repo="agent-controller",
+                pr_number=111,
+                policy_path="policy.json",
+                scope_policy=SCOPE,
+                inspection=inspection(head_repo=head_repo),
+            )
+            self.assertEqual("BLOCKED", plan["decision"])
+            self.assertEqual("UNSAFE_IMPLEMENTATION_REPOSITORY", plan["reason"])
+
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    def test_missing_default_branch_or_repo_evidence_fails_closed(self, _load):
+        for evidence in (
+            inspection(default_branch=None),
+            inspection(head_repo=None),
+            inspection(base_repo=None),
+        ):
+            plan = plan_codex_remediation_request(
+                owner="oimus1976",
+                repo="agent-controller",
+                pr_number=111,
+                policy_path="policy.json",
+                scope_policy=SCOPE,
+                inspection=evidence,
+            )
+            self.assertEqual("BLOCKED", plan["decision"])
+            self.assertEqual("CONTRADICTORY_OR_MISSING_EVIDENCE", plan["reason"])
 
     @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
     def test_draft_ci_scope_and_review_evidence_fail_closed(self, _load):
@@ -203,14 +260,17 @@ class RemediationRequestPlanTests(unittest.TestCase):
 class RemediationRequestExecutionTests(unittest.TestCase):
     def executable_plan(self):
         return {
-            "repo": "oimus1976/agent-controller",
+            "repo": REPO,
             "pr": 111,
             "requested_action": ACTION,
             "decision": "EXECUTABLE",
             "reason": "READY_TO_REQUEST_CODEX_REMEDIATION",
             "source_head_sha": HEAD,
             "head_ref": "mvp-111-codex-remediation-request",
+            "head_repo": REPO,
             "base_ref": "main",
+            "base_repo": REPO,
+            "default_branch": "main",
             "scope_policy": SCOPE,
             "policy_provenance": POLICY,
             "trusted_review_request_authors": ["oimus1976"],
@@ -244,13 +304,7 @@ class RemediationRequestExecutionTests(unittest.TestCase):
         comments,
     ):
         fresh_plan.return_value = self.executable_plan()
-        get_pr.return_value = {
-            "head": {"sha": HEAD, "ref": "mvp-111-codex-remediation-request"},
-            "base": {"ref": "main"},
-            "draft": True,
-            "merged": False,
-            "state": "open",
-        }
+        get_pr.return_value = safe_pr()
         comments.return_value = [
             {
                 "user": {"login": "oimus1976"},
@@ -281,13 +335,7 @@ class RemediationRequestExecutionTests(unittest.TestCase):
         self, fresh_plan, _load, get_pr, _identity
     ):
         fresh_plan.return_value = self.executable_plan()
-        get_pr.return_value = {
-            "head": {"sha": HEAD, "ref": "mvp-111-codex-remediation-request"},
-            "base": {"ref": "main"},
-            "draft": True,
-            "merged": False,
-            "state": "open",
-        }
+        get_pr.return_value = safe_pr()
         with patch(
             "agent_controller.remediation_request.post_codex_remediation_request"
         ) as post:
@@ -310,16 +358,7 @@ class RemediationRequestExecutionTests(unittest.TestCase):
         self, fresh_plan, _load, get_pr, _identity
     ):
         fresh_plan.return_value = self.executable_plan()
-        safe = {
-            "head": {"sha": HEAD, "ref": "mvp-111-codex-remediation-request"},
-            "base": {"ref": "main"},
-            "draft": True,
-            "merged": False,
-            "state": "open",
-        }
-        drifted = dict(safe)
-        drifted["head"] = {"sha": NEW_HEAD, "ref": "mvp-111-codex-remediation-request"}
-        get_pr.side_effect = [safe, drifted]
+        get_pr.side_effect = [safe_pr(), safe_pr(head_sha=NEW_HEAD)]
         with patch(
             "agent_controller.remediation_request.post_codex_remediation_request"
         ) as post:
@@ -333,6 +372,34 @@ class RemediationRequestExecutionTests(unittest.TestCase):
             )
         post.assert_not_called()
         self.assertEqual("STALE_HEAD_SHA", result["failure_reason"])
+
+    @patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="oimus1976")
+    @patch("agent_controller.remediation_request.get_pr_details")
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    @patch("agent_controller.remediation_request.plan_codex_remediation_request")
+    def test_default_branch_drift_after_identity_lookup_blocks_before_post(
+        self, fresh_plan, _load, get_pr, _identity
+    ):
+        fresh_plan.return_value = self.executable_plan()
+        final = safe_pr(head_ref="trunk")
+        final["base"] = {
+            "ref": "release",
+            "repo": {"full_name": REPO, "default_branch": "trunk"},
+        }
+        get_pr.side_effect = [safe_pr(), final]
+        with patch(
+            "agent_controller.remediation_request.post_codex_remediation_request"
+        ) as post:
+            result = execute_codex_remediation_request(
+                plan=self.executable_plan(),
+                owner="oimus1976",
+                repo="agent-controller",
+                pr_number=111,
+                policy_path="policy.json",
+                apply=True,
+            )
+        post.assert_not_called()
+        self.assertEqual("UNSAFE_IMPLEMENTATION_BRANCH", result["failure_reason"])
 
 
 if __name__ == "__main__":
