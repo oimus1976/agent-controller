@@ -246,6 +246,48 @@ class ObjectiveTargetHandoffTests(unittest.TestCase):
         self.assertEqual(VerificationResult.FAIL, result.verification_result)
         self.assertEqual("OBJECTIVE_SCOPE_VIOLATION", result.target_evidence.reason)
 
+    def test_rename_from_denied_source_to_allowed_destination_does_not_pass(self):
+        result = _run(
+            task=_task(allowed=("src/*",), denied=("secrets/*",)),
+            github=FakeGitHub(
+                files=[
+                    {
+                        "filename": "src/key.txt",
+                        "previous_filename": "secrets/key.txt",
+                        "changes": 1,
+                    }
+                ]
+            ),
+        )
+
+        self.assertEqual(VerificationResult.FAIL, result.verification_result)
+        self.assertEqual("OBJECTIVE_SCOPE_VIOLATION", result.target_evidence.reason)
+
+    def test_malformed_changed_file_entry_is_uncertain_not_pass(self):
+        result = _run(
+            task=_task(allowed=(), denied=("secrets/*",)),
+            github=FakeGitHub(files=[{}]),
+        )
+
+        self.assertEqual(VerificationResult.UNCERTAIN, result.verification_result)
+        self.assertEqual("GITHUB_CHANGED_FILE_ENTRY_MALFORMED", result.target_evidence.reason)
+
+    def test_malformed_previous_filename_is_uncertain_not_pass(self):
+        result = _run(
+            github=FakeGitHub(
+                files=[
+                    {
+                        "filename": "src/key.txt",
+                        "previous_filename": None,
+                        "changes": 1,
+                    }
+                ]
+            )
+        )
+
+        self.assertEqual(VerificationResult.UNCERTAIN, result.verification_result)
+        self.assertEqual("GITHUB_CHANGED_FILE_ENTRY_MALFORMED", result.target_evidence.reason)
+
     def test_github_read_failure_is_uncertain_not_pass(self):
         github = FakeGitHub()
         github.ref_error = RuntimeError("network down")
