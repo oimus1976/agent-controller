@@ -3,11 +3,12 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from .executor import load_policy
-from .inspector import get_pr_issue_comments, inspect_pr
+from .inspector import evaluate_scope, get_pr_issue_comments, inspect_pr
 from .review_request_mutator import (
     codex_review_request_marker,
     post_codex_review_request,
 )
+from .scope_evidence import normalize_github_scope_files
 
 
 ACTION = "REQUEST_CODEX_REVIEW"
@@ -27,7 +28,17 @@ def _body_mentions_head(body: Any, head_sha: str) -> bool:
 
 def _has_same_head_request(issue_comments: list[Mapping[str, Any]], head_sha: str) -> bool:
     marker = codex_review_request_marker(head_sha)
-    return any(isinstance(comment.get("body"), str) and marker in comment["body"] for comment in issue_comments)
+    for comment in issue_comments:
+        if not isinstance(comment, Mapping):
+            raise ValueError("issue comment evidence is malformed")
+        body = comment.get("body")
+        if (
+            isinstance(body, str)
+            and "@codex review" in body.lower()
+            and marker in body
+        ):
+            return True
+    return False
 
 
 def _has_codex_review_on_head(inspection: Mapping[str, Any], head_sha: str) -> bool:
@@ -61,7 +72,10 @@ def _has_codex_review_on_head(inspection: Mapping[str, Any], head_sha: str) -> b
     for thread in threads or []:
         if not isinstance(thread, Mapping):
             raise ValueError("review thread evidence is malformed")
-        comments = thread.get("comments", {}).get("nodes", [])
+        comments_container = thread.get("comments")
+        if not isinstance(comments_container, Mapping):
+            raise ValueError("review thread comments are malformed")
+        comments = comments_container.get("nodes")
         if not isinstance(comments, list):
             raise ValueError("review thread comments are malformed")
         for comment in comments:
@@ -74,6 +88,18 @@ def _has_codex_review_on_head(inspection: Mapping[str, Any], head_sha: str) -> b
                 return True
 
     return False
+
+
+def _safe_scope_status(
+    inspection: Mapping[str, Any], scope_policy: Mapping[str, Any]
+) -> str:
+    files = inspection.get("files")
+    if not isinstance(files, list):
+        return "MALFORMED"
+    normalized = normalize_github_scope_files(files)
+    if normalized is None:
+        return "MALFORMED"
+    return evaluate_scope(normalized, dict(scope_policy))
 
 
 def plan_codex_review_request(
@@ -130,14 +156,12 @@ def plan_codex_review_request(
     draft = inspection.get("draft")
     merged = inspection.get("merged")
     state = inspection.get("state")
-    scope_status = inspection.get("scope_status")
     actions_ci_status = inspection.get("actions_ci_status")
     graphql_error = inspection.get("graphql_error")
     issue_comments = inspection.get("issue_comments")
 
     plan["head_sha"] = head_sha
     plan["draft"] = draft
-    plan["scope_status"] = scope_status
     plan["actions_ci_status"] = actions_ci_status
 
     if (
@@ -152,8 +176,17 @@ def plan_codex_review_request(
         plan["reason"] = "CONTRADICTORY_OR_MISSING_EVIDENCE"
         return plan
 
+    try:
+        codex_review_request_marker(head_sha)
+    except (TypeError, ValueError):
+        plan["reason"] = "HEAD_SHA_MALFORMED"
+        return plan
+
     if merged or state == "closed":
         plan["reason"] = "PR_CLOSED_OR_MERGED"
+        return plan
+    if state != "open":
+        plan["reason"] = "PR_STATE_NOT_OPEN"
         return plan
 
     try:
@@ -174,6 +207,12 @@ def plan_codex_review_request(
         return plan
     if draft is not True:
         plan["reason"] = "PR_NOT_DRAFT"
+        return plan
+
+    scope_status = _safe_scope_status(inspection, scope_policy)
+    plan["scope_status"] = scope_status
+    if scope_status == "MALFORMED":
+        plan["reason"] = "SCOPE_EVIDENCE_MALFORMED"
         return plan
     if scope_status != "SATISFIED":
         plan["reason"] = "SCOPE_NOT_SATISFIED"
@@ -266,6 +305,7 @@ def execute_codex_review_request(
         found = any(
             isinstance(comment, Mapping)
             and isinstance(comment.get("body"), str)
+            and "@codex review" in comment["body"].lower()
             and marker in comment["body"]
             for comment in comments
         )
