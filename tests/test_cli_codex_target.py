@@ -44,6 +44,7 @@ class CliCodexTargetTests(unittest.TestCase):
                 "repo": "oimus1976/example",
                 "target_ref": "feature/task-1",
                 "resolved_sha": "b" * 40,
+                "github_observed_at": "2026-08-28T00:00:02Z",
             },
         }
         snapshot_client = object()
@@ -99,6 +100,7 @@ class CliCodexTargetTests(unittest.TestCase):
         call = handoff.call_args.kwargs
         self.assertIs(observer, call["observer"])
         self.assertIs(github, call["github"])
+        self.assertIs(cli._observed_at_now, call["github_observed_at"])
         self.assertEqual("oimus1976/example", call["task"].repo)
         self.assertEqual(START_SHA, call["task"].expected_start_sha)
         self.assertEqual(("src/*",), call["task"].objective_scope.allowed_paths)
@@ -112,6 +114,7 @@ class CliCodexTargetTests(unittest.TestCase):
                     "repo": "oimus1976/example",
                     "target_ref": "feature/task-1",
                     "resolved_sha": "b" * 40,
+                    "github_observed_at": "2026-08-28T00:00:02Z",
                 },
             },
             json.loads(stdout.getvalue()),
