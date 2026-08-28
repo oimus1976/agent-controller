@@ -3,9 +3,19 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from .executor import load_policy
-from .inspector import evaluate_scope, get_pr_details, get_pr_issue_comments, inspect_pr
+from .inspector import (
+    evaluate_actions_ci,
+    evaluate_scope,
+    get_actions_runs,
+    get_pr_details,
+    get_pr_files,
+    get_pr_issue_comments,
+    get_pr_reviews,
+    get_pr_review_threads_graphql,
+)
 from .review_request_mutator import (
     codex_review_request_marker,
+    get_authenticated_github_login,
     post_codex_review_request,
 )
 from .scope_evidence import normalize_github_scope_files
@@ -162,6 +172,54 @@ def _validate_exact_pr_snapshot(
     return None
 
 
+def _inspect_review_request(owner: str, repo: str, pr_number: int) -> dict[str, Any]:
+    """Collect only the GitHub facts required for review-request eligibility.
+
+    This deliberately avoids the general inspector's per-comment reaction reads.
+    Review-request eligibility does not consume reactions, and comment-count fan-out
+    would make an untrusted comment flood a GitHub API quota amplifier.
+    """
+
+    pr_data = get_pr_details(owner, repo, pr_number)
+    if not isinstance(pr_data, Mapping):
+        raise ValueError("PR details malformed")
+
+    head = pr_data.get("head")
+    head_sha = head.get("sha") if isinstance(head, Mapping) else None
+
+    reviews = get_pr_reviews(owner, repo, pr_number)
+    issue_comments = get_pr_issue_comments(owner, repo, pr_number)
+    files = get_pr_files(owner, repo, pr_number)
+
+    graphql_error = False
+    try:
+        review_threads_graphql = get_pr_review_threads_graphql(owner, repo, pr_number)
+    except Exception:
+        review_threads_graphql = None
+        graphql_error = True
+
+    actions_ci_status = "UNAVAILABLE"
+    try:
+        actions_response = get_actions_runs(owner, repo, head_sha)
+        actions_ci_status = evaluate_actions_ci(actions_response, head_sha)
+    except Exception:
+        actions_ci_status = "UNAVAILABLE"
+
+    return {
+        "head_sha": head_sha,
+        "draft": pr_data.get("draft"),
+        "merged": pr_data.get("merged"),
+        "state": pr_data.get("state"),
+        "changed_files": pr_data.get("changed_files"),
+        "files": files,
+        "actions_ci_status": actions_ci_status,
+        "graphql_error": graphql_error,
+        "issue_comments": issue_comments,
+        "reviews": reviews,
+        "review_threads_graphql": review_threads_graphql,
+    }
+
+
 def plan_codex_review_request(
     *,
     owner: str,
@@ -205,12 +263,7 @@ def plan_codex_review_request(
 
     if inspection is None:
         try:
-            inspection = inspect_pr(
-                owner,
-                repo,
-                pr_number,
-                scope_policy=dict(scope_policy),
-            )
+            inspection = _inspect_review_request(owner, repo, pr_number)
         except Exception:
             plan["reason"] = "EVIDENCE_FETCH_FAILED"
             return plan
@@ -363,9 +416,8 @@ def execute_codex_review_request(
         result["failure_reason"] = "STALE_HEAD_SHA"
         return result
 
-    # inspect_pr is a multi-request evidence collection. Re-read the lightweight
-    # authoritative PR identity/state after that collection and immediately before
-    # the mutation so a mid-inspection push/state transition cannot be hidden.
+    # Re-read the lightweight authoritative PR identity/state after the multi-request
+    # eligibility sweep and immediately before the mutation.
     try:
         pre_mutation_pr = get_pr_details(owner, repo, pr_number)
     except Exception:
@@ -374,6 +426,31 @@ def execute_codex_review_request(
     pre_mutation_error = _validate_exact_pr_snapshot(pre_mutation_pr, plan["head_sha"])
     if pre_mutation_error is not None:
         result["failure_reason"] = pre_mutation_error
+        return result
+
+    # Local authorization is mutable too. Re-read it after all remote evidence
+    # collection and refuse to mutate if it changed since fresh planning.
+    final_policy = load_policy(policy_path)
+    if not isinstance(final_policy, Mapping) or final_policy != fresh_plan.get("policy_provenance"):
+        result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
+        return result
+    final_trusted_authors = _trusted_request_authors(final_policy)
+    if final_trusted_authors is None:
+        result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
+        return result
+    allowed_actions = final_policy.get("allowed_actions")
+    if not isinstance(allowed_actions, list) or ACTION not in allowed_actions:
+        result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
+        return result
+
+    # Verify the exact token principal before the quota-consuming side effect.
+    try:
+        posting_login = get_authenticated_github_login()
+    except Exception:
+        result["failure_reason"] = "POSTING_IDENTITY_READ_FAILED"
+        return result
+    if posting_login not in set(final_trusted_authors):
+        result["failure_reason"] = "UNTRUSTED_POSTING_IDENTITY"
         return result
 
     result["mutation_attempted"] = True
@@ -397,11 +474,7 @@ def execute_codex_review_request(
             result["failure_reason"] = f"POSTCONDITION_{post_pr_error}"
             return result
 
-        trusted_authors_raw = fresh_plan.get("trusted_review_request_authors")
-        if not isinstance(trusted_authors_raw, list):
-            raise ValueError("trusted request author evidence malformed")
-        trusted_authors = tuple(trusted_authors_raw)
-        found = _has_same_head_request(comments, plan["head_sha"], trusted_authors)
+        found = _has_same_head_request(comments, plan["head_sha"], final_trusted_authors)
         result["postcondition_result"] = found
         if found:
             result["final_outcome"] = "SUCCESS"
