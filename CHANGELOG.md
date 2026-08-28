@@ -44,8 +44,10 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 - deterministic testsで terminal provider success が必要条件だが十分条件ではないこと、Controller explicit target が provider `gitInfo` より優先されること、unchanged / divergent / scope violation / read failure / malformed observation が PASS しないことを検証する。
 - self-review で初期実装の GitHub evidence に観測時刻がない freshness / audit 欠落を検出し、`github_observed_at` を追加して修正。
+- exact-head `efa94a0904217f67fdc6ecbf329ac46b6278ff4b` のCodex reviewで、rename時に`previous_filename`をscope判定していないP1と、malformed changed-file entryがdenied-only policyでPASSし得るP2を検出。
+- P1/P2は、GitHub changed-file entryの`filename` / `changes` / 任意`previous_filename`をscope評価前に検証し、renameのsource/destination双方を既存`evaluate_scope()`へ渡すよう修正。denied sourceからallowed destinationへのrenameとmalformed entryの回帰テストを追加。
 - この項目は Draft PR #107 の未merge実装を記録しており、mainへの採用済み状態を意味しない。
-- final merge gate は CHANGELOG 反映後の exact-head deterministic CI と exact-head independent review。Ready / merge は human-final。
+- final merge gate は review remediation反映後の exact-head deterministic CI と exact-head independent re-review。Ready / merge は human-final。
 
 ---
 
