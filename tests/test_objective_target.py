@@ -19,6 +19,7 @@ from agent_controller.provider_contract import (
 START_SHA = "a" * 40
 HEAD_SHA = "b" * 40
 THREAD_ID = "123e4567-e89b-12d3-a456-426614174000"
+GITHUB_OBSERVED_AT = "2026-08-28T00:00:02Z"
 
 
 def _task(*, repo="oimus1976/example", allowed=("src/*",), denied=()):
@@ -75,7 +76,7 @@ def _observation(
 
 class FakeObserver:
     def __init__(self, observation=None, error=None):
-        self.observation = observation or _observation()
+        self.observation = _observation() if observation is None else observation
         self.error = error
         self.calls = 0
 
@@ -111,21 +112,30 @@ class FakeGitHub:
         return {"merge_base_sha": self.merge_base, "files": self.files}
 
 
+def _run(*, task=None, operation=None, observer=None, target=None, github=None, observed_at=None):
+    return run_objective_target_handoff(
+        task=task or _task(),
+        operation=operation or _operation(),
+        observer=observer or FakeObserver(),
+        target=target or GitHubTargetExpectation(
+            repo="oimus1976/example",
+            ref="feature/task-1",
+        ),
+        github=github or FakeGitHub(),
+        github_observed_at=observed_at or (lambda: GITHUB_OBSERVED_AT),
+    )
+
+
 class ObjectiveTargetHandoffTests(unittest.TestCase):
     def test_success_requires_provider_completion_and_objective_github_verification(self):
         observer = FakeObserver()
         github = FakeGitHub()
 
-        result = run_objective_target_handoff(
-            task=_task(),
-            operation=_operation(),
-            observer=observer,
-            target=GitHubTargetExpectation(repo="oimus1976/example", ref="feature/task-1"),
-            github=github,
-        )
+        result = _run(observer=observer, github=github)
 
         self.assertEqual(VerificationResult.PASS, result.verification_result)
         self.assertEqual(HEAD_SHA, result.target_evidence.resolved_sha)
+        self.assertEqual(GITHUB_OBSERVED_AT, result.target_evidence.github_observed_at)
         self.assertEqual("GITHUB_TARGET_VERIFIED", result.target_evidence.reason)
         self.assertEqual(1, observer.calls)
         self.assertEqual(1, github.ref_calls)
@@ -140,13 +150,7 @@ class ObjectiveTargetHandoffTests(unittest.TestCase):
         )
         github = FakeGitHub()
 
-        result = run_objective_target_handoff(
-            task=_task(),
-            operation=_operation(),
-            observer=observer,
-            target=GitHubTargetExpectation(repo="oimus1976/example", ref="feature/task-1"),
-            github=github,
-        )
+        result = _run(observer=observer, github=github)
 
         self.assertEqual(VerificationResult.BLOCKED, result.verification_result)
         self.assertEqual("OBSERVATION_NOT_ARTIFACT_READY_SUCCESS", result.target_evidence.reason)
@@ -157,11 +161,9 @@ class ObjectiveTargetHandoffTests(unittest.TestCase):
         observer = FakeObserver()
         github = FakeGitHub()
 
-        result = run_objective_target_handoff(
-            task=_task(),
+        result = _run(
             operation=_operation(operation_id="wrong"),
             observer=observer,
-            target=GitHubTargetExpectation(repo="oimus1976/example", ref="feature/task-1"),
             github=github,
         )
 
@@ -174,9 +176,7 @@ class ObjectiveTargetHandoffTests(unittest.TestCase):
         observer = FakeObserver()
         github = FakeGitHub()
 
-        result = run_objective_target_handoff(
-            task=_task(),
-            operation=_operation(),
+        result = _run(
             observer=observer,
             target=GitHubTargetExpectation(repo="oimus1976/other", ref="feature/task-1"),
             github=github,
@@ -191,11 +191,9 @@ class ObjectiveTargetHandoffTests(unittest.TestCase):
         observer = FakeObserver()
         github = FakeGitHub()
 
-        result = run_objective_target_handoff(
+        result = _run(
             task=_task(allowed=(), denied=()),
-            operation=_operation(),
             observer=observer,
-            target=GitHubTargetExpectation(repo="oimus1976/example", ref="feature/task-1"),
             github=github,
         )
 
@@ -217,16 +215,9 @@ class ObjectiveTargetHandoffTests(unittest.TestCase):
                 }
             )
         )
-        github = FakeGitHub()
         target = GitHubTargetExpectation(repo="oimus1976/example", ref="controller-target")
 
-        result = run_objective_target_handoff(
-            task=_task(),
-            operation=_operation(),
-            observer=observer,
-            target=target,
-            github=github,
-        )
+        result = _run(observer=observer, target=target)
 
         self.assertEqual(VerificationResult.PASS, result.verification_result)
         self.assertEqual("controller-target", result.target_evidence.target_ref)
@@ -235,41 +226,21 @@ class ObjectiveTargetHandoffTests(unittest.TestCase):
     def test_unchanged_target_does_not_pass(self):
         github = FakeGitHub(ref_sha=START_SHA)
 
-        result = run_objective_target_handoff(
-            task=_task(),
-            operation=_operation(),
-            observer=FakeObserver(),
-            target=GitHubTargetExpectation(repo="oimus1976/example", ref="feature/task-1"),
-            github=github,
-        )
+        result = _run(github=github)
 
         self.assertEqual(VerificationResult.FAIL, result.verification_result)
         self.assertEqual("TARGET_UNCHANGED_FROM_START", result.target_evidence.reason)
         self.assertEqual(0, github.compare_calls)
 
     def test_divergent_target_does_not_pass(self):
-        github = FakeGitHub(merge_base="d" * 40)
-
-        result = run_objective_target_handoff(
-            task=_task(),
-            operation=_operation(),
-            observer=FakeObserver(),
-            target=GitHubTargetExpectation(repo="oimus1976/example", ref="feature/task-1"),
-            github=github,
-        )
+        result = _run(github=FakeGitHub(merge_base="d" * 40))
 
         self.assertEqual(VerificationResult.FAIL, result.verification_result)
         self.assertEqual("TARGET_DIVERGED_FROM_EXPECTED_START", result.target_evidence.reason)
 
     def test_scope_violation_does_not_pass(self):
-        github = FakeGitHub(files=[{"filename": "secrets/key.txt", "changes": 1}])
-
-        result = run_objective_target_handoff(
-            task=_task(),
-            operation=_operation(),
-            observer=FakeObserver(),
-            target=GitHubTargetExpectation(repo="oimus1976/example", ref="feature/task-1"),
-            github=github,
+        result = _run(
+            github=FakeGitHub(files=[{"filename": "secrets/key.txt", "changes": 1}])
         )
 
         self.assertEqual(VerificationResult.FAIL, result.verification_result)
@@ -279,31 +250,42 @@ class ObjectiveTargetHandoffTests(unittest.TestCase):
         github = FakeGitHub()
         github.ref_error = RuntimeError("network down")
 
-        result = run_objective_target_handoff(
-            task=_task(),
-            operation=_operation(),
-            observer=FakeObserver(),
-            target=GitHubTargetExpectation(repo="oimus1976/example", ref="feature/task-1"),
-            github=github,
-        )
+        result = _run(github=github)
 
         self.assertEqual(VerificationResult.UNCERTAIN, result.verification_result)
         self.assertEqual("GITHUB_REF_READ_UNAVAILABLE", result.target_evidence.reason)
+        self.assertEqual(GITHUB_OBSERVED_AT, result.target_evidence.github_observed_at)
 
     def test_provider_observation_failure_is_uncertain_and_skips_github(self):
         observer = FakeObserver(error=RuntimeError("provider unavailable"))
         github = FakeGitHub()
 
-        result = run_objective_target_handoff(
-            task=_task(),
-            operation=_operation(),
-            observer=observer,
-            target=GitHubTargetExpectation(repo="oimus1976/example", ref="feature/task-1"),
-            github=github,
-        )
+        result = _run(observer=observer, github=github)
 
         self.assertEqual(VerificationResult.UNCERTAIN, result.verification_result)
         self.assertEqual("PROVIDER_OBSERVATION_UNAVAILABLE", result.target_evidence.reason)
+        self.assertEqual(0, github.ref_calls)
+
+    def test_malformed_provider_observation_is_uncertain_and_skips_github(self):
+        observer = FakeObserver(observation={"status": "done"})
+        github = FakeGitHub()
+
+        result = _run(observer=observer, github=github)
+
+        self.assertEqual(VerificationResult.UNCERTAIN, result.verification_result)
+        self.assertEqual("PROVIDER_OBSERVATION_MALFORMED", result.target_evidence.reason)
+        self.assertEqual(0, github.ref_calls)
+
+    def test_github_timestamp_failure_is_uncertain_and_skips_github(self):
+        github = FakeGitHub()
+
+        def fail_timestamp():
+            raise RuntimeError("clock unavailable")
+
+        result = _run(github=github, observed_at=fail_timestamp)
+
+        self.assertEqual(VerificationResult.UNCERTAIN, result.verification_result)
+        self.assertEqual("GITHUB_OBSERVED_AT_UNAVAILABLE", result.target_evidence.reason)
         self.assertEqual(0, github.ref_calls)
 
 
