@@ -1,11 +1,13 @@
 import inspect
 import json
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
 from agent_controller.review_request_mutator import (
     codex_review_request_body,
     codex_review_request_marker,
+    get_authenticated_github_login,
     post_codex_review_request,
 )
 
@@ -28,6 +30,35 @@ class ReviewRequestMutatorTests(unittest.TestCase):
     def test_mutator_exposes_no_generic_comment_body_parameter(self):
         params = inspect.signature(post_codex_review_request).parameters
         self.assertEqual(["owner", "repo", "pr_number", "head_sha"], list(params))
+
+    @patch.dict(os.environ, {"GITHUB_TOKEN": "token"}, clear=False)
+    @patch("agent_controller.review_request_mutator.urllib.request.urlopen")
+    def test_authenticated_login_uses_same_github_token_identity(self, urlopen):
+        response = MagicMock()
+        response.read.return_value = json.dumps({"login": "oimus1976"}).encode()
+        urlopen.return_value.__enter__.return_value = response
+
+        self.assertEqual("oimus1976", get_authenticated_github_login())
+        request = urlopen.call_args.args[0]
+        self.assertEqual("GET", request.get_method())
+        self.assertEqual("https://api.github.com/user", request.full_url)
+        self.assertEqual("Bearer token", request.get_header("Authorization"))
+
+    @patch.dict(os.environ, {}, clear=True)
+    @patch("agent_controller.review_request_mutator.urllib.request.urlopen")
+    def test_authenticated_login_requires_token_before_network(self, urlopen):
+        with self.assertRaises(RuntimeError):
+            get_authenticated_github_login()
+        urlopen.assert_not_called()
+
+    @patch.dict(os.environ, {"GITHUB_TOKEN": "token"}, clear=False)
+    @patch("agent_controller.review_request_mutator.urllib.request.urlopen")
+    def test_authenticated_login_rejects_malformed_response(self, urlopen):
+        response = MagicMock()
+        response.read.return_value = json.dumps({"login": ""}).encode()
+        urlopen.return_value.__enter__.return_value = response
+        with self.assertRaises(RuntimeError):
+            get_authenticated_github_login()
 
     @patch("agent_controller.review_request_mutator.urllib.request.urlopen")
     def test_posts_expected_fixed_comment(self, urlopen):
