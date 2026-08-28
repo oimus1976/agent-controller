@@ -279,7 +279,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 - `6eeded2aa3ea93be7b0dfd7306829377b2e23f13` — provider-neutral contract models を追加。
 - `a3e59e23244f91d033d1550f8a04c1a7233ff9ea` — `AgentAdapter` mandatory surface を3操作へ修正。
-- `816ea118835f20694f7306829377b2e23f13` — provider-neutral contract tests を追加。
+- `816ea118835f20694f730574375c1b5ab98c3620` — provider-neutral contract tests を追加。
 - `1ac0d5c35d8369bc467951df512fb4617ad0c93f` — Jules / Codex dual-provider contract flow proof を追加。
 - `f2133e060e04a9a5b580e1662a8d9f4d0d408623` — pure Jules / Codex observation mapper を追加。
 - `9c6592502b85102d5ffbde4459ffa2ced9dc4cbd` — provider mapper tests を追加。
