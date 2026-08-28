@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from .executor import load_policy
-from .inspector import evaluate_scope, get_pr_issue_comments, inspect_pr
+from .inspector import evaluate_scope, get_pr_details, get_pr_issue_comments, inspect_pr
 from .review_request_mutator import (
     codex_review_request_marker,
     post_codex_review_request,
@@ -26,14 +26,35 @@ def _body_mentions_head(body: Any, head_sha: str) -> bool:
     return isinstance(body, str) and (head_sha in body or head_sha[:10] in body)
 
 
-def _has_same_head_request(issue_comments: list[Mapping[str, Any]], head_sha: str) -> bool:
+def _trusted_request_authors(policy: Mapping[str, Any]) -> tuple[str, ...] | None:
+    value = policy.get("trusted_review_request_authors")
+    if not isinstance(value, list) or not value:
+        return None
+    if any(not isinstance(item, str) or not item for item in value):
+        return None
+    if len(set(value)) != len(value):
+        return None
+    return tuple(value)
+
+
+def _has_same_head_request(
+    issue_comments: list[Mapping[str, Any]],
+    head_sha: str,
+    trusted_authors: tuple[str, ...],
+) -> bool:
     marker = codex_review_request_marker(head_sha)
+    trusted = set(trusted_authors)
     for comment in issue_comments:
         if not isinstance(comment, Mapping):
             raise ValueError("issue comment evidence is malformed")
+        user = comment.get("user")
+        if not isinstance(user, Mapping):
+            raise ValueError("issue comment user evidence is malformed")
+        login = user.get("login")
         body = comment.get("body")
         if (
-            isinstance(body, str)
+            login in trusted
+            and isinstance(body, str)
             and "@codex review" in body.lower()
             and marker in body
         ):
@@ -94,12 +115,51 @@ def _safe_scope_status(
     inspection: Mapping[str, Any], scope_policy: Mapping[str, Any]
 ) -> str:
     files = inspection.get("files")
+    changed_files = inspection.get("changed_files")
     if not isinstance(files, list):
+        return "MALFORMED"
+    if (
+        isinstance(changed_files, bool)
+        or not isinstance(changed_files, int)
+        or changed_files < 0
+        or changed_files != len(files)
+    ):
         return "MALFORMED"
     normalized = normalize_github_scope_files(files)
     if normalized is None:
         return "MALFORMED"
     return evaluate_scope(normalized, dict(scope_policy))
+
+
+def _validate_exact_pr_snapshot(
+    pr_data: Any,
+    expected_head_sha: str,
+) -> str | None:
+    if not isinstance(pr_data, Mapping):
+        return "PR_SNAPSHOT_MALFORMED"
+    head = pr_data.get("head")
+    if not isinstance(head, Mapping):
+        return "PR_SNAPSHOT_MALFORMED"
+    head_sha = head.get("sha")
+    draft = pr_data.get("draft")
+    merged = pr_data.get("merged")
+    state = pr_data.get("state")
+    if (
+        not isinstance(head_sha, str)
+        or not isinstance(draft, bool)
+        or not isinstance(merged, bool)
+        or not isinstance(state, str)
+    ):
+        return "PR_SNAPSHOT_MALFORMED"
+    if head_sha != expected_head_sha:
+        return "STALE_HEAD_SHA"
+    if merged or state == "closed":
+        return "PR_CLOSED_OR_MERGED"
+    if state != "open":
+        return "PR_STATE_NOT_OPEN"
+    if draft is not True:
+        return "PR_NOT_DRAFT"
+    return None
 
 
 def plan_codex_review_request(
@@ -122,6 +182,7 @@ def plan_codex_review_request(
         "scope_status": None,
         "actions_ci_status": None,
         "scope_policy": dict(scope_policy),
+        "trusted_review_request_authors": None,
         "policy_provenance": None,
     }
 
@@ -135,6 +196,12 @@ def plan_codex_review_request(
     if not isinstance(allowed_actions, list) or ACTION not in allowed_actions:
         plan["reason"] = "ACTION_NOT_ALLOWLISTED"
         return plan
+
+    trusted_authors = _trusted_request_authors(policy)
+    if trusted_authors is None:
+        plan["reason"] = "TRUSTED_REQUEST_AUTHORS_MISSING_OR_MALFORMED"
+        return plan
+    plan["trusted_review_request_authors"] = list(trusted_authors)
 
     if inspection is None:
         try:
@@ -190,7 +257,7 @@ def plan_codex_review_request(
         return plan
 
     try:
-        if _has_same_head_request(issue_comments, head_sha):
+        if _has_same_head_request(issue_comments, head_sha, trusted_authors):
             plan["decision"] = "NOOP"
             plan["reason"] = "REVIEW_ALREADY_REQUESTED_FOR_HEAD"
             return plan
@@ -296,6 +363,19 @@ def execute_codex_review_request(
         result["failure_reason"] = "STALE_HEAD_SHA"
         return result
 
+    # inspect_pr is a multi-request evidence collection. Re-read the lightweight
+    # authoritative PR identity/state after that collection and immediately before
+    # the mutation so a mid-inspection push/state transition cannot be hidden.
+    try:
+        pre_mutation_pr = get_pr_details(owner, repo, pr_number)
+    except Exception:
+        result["failure_reason"] = "PRE_MUTATION_TARGET_READ_FAILED"
+        return result
+    pre_mutation_error = _validate_exact_pr_snapshot(pre_mutation_pr, plan["head_sha"])
+    if pre_mutation_error is not None:
+        result["failure_reason"] = pre_mutation_error
+        return result
+
     result["mutation_attempted"] = True
     result["mutation_type"] = ACTION
     try:
@@ -308,14 +388,20 @@ def execute_codex_review_request(
         comments = get_pr_issue_comments(owner, repo, pr_number)
         if not isinstance(comments, list):
             raise ValueError("comments response malformed")
-        marker = codex_review_request_marker(plan["head_sha"])
-        found = any(
-            isinstance(comment, Mapping)
-            and isinstance(comment.get("body"), str)
-            and "@codex review" in comment["body"].lower()
-            and marker in comment["body"]
-            for comment in comments
-        )
+
+        post_pr = get_pr_details(owner, repo, pr_number)
+        post_pr_error = _validate_exact_pr_snapshot(post_pr, plan["head_sha"])
+        if post_pr_error is not None:
+            result["postcondition_result"] = False
+            result["final_outcome"] = "FAILED"
+            result["failure_reason"] = f"POSTCONDITION_{post_pr_error}"
+            return result
+
+        trusted_authors_raw = fresh_plan.get("trusted_review_request_authors")
+        if not isinstance(trusted_authors_raw, list):
+            raise ValueError("trusted request author evidence malformed")
+        trusted_authors = tuple(trusted_authors_raw)
+        found = _has_same_head_request(comments, plan["head_sha"], trusted_authors)
         result["postcondition_result"] = found
         if found:
             result["final_outcome"] = "SUCCESS"
