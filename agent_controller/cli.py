@@ -5,13 +5,19 @@ from datetime import datetime, timezone
 
 from .attention_queue import AttentionCategory
 from .codex_live import CodexSnapshotReadClient
+from .explicit_target_verifier import LiveGitHubTargetReadClient, run_explicit_target_verification
 from .inspector import inspect_pr
 from .watcher import watch_pr_once, watch_pr_loop
 from .executor import plan_action, execute_action
 from .reconciler import reconcile_pr_once
 from .multi_watch import run_attention_watch
 from .provider_adapters import CodexObservationAdapter
-from .provider_contract import ProviderOperationRef
+from .provider_contract import (
+    ObjectiveScope,
+    ProviderOperationRef,
+    TaskBinding,
+    VerificationResult,
+)
 
 
 def _require_single_pr_target(parser, args):
@@ -27,11 +33,44 @@ def _observed_at_now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _task_binding_from_json(data):
+    if not isinstance(data, dict):
+        raise ValueError("task file must contain one JSON object")
+    scope = data.get("objective_scope")
+    if not isinstance(scope, dict):
+        raise ValueError("task file requires objective_scope object")
+    return TaskBinding(
+        controller_task_id=data["controller_task_id"],
+        operation_id=data["operation_id"],
+        provider=data["provider"],
+        repo=data.get("repo"),
+        expected_start_ref=data.get("expected_start_ref"),
+        expected_start_sha=data.get("expected_start_sha"),
+        objective_scope=ObjectiveScope(
+            allowed_paths=scope.get("allowed_paths"),
+            denied_paths=scope.get("denied_paths"),
+        ),
+        requested_capability=data["requested_capability"],
+        allowed_effects=data.get("allowed_effects", ()),
+        forbidden_effects=data.get("forbidden_effects", ()),
+        approval_policy_id=data["approval_policy_id"],
+        created_at=data["created_at"],
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Agent Controller: PR Inspector")
     parser.add_argument(
         "command",
-        choices=["inspect-pr", "watch-pr", "act-pr", "reconcile-pr", "attention-queue", "observe-codex"],
+        choices=[
+            "inspect-pr",
+            "watch-pr",
+            "act-pr",
+            "reconcile-pr",
+            "attention-queue",
+            "observe-codex",
+            "verify-codex-target",
+        ],
         help="Command to run",
     )
     parser.add_argument("--repo", help="Target repository in OWNER/REPO format")
@@ -55,7 +94,7 @@ def main():
 
     # Arguments for one-shot live Codex observation. The source home is only
     # scanned/copied by Controller; app-server runs against a disposable snapshot.
-    parser.add_argument("--thread-id", help="Existing Codex thread id for observe-codex")
+    parser.add_argument("--thread-id", help="Existing Codex thread id for observe-codex/verify-codex-target")
     parser.add_argument(
         "--source-codex-home",
         help="Absolute source Codex home containing the persisted thread; it is never passed directly to app-server",
@@ -63,6 +102,14 @@ def main():
     parser.add_argument(
         "--codex-bin",
         help="Optional explicit path to the Codex executable; otherwise use the runtime bundled/resolved by openai-codex",
+    )
+    parser.add_argument(
+        "--task-file",
+        help="Explicit TaskBinding JSON file for verify-codex-target",
+    )
+    parser.add_argument(
+        "--target-ref",
+        help="Explicit Controller-selected GitHub ref for verify-codex-target",
     )
 
     args = parser.parse_args()
@@ -104,6 +151,47 @@ def main():
             print(json.dumps(observation.to_dict(), indent=2))
         except Exception as e:
             print(f"Error observing Codex thread: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.command == "verify-codex-target":
+        if not args.thread_id:
+            parser.error("verify-codex-target requires --thread-id")
+        if not args.source_codex_home:
+            parser.error("verify-codex-target requires --source-codex-home")
+        if not args.task_file:
+            parser.error("verify-codex-target requires --task-file")
+        if not args.target_ref:
+            parser.error("verify-codex-target requires --target-ref")
+        try:
+            with open(args.task_file, 'r', encoding='utf-8') as handle:
+                task = _task_binding_from_json(json.load(handle))
+            operation = ProviderOperationRef(
+                provider="codex",
+                provider_operation_id=args.thread_id,
+                provider_url=None,
+                controller_task_id=task.controller_task_id,
+                operation_id=task.operation_id,
+            )
+            adapter = CodexObservationAdapter(
+                client=CodexSnapshotReadClient(
+                    source_codex_home=args.source_codex_home,
+                    codex_bin=args.codex_bin,
+                ),
+                observed_at=_observed_at_now,
+            )
+            result = run_explicit_target_verification(
+                task=task,
+                operation=operation,
+                target_ref=args.target_ref,
+                observer=adapter,
+                github=LiveGitHubTargetReadClient(),
+            )
+            print(json.dumps(result.to_dict(), indent=2))
+            if result.verification_result is not VerificationResult.PASS:
+                sys.exit(1)
+        except Exception as e:
+            print(f"Error verifying Codex target: {e}", file=sys.stderr)
             sys.exit(1)
         return
 
