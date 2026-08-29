@@ -267,8 +267,23 @@ class RemediationRequestExecutionTests(unittest.TestCase):
         self.get_threads = threads.start()
         self.get_reviews.return_value = []
         self.get_threads.return_value = [finding_thread()]
+        actions = patch("agent_controller.remediation_request.get_actions_runs")
+        self.get_actions = actions.start()
+        self.get_actions.return_value = {
+            "total_count": 1,
+            "workflow_runs": [
+                {
+                    "id": 1,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "head_sha": HEAD,
+                    "event": "pull_request",
+                }
+            ],
+        }
         self.addCleanup(reviews.stop)
         self.addCleanup(threads.stop)
+        self.addCleanup(actions.stop)
 
     def executable_plan(self):
         return {
@@ -386,6 +401,45 @@ class RemediationRequestExecutionTests(unittest.TestCase):
         self.assertEqual("PASS", result["final_outcome"])
         self.assertEqual("REQUEST_PUBLISHED", result["postcondition_result"])
         self.assertTrue(result["mutation_attempted"])
+
+    @patch("agent_controller.remediation_request.post_codex_remediation_request")
+    @patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="oimus1976")
+    @patch("agent_controller.remediation_request.get_pr_details")
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    @patch("agent_controller.remediation_request.plan_codex_remediation_request")
+    def test_ci_rerun_pending_at_final_gate_blocks_before_post(
+        self, fresh_plan, _load, get_pr, _identity, post
+    ):
+        fresh_plan.return_value = self.executable_plan()
+        get_pr.return_value = safe_pr()
+        self.get_actions.return_value = {
+            "total_count": 1,
+            "workflow_runs": [
+                {
+                    "id": 1,
+                    "status": "queued",
+                    "conclusion": None,
+                    "head_sha": HEAD,
+                    "event": "pull_request",
+                }
+            ],
+        }
+
+        result = execute_codex_remediation_request(
+            plan=self.executable_plan(),
+            owner="oimus1976",
+            repo="agent-controller",
+            pr_number=111,
+            policy_path="policy.json",
+            apply=True,
+        )
+
+        post.assert_not_called()
+        self.get_actions.assert_called_once_with(
+            "oimus1976", "agent-controller", HEAD
+        )
+        self.assertEqual("BLOCKED", result["final_outcome"])
+        self.assertEqual("EXACT_HEAD_CI_NOT_PASS", result["failure_reason"])
 
     @patch("agent_controller.remediation_request.get_pr_issue_comments")
     @patch("agent_controller.remediation_request.post_codex_remediation_request")

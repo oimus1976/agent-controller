@@ -76,6 +76,21 @@ class RemediationConcurrencyBoundaryTests(unittest.TestCase):
     """
 
     @patch(
+        "agent_controller.remediation_request.get_actions_runs",
+        return_value={
+            "total_count": 1,
+            "workflow_runs": [
+                {
+                    "id": 1,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "head_sha": HEAD,
+                    "event": "pull_request",
+                }
+            ],
+        },
+    )
+    @patch(
         "agent_controller.remediation_request.get_pr_review_threads_graphql",
         return_value=[{
             "isResolved": False,
@@ -96,7 +111,16 @@ class RemediationConcurrencyBoundaryTests(unittest.TestCase):
     @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
     @patch("agent_controller.remediation_request.plan_codex_remediation_request")
     def test_simultaneous_instances_can_duplicate_only_bounded_remediation_request(
-        self, fresh_plan, _load, get_pr, _identity, post, comments, _reviews, _threads
+        self,
+        fresh_plan,
+        _load,
+        get_pr,
+        _identity,
+        post,
+        comments,
+        _reviews,
+        _threads,
+        _actions,
     ):
         fresh_plan.return_value = executable_plan()
         get_pr.return_value = safe_pr()

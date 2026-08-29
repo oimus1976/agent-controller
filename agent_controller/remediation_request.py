@@ -545,8 +545,7 @@ def execute_codex_remediation_request(
         result["failure_reason"] = "REVIEW_EVIDENCE_UNAVAILABLE"
         return result
 
-    # Final target/policy gate follows the refreshed review evidence so the PR
-    # snapshot is the last network read before the fixed POST.
+    # Final target/policy gate follows the refreshed review evidence.
     try:
         final_pr = get_pr_details(owner, repo, pr_number)
     except Exception:
@@ -576,6 +575,18 @@ def execute_codex_remediation_request(
         or ACTION not in final_allowed
     ):
         result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
+        return result
+
+    # Actions runs can be re-run without changing the PR head. Refresh the
+    # exact-head pull_request evidence at the final mutation gate so a run that
+    # has become pending or failed cannot leave stale PASS authorization.
+    try:
+        final_actions = get_actions_runs(owner, repo, source_head)
+        final_actions_ci_status = evaluate_actions_ci(final_actions, source_head)
+    except Exception:
+        final_actions_ci_status = "UNAVAILABLE"
+    if final_actions_ci_status != "PASS":
+        result["failure_reason"] = "EXACT_HEAD_CI_NOT_PASS"
         return result
 
     try:
