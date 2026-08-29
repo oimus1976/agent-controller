@@ -40,6 +40,19 @@ def finding_thread(head=HEAD, resolved=False):
     }
 
 
+def non_codex_thread_with_codex_reply(head=HEAD, resolved=False):
+    thread = finding_thread(head=head, resolved=resolved)
+    thread["comments"]["nodes"].insert(
+        0,
+        {
+            "author": {"login": "human-reviewer"},
+            "body": "Human finding",
+            "originalCommit": {"oid": head},
+        },
+    )
+    return thread
+
+
 def inspection(**overrides):
     value = {
         "head_sha": HEAD,
@@ -137,6 +150,43 @@ class RemediationRequestPlanTests(unittest.TestCase):
             scope_policy=SCOPE,
             inspection=inspection(
                 reviews=[review], review_threads_graphql=[finding_thread(resolved=True)]
+            ),
+        )
+        self.assertEqual("NOOP", plan["decision"])
+        self.assertEqual(
+            "NO_UNRESOLVED_CURRENT_HEAD_CODEX_FINDING", plan["reason"]
+        )
+
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    def test_unrelated_thread_does_not_suppress_review_fallback(self, _load):
+        review = {
+            "user": {"login": "chatgpt-codex-connector[bot]"},
+            "commit_id": HEAD,
+            "state": "CHANGES_REQUESTED",
+        }
+        plan = plan_codex_remediation_request(
+            owner="oimus1976",
+            repo="agent-controller",
+            pr_number=111,
+            policy_path="policy.json",
+            scope_policy=SCOPE,
+            inspection=inspection(
+                reviews=[review],
+                review_threads_graphql=[non_codex_thread_with_codex_reply()],
+            ),
+        )
+        self.assertEqual("EXECUTABLE", plan["decision"])
+
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    def test_codex_reply_does_not_make_human_thread_a_codex_finding(self, _load):
+        plan = plan_codex_remediation_request(
+            owner="oimus1976",
+            repo="agent-controller",
+            pr_number=111,
+            policy_path="policy.json",
+            scope_policy=SCOPE,
+            inspection=inspection(
+                review_threads_graphql=[non_codex_thread_with_codex_reply()]
             ),
         )
         self.assertEqual("NOOP", plan["decision"])

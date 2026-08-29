@@ -87,16 +87,39 @@ def _thread_has_current_head_codex_finding(
     if not isinstance(comments, list) or not comments:
         raise ValueError("review thread comments are malformed")
 
-    for comment in comments:
-        if not isinstance(comment, Mapping):
-            raise ValueError("review thread comment is malformed")
-        author = comment.get("author")
-        if not isinstance(author, Mapping) or not _is_codex_login(author.get("login")):
-            continue
-        original_commit = comment.get("originalCommit") or {}
-        if isinstance(original_commit, Mapping) and original_commit.get("oid") == head_sha:
-            return True
-    return False
+    root_comment = comments[0]
+    if not isinstance(root_comment, Mapping):
+        raise ValueError("review thread comment is malformed")
+    author = root_comment.get("author")
+    if not isinstance(author, Mapping) or not _is_codex_login(author.get("login")):
+        return False
+    original_commit = root_comment.get("originalCommit") or {}
+    return (
+        isinstance(original_commit, Mapping)
+        and original_commit.get("oid") == head_sha
+    )
+
+
+def _thread_is_current_head_codex_thread(
+    thread: Mapping[str, Any], head_sha: str
+) -> bool:
+    comments_container = thread.get("comments")
+    if not isinstance(comments_container, Mapping):
+        raise ValueError("review thread comments are malformed")
+    comments = comments_container.get("nodes")
+    if not isinstance(comments, list) or not comments:
+        raise ValueError("review thread comments are malformed")
+    root_comment = comments[0]
+    if not isinstance(root_comment, Mapping):
+        raise ValueError("review thread comment is malformed")
+    author = root_comment.get("author")
+    original_commit = root_comment.get("originalCommit") or {}
+    return (
+        isinstance(author, Mapping)
+        and _is_codex_login(author.get("login"))
+        and isinstance(original_commit, Mapping)
+        and original_commit.get("oid") == head_sha
+    )
 
 
 def _review_is_current_head_codex_finding(
@@ -130,9 +153,11 @@ def _has_current_head_codex_finding(
 
     # A submitted CHANGES_REQUESTED review remains in that state after all of
     # its conversations are resolved. Only use review-level evidence when no
-    # thread evidence exists; otherwise the threads are authoritative for the
-    # finding's current resolution state.
-    if threads:
+    # current-head Codex-originated thread exists; unrelated threads must not
+    # suppress review-level evidence.
+    if any(
+        _thread_is_current_head_codex_thread(thread, head_sha) for thread in threads
+    ):
         return False
 
     for review in reviews:
