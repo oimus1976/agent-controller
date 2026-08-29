@@ -15,6 +15,30 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-08-29 — Bounded Codex remediation request（Issue #111 / Draft PR #112）
+
+関連: ADR Issue #12, ADR Issue #90, Issue #111, Draft PR #112
+
+### Added / changed
+
+- unresolvedなtrusted Codex findingに対し、固定本文 `@codex address that feedback` だけを投稿するbounded action `REQUEST_CODEX_REMEDIATION` を追加。arbitrary prompt/comment capabilityは公開しない。
+- 実行gateをDraft/open/unmerged PR、明示的なnon-base implementation branch、exact current head、exact-head Actions `PASS`、safe scope `SATISFIED`、current-headのunresolved trusted Codex findingに限定。old-head findingやstale evidenceはauthorizationに使用しない。
+- authenticated posting identityのallowlist確認後、POST直前にhead/state/Draft/base/policyをfreshに再検証し、計画時のauthorization evidenceから変化していればwriteせずfail closedする。
+- request publicationのpostconditionはremediation commandが投稿された事実だけを証明し、remediation成功、finding解消、code trust、review approvalを意味しない。
+- trustedなsame-source-head markerによりretry/replay/serial requestをdedupeする。ただしGitHub comment creationにdistributed atomic claimはなく、真に同時の複数instanceに対するglobal exactly-onceは保証しない。
+
+### Observed Codex Cloud boundary
+
+- live observationでは、Codex Cloudを利用するにはrepository environmentの作成が必要だった。またCodexが変更を生成した後も、GitHub上のPR headを変更するには独立したbranch-publication step（`Update branch`）が必要であり、remediation requestの投稿やCloud task完了だけではGitHub headは更新されない。
+- publication後のresulting codeもuntrustedな新しいcandidateであり、更新されたexact headに対するCI、scope検証、independent reviewへ再投入する。以前のheadに対するevidenceを流用しない。
+
+### Authority / safety boundary
+
+- auto thread resolution、automatic retry/polling、local model turn、Ready、mergeは追加しない。request publication後のfinding状態やbranch publicationをControllerが成功として推定しない。
+- Ready / mergeはADR #90に従いhuman-finalのまま。この項目はDraft PR #112の未merge実装を記録しており、mainへの採用済み状態を意味しない。
+
+---
+
 ## 2026-08-28 — Exact-head Codex review request（Issue #109 / Draft PR #110）
 
 関連: ADR Issue #12, ADR Issue #90, Issue #55, Issue #109, Draft PR #110
