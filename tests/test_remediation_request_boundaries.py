@@ -75,6 +75,17 @@ class RemediationConcurrencyBoundaryTests(unittest.TestCase):
     REQUEST_CODEX_REMEDIATION capability, never Ready/merge/LEVEL 3 authority.
     """
 
+    @patch(
+        "agent_controller.remediation_request.get_pr_review_threads_graphql",
+        return_value=[{
+            "isResolved": False,
+            "comments": {"nodes": [{
+                "author": {"login": "chatgpt-codex-connector[bot]"},
+                "originalCommit": {"oid": HEAD},
+            }]},
+        }],
+    )
+    @patch("agent_controller.remediation_request.get_pr_reviews", return_value=[])
     @patch("agent_controller.remediation_request.get_pr_issue_comments")
     @patch("agent_controller.remediation_request.post_codex_remediation_request")
     @patch(
@@ -85,7 +96,7 @@ class RemediationConcurrencyBoundaryTests(unittest.TestCase):
     @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
     @patch("agent_controller.remediation_request.plan_codex_remediation_request")
     def test_simultaneous_instances_can_duplicate_only_bounded_remediation_request(
-        self, fresh_plan, _load, get_pr, _identity, post, comments
+        self, fresh_plan, _load, get_pr, _identity, post, comments, _reviews, _threads
     ):
         fresh_plan.return_value = executable_plan()
         get_pr.return_value = safe_pr()
@@ -114,6 +125,17 @@ class RemediationConcurrencyBoundaryTests(unittest.TestCase):
 
 class RemediationPolicyDriftTests(unittest.TestCase):
     @patch(
+        "agent_controller.remediation_request.get_pr_review_threads_graphql",
+        return_value=[{
+            "isResolved": False,
+            "comments": {"nodes": [{
+                "author": {"login": "chatgpt-codex-connector[bot]"},
+                "originalCommit": {"oid": HEAD},
+            }]},
+        }],
+    )
+    @patch("agent_controller.remediation_request.get_pr_reviews", return_value=[])
+    @patch(
         "agent_controller.remediation_request.get_authenticated_github_login",
         return_value="oimus1976",
     )
@@ -121,7 +143,7 @@ class RemediationPolicyDriftTests(unittest.TestCase):
     @patch("agent_controller.remediation_request.load_policy")
     @patch("agent_controller.remediation_request.plan_codex_remediation_request")
     def test_policy_revocation_after_identity_lookup_blocks_before_post(
-        self, fresh_plan, load_policy, _get_pr, _identity
+        self, fresh_plan, load_policy, _get_pr, _identity, _reviews, _threads
     ):
         fresh_plan.return_value = executable_plan()
         load_policy.side_effect = [POLICY, REVOKED_POLICY]

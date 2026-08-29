@@ -472,6 +472,12 @@ def execute_codex_remediation_request(
 
     fresh_base_ref = fresh_plan.get("base_ref")
     fresh_base_repo = fresh_plan.get("base_repo")
+    if (
+        fresh_base_ref != plan.get("base_ref")
+        or fresh_base_repo != plan.get("base_repo")
+    ):
+        result["failure_reason"] = "STALE_BASE_TARGET"
+        return result
 
     try:
         pre_identity_pr = get_pr_details(owner, repo, pr_number)
@@ -516,8 +522,31 @@ def execute_codex_remediation_request(
         result["failure_reason"] = "GITHUB_POSTING_IDENTITY_NOT_TRUSTED"
         return result
 
-    # Final mutable-state gate after identity resolution. No network read is
-    # permitted between this exact target/policy gate and the fixed POST.
+    # Review-thread resolution is mutable independently of the PR head. Refresh
+    # it after identity lookup so a finding resolved since the evidence sweep no
+    # longer authorizes the write-triggering request.
+    try:
+        final_reviews = get_pr_reviews(owner, repo, pr_number)
+        final_threads = get_pr_review_threads_graphql(owner, repo, pr_number)
+        final_review_inspection = {
+            "reviews": final_reviews,
+            "review_threads_graphql": final_threads,
+        }
+        if not _has_current_head_codex_finding(
+            final_review_inspection, source_head
+        ):
+            result["final_outcome"] = "NOOP"
+            result["failure_reason"] = "NO_UNRESOLVED_CURRENT_HEAD_CODEX_FINDING"
+            return result
+    except (TypeError, ValueError):
+        result["failure_reason"] = "REVIEW_EVIDENCE_MALFORMED"
+        return result
+    except Exception:
+        result["failure_reason"] = "REVIEW_EVIDENCE_UNAVAILABLE"
+        return result
+
+    # Final target/policy gate follows the refreshed review evidence so the PR
+    # snapshot is the last network read before the fixed POST.
     try:
         final_pr = get_pr_details(owner, repo, pr_number)
     except Exception:

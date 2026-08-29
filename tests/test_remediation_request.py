@@ -258,6 +258,18 @@ class RemediationRequestPlanTests(unittest.TestCase):
 
 
 class RemediationRequestExecutionTests(unittest.TestCase):
+    def setUp(self):
+        reviews = patch("agent_controller.remediation_request.get_pr_reviews")
+        threads = patch(
+            "agent_controller.remediation_request.get_pr_review_threads_graphql"
+        )
+        self.get_reviews = reviews.start()
+        self.get_threads = threads.start()
+        self.get_reviews.return_value = []
+        self.get_threads.return_value = [finding_thread()]
+        self.addCleanup(reviews.stop)
+        self.addCleanup(threads.stop)
+
     def executable_plan(self):
         return {
             "repo": REPO,
@@ -287,6 +299,54 @@ class RemediationRequestExecutionTests(unittest.TestCase):
         )
         self.assertEqual("DRY_RUN", result["final_outcome"])
         self.assertFalse(result["mutation_attempted"])
+
+    @patch("agent_controller.remediation_request.plan_codex_remediation_request")
+    def test_base_retarget_before_fresh_sweep_blocks_before_post(self, fresh_plan):
+        retargeted_plan = self.executable_plan()
+        retargeted_plan["base_ref"] = "release"
+        fresh_plan.return_value = retargeted_plan
+        with patch(
+            "agent_controller.remediation_request.post_codex_remediation_request"
+        ) as post:
+            result = execute_codex_remediation_request(
+                plan=self.executable_plan(),
+                owner="oimus1976",
+                repo="agent-controller",
+                pr_number=111,
+                policy_path="policy.json",
+                apply=True,
+            )
+
+        post.assert_not_called()
+        self.assertEqual("STALE_BASE_TARGET", result["failure_reason"])
+
+    @patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="oimus1976")
+    @patch("agent_controller.remediation_request.get_pr_details")
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    @patch("agent_controller.remediation_request.plan_codex_remediation_request")
+    def test_resolved_finding_after_identity_lookup_blocks_before_post(
+        self, fresh_plan, _load, get_pr, _identity
+    ):
+        fresh_plan.return_value = self.executable_plan()
+        get_pr.return_value = safe_pr()
+        self.get_threads.return_value = [finding_thread(resolved=True)]
+        with patch(
+            "agent_controller.remediation_request.post_codex_remediation_request"
+        ) as post:
+            result = execute_codex_remediation_request(
+                plan=self.executable_plan(),
+                owner="oimus1976",
+                repo="agent-controller",
+                pr_number=111,
+                policy_path="policy.json",
+                apply=True,
+            )
+
+        post.assert_not_called()
+        self.assertEqual("NOOP", result["final_outcome"])
+        self.assertEqual(
+            "NO_UNRESOLVED_CURRENT_HEAD_CODEX_FINDING", result["failure_reason"]
+        )
 
     @patch("agent_controller.remediation_request.get_pr_issue_comments")
     @patch("agent_controller.remediation_request.post_codex_remediation_request")
