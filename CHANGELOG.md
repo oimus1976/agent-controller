@@ -24,7 +24,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - unresolvedなtrusted Codex findingに対し、固定本文 `@codex address that feedback` だけを投稿するbounded action `REQUEST_CODEX_REMEDIATION` を追加。arbitrary prompt/comment capabilityは公開しない。
 - 実行gateをDraft/open/unmerged PR、明示的なnon-base implementation branch、exact current head、exact-head Actions `PASS`、safe scope `SATISFIED`、current-headのunresolved trusted Codex findingに限定。old-head findingやstale evidenceはauthorizationに使用しない。
 - authenticated posting identityのallowlist確認後、POST直前にhead/state/Draft/base/policyをfreshに再検証し、計画時のauthorization evidenceから変化していればwriteせずfail closedする。
-- request publicationのpostconditionはremediation commandが投稿された事実だけを証明し、remediation成功、finding解消、code trust、review approvalを意味しない。
+- request publicationのpostconditionは、固定remediation request markerが公開されたことと、その公開後にfreshに再読したPR snapshotがauthorization対象のhead/base/repository/Draft/open targetと一致し続けることの両方を証明する。再読のuncertaintyまたはdrift検出を`REQUEST_PUBLISHED` / `PASS`として報告しない。ただしremediation成功、finding解消、code trust、review approvalを意味しない。
 - trustedなsame-source-head markerによりretry/replay/serial requestをdedupeする。ただしGitHub comment creationにdistributed atomic claimはなく、真に同時の複数instanceに対するglobal exactly-onceは保証しない。
 
 ### Observed Codex Cloud boundary
