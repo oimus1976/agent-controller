@@ -188,6 +188,20 @@ def _validate_safe_pr_snapshot(
     return None
 
 
+def _validate_planned_base_snapshot(
+    pr_data: Mapping[str, Any], planned_base_ref: Any, planned_base_repo: Any
+) -> str | None:
+    base = pr_data.get("base")
+    if not isinstance(base, Mapping):
+        return "PR_SNAPSHOT_MALFORMED"
+    if (
+        base.get("ref") != planned_base_ref
+        or _repo_full_name(base.get("repo")) != planned_base_repo
+    ):
+        return "STALE_BASE_TARGET"
+    return None
+
+
 def _inspect_remediation_request(
     owner: str, repo: str, pr_number: int
 ) -> dict[str, Any]:
@@ -456,6 +470,9 @@ def execute_codex_remediation_request(
         result["failure_reason"] = fresh_plan.get("reason") or "STALE_HEAD_SHA"
         return result
 
+    fresh_base_ref = fresh_plan.get("base_ref")
+    fresh_base_repo = fresh_plan.get("base_repo")
+
     try:
         pre_identity_pr = get_pr_details(owner, repo, pr_number)
     except Exception:
@@ -466,6 +483,12 @@ def execute_codex_remediation_request(
     )
     if snapshot_error is not None:
         result["failure_reason"] = snapshot_error
+        return result
+    base_error = _validate_planned_base_snapshot(
+        pre_identity_pr, fresh_base_ref, fresh_base_repo
+    )
+    if base_error is not None:
+        result["failure_reason"] = base_error
         return result
 
     pre_identity_policy = load_policy(policy_path)
@@ -503,6 +526,12 @@ def execute_codex_remediation_request(
     snapshot_error = _validate_safe_pr_snapshot(final_pr, source_head, expected_repo)
     if snapshot_error is not None:
         result["failure_reason"] = snapshot_error
+        return result
+    base_error = _validate_planned_base_snapshot(
+        final_pr, fresh_base_ref, fresh_base_repo
+    )
+    if base_error is not None:
+        result["failure_reason"] = base_error
         return result
 
     final_policy = load_policy(policy_path)

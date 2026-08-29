@@ -377,6 +377,31 @@ class RemediationRequestExecutionTests(unittest.TestCase):
     @patch("agent_controller.remediation_request.get_pr_details")
     @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
     @patch("agent_controller.remediation_request.plan_codex_remediation_request")
+    def test_base_retarget_after_identity_lookup_blocks_before_post(
+        self, fresh_plan, _load, get_pr, _identity
+    ):
+        fresh_plan.return_value = self.executable_plan()
+        retargeted = safe_pr()
+        retargeted["base"]["ref"] = "release"
+        get_pr.side_effect = [safe_pr(), retargeted]
+        with patch(
+            "agent_controller.remediation_request.post_codex_remediation_request"
+        ) as post:
+            result = execute_codex_remediation_request(
+                plan=self.executable_plan(),
+                owner="oimus1976",
+                repo="agent-controller",
+                pr_number=111,
+                policy_path="policy.json",
+                apply=True,
+            )
+        post.assert_not_called()
+        self.assertEqual("STALE_BASE_TARGET", result["failure_reason"])
+
+    @patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="oimus1976")
+    @patch("agent_controller.remediation_request.get_pr_details")
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    @patch("agent_controller.remediation_request.plan_codex_remediation_request")
     def test_default_branch_drift_after_identity_lookup_blocks_before_post(
         self, fresh_plan, _load, get_pr, _identity
     ):
