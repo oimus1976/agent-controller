@@ -327,6 +327,45 @@ class RemediationRequestExecutionTests(unittest.TestCase):
         self.assertEqual("REQUEST_PUBLISHED", result["postcondition_result"])
         self.assertTrue(result["mutation_attempted"])
 
+    @patch("agent_controller.remediation_request.get_pr_issue_comments")
+    @patch("agent_controller.remediation_request.post_codex_remediation_request")
+    @patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="oimus1976")
+    @patch("agent_controller.remediation_request.get_pr_details")
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    @patch("agent_controller.remediation_request.plan_codex_remediation_request")
+    def test_head_drift_during_post_fails_publication_postcondition(
+        self,
+        fresh_plan,
+        _load,
+        get_pr,
+        _identity,
+        post,
+        comments,
+    ):
+        fresh_plan.return_value = self.executable_plan()
+        get_pr.side_effect = [safe_pr(), safe_pr(), safe_pr(head_sha=NEW_HEAD)]
+        comments.return_value = [
+            {
+                "user": {"login": "oimus1976"},
+                "body": "@codex address that feedback\n\n"
+                + codex_remediation_request_marker(HEAD),
+            }
+        ]
+
+        result = execute_codex_remediation_request(
+            plan=self.executable_plan(),
+            owner="oimus1976",
+            repo="agent-controller",
+            pr_number=111,
+            policy_path="policy.json",
+            apply=True,
+        )
+
+        post.assert_called_once_with("oimus1976", "agent-controller", 111, HEAD)
+        self.assertEqual("BLOCKED", result["final_outcome"])
+        self.assertEqual("STALE_HEAD_SHA", result["failure_reason"])
+        self.assertEqual("FAILED", result["postcondition_result"])
+
     @patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="attacker")
     @patch("agent_controller.remediation_request.get_pr_details")
     @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)

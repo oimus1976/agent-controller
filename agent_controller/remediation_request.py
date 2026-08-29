@@ -570,6 +570,30 @@ def execute_codex_remediation_request(
         result["postcondition_result"] = "UNCERTAIN"
         return result
 
+    # Observing the marker proves publication only for the target state that was
+    # authorized. Revalidate that state after the POST so head/base/state drift
+    # during the mutation is not reported as a successful request publication.
+    try:
+        postcondition_pr = get_pr_details(owner, repo, pr_number)
+    except Exception:
+        result["failure_reason"] = "POSTCONDITION_TARGET_READ_FAILED"
+        result["postcondition_result"] = "UNCERTAIN"
+        return result
+    snapshot_error = _validate_safe_pr_snapshot(
+        postcondition_pr, source_head, expected_repo
+    )
+    if snapshot_error is not None:
+        result["failure_reason"] = snapshot_error
+        result["postcondition_result"] = "FAILED"
+        return result
+    base_error = _validate_planned_base_snapshot(
+        postcondition_pr, fresh_base_ref, fresh_base_repo
+    )
+    if base_error is not None:
+        result["failure_reason"] = base_error
+        result["postcondition_result"] = "FAILED"
+        return result
+
     result["postcondition_result"] = "REQUEST_PUBLISHED"
     result["final_outcome"] = "PASS"
     return result
