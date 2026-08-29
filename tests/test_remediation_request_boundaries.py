@@ -6,6 +6,7 @@ from agent_controller.remediation_request_mutator import codex_remediation_reque
 
 
 HEAD = "a" * 40
+BASE_SHA = "c" * 40
 REPO = "oimus1976/agent-controller"
 POLICY = {
     "allowed_actions": [ACTION],
@@ -33,6 +34,7 @@ def executable_plan():
         "head_ref": "mvp-111-codex-remediation-request",
         "head_repo": REPO,
         "base_ref": "main",
+        "base_sha": BASE_SHA,
         "base_repo": REPO,
         "default_branch": "main",
         "scope_policy": SCOPE,
@@ -49,6 +51,7 @@ def safe_pr():
             "repo": {"full_name": REPO},
         },
         "base": {
+            "sha": BASE_SHA,
             "ref": "main",
             "repo": {"full_name": REPO, "default_branch": "main"},
         },

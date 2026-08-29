@@ -11,6 +11,8 @@ from agent_controller.remediation_request_mutator import codex_remediation_reque
 
 HEAD = "a" * 40
 NEW_HEAD = "b" * 40
+BASE_SHA = "c" * 40
+NEW_BASE_SHA = "d" * 40
 REPO = "oimus1976/agent-controller"
 POLICY = {
     "allowed_actions": [ACTION],
@@ -44,6 +46,7 @@ def inspection(**overrides):
         "head_ref": "mvp-111-codex-remediation-request",
         "head_repo": REPO,
         "base_ref": "main",
+        "base_sha": BASE_SHA,
         "base_repo": REPO,
         "default_branch": "main",
         "draft": True,
@@ -75,6 +78,7 @@ def safe_pr(head_sha=HEAD, head_ref="mvp-111-codex-remediation-request"):
             "repo": {"full_name": REPO},
         },
         "base": {
+            "sha": BASE_SHA,
             "ref": "main",
             "repo": {"full_name": REPO, "default_branch": "main"},
         },
@@ -117,6 +121,28 @@ class RemediationRequestPlanTests(unittest.TestCase):
             self.assertEqual(
                 "NO_UNRESOLVED_CURRENT_HEAD_CODEX_FINDING", plan["reason"]
             )
+
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    def test_resolved_threads_override_stale_changes_requested_review(self, _load):
+        review = {
+            "user": {"login": "chatgpt-codex-connector[bot]"},
+            "commit_id": HEAD,
+            "state": "CHANGES_REQUESTED",
+        }
+        plan = plan_codex_remediation_request(
+            owner="oimus1976",
+            repo="agent-controller",
+            pr_number=111,
+            policy_path="policy.json",
+            scope_policy=SCOPE,
+            inspection=inspection(
+                reviews=[review], review_threads_graphql=[finding_thread(resolved=True)]
+            ),
+        )
+        self.assertEqual("NOOP", plan["decision"])
+        self.assertEqual(
+            "NO_UNRESOLVED_CURRENT_HEAD_CODEX_FINDING", plan["reason"]
+        )
 
     @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
     def test_clean_current_head_review_does_not_request_remediation(self, _load):
@@ -296,6 +322,7 @@ class RemediationRequestExecutionTests(unittest.TestCase):
             "head_ref": "mvp-111-codex-remediation-request",
             "head_repo": REPO,
             "base_ref": "main",
+            "base_sha": BASE_SHA,
             "base_repo": REPO,
             "default_branch": "main",
             "scope_policy": SCOPE,
@@ -480,6 +507,47 @@ class RemediationRequestExecutionTests(unittest.TestCase):
         self.assertEqual("STALE_HEAD_SHA", result["failure_reason"])
         self.assertEqual("FAILED", result["postcondition_result"])
 
+    @patch("agent_controller.remediation_request.get_pr_issue_comments")
+    @patch("agent_controller.remediation_request.post_codex_remediation_request")
+    @patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="oimus1976")
+    @patch("agent_controller.remediation_request.get_pr_details")
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    @patch("agent_controller.remediation_request.plan_codex_remediation_request")
+    def test_base_advance_during_post_fails_publication_postcondition(
+        self,
+        fresh_plan,
+        _load,
+        get_pr,
+        _identity,
+        post,
+        comments,
+    ):
+        fresh_plan.return_value = self.executable_plan()
+        advanced = safe_pr()
+        advanced["base"]["sha"] = NEW_BASE_SHA
+        get_pr.side_effect = [safe_pr(), safe_pr(), advanced]
+        comments.return_value = [
+            {
+                "user": {"login": "oimus1976"},
+                "body": "@codex address that feedback\n\n"
+                + codex_remediation_request_marker(HEAD),
+            }
+        ]
+
+        result = execute_codex_remediation_request(
+            plan=self.executable_plan(),
+            owner="oimus1976",
+            repo="agent-controller",
+            pr_number=111,
+            policy_path="policy.json",
+            apply=True,
+        )
+
+        post.assert_called_once_with("oimus1976", "agent-controller", 111, HEAD)
+        self.assertEqual("BLOCKED", result["final_outcome"])
+        self.assertEqual("STALE_BASE_TARGET", result["failure_reason"])
+        self.assertEqual("FAILED", result["postcondition_result"])
+
     @patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="attacker")
     @patch("agent_controller.remediation_request.get_pr_details")
     @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
@@ -537,6 +605,31 @@ class RemediationRequestExecutionTests(unittest.TestCase):
         retargeted = safe_pr()
         retargeted["base"]["ref"] = "release"
         get_pr.side_effect = [safe_pr(), retargeted]
+        with patch(
+            "agent_controller.remediation_request.post_codex_remediation_request"
+        ) as post:
+            result = execute_codex_remediation_request(
+                plan=self.executable_plan(),
+                owner="oimus1976",
+                repo="agent-controller",
+                pr_number=111,
+                policy_path="policy.json",
+                apply=True,
+            )
+        post.assert_not_called()
+        self.assertEqual("STALE_BASE_TARGET", result["failure_reason"])
+
+    @patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="oimus1976")
+    @patch("agent_controller.remediation_request.get_pr_details")
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    @patch("agent_controller.remediation_request.plan_codex_remediation_request")
+    def test_base_advance_after_identity_lookup_blocks_before_post(
+        self, fresh_plan, _load, get_pr, _identity
+    ):
+        fresh_plan.return_value = self.executable_plan()
+        advanced = safe_pr()
+        advanced["base"]["sha"] = NEW_BASE_SHA
+        get_pr.side_effect = [safe_pr(), advanced]
         with patch(
             "agent_controller.remediation_request.post_codex_remediation_request"
         ) as post:

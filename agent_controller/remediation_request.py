@@ -128,6 +128,13 @@ def _has_current_head_codex_finding(
         if _thread_has_current_head_codex_finding(thread, head_sha):
             return True
 
+    # A submitted CHANGES_REQUESTED review remains in that state after all of
+    # its conversations are resolved. Only use review-level evidence when no
+    # thread evidence exists; otherwise the threads are authoritative for the
+    # finding's current resolution state.
+    if threads:
+        return False
+
     for review in reviews:
         if not isinstance(review, Mapping):
             raise ValueError("review evidence is malformed")
@@ -189,7 +196,10 @@ def _validate_safe_pr_snapshot(
 
 
 def _validate_planned_base_snapshot(
-    pr_data: Mapping[str, Any], planned_base_ref: Any, planned_base_repo: Any
+    pr_data: Mapping[str, Any],
+    planned_base_ref: Any,
+    planned_base_repo: Any,
+    planned_base_sha: Any,
 ) -> str | None:
     base = pr_data.get("base")
     if not isinstance(base, Mapping):
@@ -197,6 +207,7 @@ def _validate_planned_base_snapshot(
     if (
         base.get("ref") != planned_base_ref
         or _repo_full_name(base.get("repo")) != planned_base_repo
+        or base.get("sha") != planned_base_sha
     ):
         return "STALE_BASE_TARGET"
     return None
@@ -235,6 +246,7 @@ def _inspect_remediation_request(
         "head_ref": head.get("ref") if isinstance(head, Mapping) else None,
         "head_repo": _repo_full_name(head_repo_data),
         "base_ref": base.get("ref") if isinstance(base, Mapping) else None,
+        "base_sha": base.get("sha") if isinstance(base, Mapping) else None,
         "base_repo": _repo_full_name(base_repo_data),
         "default_branch": _default_branch(base_repo_data),
         "draft": pr_data.get("draft"),
@@ -270,6 +282,7 @@ def plan_codex_remediation_request(
         "head_ref": None,
         "head_repo": None,
         "base_ref": None,
+        "base_sha": None,
         "base_repo": None,
         "default_branch": None,
         "draft": None,
@@ -311,6 +324,7 @@ def plan_codex_remediation_request(
     head_ref = inspection.get("head_ref")
     head_repo = inspection.get("head_repo")
     base_ref = inspection.get("base_ref")
+    base_sha = inspection.get("base_sha")
     base_repo = inspection.get("base_repo")
     default_branch = inspection.get("default_branch")
     draft = inspection.get("draft")
@@ -324,6 +338,7 @@ def plan_codex_remediation_request(
     plan["head_ref"] = head_ref
     plan["head_repo"] = head_repo
     plan["base_ref"] = base_ref
+    plan["base_sha"] = base_sha
     plan["base_repo"] = base_repo
     plan["default_branch"] = default_branch
     plan["draft"] = draft
@@ -338,6 +353,8 @@ def plan_codex_remediation_request(
         or not head_repo
         or not isinstance(base_ref, str)
         or not base_ref
+        or not isinstance(base_sha, str)
+        or len(base_sha) != 40
         or not isinstance(base_repo, str)
         or not base_repo
         or not isinstance(default_branch, str)
@@ -472,9 +489,11 @@ def execute_codex_remediation_request(
 
     fresh_base_ref = fresh_plan.get("base_ref")
     fresh_base_repo = fresh_plan.get("base_repo")
+    fresh_base_sha = fresh_plan.get("base_sha")
     if (
         fresh_base_ref != plan.get("base_ref")
         or fresh_base_repo != plan.get("base_repo")
+        or fresh_base_sha != plan.get("base_sha")
     ):
         result["failure_reason"] = "STALE_BASE_TARGET"
         return result
@@ -491,7 +510,7 @@ def execute_codex_remediation_request(
         result["failure_reason"] = snapshot_error
         return result
     base_error = _validate_planned_base_snapshot(
-        pre_identity_pr, fresh_base_ref, fresh_base_repo
+        pre_identity_pr, fresh_base_ref, fresh_base_repo, fresh_base_sha
     )
     if base_error is not None:
         result["failure_reason"] = base_error
@@ -556,7 +575,7 @@ def execute_codex_remediation_request(
         result["failure_reason"] = snapshot_error
         return result
     base_error = _validate_planned_base_snapshot(
-        final_pr, fresh_base_ref, fresh_base_repo
+        final_pr, fresh_base_ref, fresh_base_repo, fresh_base_sha
     )
     if base_error is not None:
         result["failure_reason"] = base_error
@@ -627,7 +646,7 @@ def execute_codex_remediation_request(
         result["postcondition_result"] = "FAILED"
         return result
     base_error = _validate_planned_base_snapshot(
-        postcondition_pr, fresh_base_ref, fresh_base_repo
+        postcondition_pr, fresh_base_ref, fresh_base_repo, fresh_base_sha
     )
     if base_error is not None:
         result["failure_reason"] = base_error
