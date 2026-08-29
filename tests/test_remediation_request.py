@@ -25,7 +25,8 @@ SCOPE = {
 }
 
 
-def finding_thread(head=HEAD, resolved=False):
+def finding_thread(head=HEAD, resolved=False, review_id=None):
+    review = {"databaseId": review_id} if review_id is not None else None
     return {
         "isResolved": resolved,
         "comments": {
@@ -34,6 +35,7 @@ def finding_thread(head=HEAD, resolved=False):
                     "author": {"login": "chatgpt-codex-connector[bot]"},
                     "body": "P1 finding",
                     "originalCommit": {"oid": head},
+                    "pullRequestReview": review,
                 }
             ]
         },
@@ -138,6 +140,7 @@ class RemediationRequestPlanTests(unittest.TestCase):
     @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
     def test_resolved_threads_override_stale_changes_requested_review(self, _load):
         review = {
+            "id": 101,
             "user": {"login": "chatgpt-codex-connector[bot]"},
             "commit_id": HEAD,
             "state": "CHANGES_REQUESTED",
@@ -149,13 +152,43 @@ class RemediationRequestPlanTests(unittest.TestCase):
             policy_path="policy.json",
             scope_policy=SCOPE,
             inspection=inspection(
-                reviews=[review], review_threads_graphql=[finding_thread(resolved=True)]
+                reviews=[review],
+                review_threads_graphql=[finding_thread(resolved=True, review_id=101)],
             ),
         )
         self.assertEqual("NOOP", plan["decision"])
         self.assertEqual(
             "NO_UNRESOLVED_CURRENT_HEAD_CODEX_FINDING", plan["reason"]
         )
+
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    def test_resolved_thread_only_suppresses_its_originating_review(self, _load):
+        reviews = [
+            {
+                "id": 101,
+                "user": {"login": "chatgpt-codex-connector[bot]"},
+                "commit_id": HEAD,
+                "state": "CHANGES_REQUESTED",
+            },
+            {
+                "id": 202,
+                "user": {"login": "chatgpt-codex-connector[bot]"},
+                "commit_id": HEAD,
+                "state": "CHANGES_REQUESTED",
+            },
+        ]
+        plan = plan_codex_remediation_request(
+            owner="oimus1976",
+            repo="agent-controller",
+            pr_number=111,
+            policy_path="policy.json",
+            scope_policy=SCOPE,
+            inspection=inspection(
+                reviews=reviews,
+                review_threads_graphql=[finding_thread(resolved=True, review_id=101)],
+            ),
+        )
+        self.assertEqual("EXECUTABLE", plan["decision"])
 
     @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
     def test_unrelated_thread_does_not_suppress_review_fallback(self, _load):

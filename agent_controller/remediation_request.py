@@ -100,9 +100,9 @@ def _thread_has_current_head_codex_finding(
     )
 
 
-def _thread_is_current_head_codex_thread(
+def _current_head_codex_thread_review_id(
     thread: Mapping[str, Any], head_sha: str
-) -> bool:
+) -> int | None:
     comments_container = thread.get("comments")
     if not isinstance(comments_container, Mapping):
         raise ValueError("review thread comments are malformed")
@@ -114,12 +114,18 @@ def _thread_is_current_head_codex_thread(
         raise ValueError("review thread comment is malformed")
     author = root_comment.get("author")
     original_commit = root_comment.get("originalCommit") or {}
-    return (
+    if not (
         isinstance(author, Mapping)
         and _is_codex_login(author.get("login"))
         and isinstance(original_commit, Mapping)
         and original_commit.get("oid") == head_sha
-    )
+    ):
+        return None
+    review = root_comment.get("pullRequestReview")
+    if not isinstance(review, Mapping):
+        return None
+    review_id = review.get("databaseId")
+    return review_id if isinstance(review_id, int) and not isinstance(review_id, bool) else None
 
 
 def _review_is_current_head_codex_finding(
@@ -151,19 +157,21 @@ def _has_current_head_codex_finding(
         if _thread_has_current_head_codex_finding(thread, head_sha):
             return True
 
-    # A submitted CHANGES_REQUESTED review remains in that state after all of
-    # its conversations are resolved. Only use review-level evidence when no
-    # current-head Codex-originated thread exists; unrelated threads must not
-    # suppress review-level evidence.
-    if any(
-        _thread_is_current_head_codex_thread(thread, head_sha) for thread in threads
-    ):
-        return False
-
     for review in reviews:
         if not isinstance(review, Mapping):
             raise ValueError("review evidence is malformed")
         if _review_is_current_head_codex_finding(review, head_sha):
+            review_id = review.get("id")
+            # GitHub retains CHANGES_REQUESTED after conversations are resolved.
+            # Suppress this fallback only when a Codex-originated thread can be
+            # associated with this exact review; threads from another review on
+            # the same head are not evidence that this review was resolved.
+            if isinstance(review_id, int) and not isinstance(review_id, bool):
+                if any(
+                    _current_head_codex_thread_review_id(thread, head_sha) == review_id
+                    for thread in threads
+                ):
+                    continue
             return True
     return False
 

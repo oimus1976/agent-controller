@@ -76,6 +76,7 @@ def get_pr_review_threads_graphql(owner, repo, pr_number):
                 nodes {
                   author { login }
                   originalCommit { oid }
+                  pullRequestReview { databaseId }
                   body
                 }
               }
@@ -95,6 +96,7 @@ def get_pr_review_threads_graphql(owner, repo, pr_number):
             nodes {
               author { login }
               originalCommit { oid }
+              pullRequestReview { databaseId }
               body
             }
           }
