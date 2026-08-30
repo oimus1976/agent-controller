@@ -9,6 +9,7 @@ from agent_controller.jules_live import (
     _branch_from_ref,
 )
 from agent_controller.provider_adapters import JulesObservationAdapter
+from agent_controller.provider_artifacts import JulesArtifactAdapter
 from agent_controller.provider_contract import (
     ControllerState,
     ObjectiveScope,
@@ -16,6 +17,7 @@ from agent_controller.provider_contract import (
     TaskBinding,
     TerminalClaim,
 )
+from agent_controller.provider_runtime import JulesAgentAdapter
 
 
 def make_task(
@@ -65,15 +67,34 @@ class TestJulesLiveAdapter(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be a branch ref"):
             _branch_from_ref("refs/pull/1/head")
 
-    def test_missing_api_key_fails_closed_before_network(self):
+    def test_missing_or_malformed_api_key_fails_closed_before_network(self):
         old_key = os.environ.pop("JULES_API_KEY", None)
         try:
             client = JulesApiClient(api_key=None)
             with self.assertRaisesRegex(ValueError, "JULES_API_KEY is required"):
                 client.get_session("session-1")
+
+            for bad_key in ("", "   ", "key\r\nwith_crlf", "key\nwith_newline", "key\x00ctrl"):
+                bad_client = JulesApiClient(api_key=bad_key)
+                with self.assertRaises(ValueError):
+                    bad_client.get_session("session-1")
         finally:
             if old_key is not None:
                 os.environ["JULES_API_KEY"] = old_key
+
+    def test_arbitrary_exception_sanitizes_api_key(self):
+        fake_key = "secret-jules-key-12345"
+
+        def arbitrary_exception_transport(req):
+            raise KeyError(f"Unexpected KeyError with key {fake_key}")
+
+        client = JulesApiClient(api_key=fake_key, transport=arbitrary_exception_transport)
+        with self.assertRaises(RuntimeError) as ctx:
+            client.get_session("session-1")
+
+        err_text = str(ctx.exception)
+        self.assertNotIn(fake_key, err_text)
+        self.assertIn("[REDACTED]", err_text)
 
     def test_api_key_header_sent_and_not_leaked_on_error(self):
         fake_key = "secret-jules-api-key-99999"
@@ -225,10 +246,6 @@ class TestJulesLiveAdapter(unittest.TestCase):
             client.resolve_source("oimus1976/agent-controller"),
             "sources/opaque-source-id-123",
         )
-        self.assertEqual(
-            client.resolve_source("sources/opaque-source-id-123"),
-            "sources/opaque-source-id-123",
-        )
 
     def test_source_resolution_case_insensitive_matching(self):
         def mock_transport(req):
@@ -253,6 +270,14 @@ class TestJulesLiveAdapter(unittest.TestCase):
             client.resolve_source("oimus1976/agent-controller"),
             "sources/opaque-source-id-123",
         )
+
+    def test_source_resolution_rejects_sources_prefix_as_repo(self):
+        client = JulesApiClient(api_key="fake-key")
+        with self.assertRaisesRegex(ValueError, "repo must be in OWNER/REPO format"):
+            client.resolve_source("sources/github.com/oimus1976/agent-controller")
+
+        with self.assertRaisesRegex(ValueError, "repo must be in OWNER/REPO format"):
+            client.resolve_source("sources/opaque-source-id")
 
     def test_source_resolution_fails_closed_on_malformed_entry(self):
         def mock_transport(req):
@@ -373,8 +398,19 @@ class TestJulesLiveAdapter(unittest.TestCase):
             ref_shas={("oimus1976/agent-controller", "refs/heads/main"): "1234567890abcdef1234567890abcdef12345678"}  # lowercase
         )
         dispatch_client = JulesDispatchClient(api_client, github_client=fake_github)
+        adapter = JulesAgentAdapter(
+            dispatch_client=dispatch_client,
+            observation=JulesObservationAdapter(
+                client=JulesReadClient(api_client),
+                observed_at=lambda: "2026-08-24T01:00:00Z",
+            ),
+            artifacts=JulesArtifactAdapter(
+                client=None,  # type: ignore
+                observed_at=lambda: "2026-08-24T01:00:00Z",
+            ),
+        )
 
-        ref = dispatch_client.dispatch(task, prompt="Implement live Jules adapter")
+        ref = adapter.dispatch(task)
 
         self.assertEqual(ref.provider, "jules")
         self.assertEqual(ref.provider_operation_id, "sess-abc-123")
@@ -384,7 +420,7 @@ class TestJulesLiveAdapter(unittest.TestCase):
 
         self.assertEqual(len(captured_requests), 2)  # list_sources + create_session
         sent_body = loads(captured_requests[1].data.decode("utf-8"))
-        self.assertEqual(sent_body["prompt"], "Implement live Jules adapter")
+        self.assertEqual(sent_body["prompt"], "Task task-jules-123: IMPLEMENT")
         self.assertEqual(
             sent_body["sourceContext"]["source"],
             "sources/opaque-source-id-123",

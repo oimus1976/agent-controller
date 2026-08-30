@@ -17,6 +17,8 @@ from .objective_target import (
 )
 from .jules_live import JulesApiClient, JulesDispatchClient, JulesReadClient
 from .provider_adapters import CodexObservationAdapter, JulesObservationAdapter
+from .provider_artifacts import JulesArtifactAdapter
+from .provider_runtime import JulesAgentAdapter
 from .provider_contract import (
     ObjectiveScope,
     ProviderOperationRef,
@@ -145,7 +147,19 @@ def main():
             )
             api_client = JulesApiClient()
             dispatch_client = JulesDispatchClient(api_client)
-            ref = dispatch_client.dispatch(task, prompt=args.prompt)
+            adapter = JulesAgentAdapter(
+                dispatch_client=dispatch_client,
+                observation=JulesObservationAdapter(
+                    client=JulesReadClient(api_client),
+                    observed_at=_observed_at_now,
+                ),
+                artifacts=JulesArtifactAdapter(
+                    client=None,  # type: ignore
+                    observed_at=_observed_at_now,
+                ),
+            )
+            # Dispatch through JulesAgentAdapter to enforce provider-neutral binding validation
+            ref = adapter.dispatch(task)
             print(json.dumps(ref.to_dict(), indent=2))
         except Exception as e:
             print(f"Error dispatching Jules task: {e}", file=sys.stderr)

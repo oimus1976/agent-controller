@@ -51,9 +51,12 @@ class JulesApiClient:
 
     def get_api_key(self) -> str:
         key = self._explicit_api_key or os.environ.get("JULES_API_KEY")
-        if not key or not key.strip():
+        if not key or not isinstance(key, str) or not key.strip():
             raise ValueError("JULES_API_KEY is required for live Jules API operations")
-        return key.strip()
+        clean_key = key.strip()
+        if "\r" in clean_key or "\n" in clean_key or any(ord(c) < 32 or ord(c) == 127 for c in clean_key):
+            raise ValueError("JULES_API_KEY contains invalid control characters or CRLF")
+        return clean_key
 
     def _request(
         self,
@@ -93,8 +96,8 @@ class JulesApiClient:
 
             return json.loads(resp_data.decode("utf-8"))
 
-        except (HTTPError, URLError, OSError, json.JSONDecodeError, RuntimeError) as exc:
-            # Sanitize error message to ensure API key is never leaked
+        except Exception as exc:
+            # Sanitize error message to ensure API key is never leaked for any exception type
             err_msg = str(exc)
             if api_key in err_msg:
                 err_msg = err_msg.replace(api_key, "[REDACTED]")
@@ -150,11 +153,8 @@ class JulesApiClient:
     def resolve_source(self, repo: str) -> str:
         if not repo or not isinstance(repo, str):
             raise ValueError("repo must be a non-empty string")
-        if repo.startswith("sources/"):
-            if repo == "sources/" or "/" in repo[len("sources/") :].strip("/"):
-                raise ValueError(f"invalid source resource name format: {repo!r}")
-            return repo
-
+        if repo.lower().startswith("sources/"):
+            raise ValueError("repo must be in OWNER/REPO format")
         parts = repo.split("/")
         if len(parts) != 2 or not all(parts):
             raise ValueError("repo must be in OWNER/REPO format")

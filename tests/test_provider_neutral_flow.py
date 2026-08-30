@@ -41,9 +41,9 @@ class JulesFixtureAdapter:
     def __init__(self, client=None):
         self.client = client or FixtureReadClient(
             {
-                "status": "AWAITING_PLAN_APPROVAL",
+                "state": "AWAITING_PLAN_APPROVAL",
                 "plan_id": "plan-7",
-                "updated_at": "2026-08-24T01:29:59Z",
+                "updateTime": "2026-08-24T01:29:59Z",
             }
         )
 
@@ -105,9 +105,9 @@ class JulesArtifactFixtureAdapter(JulesFixtureAdapter):
         super().__init__(
             FixtureReadClient(
                 {
-                    "status": "COMPLETED",
+                    "state": "COMPLETED",
                     "artifact_id": "jules-artifact-1",
-                    "updated_at": "2026-08-24T01:34:59Z",
+                    "updateTime": "2026-08-24T01:34:59Z",
                 }
             )
         )
@@ -191,7 +191,7 @@ class TestProviderNeutralFlow(unittest.TestCase):
 
     def test_adapter_observation_reads_client_then_maps(self):
         jules_client = FixtureReadClient(
-            {"status": "RUNNING", "updated_at": "2026-08-24T01:30:00Z"}
+            {"state": "IN_PROGRESS", "updateTime": "2026-08-24T01:30:00Z"}
         )
         codex_client = FixtureReadClient(
             {"status": "running", "updated_at": "2026-08-24T01:30:00Z"}

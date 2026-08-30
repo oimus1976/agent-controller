@@ -13,24 +13,15 @@ from agent_controller.provider_contract import (
 
 _SAFE_NATIVE_VALUES = frozenset(
     {
+        "STATE_UNSPECIFIED",
         "QUEUED",
         "PLANNING",
-        "PLAN_GENERATING",
         "AWAITING_PLAN_APPROVAL",
-        "PLAN_REVIEW_REQUIRED",
-        "IN_PROGRESS",
-        "RUNNING",
-        "EXECUTING",
-        "WORKING",
-        "AWAITING_USER",
         "AWAITING_USER_FEEDBACK",
-        "NEEDS_USER_INPUT",
+        "IN_PROGRESS",
         "PAUSED",
-        "COMPLETED",
-        "SUCCEEDED",
         "FAILED",
-        "ERROR",
-        "STATE_UNSPECIFIED",
+        "COMPLETED",
         "planning",
         "thinking",
         "waiting_for_user",
@@ -122,7 +113,7 @@ def map_jules_observation(
     raw_state: Any,
     observed_at: str,
 ) -> AgentObservation:
-    """Map a Jules session payload or fixture into the provider-neutral observation model."""
+    """Map an official Jules v1alpha session payload into the provider-neutral observation model."""
 
     if not isinstance(raw_state, Mapping):
         return _uncertain(
@@ -134,11 +125,15 @@ def map_jules_observation(
             reason="JULES_RAW_STATE_NOT_MAPPING",
         )
 
-    provider_updated_at = _safe_timestamp(raw_state.get("updated_at")) or _safe_timestamp(
-        raw_state.get("updateTime")
+    provider_updated_at = _safe_timestamp(raw_state.get("updateTime")) or _safe_timestamp(
+        raw_state.get("updated_at")
     )
-    status = _string(raw_state.get("status")) or _string(raw_state.get("state"))
-    if status is None:
+    state = _string(raw_state.get("state"))
+    if state is None:
+        # Fall back to status only if state is absent (for backward compatibility with early fixtures)
+        state = _string(raw_state.get("status"))
+
+    if state is None:
         return _uncertain(
             provider="jules",
             provider_operation_id=provider_operation_id,
@@ -148,7 +143,7 @@ def map_jules_observation(
             reason="JULES_STATUS_MISSING",
         )
 
-    normalized = status.upper()
+    normalized = state.upper()
     common = dict(
         provider="jules",
         provider_operation_id=provider_operation_id,
@@ -158,17 +153,17 @@ def map_jules_observation(
         provider_refs=_refs(raw_state, ("plan_id", "artifact_id", "result_id", "id", "name")),
     )
 
-    if normalized in {"QUEUED", "PLANNING", "PLAN_GENERATING"}:
+    if normalized in {"QUEUED", "PLANNING"}:
         return AgentObservation(mapped_state=ControllerState.PLANNING, **common)
-    if normalized in {"AWAITING_PLAN_APPROVAL", "PLAN_REVIEW_REQUIRED"}:
+    if normalized == "AWAITING_PLAN_APPROVAL":
         return AgentObservation(
             mapped_state=ControllerState.PLAN_REVIEW_REQUIRED,
             awaiting_input=AwaitingInput.PLAN_APPROVAL,
             **common,
         )
-    if normalized in {"IN_PROGRESS", "RUNNING", "EXECUTING", "WORKING"}:
+    if normalized == "IN_PROGRESS":
         return AgentObservation(mapped_state=ControllerState.EXECUTING, **common)
-    if normalized in {"AWAITING_USER_FEEDBACK", "AWAITING_USER", "NEEDS_USER_INPUT"}:
+    if normalized == "AWAITING_USER_FEEDBACK":
         return AgentObservation(
             mapped_state=ControllerState.REVIEW_REQUIRED,
             awaiting_input=AwaitingInput.USER_FEEDBACK,
@@ -179,13 +174,13 @@ def map_jules_observation(
             mapped_state=ControllerState.BLOCKED,
             **common,
         )
-    if normalized in {"COMPLETED", "SUCCEEDED"}:
+    if normalized == "COMPLETED":
         return AgentObservation(
             mapped_state=ControllerState.ARTIFACT_READY,
             terminal_claim=TerminalClaim.SUCCESS,
             **common,
         )
-    if normalized in {"FAILED", "ERROR"}:
+    if normalized == "FAILED":
         return AgentObservation(
             mapped_state=ControllerState.BLOCKED,
             terminal_claim=TerminalClaim.FAILURE,
