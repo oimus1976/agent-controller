@@ -13,19 +13,24 @@ from agent_controller.provider_contract import (
 
 _SAFE_NATIVE_VALUES = frozenset(
     {
+        "QUEUED",
         "PLANNING",
         "PLAN_GENERATING",
         "AWAITING_PLAN_APPROVAL",
         "PLAN_REVIEW_REQUIRED",
+        "IN_PROGRESS",
         "RUNNING",
         "EXECUTING",
         "WORKING",
         "AWAITING_USER",
+        "AWAITING_USER_FEEDBACK",
         "NEEDS_USER_INPUT",
+        "PAUSED",
         "COMPLETED",
         "SUCCEEDED",
         "FAILED",
         "ERROR",
+        "STATE_UNSPECIFIED",
         "planning",
         "thinking",
         "waiting_for_user",
@@ -65,12 +70,12 @@ def _evidence_projection(raw_state: Any) -> Any:
         return {"raw_type": type(raw_state).__name__}
 
     projection = {}
-    for key in ("status", "reason", "result"):
+    for key in ("status", "state", "reason", "result"):
         value = raw_state.get(key)
         if isinstance(value, str) and value in _SAFE_NATIVE_VALUES:
             projection[key] = value
 
-    updated_at = _safe_timestamp(raw_state.get("updated_at"))
+    updated_at = _safe_timestamp(raw_state.get("updated_at")) or _safe_timestamp(raw_state.get("updateTime"))
     if updated_at is not None:
         projection["updated_at"] = updated_at
 
@@ -117,7 +122,7 @@ def map_jules_observation(
     raw_state: Any,
     observed_at: str,
 ) -> AgentObservation:
-    """Map a Jules fixture payload into the provider-neutral observation model."""
+    """Map a Jules session payload or fixture into the provider-neutral observation model."""
 
     if not isinstance(raw_state, Mapping):
         return _uncertain(
@@ -129,8 +134,10 @@ def map_jules_observation(
             reason="JULES_RAW_STATE_NOT_MAPPING",
         )
 
-    provider_updated_at = _safe_timestamp(raw_state.get("updated_at"))
-    status = _string(raw_state.get("status"))
+    provider_updated_at = _safe_timestamp(raw_state.get("updated_at")) or _safe_timestamp(
+        raw_state.get("updateTime")
+    )
+    status = _string(raw_state.get("status")) or _string(raw_state.get("state"))
     if status is None:
         return _uncertain(
             provider="jules",
@@ -148,10 +155,10 @@ def map_jules_observation(
         observed_at=observed_at,
         provider_updated_at=provider_updated_at,
         provider_raw_state=_evidence_projection(raw_state),
-        provider_refs=_refs(raw_state, ("plan_id", "artifact_id", "result_id")),
+        provider_refs=_refs(raw_state, ("plan_id", "artifact_id", "result_id", "id", "name")),
     )
 
-    if normalized in {"PLANNING", "PLAN_GENERATING"}:
+    if normalized in {"QUEUED", "PLANNING", "PLAN_GENERATING"}:
         return AgentObservation(mapped_state=ControllerState.PLANNING, **common)
     if normalized in {"AWAITING_PLAN_APPROVAL", "PLAN_REVIEW_REQUIRED"}:
         return AgentObservation(
@@ -159,12 +166,17 @@ def map_jules_observation(
             awaiting_input=AwaitingInput.PLAN_APPROVAL,
             **common,
         )
-    if normalized in {"RUNNING", "EXECUTING", "WORKING"}:
+    if normalized in {"IN_PROGRESS", "RUNNING", "EXECUTING", "WORKING"}:
         return AgentObservation(mapped_state=ControllerState.EXECUTING, **common)
-    if normalized in {"AWAITING_USER", "NEEDS_USER_INPUT"}:
+    if normalized in {"AWAITING_USER_FEEDBACK", "AWAITING_USER", "NEEDS_USER_INPUT"}:
         return AgentObservation(
             mapped_state=ControllerState.REVIEW_REQUIRED,
             awaiting_input=AwaitingInput.USER_FEEDBACK,
+            **common,
+        )
+    if normalized == "PAUSED":
+        return AgentObservation(
+            mapped_state=ControllerState.BLOCKED,
             **common,
         )
     if normalized in {"COMPLETED", "SUCCEEDED"}:

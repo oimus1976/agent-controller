@@ -238,6 +238,29 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-08-30 — Live official Jules API adapter slice (v1alpha)
+
+関連: ADR Issue #12, ADR Issue #90, Issue #14
+
+### Added / changed
+
+- 既存の `ProviderDispatchClient` および `ProviderReadClient` 抽象の背後に、公式 Jules REST API (`v1alpha`) に直接接続する `JulesApiClient` (`agent_controller/jules_live.py`) を追加。`urllib.request` のみを使用し外部依存を持たない。
+- `JulesDispatchClient` を追加し、明確に指定された `controller_task_id` / `operation_id` / `repo` / `expected_start_ref` / `expected_start_sha` から `POST /v1alpha/sessions` (`requirePlanApproval=True`, `automationMode="AUTOMATION_MODE_UNSPECIFIED"`) を呼び出して `ProviderOperationRef` を生成。
+- `JulesReadClient` を追加し、`GET /v1alpha/sessions/{id}` から生の Jules セッションデータを取り出し。
+- `map_jules_observation` を更新し、公式 `v1alpha` API の `state` フィールド (`QUEUED`, `IN_PROGRESS`, `AWAITING_USER_FEEDBACK`, `PAUSED`) および `updateTime` を認識・マッピング可能に拡張。不明なステータスは `UNCERTAIN` へ fail closed。
+- CLI コマンド `dispatch-jules` および `observe-jules` を追加。
+
+### Safety / credential boundary
+
+- 認証キーは `JULES_API_KEY` 環境変数または明示設定からのみ取得し、`X-Goog-Api-Key` HTTP ヘッダーとして送信。
+- ネットワーク要求前にキーの存在をチェックし、キーが欠落している場合は即座に fail closed。
+- エラーハンドリングにおいて例外メッセージ中の API キー文字列をサニタイズ (`[REDACTED]`) し、キーの漏洩・ログ・出力・永続化を防止。
+- テストおよび CI はインジェクトされた偽のトランスポートを用い、外部の Jules ライブ API に一切依存しない。
+- 検出された `COMPLETED` ステータスは provider の成果物準備完了の主張 (`ARTIFACT_READY` / `TerminalClaim.SUCCESS`) であり、Controller の最終評価 (Controller PASS) や GitHub への自動公開証明ではない。
+- Ready / merge は ADR #90 に従い human-final のまま。
+
+---
+
 ## [Unreleased] — Phase 4C-PN1 provider-neutral proof
 
 ### 2026-08-24 — provider-neutral contract proof を実装中
