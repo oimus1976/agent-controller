@@ -15,6 +15,27 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-08-30 — Codex request amplification observation（Issue #113 / Draft PR #114）
+
+関連: Issue #55, Issue #113, Draft PR #114
+
+### Added / changed
+
+- GitHub-authoritative issue comment / PR review evidenceから、trusted exact-head `@codex review` request、trusted source-head `@codex address that feedback` request、Codex review submissionのexact `commit_id`をread-onlyに集計するobservationを追加。
+- serial multi-head review/remediation loopとsame-head duplicate replayを分離し、distinct reviewed heads、distinct loop heads、per-head counts、duplicate countsをconcise JSONで出力する。
+- standalone read-only CLI `python -m agent_controller.codex_amplification --repo OWNER/REPO --pr N --policy PATH` を追加し、既存policyの `trusted_review_request_authors` を再利用する。
+- malformed / ambiguous GitHub evidenceは `UNCERTAIN` にfail closedし、推測で補完しない。
+
+### Efficiency / authority boundary
+
+- GitHub request数はprovider turn、token、5-hour/weekly allowance、costではない。`provider_turn_count`、token fields、allowance unitsはauthoritative provider/account telemetryがない限りUNKNOWNのままとする。
+- UI scraping、interactive `/status` parsing、token estimation、automatic throttling/model downgrade/provider routing/review skippingを追加しない。
+- provider write、remediation/review trigger、Ready、merge、Update-branch automationを追加しない。read-only observationのみ。
+- PR #112-shaped regression fixtureでserial amplificationとsame-head duplicatesを分離し、deterministic suiteで検証する。
+- この項目はDraft PR #114の未merge実装を記録しており、mainへの採用済み状態を意味しない。
+
+---
+
 ## 2026-08-29 — Bounded Codex remediation request（Issue #111 / Draft PR #112）
 
 関連: ADR Issue #12, ADR Issue #90, Issue #111, Draft PR #112
