@@ -36,8 +36,8 @@ def _body(item: Mapping[str, Any]) -> str | None:
     return body if isinstance(body, str) else None
 
 
-def _marker_shas(body: str, pattern: re.Pattern[str]) -> list[str]:
-    return pattern.findall(body)
+def _marker_shas(body: str, pattern: re.Pattern[str]) -> set[str]:
+    return set(pattern.findall(body))
 
 
 def _duplicate_count(counter: Counter[str]) -> int:
