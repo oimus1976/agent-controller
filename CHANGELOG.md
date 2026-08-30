@@ -203,7 +203,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ### Validation status
 
-- この項目はDraft PR #103の未merge実装を記録しており、main への採用済み状態を意味しない。
+- この項目はDraft PR #103の未merge実装を記録しており、mainへの採用済み状態を意味しない。
 - Ready / merge はADR #90に従いhuman-finalのまま。
 
 ---
