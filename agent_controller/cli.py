@@ -26,6 +26,10 @@ from .review_request import (
     execute_codex_review_request,
     plan_codex_review_request,
 )
+from .remediation_request import (
+    execute_codex_remediation_request,
+    plan_codex_remediation_request,
+)
 
 
 def _require_single_pr_target(parser, args):
@@ -63,6 +67,7 @@ def main():
             "observe-codex",
             "verify-codex-target",
             "request-codex-review",
+            "request-codex-remediation",
         ],
         help="Command to run",
     )
@@ -72,21 +77,16 @@ def main():
     parser.add_argument("--denied-paths", nargs='*', help="List of denied glob patterns for files")
     parser.add_argument("--allow-docs-only", action='store_true', help="Allow PRs that only change documentation/config")
 
-    # Arguments for watch-pr and reconcile-pr
     parser.add_argument("--once", action='store_true', help="Run a single deterministic observation or reconciliation cycle")
     parser.add_argument("--state-file", default=".pr_state.json", help="Path to local state/evidence file")
     parser.add_argument("--interval", type=int, default=60, help="Polling interval in seconds for loop mode")
 
-    # Arguments for bounded GitHub actions and reconcile-pr
     parser.add_argument("--policy", help="Path to explicit local policy JSON file")
     parser.add_argument("--receipts-file", default=".action_receipts.json", help="Path to action receipts file (reconcile-pr)")
     parser.add_argument("--apply", action='store_true', help="Actually perform authorized GitHub writes")
 
-    # Argument for one-shot multi-PR attention aggregation
     parser.add_argument("--targets-file", help="JSON target list for attention-queue")
 
-    # Arguments for one-shot live Codex observation. The source home is only
-    # scanned/copied by Controller; app-server runs against a disposable snapshot.
     parser.add_argument("--thread-id", help="Existing Codex thread id for observe-codex / verify-codex-target")
     parser.add_argument(
         "--source-codex-home",
@@ -97,7 +97,6 @@ def main():
         help="Optional explicit path to the Codex executable; otherwise use the runtime bundled/resolved by openai-codex",
     )
 
-    # Arguments for objective GitHub target verification after provider completion.
     parser.add_argument(
         "--target-ref",
         help="Explicit Controller-owned GitHub branch ref to verify after provider completion",
@@ -232,8 +231,6 @@ def main():
             print(f"Base Branch: {result['base_branch']}")
             print(f"Draft: {result['draft']}")
             print(f"Merged: {result['merged']}")
-
-            # Print more detailed objective evidence as needed
         except Exception as e:
             print(f"Error inspecting PR: {e}", file=sys.stderr)
             sys.exit(1)
@@ -255,11 +252,9 @@ def main():
             plan = plan_action(owner, repo, args.pr, "ENSURE_DRAFT", args.policy)
             print("PLAN:")
             print(json.dumps(plan, indent=2))
-
             result = execute_action(plan, owner, repo, args.pr, apply=args.apply)
             print("EXECUTION:")
             print(json.dumps(result, indent=2))
-
             if result.get("final_outcome") in ["BLOCKED", "FAILED"]:
                 sys.exit(1)
         except Exception as e:
@@ -277,7 +272,6 @@ def main():
             )
             print("PLAN:")
             print(json.dumps(plan, indent=2))
-
             result = execute_codex_review_request(
                 plan=plan,
                 owner=owner,
@@ -288,11 +282,37 @@ def main():
             )
             print("EXECUTION:")
             print(json.dumps(result, indent=2))
-
             if result.get("final_outcome") in ["BLOCKED", "FAILED"]:
                 sys.exit(1)
         except Exception as e:
             print(f"Error requesting Codex review: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif args.command == "request-codex-remediation":
+        try:
+            plan = plan_codex_remediation_request(
+                owner=owner,
+                repo=repo,
+                pr_number=args.pr,
+                policy_path=args.policy,
+                scope_policy=policy,
+            )
+            print("PLAN:")
+            print(json.dumps(plan, indent=2))
+            result = execute_codex_remediation_request(
+                plan=plan,
+                owner=owner,
+                repo=repo,
+                pr_number=args.pr,
+                policy_path=args.policy,
+                apply=args.apply,
+            )
+            print("EXECUTION:")
+            print(json.dumps(result, indent=2))
+            if result.get("final_outcome") in ["BLOCKED", "FAILED"]:
+                sys.exit(1)
+        except Exception as e:
+            print(f"Error requesting Codex remediation: {e}", file=sys.stderr)
             sys.exit(1)
 
     elif args.command == "reconcile-pr":
@@ -300,7 +320,6 @@ def main():
             if not args.once:
                 print("Error: reconcile-pr currently requires --once flag", file=sys.stderr)
                 sys.exit(1)
-
             result = reconcile_pr_once(
                 owner, repo, args.pr,
                 state_file=args.state_file,
@@ -309,7 +328,6 @@ def main():
                 apply=args.apply
             )
             print(json.dumps(result, indent=2))
-
             plan = result.get("action_plan") or {}
             exec_res = result.get("execution_result") or {}
             if plan.get("decision") == "BLOCKED" or exec_res.get("final_outcome") in ["BLOCKED", "FAILED"]:
