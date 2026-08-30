@@ -60,6 +60,10 @@ class TestJulesLiveAdapter(unittest.TestCase):
             _branch_from_ref("")
         with self.assertRaises(ValueError):
             _branch_from_ref("refs/heads/")
+        with self.assertRaisesRegex(ValueError, "must be a branch ref"):
+            _branch_from_ref("refs/tags/v1.0.0")
+        with self.assertRaisesRegex(ValueError, "must be a branch ref"):
+            _branch_from_ref("refs/pull/1/head")
 
     def test_missing_api_key_fails_closed_before_network(self):
         old_key = os.environ.pop("JULES_API_KEY", None)
@@ -162,7 +166,7 @@ class TestJulesLiveAdapter(unittest.TestCase):
             client.list_sources(max_pages=3)
 
     def test_list_sources_malformed_token_fails_closed(self):
-        def mock_transport(req):
+        def mock_transport_int(req):
             return (
                 200,
                 {"Content-Type": "application/json"},
@@ -172,9 +176,23 @@ class TestJulesLiveAdapter(unittest.TestCase):
                 }),
             )
 
-        client = JulesApiClient(api_key="fake-key", transport=mock_transport)
+        client = JulesApiClient(api_key="fake-key", transport=mock_transport_int)
         with self.assertRaisesRegex(RuntimeError, "Malformed 'nextPageToken'"):
             client.list_sources()
+
+        def mock_transport_bool(req):
+            return (
+                200,
+                {"Content-Type": "application/json"},
+                json_bytes({
+                    "sources": [{"name": "sources/src-1"}],
+                    "nextPageToken": False,  # Boolean token
+                }),
+            )
+
+        client_bool = JulesApiClient(api_key="fake-key", transport=mock_transport_bool)
+        with self.assertRaisesRegex(RuntimeError, "Malformed 'nextPageToken'"):
+            client_bool.list_sources()
 
     def test_source_resolution_from_sources_api(self):
         def mock_transport(req):
@@ -210,6 +228,42 @@ class TestJulesLiveAdapter(unittest.TestCase):
             client.resolve_source("sources/opaque-source-id-123"),
             "sources/opaque-source-id-123",
         )
+
+    def test_source_resolution_case_insensitive_matching(self):
+        def mock_transport(req):
+            return (
+                200,
+                {"Content-Type": "application/json"},
+                json_bytes({
+                    "sources": [
+                        {
+                            "name": "sources/opaque-source-id-123",
+                            "githubRepo": {
+                                "owner": "Oimus1976",
+                                "repo": "Agent-Controller",
+                            },
+                        }
+                    ]
+                }),
+            )
+
+        client = JulesApiClient(api_key="fake-key", transport=mock_transport)
+        self.assertEqual(
+            client.resolve_source("oimus1976/agent-controller"),
+            "sources/opaque-source-id-123",
+        )
+
+    def test_source_resolution_fails_closed_on_malformed_entry(self):
+        def mock_transport(req):
+            return (
+                200,
+                {"Content-Type": "application/json"},
+                json_bytes({"sources": ["not-a-mapping"]}),
+            )
+
+        client = JulesApiClient(api_key="fake-key", transport=mock_transport)
+        with self.assertRaisesRegex(RuntimeError, "Malformed source entry"):
+            client.resolve_source("oimus1976/agent-controller")
 
     def test_source_resolution_fails_closed_on_zero_or_ambiguous_matches(self):
         def mock_transport(req):
@@ -274,9 +328,9 @@ class TestJulesLiveAdapter(unittest.TestCase):
             )
 
         api_client = JulesApiClient(api_key="fake-key", transport=mock_transport)
-        task = make_task()
+        task = make_task(sha="1234567890ABCDEF1234567890ABCDEF12345678")  # uppercase sha
         fake_github = FakeGitHubClient(
-            ref_shas={("oimus1976/agent-controller", "refs/heads/main"): task.expected_start_sha}
+            ref_shas={("oimus1976/agent-controller", "refs/heads/main"): "1234567890abcdef1234567890abcdef12345678"}  # lowercase
         )
         dispatch_client = JulesDispatchClient(api_client, github_client=fake_github)
 

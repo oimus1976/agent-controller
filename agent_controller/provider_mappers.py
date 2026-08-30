@@ -79,7 +79,7 @@ def _evidence_projection(raw_state: Any) -> Any:
     if updated_at is not None:
         projection["updated_at"] = updated_at
 
-    for key in ("plan_id", "artifact_id", "result_id", "task_id"):
+    for key in ("plan_id", "artifact_id", "result_id", "task_id", "id", "name"):
         value = _safe_id(raw_state.get(key))
         if value is not None:
             projection[key] = value

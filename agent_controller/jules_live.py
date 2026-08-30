@@ -21,6 +21,8 @@ def _branch_from_ref(ref: str) -> str:
         branch = ref[len("refs/heads/") :]
     elif ref.startswith("heads/"):
         branch = ref[len("heads/") :]
+    elif ref.startswith("refs/"):
+        raise ValueError(f"ref must be a branch ref (refs/heads/* or heads/*), got: {ref!r}")
     else:
         branch = ref
     if not branch or branch.startswith("/") or branch.endswith("/"):
@@ -126,12 +128,14 @@ class JulesApiClient:
 
             all_sources.extend(page_sources)
 
-            next_token = res.get("nextPageToken")
-            if not next_token:
+            if "nextPageToken" in res:
+                next_token = res["nextPageToken"]
+                if next_token is None or next_token == "":
+                    break
+                if not isinstance(next_token, str) or isinstance(next_token, bool):
+                    raise RuntimeError("Malformed 'nextPageToken' in Jules sources API response")
+            else:
                 break
-
-            if not isinstance(next_token, str):
-                raise RuntimeError("Malformed 'nextPageToken' in Jules sources API response")
 
             if next_token in seen_page_tokens:
                 raise RuntimeError(f"Detected pagination cycle with nextPageToken: {next_token!r}")
@@ -145,24 +149,31 @@ class JulesApiClient:
         if not repo or not isinstance(repo, str):
             raise ValueError("repo must be a non-empty string")
         if repo.startswith("sources/"):
+            if repo == "sources/" or "/" in repo[len("sources/") :].strip("/"):
+                raise ValueError(f"invalid source resource name format: {repo!r}")
             return repo
 
         parts = repo.split("/")
         if len(parts) != 2 or not all(parts):
             raise ValueError("repo must be in OWNER/REPO format")
-        owner, name = parts[0], parts[1]
+        owner, name = parts[0].lower(), parts[1].lower()
 
         sources = self.list_sources()
         matched = []
         for src in sources:
             if not isinstance(src, Mapping):
-                continue
+                raise RuntimeError("Malformed source entry in Jules sources API response")
             gh_repo = src.get("githubRepo")
             if not isinstance(gh_repo, Mapping):
                 continue
             src_owner = gh_repo.get("owner")
             src_name = gh_repo.get("repo")
-            if src_owner == owner and src_name == name:
+            if (
+                isinstance(src_owner, str)
+                and isinstance(src_name, str)
+                and src_owner.lower() == owner
+                and src_name.lower() == name
+            ):
                 src_resource_name = src.get("name")
                 if isinstance(src_resource_name, str) and src_resource_name:
                     matched.append(src_resource_name)
@@ -241,7 +252,7 @@ class JulesDispatchClient:
 
         # Verify expected starting SHA against explicit GitHub target before dispatch
         current_sha = self.github_client.get_ref_sha(task.repo, task.expected_start_ref)
-        if not current_sha or current_sha != task.expected_start_sha:
+        if not current_sha or current_sha.lower() != task.expected_start_sha.lower():
             raise RuntimeError(
                 f"GitHub starting ref {task.expected_start_ref!r} head SHA {current_sha!r} "
                 f"does not match expected starting SHA {task.expected_start_sha!r}"
