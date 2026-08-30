@@ -1,6 +1,10 @@
 import unittest
+from unittest.mock import patch
 
-from agent_controller.codex_amplification import analyze_codex_request_amplification
+from agent_controller.codex_amplification import (
+    analyze_codex_request_amplification,
+    collect_codex_request_amplification,
+)
 
 
 OWNER = "oimus1976"
@@ -182,6 +186,68 @@ class CodexAmplificationTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "OBSERVED")
         self.assertEqual(result["codex_review_submission_count"], 0)
+
+    @patch("agent_controller.codex_amplification.get_pr_reviews")
+    @patch("agent_controller.codex_amplification.get_pr_issue_comments")
+    @patch("agent_controller.codex_amplification.load_policy")
+    def test_collect_reads_each_github_surface_once(
+        self, mock_policy, mock_comments, mock_reviews
+    ):
+        head = "7" * 40
+        mock_policy.return_value = {"trusted_review_request_authors": [OWNER]}
+        mock_comments.return_value = [issue_comment(review_request(head))]
+        mock_reviews.return_value = [
+            review("Codex review", login=CODEX, commit_id=head, review_id=99)
+        ]
+
+        result = collect_codex_request_amplification(
+            owner="oimus1976",
+            repo="agent-controller",
+            pr_number=112,
+            policy_path="policy.json",
+        )
+
+        self.assertEqual(result["status"], "OBSERVED")
+        self.assertEqual(result["repo"], "oimus1976/agent-controller")
+        self.assertEqual(result["pr"], 112)
+        self.assertEqual(result["review_request_count"], 1)
+        self.assertEqual(result["codex_review_submission_count"], 1)
+        mock_comments.assert_called_once_with("oimus1976", "agent-controller", 112)
+        mock_reviews.assert_called_once_with("oimus1976", "agent-controller", 112)
+
+    @patch("agent_controller.codex_amplification.get_pr_issue_comments")
+    @patch("agent_controller.codex_amplification.load_policy")
+    def test_collect_github_read_failure_is_uncertain(self, mock_policy, mock_comments):
+        mock_policy.return_value = {"trusted_review_request_authors": [OWNER]}
+        mock_comments.side_effect = RuntimeError("offline")
+
+        result = collect_codex_request_amplification(
+            owner="oimus1976",
+            repo="agent-controller",
+            pr_number=112,
+            policy_path="policy.json",
+        )
+
+        self.assertEqual(result["status"], "UNCERTAIN")
+        self.assertIn("EVIDENCE_FETCH_FAILED", result["reason"])
+
+    @patch("agent_controller.codex_amplification.get_pr_issue_comments")
+    @patch("agent_controller.codex_amplification.load_policy")
+    def test_collect_missing_policy_stops_before_github_reads(
+        self, mock_policy, mock_comments
+    ):
+        mock_policy.return_value = None
+
+        result = collect_codex_request_amplification(
+            owner="oimus1976",
+            repo="agent-controller",
+            pr_number=112,
+            policy_path="missing.json",
+        )
+
+        self.assertEqual(result["status"], "UNCERTAIN")
+        self.assertEqual(result["reason"], "MISSING_OR_MALFORMED_POLICY")
+        mock_comments.assert_not_called()
 
 
 if __name__ == "__main__":
