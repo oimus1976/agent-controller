@@ -61,6 +61,8 @@ def analyze_codex_request_amplification(
     if any(not isinstance(author, str) or not author for author in trusted_request_authors):
         raise ValueError("trusted_request_authors is malformed")
 
+    issue_comments_list = list(issue_comments)
+    reviews_list = list(reviews)
     trusted = set(trusted_request_authors)
     review_requests: Counter[str] = Counter()
     remediation_requests: Counter[str] = Counter()
@@ -68,8 +70,8 @@ def analyze_codex_request_amplification(
     uncertainties: list[str] = []
 
     request_surfaces = (
-        ("issue_comment", list(issue_comments)),
-        ("review", list(reviews)),
+        ("issue_comment", issue_comments_list),
+        ("review", reviews_list),
     )
 
     for surface_name, items in request_surfaces:
@@ -104,7 +106,7 @@ def analyze_codex_request_amplification(
                         continue
                     remediation_requests[sha] += 1
 
-    for index, review in enumerate(list(reviews)):
+    for index, review in enumerate(reviews_list):
         if not isinstance(review, Mapping):
             continue
         login = _login(review)
