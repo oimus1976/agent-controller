@@ -240,7 +240,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ## 2026-08-30 — Live official Jules API adapter slice (v1alpha)
 
-関連: ADR Issue #12, ADR Issue #90, Issue #14
+関連: ADR Issue #12, ADR Issue #90, Issue #116
 
 ### Added / changed
 

@@ -166,33 +166,34 @@ class TestJulesLiveAdapter(unittest.TestCase):
             client.list_sources(max_pages=3)
 
     def test_list_sources_malformed_token_fails_closed(self):
-        def mock_transport_int(req):
+        for bad_token in (12345, False, True, None, "", "   "):
+            def mock_transport(req):
+                return (
+                    200,
+                    {"Content-Type": "application/json"},
+                    json_bytes({
+                        "sources": [{"name": "sources/src-1"}],
+                        "nextPageToken": bad_token,
+                    }),
+                )
+
+            client = JulesApiClient(api_key="fake-key", transport=mock_transport)
+            with self.assertRaisesRegex(RuntimeError, "Malformed 'nextPageToken'"):
+                client.list_sources()
+
+    def test_list_sources_omitted_next_page_token_completes_cleanly(self):
+        def mock_transport(req):
             return (
                 200,
                 {"Content-Type": "application/json"},
                 json_bytes({
                     "sources": [{"name": "sources/src-1"}],
-                    "nextPageToken": 12345,  # Non-string token
                 }),
             )
 
-        client = JulesApiClient(api_key="fake-key", transport=mock_transport_int)
-        with self.assertRaisesRegex(RuntimeError, "Malformed 'nextPageToken'"):
-            client.list_sources()
-
-        def mock_transport_bool(req):
-            return (
-                200,
-                {"Content-Type": "application/json"},
-                json_bytes({
-                    "sources": [{"name": "sources/src-1"}],
-                    "nextPageToken": False,  # Boolean token
-                }),
-            )
-
-        client_bool = JulesApiClient(api_key="fake-key", transport=mock_transport_bool)
-        with self.assertRaisesRegex(RuntimeError, "Malformed 'nextPageToken'"):
-            client_bool.list_sources()
+        client = JulesApiClient(api_key="fake-key", transport=mock_transport)
+        sources = client.list_sources()
+        self.assertEqual(len(sources), 1)
 
     def test_source_resolution_from_sources_api(self):
         def mock_transport(req):
@@ -263,6 +264,45 @@ class TestJulesLiveAdapter(unittest.TestCase):
 
         client = JulesApiClient(api_key="fake-key", transport=mock_transport)
         with self.assertRaisesRegex(RuntimeError, "Malformed source entry"):
+            client.resolve_source("oimus1976/agent-controller")
+
+    def test_cross_page_ambiguous_sources_fails_closed(self):
+        def mock_transport(req):
+            if "pageToken=token-page-2" in req.full_url:
+                return (
+                    200,
+                    {"Content-Type": "application/json"},
+                    json_bytes({
+                        "sources": [
+                            {
+                                "name": "sources/opaque-source-id-456",
+                                "githubRepo": {
+                                    "owner": "oimus1976",
+                                    "repo": "agent-controller",
+                                },
+                            }
+                        ]
+                    }),
+                )
+            return (
+                200,
+                {"Content-Type": "application/json"},
+                json_bytes({
+                    "sources": [
+                        {
+                            "name": "sources/opaque-source-id-123",
+                            "githubRepo": {
+                                "owner": "oimus1976",
+                                "repo": "agent-controller",
+                            },
+                        }
+                    ],
+                    "nextPageToken": "token-page-2",
+                }),
+            )
+
+        client = JulesApiClient(api_key="fake-key", transport=mock_transport)
+        with self.assertRaisesRegex(RuntimeError, "Ambiguous Jules sources"):
             client.resolve_source("oimus1976/agent-controller")
 
     def test_source_resolution_fails_closed_on_zero_or_ambiguous_matches(self):
@@ -375,6 +415,50 @@ class TestJulesLiveAdapter(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "prompt must be a non-empty string when specified"):
             dispatch_client.dispatch(task, prompt="   ")
+
+    def test_sha_drift_between_reads_prevents_jules_session_creation(self):
+        created_sessions = []
+
+        def mock_transport(req):
+            if req.method == "POST":
+                created_sessions.append(req)
+            if req.method == "GET" and "v1alpha/sources" in req.full_url:
+                return (
+                    200,
+                    {"Content-Type": "application/json"},
+                    json_bytes({
+                        "sources": [
+                            {
+                                "name": "sources/opaque-source-id-123",
+                                "githubRepo": {
+                                    "owner": "oimus1976",
+                                    "repo": "agent-controller",
+                                },
+                            }
+                        ]
+                    }),
+                )
+            return (200, {}, json_bytes({}))
+
+        api_client = JulesApiClient(api_key="fake-key", transport=mock_transport)
+        task = make_task(sha="initial-matching-sha")
+
+        class DriftGitHubClient:
+            def __init__(self):
+                self.call_count = 0
+
+            def get_ref_sha(self, repo, ref):
+                self.call_count += 1
+                if self.call_count == 1:
+                    return "initial-matching-sha"
+                return "drifted-different-sha"
+
+        dispatch_client = JulesDispatchClient(api_client, github_client=DriftGitHubClient())
+
+        with self.assertRaisesRegex(RuntimeError, "head SHA drifted"):
+            dispatch_client.dispatch(task)
+
+        self.assertEqual(len(created_sessions), 0)
 
     def test_starting_sha_mismatch_prevents_jules_session_creation(self):
         created_sessions = []

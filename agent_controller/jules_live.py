@@ -130,9 +130,11 @@ class JulesApiClient:
 
             if "nextPageToken" in res:
                 next_token = res["nextPageToken"]
-                if next_token is None or next_token == "":
-                    break
-                if not isinstance(next_token, str) or isinstance(next_token, bool):
+                if (
+                    not isinstance(next_token, str)
+                    or isinstance(next_token, bool)
+                    or not next_token.strip()
+                ):
                     raise RuntimeError("Malformed 'nextPageToken' in Jules sources API response")
             else:
                 break
@@ -267,6 +269,14 @@ class JulesDispatchClient:
 
         starting_branch = _branch_from_ref(task.expected_start_ref)
         source = self.api_client.resolve_source(task.repo)
+
+        # Re-verify expected starting SHA immediately before create_session
+        second_sha = self.github_client.get_ref_sha(task.repo, task.expected_start_ref)
+        if not second_sha or second_sha.lower() != task.expected_start_sha.lower():
+            raise RuntimeError(
+                f"GitHub starting ref {task.expected_start_ref!r} head SHA drifted to {second_sha!r} "
+                f"(expected {task.expected_start_sha!r}) before Jules session creation"
+            )
 
         effective_prompt = prompt or self.default_prompt or f"Task {task.controller_task_id}: {task.requested_capability}"
 
