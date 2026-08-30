@@ -38,12 +38,7 @@ def remediation_request(sha):
 
 class CodexAmplificationTests(unittest.TestCase):
     def test_serial_multi_head_loop_is_amplification_not_duplicate_replay(self):
-        heads = [
-            "a" * 40,
-            "b" * 40,
-            "c" * 40,
-            "d" * 40,
-        ]
+        heads = ["a" * 40, "b" * 40, "c" * 40, "d" * 40]
         comments = [
             issue_comment(review_request(heads[0])),
             issue_comment(remediation_request(heads[0])),
@@ -106,6 +101,36 @@ class CodexAmplificationTests(unittest.TestCase):
         self.assertEqual(result["same_head_duplicate_review_request_count"], 1)
         self.assertEqual(result["same_head_duplicate_remediation_request_count"], 1)
         self.assertEqual(result["same_head_duplicate_codex_review_submission_count"], 1)
+
+    def test_repeated_marker_inside_one_event_counts_once(self):
+        head = "5" * 40
+        marker = f"<!-- agent-controller:codex-review-request head={head} -->"
+        result = analyze_codex_request_amplification(
+            issue_comments=[issue_comment(f"@codex review\n\n{marker}\n{marker}")],
+            reviews=[],
+            trusted_request_authors=(OWNER,),
+        )
+
+        self.assertEqual(result["review_request_count"], 1)
+        self.assertEqual(result["same_head_duplicate_review_request_count"], 0)
+
+    def test_one_shot_review_iterable_is_materialized_once(self):
+        head = "6" * 40
+        reviews = (
+            item
+            for item in [
+                review(review_request(head), review_id=1),
+                review("Codex review", login=CODEX, commit_id=head, review_id=2),
+            ]
+        )
+        result = analyze_codex_request_amplification(
+            issue_comments=(),
+            reviews=reviews,
+            trusted_request_authors=(OWNER,),
+        )
+
+        self.assertEqual(result["review_request_count"], 1)
+        self.assertEqual(result["codex_review_submission_count"], 1)
 
     def test_untrusted_marker_is_not_counted(self):
         head = "2" * 40
