@@ -128,11 +128,7 @@ def map_jules_observation(
     provider_updated_at = _safe_timestamp(raw_state.get("updateTime")) or _safe_timestamp(
         raw_state.get("updated_at")
     )
-    state = _string(raw_state.get("state"))
-    if state is None:
-        # Fall back to status only if state is absent (for backward compatibility with early fixtures)
-        state = _string(raw_state.get("status"))
-
+    state = _string(raw_state.get("state")) or _string(raw_state.get("status"))
     if state is None:
         return _uncertain(
             provider="jules",

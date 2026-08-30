@@ -153,10 +153,8 @@ class JulesApiClient:
     def resolve_source(self, repo: str) -> str:
         if not repo or not isinstance(repo, str):
             raise ValueError("repo must be a non-empty string")
-        if repo.lower().startswith("sources/"):
-            raise ValueError("repo must be in OWNER/REPO format")
         parts = repo.split("/")
-        if len(parts) != 2 or not all(parts):
+        if len(parts) != 2 or not all(parts) or parts[0].lower() == "sources":
             raise ValueError("repo must be in OWNER/REPO format")
         owner, name = parts[0].lower(), parts[1].lower()
 
@@ -253,7 +251,7 @@ class JulesDispatchClient:
             raise ValueError("TaskBinding.expected_start_sha is required for Jules dispatch")
 
         parts = task.repo.split("/")
-        if len(parts) != 2 or not all(parts):
+        if len(parts) != 2 or not all(parts) or parts[0].lower() == "sources":
             raise ValueError("TaskBinding.repo must be in OWNER/REPO format")
 
         if prompt is not None and (not isinstance(prompt, str) or not prompt.strip()):

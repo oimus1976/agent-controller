@@ -159,7 +159,7 @@ def main():
                 ),
             )
             # Dispatch through JulesAgentAdapter to enforce provider-neutral binding validation
-            ref = adapter.dispatch(task)
+            ref = adapter.dispatch(task, prompt=args.prompt)
             print(json.dumps(ref.to_dict(), indent=2))
         except Exception as e:
             print(f"Error dispatching Jules task: {e}", file=sys.stderr)

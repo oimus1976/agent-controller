@@ -118,7 +118,7 @@ class TestProviderMappers(unittest.TestCase):
         secret = "Bearer-super-secret"
         jules = map_jules_observation(
             provider_operation_id="jules-1",
-            raw_state={"status": secret},
+            raw_state={"state": secret},
             observed_at="2026-08-24T01:35:00Z",
         )
         codex = map_codex_observation(
