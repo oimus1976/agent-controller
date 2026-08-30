@@ -25,7 +25,7 @@ SCOPE = {
 }
 
 
-def finding_thread(head=HEAD, resolved=False, review_id=None):
+def finding_thread(head=HEAD, resolved=False, review_id=101):
     review = {"databaseId": review_id} if review_id is not None else None
     return {
         "isResolved": resolved,
@@ -78,7 +78,14 @@ def inspection(**overrides):
         "actions_ci_status": "PASS",
         "graphql_error": False,
         "issue_comments": [],
-        "reviews": [],
+        "reviews": [
+            {
+                "id": 101,
+                "user": {"login": "chatgpt-codex-connector[bot]"},
+                "commit_id": HEAD,
+                "state": "COMMENTED",
+            }
+        ],
         "review_threads_graphql": [finding_thread()],
     }
     value.update(overrides)
@@ -130,7 +137,7 @@ class RemediationRequestPlanTests(unittest.TestCase):
                 pr_number=111,
                 policy_path="policy.json",
                 scope_policy=SCOPE,
-                inspection=inspection(review_threads_graphql=threads),
+                inspection=inspection(review_threads_graphql=threads, reviews=[]),
             )
             self.assertEqual("NOOP", plan["decision"])
             self.assertEqual(
@@ -155,6 +162,27 @@ class RemediationRequestPlanTests(unittest.TestCase):
                 reviews=[review],
                 review_threads_graphql=[finding_thread(resolved=True, review_id=101)],
             ),
+        )
+        self.assertEqual("NOOP", plan["decision"])
+        self.assertEqual(
+            "NO_UNRESOLVED_CURRENT_HEAD_CODEX_FINDING", plan["reason"]
+        )
+
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    def test_unresolved_thread_from_dismissed_review_does_not_authorize(self, _load):
+        dismissed_review = {
+            "id": 101,
+            "user": {"login": "chatgpt-codex-connector[bot]"},
+            "commit_id": HEAD,
+            "state": "DISMISSED",
+        }
+        plan = plan_codex_remediation_request(
+            owner="oimus1976",
+            repo="agent-controller",
+            pr_number=111,
+            policy_path="policy.json",
+            scope_policy=SCOPE,
+            inspection=inspection(reviews=[dismissed_review]),
         )
         self.assertEqual("NOOP", plan["decision"])
         self.assertEqual(
@@ -374,7 +402,14 @@ class RemediationRequestExecutionTests(unittest.TestCase):
         )
         self.get_reviews = reviews.start()
         self.get_threads = threads.start()
-        self.get_reviews.return_value = []
+        self.get_reviews.return_value = [
+            {
+                "id": 101,
+                "user": {"login": "chatgpt-codex-connector[bot]"},
+                "commit_id": HEAD,
+                "state": "COMMENTED",
+            }
+        ]
         self.get_threads.return_value = [finding_thread()]
         actions = patch("agent_controller.remediation_request.get_actions_runs")
         self.get_actions = actions.start()

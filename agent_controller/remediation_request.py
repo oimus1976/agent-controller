@@ -70,7 +70,7 @@ def _has_same_source_head_request(
 
 
 def _thread_has_current_head_codex_finding(
-    thread: Mapping[str, Any], head_sha: str
+    thread: Mapping[str, Any], head_sha: str, active_review_ids: set[int]
 ) -> bool:
     resolved = thread.get("isResolved")
     if resolved is None:
@@ -94,9 +94,14 @@ def _thread_has_current_head_codex_finding(
     if not isinstance(author, Mapping) or not _is_codex_login(author.get("login")):
         return False
     original_commit = root_comment.get("originalCommit") or {}
+    review = root_comment.get("pullRequestReview")
+    review_id = review.get("databaseId") if isinstance(review, Mapping) else None
     return (
         isinstance(original_commit, Mapping)
         and original_commit.get("oid") == head_sha
+        and isinstance(review_id, int)
+        and not isinstance(review_id, bool)
+        and review_id in active_review_ids
     )
 
 
@@ -151,10 +156,25 @@ def _has_current_head_codex_finding(
     if not isinstance(reviews, list) or not isinstance(threads, list):
         raise ValueError("review evidence is malformed")
 
+    active_review_ids = {
+        review.get("id")
+        for review in reviews
+        if isinstance(review, Mapping)
+        and isinstance(review.get("id"), int)
+        and not isinstance(review.get("id"), bool)
+        and isinstance(review.get("user"), Mapping)
+        and _is_codex_login(review["user"].get("login"))
+        and review.get("commit_id") == head_sha
+        and isinstance(review.get("state"), str)
+        and review["state"].upper() != "DISMISSED"
+    }
+
     for thread in threads:
         if not isinstance(thread, Mapping):
             raise ValueError("review thread evidence is malformed")
-        if _thread_has_current_head_codex_finding(thread, head_sha):
+        if _thread_has_current_head_codex_finding(
+            thread, head_sha, active_review_ids
+        ):
             return True
 
     for review in reviews:

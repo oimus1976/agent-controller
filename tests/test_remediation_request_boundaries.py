@@ -100,10 +100,16 @@ class RemediationConcurrencyBoundaryTests(unittest.TestCase):
             "comments": {"nodes": [{
                 "author": {"login": "chatgpt-codex-connector[bot]"},
                 "originalCommit": {"oid": HEAD},
+                "pullRequestReview": {"databaseId": 101},
             }]},
         }],
     )
-    @patch("agent_controller.remediation_request.get_pr_reviews", return_value=[])
+    @patch("agent_controller.remediation_request.get_pr_reviews", return_value=[{
+        "id": 101,
+        "user": {"login": "chatgpt-codex-connector[bot]"},
+        "commit_id": HEAD,
+        "state": "COMMENTED",
+    }])
     @patch("agent_controller.remediation_request.get_pr_issue_comments")
     @patch("agent_controller.remediation_request.post_codex_remediation_request")
     @patch(
@@ -158,10 +164,16 @@ class RemediationPolicyDriftTests(unittest.TestCase):
             "comments": {"nodes": [{
                 "author": {"login": "chatgpt-codex-connector[bot]"},
                 "originalCommit": {"oid": HEAD},
+                "pullRequestReview": {"databaseId": 101},
             }]},
         }],
     )
-    @patch("agent_controller.remediation_request.get_pr_reviews", return_value=[])
+    @patch("agent_controller.remediation_request.get_pr_reviews", return_value=[{
+        "id": 101,
+        "user": {"login": "chatgpt-codex-connector[bot]"},
+        "commit_id": HEAD,
+        "state": "COMMENTED",
+    }])
     @patch(
         "agent_controller.remediation_request.get_authenticated_github_login",
         return_value="oimus1976",
