@@ -356,6 +356,26 @@ class TestJulesLiveAdapter(unittest.TestCase):
         self.assertTrue(sent_body["requirePlanApproval"])
         self.assertEqual(sent_body["automationMode"], "AUTOMATION_MODE_UNSPECIFIED")
 
+    def test_dispatch_invalid_repo_format_fails_closed(self):
+        api_client = JulesApiClient(api_key="fake-key")
+        task = make_task(repo="invalid-repo-format")
+        fake_github = FakeGitHubClient()
+        dispatch_client = JulesDispatchClient(api_client, github_client=fake_github)
+
+        with self.assertRaisesRegex(ValueError, "TaskBinding.repo must be in OWNER/REPO format"):
+            dispatch_client.dispatch(task)
+
+    def test_dispatch_empty_prompt_fails_closed(self):
+        api_client = JulesApiClient(api_key="fake-key")
+        task = make_task()
+        fake_github = FakeGitHubClient(
+            ref_shas={("oimus1976/agent-controller", "refs/heads/main"): task.expected_start_sha}
+        )
+        dispatch_client = JulesDispatchClient(api_client, github_client=fake_github)
+
+        with self.assertRaisesRegex(ValueError, "prompt must be a non-empty string when specified"):
+            dispatch_client.dispatch(task, prompt="   ")
+
     def test_starting_sha_mismatch_prevents_jules_session_creation(self):
         created_sessions = []
 

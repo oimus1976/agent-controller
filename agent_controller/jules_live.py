@@ -250,6 +250,13 @@ class JulesDispatchClient:
         if not task.expected_start_sha:
             raise ValueError("TaskBinding.expected_start_sha is required for Jules dispatch")
 
+        parts = task.repo.split("/")
+        if len(parts) != 2 or not all(parts):
+            raise ValueError("TaskBinding.repo must be in OWNER/REPO format")
+
+        if prompt is not None and (not isinstance(prompt, str) or not prompt.strip()):
+            raise ValueError("prompt must be a non-empty string when specified")
+
         # Verify expected starting SHA against explicit GitHub target before dispatch
         current_sha = self.github_client.get_ref_sha(task.repo, task.expected_start_ref)
         if not current_sha or current_sha.lower() != task.expected_start_sha.lower():
