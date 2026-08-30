@@ -6,6 +6,7 @@ from typing import Any, Callable, Mapping, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from agent_controller.github_target_client import GitHubRestTargetReadClient
 from agent_controller.provider_contract import ProviderOperationRef, TaskBinding
 
 
@@ -107,8 +108,32 @@ class JulesApiClient:
         if repo.startswith("sources/"):
             return repo
 
-        # Standard canonical Jules source identifier for GitHub repos
-        return f"sources/github.com/{repo}"
+        parts = repo.split("/")
+        if len(parts) != 2 or not all(parts):
+            raise ValueError("repo must be in OWNER/REPO format")
+        owner, name = parts[0], parts[1]
+
+        sources = self.list_sources()
+        matched = []
+        for src in sources:
+            if not isinstance(src, Mapping):
+                continue
+            gh_repo = src.get("githubRepo")
+            if not isinstance(gh_repo, Mapping):
+                continue
+            src_owner = gh_repo.get("owner")
+            src_name = gh_repo.get("repo")
+            if src_owner == owner and src_name == name:
+                src_resource_name = src.get("name")
+                if isinstance(src_resource_name, str) and src_resource_name:
+                    matched.append(src_resource_name)
+
+        if len(matched) == 0:
+            raise RuntimeError(f"No matching Jules source found for repo {repo!r}")
+        if len(matched) > 1:
+            raise RuntimeError(f"Ambiguous Jules sources found for repo {repo!r}: {len(matched)} matches")
+
+        return matched[0]
 
     def create_session(
         self,
@@ -155,9 +180,15 @@ class JulesApiClient:
 class JulesDispatchClient:
     """Dispatch seam implementation for live official Jules API."""
 
-    def __init__(self, api_client: JulesApiClient, default_prompt: Optional[str] = None):
+    def __init__(
+        self,
+        api_client: JulesApiClient,
+        default_prompt: Optional[str] = None,
+        github_client: Any = None,
+    ):
         self.api_client = api_client
         self.default_prompt = default_prompt
+        self.github_client = github_client or GitHubRestTargetReadClient()
 
     def dispatch(self, task: TaskBinding, prompt: Optional[str] = None) -> ProviderOperationRef:
         if task.provider != "jules":
@@ -168,6 +199,14 @@ class JulesDispatchClient:
             raise ValueError("TaskBinding.expected_start_ref is required for Jules dispatch")
         if not task.expected_start_sha:
             raise ValueError("TaskBinding.expected_start_sha is required for Jules dispatch")
+
+        # Verify expected starting SHA against explicit GitHub target before dispatch
+        current_sha = self.github_client.get_ref_sha(task.repo, task.expected_start_ref)
+        if not current_sha or current_sha != task.expected_start_sha:
+            raise RuntimeError(
+                f"GitHub starting ref {task.expected_start_ref!r} head SHA {current_sha!r} "
+                f"does not match expected starting SHA {task.expected_start_sha!r}"
+            )
 
         starting_branch = _branch_from_ref(task.expected_start_ref)
         source = self.api_client.resolve_source(task.repo)

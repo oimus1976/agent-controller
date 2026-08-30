@@ -1,7 +1,6 @@
 import os
 import unittest
 from json import loads
-from urllib.parse import parse_qs, urlparse
 
 from agent_controller.jules_live import (
     JulesApiClient,
@@ -41,6 +40,16 @@ def make_task(
     )
 
 
+class FakeGitHubClient:
+    def __init__(self, ref_shas=None):
+        self.ref_shas = ref_shas or {}
+        self.calls = []
+
+    def get_ref_sha(self, repo, ref):
+        self.calls.append((repo, ref))
+        return self.ref_shas.get((repo, ref))
+
+
 class TestJulesLiveAdapter(unittest.TestCase):
     def test_branch_from_ref_parsing(self):
         self.assertEqual(_branch_from_ref("refs/heads/feature/test"), "feature/test")
@@ -77,23 +86,92 @@ class TestJulesLiveAdapter(unittest.TestCase):
         self.assertNotIn(fake_key, err_text)
         self.assertIn("[REDACTED]", err_text)
 
-    def test_source_resolution(self):
-        client = JulesApiClient(api_key="fake-key")
+    def test_source_resolution_from_sources_api(self):
+        def mock_transport(req):
+            return (
+                200,
+                {"Content-Type": "application/json"},
+                json_bytes({
+                    "sources": [
+                        {
+                            "name": "sources/opaque-source-id-123",
+                            "githubRepo": {
+                                "owner": "oimus1976",
+                                "repo": "agent-controller",
+                            },
+                        },
+                        {
+                            "name": "sources/opaque-source-id-456",
+                            "githubRepo": {
+                                "owner": "other",
+                                "repo": "repo",
+                            },
+                        },
+                    ]
+                }),
+            )
+
+        client = JulesApiClient(api_key="fake-key", transport=mock_transport)
         self.assertEqual(
             client.resolve_source("oimus1976/agent-controller"),
-            "sources/github.com/oimus1976/agent-controller",
+            "sources/opaque-source-id-123",
         )
         self.assertEqual(
-            client.resolve_source("sources/github.com/oimus1976/agent-controller"),
-            "sources/github.com/oimus1976/agent-controller",
+            client.resolve_source("sources/opaque-source-id-123"),
+            "sources/opaque-source-id-123",
         )
 
-    def test_dispatch_session_creation(self):
+    def test_source_resolution_fails_closed_on_zero_or_ambiguous_matches(self):
+        def mock_transport(req):
+            return (
+                200,
+                {"Content-Type": "application/json"},
+                json_bytes({
+                    "sources": [
+                        {
+                            "name": "sources/opaque-1",
+                            "githubRepo": {"owner": "oimus1976", "repo": "agent-controller"},
+                        },
+                        {
+                            "name": "sources/opaque-2",
+                            "githubRepo": {"owner": "oimus1976", "repo": "agent-controller"},
+                        },
+                    ]
+                }),
+            )
+
+        client = JulesApiClient(api_key="fake-key", transport=mock_transport)
+        with self.assertRaisesRegex(RuntimeError, "Ambiguous Jules sources"):
+            client.resolve_source("oimus1976/agent-controller")
+
+        empty_client = JulesApiClient(
+            api_key="fake-key",
+            transport=lambda req: (200, {}, json_bytes({"sources": []})),
+        )
+        with self.assertRaisesRegex(RuntimeError, "No matching Jules source"):
+            empty_client.resolve_source("oimus1976/agent-controller")
+
+    def test_dispatch_session_creation_with_exact_starting_sha(self):
         captured_requests = []
 
         def mock_transport(req):
             captured_requests.append(req)
-            body = loads(req.data.decode("utf-8")) if req.data else {}
+            if req.method == "GET" and "v1alpha/sources" in req.full_url:
+                return (
+                    200,
+                    {"Content-Type": "application/json"},
+                    json_bytes({
+                        "sources": [
+                            {
+                                "name": "sources/opaque-source-id-123",
+                                "githubRepo": {
+                                    "owner": "oimus1976",
+                                    "repo": "agent-controller",
+                                },
+                            }
+                        ]
+                    }),
+                )
             return (
                 200,
                 {"Content-Type": "application/json"},
@@ -106,9 +184,12 @@ class TestJulesLiveAdapter(unittest.TestCase):
             )
 
         api_client = JulesApiClient(api_key="fake-key", transport=mock_transport)
-        dispatch_client = JulesDispatchClient(api_client)
-
         task = make_task()
+        fake_github = FakeGitHubClient(
+            ref_shas={("oimus1976/agent-controller", "refs/heads/main"): task.expected_start_sha}
+        )
+        dispatch_client = JulesDispatchClient(api_client, github_client=fake_github)
+
         ref = dispatch_client.dispatch(task, prompt="Implement live Jules adapter")
 
         self.assertEqual(ref.provider, "jules")
@@ -117,12 +198,12 @@ class TestJulesLiveAdapter(unittest.TestCase):
         self.assertEqual(ref.operation_id, task.operation_id)
         self.assertEqual(ref.provider_url, "https://jules.google.com/session/sess-abc-123")
 
-        self.assertEqual(len(captured_requests), 1)
-        sent_body = loads(captured_requests[0].data.decode("utf-8"))
+        self.assertEqual(len(captured_requests), 2)  # list_sources + create_session
+        sent_body = loads(captured_requests[1].data.decode("utf-8"))
         self.assertEqual(sent_body["prompt"], "Implement live Jules adapter")
         self.assertEqual(
             sent_body["sourceContext"]["source"],
-            "sources/github.com/oimus1976/agent-controller",
+            "sources/opaque-source-id-123",
         )
         self.assertEqual(
             sent_body["sourceContext"]["githubRepoContext"]["startingBranch"],
@@ -130,6 +211,26 @@ class TestJulesLiveAdapter(unittest.TestCase):
         )
         self.assertTrue(sent_body["requirePlanApproval"])
         self.assertEqual(sent_body["automationMode"], "AUTOMATION_MODE_UNSPECIFIED")
+
+    def test_starting_sha_mismatch_prevents_jules_session_creation(self):
+        created_sessions = []
+
+        def mock_transport(req):
+            if req.method == "POST":
+                created_sessions.append(req)
+            return (200, {}, json_bytes({}))
+
+        api_client = JulesApiClient(api_key="fake-key", transport=mock_transport)
+        task = make_task(sha="expected-sha-123")
+        fake_github = FakeGitHubClient(
+            ref_shas={("oimus1976/agent-controller", "refs/heads/main"): "different-current-sha-456"}
+        )
+        dispatch_client = JulesDispatchClient(api_client, github_client=fake_github)
+
+        with self.assertRaisesRegex(RuntimeError, "does not match expected starting SHA"):
+            dispatch_client.dispatch(task)
+
+        self.assertEqual(len(created_sessions), 0)
 
     def test_read_client_and_observation_adapter_mapping(self):
         def mock_transport(req):
@@ -193,7 +294,6 @@ class TestJulesLiveAdapter(unittest.TestCase):
         observation = adapter.observe(op)
         self.assertEqual(observation.mapped_state, ControllerState.ARTIFACT_READY)
         self.assertEqual(observation.terminal_claim, TerminalClaim.SUCCESS)
-        # Verify mapped_state is NOT a Controller PASS state (Controller PASS is determined independently via objective verification)
         self.assertNotEqual(observation.mapped_state, "PASS")
 
     def test_unknown_or_malformed_state_fails_closed_to_uncertain(self):
