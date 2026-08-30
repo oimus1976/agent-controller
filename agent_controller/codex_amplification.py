@@ -191,6 +191,14 @@ def collect_codex_request_amplification(
             "pr": pr_number,
         }
 
+    if not isinstance(issue_comments, list) or not isinstance(reviews, list):
+        return {
+            "status": "UNCERTAIN",
+            "reason": "MALFORMED_GITHUB_EVIDENCE",
+            "repo": f"{owner}/{repo}",
+            "pr": pr_number,
+        }
+
     observation = analyze_codex_request_amplification(
         issue_comments=issue_comments,
         reviews=reviews,
