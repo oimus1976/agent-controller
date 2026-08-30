@@ -4,6 +4,7 @@ import json
 import os
 from typing import Any, Callable, Mapping, Optional
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from agent_controller.github_target_client import GitHubRestTargetReadClient
@@ -97,10 +98,48 @@ class JulesApiClient:
                 err_msg = err_msg.replace(api_key, "[REDACTED]")
             raise RuntimeError(f"Jules API network call failed: {err_msg}") from None
 
-    def list_sources(self) -> list[dict[str, Any]]:
-        res = self._request("GET", "sources")
-        sources = res.get("sources", [])
-        return sources if isinstance(sources, list) else []
+    def list_sources(self, max_pages: int = 50) -> list[dict[str, Any]]:
+        if max_pages <= 0:
+            raise ValueError("max_pages must be positive")
+
+        all_sources: list[dict[str, Any]] = []
+        page_token: Optional[str] = None
+        seen_page_tokens: set[str] = set()
+        page_count = 0
+
+        while True:
+            page_count += 1
+            if page_count > max_pages:
+                raise RuntimeError(f"Exceeded maximum page limit ({max_pages}) while listing Jules sources")
+
+            path = "sources"
+            if page_token:
+                path = f"sources?pageToken={quote(page_token, safe='')}"
+
+            res = self._request("GET", path)
+            if not isinstance(res, Mapping):
+                raise RuntimeError("Malformed response payload from Jules sources API")
+
+            page_sources = res.get("sources", [])
+            if not isinstance(page_sources, list):
+                raise RuntimeError("Malformed 'sources' field in Jules sources API response")
+
+            all_sources.extend(page_sources)
+
+            next_token = res.get("nextPageToken")
+            if not next_token:
+                break
+
+            if not isinstance(next_token, str):
+                raise RuntimeError("Malformed 'nextPageToken' in Jules sources API response")
+
+            if next_token in seen_page_tokens:
+                raise RuntimeError(f"Detected pagination cycle with nextPageToken: {next_token!r}")
+
+            seen_page_tokens.add(next_token)
+            page_token = next_token
+
+        return all_sources
 
     def resolve_source(self, repo: str) -> str:
         if not repo or not isinstance(repo, str):

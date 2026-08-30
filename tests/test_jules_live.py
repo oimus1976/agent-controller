@@ -86,6 +86,96 @@ class TestJulesLiveAdapter(unittest.TestCase):
         self.assertNotIn(fake_key, err_text)
         self.assertIn("[REDACTED]", err_text)
 
+    def test_list_sources_pagination_multi_page(self):
+        requested_urls = []
+
+        def mock_transport(req):
+            requested_urls.append(req.full_url)
+            if "pageToken=token-page-2" in req.full_url:
+                return (
+                    200,
+                    {"Content-Type": "application/json"},
+                    json_bytes({
+                        "sources": [
+                            {
+                                "name": "sources/page-2-src",
+                                "githubRepo": {"owner": "oimus1976", "repo": "agent-controller"},
+                            }
+                        ]
+                    }),
+                )
+            return (
+                200,
+                {"Content-Type": "application/json"},
+                json_bytes({
+                    "sources": [
+                        {
+                            "name": "sources/page-1-src",
+                            "githubRepo": {"owner": "other", "repo": "repo"},
+                        }
+                    ],
+                    "nextPageToken": "token-page-2",
+                }),
+            )
+
+        client = JulesApiClient(api_key="fake-key", transport=mock_transport)
+        sources = client.list_sources()
+
+        self.assertEqual(len(sources), 2)
+        self.assertEqual(sources[0]["name"], "sources/page-1-src")
+        self.assertEqual(sources[1]["name"], "sources/page-2-src")
+        self.assertEqual(len(requested_urls), 2)
+        self.assertIn("v1alpha/sources", requested_urls[0])
+        self.assertIn("pageToken=token-page-2", requested_urls[1])
+
+    def test_list_sources_pagination_cycle_fails_closed(self):
+        def mock_transport(req):
+            return (
+                200,
+                {"Content-Type": "application/json"},
+                json_bytes({
+                    "sources": [{"name": "sources/src-1"}],
+                    "nextPageToken": "looping-token",
+                }),
+            )
+
+        client = JulesApiClient(api_key="fake-key", transport=mock_transport)
+        with self.assertRaisesRegex(RuntimeError, "Detected pagination cycle"):
+            client.list_sources()
+
+    def test_list_sources_pagination_max_pages_fails_closed(self):
+        page_counter = [0]
+
+        def mock_transport(req):
+            page_counter[0] += 1
+            return (
+                200,
+                {"Content-Type": "application/json"},
+                json_bytes({
+                    "sources": [{"name": f"sources/src-{page_counter[0]}"}],
+                    "nextPageToken": f"token-{page_counter[0]}",
+                }),
+            )
+
+        client = JulesApiClient(api_key="fake-key", transport=mock_transport)
+        with self.assertRaisesRegex(RuntimeError, "Exceeded maximum page limit"):
+            client.list_sources(max_pages=3)
+
+    def test_list_sources_malformed_token_fails_closed(self):
+        def mock_transport(req):
+            return (
+                200,
+                {"Content-Type": "application/json"},
+                json_bytes({
+                    "sources": [{"name": "sources/src-1"}],
+                    "nextPageToken": 12345,  # Non-string token
+                }),
+            )
+
+        client = JulesApiClient(api_key="fake-key", transport=mock_transport)
+        with self.assertRaisesRegex(RuntimeError, "Malformed 'nextPageToken'"):
+            client.list_sources()
+
     def test_source_resolution_from_sources_api(self):
         def mock_transport(req):
             return (
