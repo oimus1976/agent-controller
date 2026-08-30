@@ -215,6 +215,26 @@ class CodexAmplificationTests(unittest.TestCase):
         mock_comments.assert_called_once_with("oimus1976", "agent-controller", 112)
         mock_reviews.assert_called_once_with("oimus1976", "agent-controller", 112)
 
+    @patch("agent_controller.codex_amplification.get_pr_reviews")
+    @patch("agent_controller.codex_amplification.get_pr_issue_comments")
+    @patch("agent_controller.codex_amplification.load_policy")
+    def test_collect_malformed_top_level_evidence_is_uncertain(
+        self, mock_policy, mock_comments, mock_reviews
+    ):
+        mock_policy.return_value = {"trusted_review_request_authors": [OWNER]}
+        mock_comments.return_value = {}
+        mock_reviews.return_value = []
+
+        result = collect_codex_request_amplification(
+            owner="oimus1976",
+            repo="agent-controller",
+            pr_number=112,
+            policy_path="policy.json",
+        )
+
+        self.assertEqual(result["status"], "UNCERTAIN")
+        self.assertEqual(result["reason"], "MALFORMED_GITHUB_EVIDENCE")
+
     @patch("agent_controller.codex_amplification.get_pr_issue_comments")
     @patch("agent_controller.codex_amplification.load_policy")
     def test_collect_github_read_failure_is_uncertain(self, mock_policy, mock_comments):
