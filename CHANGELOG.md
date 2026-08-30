@@ -15,6 +15,27 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-08-30 — Codex request amplification observation（Issue #113 / Draft PR #114）
+
+関連: Issue #55, Issue #113, Draft PR #114
+
+### Added / changed
+
+- GitHub-authoritative issue comment / PR review evidenceから、trusted exact-head `@codex review` request、trusted source-head `@codex address that feedback` request、Codex review submissionのexact `commit_id`をread-onlyに集計するobservationを追加。
+- serial multi-head review/remediation loopとsame-head duplicate replayを分離し、distinct reviewed heads、distinct loop heads、per-head counts、duplicate countsをconcise JSONで出力する。
+- standalone read-only CLI `python -m agent_controller.codex_amplification --repo OWNER/REPO --pr N --policy PATH` を追加し、既存policyの `trusted_review_request_authors` を再利用する。
+- malformed / ambiguous GitHub evidenceは `UNCERTAIN` にfail closedし、推測で補完しない。
+
+### Efficiency / authority boundary
+
+- GitHub request数はprovider turn、token、5-hour/weekly allowance、costではない。`provider_turn_count`、token fields、allowance unitsはauthoritative provider/account telemetryがない限りUNKNOWNのままとする。
+- UI scraping、interactive `/status` parsing、token estimation、automatic throttling/model downgrade/provider routing/review skippingを追加しない。
+- provider write、remediation/review trigger、Ready、merge、Update-branch automationを追加しない。read-only observationのみ。
+- PR #112-shaped regression fixtureでserial amplificationとsame-head duplicatesを分離し、deterministic suiteで検証する。
+- この項目はDraft PR #114の未merge実装を記録しており、mainへの採用済み状態を意味しない。
+
+---
+
 ## 2026-08-29 — Bounded Codex remediation request（Issue #111 / Draft PR #112）
 
 関連: ADR Issue #12, ADR Issue #90, Issue #111, Draft PR #112
@@ -115,16 +136,16 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ### Safety-boundary correction
 
-- PR #103 merge 後の Windows 実機 negative smoke で、公式 app-server に送った provider RPC が `thread/read` だけでも、app-server 起動時に `CODEX_HOME` へ `installation_id`、SQLite state/log/memory/queue DB、system skills、temporary helper files 等が作成されることを確認。
-- したがって、PR #103 でいう「read-only」は **provider lifecycle / model turn / approval / task mutation を行わない**という意味では維持されるが、**owner-machine / local filesystem write-free** を意味しない。以前の表現をこの点で訂正する。
-- exact upstream `0.147.0` を確認した結果、app-server startup の state persistence を無効化する公式 read-only / non-persistent mode は見つからなかった。`installation_id` は起動時に read+write+create で開かれ、state runtime も初期化/backfill される。
-- このため、実ユーザーの Codex Desktop / CLI `CODEX_HOME` を app-server に直接渡す運用を禁止し、positive real-thread smoke も source-home isolation 実装まで停止した。
+- PR #103 merge 後の Windows実機negative smokeで、公式app-serverに送ったprovider RPCが `thread/read` だけでも、app-server起動時に `CODEX_HOME` へ `installation_id`、SQLite state/log/memory/queue DB、system skills、temporary helper files等が作成されることを確認。
+- したがって、PR #103でいう「read-only」は **provider lifecycle / model turn / approval / task mutationを行わない**という意味では維持されるが、**owner-machine / local filesystem write-free** を意味しない。以前の表現をこの点で訂正する。
+- exact upstream `0.147.0` を確認した結果、app-server startupのstate persistenceを無効化する公式read-only / non-persistent modeは見つからなかった。`installation_id` は起動時にread+write+createで開かれ、state runtimeも初期化/backfillされる。
+- このため、実ユーザーのCodex Desktop / CLI `CODEX_HOME` をapp-serverに直接渡す運用を禁止し、positive real-thread smokeもsource-home isolation実装まで停止した。
 
 ### Draft implementation
 
 - `CodexOfficialSdkReadClient` は app-server のローカル書込み先となる **明示的な absolute `codex_home`** を必須化し、継承/defaultの `CODEX_HOME` に依存しないよう変更。
-- 公式 Python SDK の `CodexConfig.env` を使い、app-server 子プロセスにのみ disposable `CODEX_HOME` を注入する。
-- 新しい `CodexSnapshotReadClient` は、明示した source Codex home から対象threadの persisted rolloutだけを検索し、一時 `CODEX_HOME` へ相対pathを保ってコピーしてから公式 `thread/read` を実行する。
+- 公式Python SDKの `CodexConfig.env` を使い、app-server子プロセスにのみdisposable `CODEX_HOME` を注入する。
+- 新しい `CodexSnapshotReadClient` は、明示したsource Codex homeから対象threadのpersisted rolloutだけを検索し、一時 `CODEX_HOME` へ相対pathを保ってコピーしてから公式 `thread/read` を実行する。
 - source home の `state_*.sqlite`、WAL/SHM、installation state、skills、その他threadは snapshotへコピーしない。app-serverが必要とするDB/backfillは disposable snapshot側だけで生成させる。
 - rolloutは `sessions/` / `archived_sessions/` 配下の canonical UUID に一致する単一 `.jsonl` または `.jsonl.zst` に限定。missing / ambiguous / symlink / source-home外へのpath escape は fail closed。
 - source rolloutを copy前・copy後・観測後に SHA-256 で照合し、copy mismatch または観測中のsource変更を stale evidence としてfail closedする。
@@ -132,8 +153,8 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ### Safety / trust boundary
 
-- `provider_read_only` と `owner_machine_write_free` を別の性質として扱う。公式 app-server のstartup writeは disposable Controller-owned pathのみに閉じ込める。
-- source Codex homeはController自身が対象rolloutをread/hash/copyするだけで、公式 app-server processには渡さない。
+- `provider_read_only` と `owner_machine_write_free` を別の性質として扱う。公式app-serverのstartup writeは disposable Controller-owned pathのみに閉じ込める。
+- source Codex homeはController自身が対象rolloutをread/hash/copyするだけで、公式app-server processには渡さない。
 - snapshotは evidence-at-copy-time として扱い、source evidenceが観測中に変化した場合は成功を推定しない。
 - provider completionは引き続き `ARTIFACT_READY` / terminal claimまでで、Controller `PASS` ではない。
 - approval handler reject、SDK version pin、timeout、unknown-status fail-closed、LEVEL 3 human-finalはPR #103の境界を維持する。
@@ -144,7 +165,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - この項目は Issue #104 の Draft 実装を記録しており、mainへの採用済み状態を意味しない。
 - initial Codex reviewで、snapshot parentがsource home配下へ解決される場合にapp-server startup writeが実homeへ戻り得るP1を検出した。
 - P1は、effective temp parentをTemporaryDirectory作成前にresolveし、source homeと同一・配下・symlink経由・default temp経由のoverlapをSDK起動前にfail closedするよう修正。exact-head `0769b4607a9f13824a643da0086055e846e9998f` のCodex re-reviewでmajor issueなしを確認し、review threadをresolvedとした。
-- 同code treeをWindows実機で deterministic suite 335 tests 実行し、全件OKを確認した。
+- 同code treeをWindows実機で deterministic suite 335 tests実行し、全件OKを確認した。
 - merge gateとしてfinal exact-head CI、final exact-head independent review、positive real-thread smokeを要求し、prior-head evidenceから成功を推定しない。Ready / merge はADR #90に従いhuman-finalのまま。
 
 ---
