@@ -171,3 +171,34 @@ def inspect_published_draft_pr(
         return PublishedDraftInspectionResult("BLOCKED", str(exc) or "INSPECTION_VALIDATION_FAILED")
     except Exception:
         return PublishedDraftInspectionResult("UNCERTAIN", "INSPECTION_EXTERNAL_UNCERTAINTY")
+
+
+def inspect_published_draft_pr_live(
+    *,
+    publication: DraftPublicationResult,
+    task: TaskBinding,
+    workstream: WorkstreamBinding,
+) -> PublishedDraftInspectionResult:
+    """Read-only live composition using the existing GitHub inspector implementation."""
+
+    from agent_controller import inspector as existing_inspector
+
+    def read_pr(repo: str, pr_number: int) -> Mapping[str, Any]:
+        owner, repo_name = repo.split("/", 1)
+        return existing_inspector.get_pr_details(owner, repo_name, pr_number)
+
+    def inspect_existing(
+        owner: str,
+        repo_name: str,
+        pr_number: int,
+        scope_policy: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        return existing_inspector.inspect_pr(owner, repo_name, pr_number, dict(scope_policy))
+
+    return inspect_published_draft_pr(
+        publication=publication,
+        task=task,
+        workstream=workstream,
+        read_pr=read_pr,
+        inspector=inspect_existing,
+    )
