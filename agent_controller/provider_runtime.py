@@ -49,10 +49,10 @@ class JulesAgentAdapter:
     artifacts: JulesArtifactAdapter
     capabilities: AdapterCapabilities = AdapterCapabilities()
 
-    def dispatch(self, task: TaskBinding) -> ProviderOperationRef:
+    def dispatch(self, task: TaskBinding, **kwargs: Any) -> ProviderOperationRef:
         if task.provider != "jules":
             raise ValueError("JulesAgentAdapter requires task.provider='jules'")
-        operation = self.dispatch_client.dispatch(task)
+        operation = self.dispatch_client.dispatch(task, **kwargs) if hasattr(self.dispatch_client, "dispatch") else self.dispatch_client.dispatch(task)
         binding = validate_operation_binding(task=task, operation=operation)
         if not binding.valid:
             raise ValueError(f"invalid dispatched operation binding: {binding.reason}")

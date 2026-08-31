@@ -91,7 +91,7 @@ class TestProviderHandoff(unittest.TestCase):
     def _run(self, provider):
         if provider == "jules":
             observation_client = FakeObservationClient(
-                {"status": "COMPLETED", "updated_at": "2026-08-24T01:10:00Z"}
+                {"state": "COMPLETED", "updated_at": "2026-08-24T01:10:00Z"}
             )
             observer = JulesObservationAdapter(
                 observation_client, lambda: "2026-08-24T01:11:00Z"
@@ -168,7 +168,7 @@ class TestProviderHandoff(unittest.TestCase):
         self.assertEqual(normalized[0], normalized[1])
 
     def test_operation_binding_failure_stops_before_provider_or_github_reads(self):
-        observation_client = FakeObservationClient({"status": "COMPLETED"})
+        observation_client = FakeObservationClient({"state": "COMPLETED"})
         artifact_client = FakeArtifactClient([])
         observer = JulesObservationAdapter(
             observation_client, lambda: "2026-08-24T01:11:00Z"
@@ -238,7 +238,7 @@ class TestProviderHandoff(unittest.TestCase):
             self.assertEqual(github.compare_calls, [])
 
     def test_terminal_success_without_artifacts_is_not_verification_success(self):
-        observation_client = FakeObservationClient({"status": "COMPLETED"})
+        observation_client = FakeObservationClient({"state": "COMPLETED"})
         artifact_client = FakeArtifactClient([])
         observer = JulesObservationAdapter(
             observation_client, lambda: "2026-08-24T01:11:00Z"
@@ -259,7 +259,7 @@ class TestProviderHandoff(unittest.TestCase):
         self.assertEqual(result.verification_result, VerificationResult.BLOCKED)
 
     def test_artifact_verification_failure_is_explicit_even_when_binding_is_valid(self):
-        observation_client = FakeObservationClient({"status": "COMPLETED"})
+        observation_client = FakeObservationClient({"state": "COMPLETED"})
         artifact_client = FakeArtifactClient([
             {"kind": "commit", "ref": "refs/heads/work", "sha": "claimed-sha"}
         ])
@@ -282,7 +282,7 @@ class TestProviderHandoff(unittest.TestCase):
         self.assertFalse(result.artifacts[0].independently_verified)
 
     def test_artifact_binding_failure_stops_before_github_verification(self):
-        observation_client = FakeObservationClient({"status": "COMPLETED"})
+        observation_client = FakeObservationClient({"state": "COMPLETED"})
         observer = JulesObservationAdapter(
             observation_client, lambda: "2026-08-24T01:11:00Z"
         )
@@ -320,7 +320,7 @@ class TestProviderHandoff(unittest.TestCase):
         self.assertEqual(github.compare_calls, [])
 
     def test_late_artifact_binding_failure_discards_earlier_verified_artifacts(self):
-        observation_client = FakeObservationClient({"status": "COMPLETED"})
+        observation_client = FakeObservationClient({"state": "COMPLETED"})
         observer = JulesObservationAdapter(
             observation_client, lambda: "2026-08-24T01:11:00Z"
         )

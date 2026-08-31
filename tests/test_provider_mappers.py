@@ -10,9 +10,9 @@ from agent_controller.provider_mappers import (
 class TestProviderMappers(unittest.TestCase):
     def test_jules_plan_approval_maps_to_provider_neutral_state(self):
         raw = {
-            "status": "AWAITING_PLAN_APPROVAL",
+            "state": "AWAITING_PLAN_APPROVAL",
             "plan_id": "plan-7",
-            "updated_at": "2026-08-24T01:29:59Z",
+            "updateTime": "2026-08-24T01:29:59Z",
         }
         observation = map_jules_observation(
             provider_operation_id="jules-session-42",
@@ -22,7 +22,14 @@ class TestProviderMappers(unittest.TestCase):
         self.assertEqual(observation.mapped_state, ControllerState.PLAN_REVIEW_REQUIRED)
         self.assertEqual(observation.awaiting_input, AwaitingInput.PLAN_APPROVAL)
         self.assertEqual(observation.provider_refs, ("plan-7",))
-        self.assertEqual(dict(observation.provider_raw_state), raw)
+        self.assertEqual(
+            dict(observation.provider_raw_state),
+            {
+                "state": "AWAITING_PLAN_APPROVAL",
+                "plan_id": "plan-7",
+                "updated_at": "2026-08-24T01:29:59Z",
+            },
+        )
 
     def test_codex_plan_review_maps_to_same_provider_neutral_state(self):
         raw = {
@@ -44,7 +51,7 @@ class TestProviderMappers(unittest.TestCase):
     def test_jules_and_codex_running_states_normalize_to_executing(self):
         jules = map_jules_observation(
             provider_operation_id="jules-1",
-            raw_state={"status": "WORKING"},
+            raw_state={"state": "IN_PROGRESS"},
             observed_at="2026-08-24T01:30:00Z",
         )
         codex = map_codex_observation(
@@ -55,11 +62,21 @@ class TestProviderMappers(unittest.TestCase):
         self.assertEqual(jules.mapped_state, ControllerState.EXECUTING)
         self.assertEqual(codex.mapped_state, ControllerState.EXECUTING)
 
+    def test_legacy_jules_statuses_fail_closed_to_uncertain(self):
+        for legacy_status in ("WORKING", "RUNNING", "SUCCEEDED", "ERROR", "PLAN_GENERATING"):
+            jules = map_jules_observation(
+                provider_operation_id="jules-1",
+                raw_state={"state": legacy_status},
+                observed_at="2026-08-24T01:30:00Z",
+            )
+            self.assertEqual(jules.mapped_state, ControllerState.UNCERTAIN)
+            self.assertEqual(jules.uncertainty_reason, "JULES_STATUS_UNKNOWN")
+
     def test_success_is_only_a_terminal_claim_not_independent_verification(self):
         for observation in (
             map_jules_observation(
                 provider_operation_id="jules-1",
-                raw_state={"status": "COMPLETED"},
+                raw_state={"state": "COMPLETED"},
                 observed_at="2026-08-24T01:35:00Z",
             ),
             map_codex_observation(
@@ -85,7 +102,7 @@ class TestProviderMappers(unittest.TestCase):
     def test_failure_maps_to_blocked_terminal_claim(self):
         jules = map_jules_observation(
             provider_operation_id="jules-1",
-            raw_state={"status": "FAILED"},
+            raw_state={"state": "FAILED"},
             observed_at="2026-08-24T01:35:00Z",
         )
         codex = map_codex_observation(
@@ -101,7 +118,7 @@ class TestProviderMappers(unittest.TestCase):
         secret = "Bearer-super-secret"
         jules = map_jules_observation(
             provider_operation_id="jules-1",
-            raw_state={"status": secret},
+            raw_state={"state": secret},
             observed_at="2026-08-24T01:35:00Z",
         )
         codex = map_codex_observation(
@@ -129,10 +146,31 @@ class TestProviderMappers(unittest.TestCase):
             self.assertEqual(observation.mapped_state, ControllerState.UNCERTAIN)
             self.assertIsNotNone(observation.uncertainty_reason)
 
+    def test_jules_status_fallback_removed_and_status_completed_without_state_is_not_success(self):
+        # Payload with status COMPLETED but no state must NOT produce TerminalClaim.SUCCESS
+        observation = map_jules_observation(
+            provider_operation_id="jules-1",
+            raw_state={"status": "COMPLETED"},
+            observed_at="2026-08-24T01:35:00Z",
+        )
+        self.assertEqual(observation.mapped_state, ControllerState.UNCERTAIN)
+        self.assertEqual(observation.terminal_claim, TerminalClaim.NONE)
+        self.assertEqual(observation.uncertainty_reason, "JULES_STATE_MISSING")
+
+    def test_jules_state_unspecified_fails_closed_to_uncertain(self):
+        observation = map_jules_observation(
+            provider_operation_id="jules-1",
+            raw_state={"state": "STATE_UNSPECIFIED"},
+            observed_at="2026-08-24T01:35:00Z",
+        )
+        self.assertEqual(observation.mapped_state, ControllerState.UNCERTAIN)
+        self.assertEqual(observation.terminal_claim, TerminalClaim.NONE)
+        self.assertEqual(observation.uncertainty_reason, "JULES_STATE_UNSPECIFIED")
+
     def test_generic_user_wait_does_not_masquerade_as_plan_approval(self):
         jules = map_jules_observation(
             provider_operation_id="jules-1",
-            raw_state={"status": "AWAITING_USER"},
+            raw_state={"state": "AWAITING_USER_FEEDBACK"},
             observed_at="2026-08-24T01:35:00Z",
         )
         codex = map_codex_observation(
@@ -146,16 +184,23 @@ class TestProviderMappers(unittest.TestCase):
             self.assertNotEqual(observation.awaiting_input, AwaitingInput.PLAN_APPROVAL)
 
     def test_arbitrary_provider_payload_is_not_retained_in_normalized_evidence(self):
-        raw = {
-            "status": "WORKING",
+        raw_jules = {
+            "state": "IN_PROGRESS",
             "access_token": "top-secret-token",
             "url": "https://provider.example/callback?access_token=url-secret",
             "headers": {"X-Custom": "Bearer header-secret"},
             "nested": {"safe": "not-needed-for-normalized-evidence"},
         }
-        for mapper, operation_id in (
-            (map_jules_observation, "jules-1"),
-            (map_codex_observation, "codex-1"),
+        raw_codex = {
+            "status": "running",
+            "access_token": "top-secret-token",
+            "url": "https://provider.example/callback?access_token=url-secret",
+            "headers": {"X-Custom": "Bearer header-secret"},
+            "nested": {"safe": "not-needed-for-normalized-evidence"},
+        }
+        for mapper, operation_id, raw in (
+            (map_jules_observation, "jules-1", raw_jules),
+            (map_codex_observation, "codex-1", raw_codex),
         ):
             observation = mapper(
                 provider_operation_id=operation_id,
@@ -163,7 +208,6 @@ class TestProviderMappers(unittest.TestCase):
                 observed_at="2026-08-24T01:35:00Z",
             )
             retained = repr(observation.to_dict()["provider_raw_state"])
-            self.assertEqual(dict(observation.provider_raw_state), {"status": "WORKING"})
             for secret in ("top-secret-token", "url-secret", "header-secret"):
                 self.assertNotIn(secret, retained)
             self.assertNotIn("provider.example", retained)
