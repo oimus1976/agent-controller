@@ -93,6 +93,62 @@ class WorkstreamBinding:
         return data
 
 
+def validate_workstream_set(bindings: Sequence[WorkstreamBinding]) -> WorkstreamValidation:
+    """Fail closed if active workstreams claim overlapping Controller targets.
+
+    No persistent registry is introduced in this MVP. Callers that assemble a
+    concurrent active set can validate it deterministically before observation,
+    selection, or mutation. One task/GitHub target may belong to only one active
+    workstream in this slice.
+    """
+
+    if not isinstance(bindings, Sequence) or isinstance(bindings, (str, bytes)):
+        return WorkstreamValidation(False, "WORKSTREAM_SET_MALFORMED")
+    materialized = tuple(bindings)
+    if any(not isinstance(binding, WorkstreamBinding) for binding in materialized):
+        return WorkstreamValidation(False, "WORKSTREAM_SET_MALFORMED")
+
+    seen_workstream_ids: set[str] = set()
+    seen_tasks: set[str] = set()
+    seen_issues: set[tuple[str, int]] = set()
+    seen_prs: set[tuple[str, int]] = set()
+    seen_branches: set[tuple[str, str]] = set()
+
+    for binding in materialized:
+        if binding.workstream_id in seen_workstream_ids:
+            return WorkstreamValidation(False, "DUPLICATE_WORKSTREAM_ID")
+        seen_workstream_ids.add(binding.workstream_id)
+
+        for task_id in binding.task_ids:
+            if task_id in seen_tasks:
+                return WorkstreamValidation(False, "TASK_BOUND_TO_MULTIPLE_WORKSTREAMS")
+            seen_tasks.add(task_id)
+
+        repo_key = binding.repo.casefold()
+        for issue in binding.github_issues:
+            target = (repo_key, issue)
+            if target in seen_issues:
+                return WorkstreamValidation(False, "ISSUE_BOUND_TO_MULTIPLE_WORKSTREAMS")
+            seen_issues.add(target)
+        for pr in binding.github_prs:
+            target = (repo_key, pr)
+            if target in seen_prs:
+                return WorkstreamValidation(False, "PR_BOUND_TO_MULTIPLE_WORKSTREAMS")
+            seen_prs.add(target)
+        for branch_ref in binding.branch_refs:
+            target = (repo_key, branch_ref)
+            if target in seen_branches:
+                return WorkstreamValidation(False, "BRANCH_BOUND_TO_MULTIPLE_WORKSTREAMS")
+            seen_branches.add(target)
+
+    for binding in materialized:
+        for dependency in binding.depends_on_workstream_ids:
+            if dependency not in seen_workstream_ids:
+                return WorkstreamValidation(False, "UNKNOWN_WORKSTREAM_DEPENDENCY")
+
+    return WorkstreamValidation(True)
+
+
 def validate_task_workstream(
     *, binding: WorkstreamBinding, task: TaskBinding
 ) -> WorkstreamValidation:
