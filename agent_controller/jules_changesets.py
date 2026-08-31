@@ -24,6 +24,8 @@ class JulesChangeSetEvidence:
     provider_operation_id: str
     activity_id: str
     activity_name: str
+    activity_create_time: Optional[str]
+    session_completed: bool
     source: str
     unidiff_patch: str
     base_commit_id: str
@@ -84,7 +86,11 @@ class JulesActivitiesApiClient(JulesApiClient):
                 break
 
             next_token = response.get("nextPageToken")
-            if not isinstance(next_token, str) or not next_token.strip():
+            if (
+                not isinstance(next_token, str)
+                or not next_token
+                or next_token != next_token.strip()
+            ):
                 raise RuntimeError("Malformed 'nextPageToken' in Jules activities API response")
             if next_token in seen_page_tokens:
                 raise RuntimeError(
@@ -101,7 +107,13 @@ ObservedAtFactory = Callable[[], str]
 
 
 class JulesChangeSetReadClient:
-    """Extract strictly validated ChangeSet.gitPatch evidence for one bound task."""
+    """Extract publishable-looking ChangeSet.gitPatch evidence for one bound task.
+
+    Jules may emit intermediate ChangeSet snapshots with an omitted or empty
+    patch/base while work is progressing. Those schema-valid but incomplete
+    snapshots are not publication candidates and are ignored. Structural type
+    errors, exact-session mismatches, and source mismatches still fail closed.
+    """
 
     def __init__(
         self,
@@ -157,6 +169,7 @@ class JulesChangeSetReadClient:
             activity_id = activity.get("id")
             activity_name = activity.get("name")
             originator = activity.get("originator")
+            create_time = activity.get("createTime")
             if not isinstance(activity_id, str) or not activity_id:
                 raise RuntimeError("Malformed Jules activity id")
             if not isinstance(activity_name, str) or not activity_name:
@@ -165,6 +178,14 @@ class JulesChangeSetReadClient:
                 raise RuntimeError("Jules activity does not belong to the bound session")
             if not isinstance(originator, str) or not originator:
                 raise RuntimeError("Malformed Jules activity originator")
+            if create_time is not None and (
+                not isinstance(create_time, str) or not create_time
+            ):
+                raise RuntimeError("Malformed Jules activity createTime")
+
+            session_completed = "sessionCompleted" in activity
+            if session_completed and not isinstance(activity.get("sessionCompleted"), Mapping):
+                raise RuntimeError("Malformed Jules sessionCompleted activity")
 
             raw_artifacts = activity.get("artifacts", [])
             if not isinstance(raw_artifacts, list):
@@ -195,27 +216,34 @@ class JulesChangeSetReadClient:
                 patch = git_patch.get("unidiffPatch")
                 base_commit_id = git_patch.get("baseCommitId")
                 suggested = git_patch.get("suggestedCommitMessage")
-                if not isinstance(patch, str) or not patch:
-                    raise RuntimeError("Jules ChangeSet unidiffPatch is missing or empty")
-                if not isinstance(base_commit_id, str) or not base_commit_id:
-                    raise RuntimeError("Jules ChangeSet baseCommitId is missing or empty")
-                if suggested is not None and (
-                    not isinstance(suggested, str) or not suggested
-                ):
+
+                # The official Jules examples include intermediate ChangeSets
+                # where one or both of these fields are omitted/empty. They are
+                # valid progress snapshots, but not usable publication evidence.
+                if patch is not None and not isinstance(patch, str):
+                    raise RuntimeError("Jules ChangeSet unidiffPatch is malformed")
+                if base_commit_id is not None and not isinstance(base_commit_id, str):
+                    raise RuntimeError("Jules ChangeSet baseCommitId is malformed")
+                if suggested is not None and not isinstance(suggested, str):
                     raise RuntimeError(
                         "Jules ChangeSet suggestedCommitMessage is malformed"
                     )
+                if not patch or not base_commit_id:
+                    continue
 
+                normalized_suggested = suggested if suggested else None
                 results.append(
                     JulesChangeSetEvidence(
                         provider="jules",
                         provider_operation_id=operation.provider_operation_id,
                         activity_id=activity_id,
                         activity_name=activity_name,
+                        activity_create_time=create_time,
+                        session_completed=session_completed,
                         source=source,
                         unidiff_patch=patch,
                         base_commit_id=base_commit_id,
-                        suggested_commit_message=suggested,
+                        suggested_commit_message=normalized_suggested,
                         observed_at=observed_at,
                         patch_sha256=sha256(patch.encode("utf-8")).hexdigest(),
                     )
