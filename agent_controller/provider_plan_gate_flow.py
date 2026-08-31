@@ -33,6 +33,32 @@ class PlanGateFlowStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class PlanGateCheckpoint:
+    """Controller-owned exact identity that may be resumed after a human plan action."""
+
+    task: TaskBinding
+    operation: ProviderOperationRef
+    workstream_binding: WorkstreamBinding | None
+    expected_provider: str
+    expected_provider_operation_id: str
+    expected_workstream_id: str | None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "task": self.task.to_dict(),
+            "operation": self.operation.to_dict(),
+            "workstream_binding": (
+                self.workstream_binding.to_dict()
+                if self.workstream_binding is not None
+                else None
+            ),
+            "expected_provider": self.expected_provider,
+            "expected_provider_operation_id": self.expected_provider_operation_id,
+            "expected_workstream_id": self.expected_workstream_id,
+        }
+
+
+@dataclass(frozen=True)
 class HumanPlanAction:
     workstream_id: str | None
     controller_task_id: str
@@ -64,6 +90,7 @@ class PlanGateFlowResult:
     status: PlanGateFlowStatus
     operation: ProviderOperationRef | None
     follow_result: FollowResult | None
+    checkpoint: PlanGateCheckpoint | None = None
     human_action: HumanPlanAction | None = None
     failure_reason: str | None = None
 
@@ -74,6 +101,7 @@ class PlanGateFlowResult:
             "follow_result": (
                 self.follow_result.to_dict() if self.follow_result is not None else None
             ),
+            "checkpoint": self.checkpoint.to_dict() if self.checkpoint is not None else None,
             "human_action": (
                 self.human_action.to_dict() if self.human_action is not None else None
             ),
@@ -117,6 +145,63 @@ def _validate_operation(
     return None
 
 
+def _checkpoint(
+    *,
+    task: TaskBinding,
+    operation: ProviderOperationRef,
+    workstream_binding: WorkstreamBinding | None,
+) -> PlanGateCheckpoint:
+    return PlanGateCheckpoint(
+        task=task,
+        operation=operation,
+        workstream_binding=workstream_binding,
+        expected_provider=operation.provider,
+        expected_provider_operation_id=operation.provider_operation_id,
+        expected_workstream_id=(
+            workstream_binding.workstream_id if workstream_binding is not None else None
+        ),
+    )
+
+
+def _validate_checkpoint(checkpoint: object) -> str | None:
+    if not isinstance(checkpoint, PlanGateCheckpoint):
+        return "PLAN_GATE_CHECKPOINT_MALFORMED"
+    if not isinstance(checkpoint.task, TaskBinding):
+        return "CHECKPOINT_TASK_MALFORMED"
+    if not isinstance(checkpoint.operation, ProviderOperationRef):
+        return "CHECKPOINT_OPERATION_MALFORMED"
+    if checkpoint.workstream_binding is not None and not isinstance(
+        checkpoint.workstream_binding, WorkstreamBinding
+    ):
+        return "CHECKPOINT_WORKSTREAM_MALFORMED"
+
+    operation = checkpoint.operation
+    if operation.provider != checkpoint.expected_provider:
+        return "CHECKPOINT_PROVIDER_CHANGED"
+    if operation.provider_operation_id != checkpoint.expected_provider_operation_id:
+        return "CHECKPOINT_PROVIDER_OPERATION_CHANGED"
+
+    actual_workstream_id = (
+        checkpoint.workstream_binding.workstream_id
+        if checkpoint.workstream_binding is not None
+        else None
+    )
+    if actual_workstream_id != checkpoint.expected_workstream_id:
+        return "CHECKPOINT_WORKSTREAM_CHANGED"
+
+    pre = _validate_pre_dispatch(
+        task=checkpoint.task,
+        workstream_binding=checkpoint.workstream_binding,
+    )
+    if pre is not None:
+        return pre
+    return _validate_operation(
+        task=checkpoint.task,
+        operation=operation,
+        workstream_binding=checkpoint.workstream_binding,
+    )
+
+
 def _is_plan_gate(follow_result: FollowResult) -> bool:
     final = follow_result.final_observation
     if final is None:
@@ -131,26 +216,24 @@ def _is_plan_gate(follow_result: FollowResult) -> bool:
 
 def _from_follow(
     *,
-    task: TaskBinding,
-    operation: ProviderOperationRef,
-    workstream_binding: WorkstreamBinding | None,
+    checkpoint: PlanGateCheckpoint,
     follow_result: FollowResult,
 ) -> PlanGateFlowResult:
+    operation = checkpoint.operation
     if not _is_plan_gate(follow_result):
         return PlanGateFlowResult(
             status=PlanGateFlowStatus.FOLLOW_STOPPED,
             operation=operation,
             follow_result=follow_result,
+            checkpoint=checkpoint,
         )
 
     final = follow_result.final_observation
     assert final is not None
     action = HumanPlanAction(
-        workstream_id=(
-            workstream_binding.workstream_id if workstream_binding is not None else None
-        ),
-        controller_task_id=task.controller_task_id,
-        operation_id=task.operation_id,
+        workstream_id=checkpoint.expected_workstream_id,
+        controller_task_id=checkpoint.task.controller_task_id,
+        operation_id=checkpoint.task.operation_id,
         provider=operation.provider,
         provider_operation_id=operation.provider_operation_id,
         provider_url=operation.provider_url,
@@ -161,6 +244,7 @@ def _from_follow(
         status=PlanGateFlowStatus.HUMAN_PLAN_ACTION_REQUIRED,
         operation=operation,
         follow_result=follow_result,
+        checkpoint=checkpoint,
         human_action=action,
     )
 
@@ -176,11 +260,7 @@ def start_plan_gate_flow(
     clock: Callable[[], float] = monotonic,
     sleeper: Callable[[float], None] = sleep,
 ) -> PlanGateFlowResult:
-    """Dispatch once, then follow the returned exact operation to the next stop.
-
-    This composition never approves a provider plan. If plan review is required,
-    it emits a bound human action and stops.
-    """
+    """Dispatch once, freeze that exact operation, then follow to the next stop."""
 
     failure = _validate_pre_dispatch(
         task=task, workstream_binding=workstream_binding
@@ -217,6 +297,11 @@ def start_plan_gate_flow(
         )
 
     assert isinstance(operation, ProviderOperationRef)
+    checkpoint = _checkpoint(
+        task=task,
+        operation=operation,
+        workstream_binding=workstream_binding,
+    )
     follow_result = follow_bound_operation(
         task=task,
         operation=operation,
@@ -228,71 +313,50 @@ def start_plan_gate_flow(
         clock=clock,
         sleeper=sleeper,
     )
-    return _from_follow(
-        task=task,
-        operation=operation,
-        workstream_binding=workstream_binding,
-        follow_result=follow_result,
-    )
+    return _from_follow(checkpoint=checkpoint, follow_result=follow_result)
 
 
 def resume_plan_gate_flow(
     *,
-    task: TaskBinding,
-    operation: ProviderOperationRef,
+    checkpoint: PlanGateCheckpoint,
     adapter: AgentAdapter,
     max_elapsed_seconds: float,
     max_observations: int,
     poll_interval_seconds: float,
-    workstream_binding: WorkstreamBinding | None = None,
     clock: Callable[[], float] = monotonic,
     sleeper: Callable[[float], None] = sleep,
 ) -> PlanGateFlowResult:
-    """Re-read and follow the original operation after a human provider action.
+    """Re-read and follow the exact operation frozen before the human gate.
 
-    No caller-supplied "approved" flag exists. Provider state is re-read through
-    the existing adapter, and this function never redispatches a replacement.
+    No caller-supplied "approved" flag or replacement operation exists. Provider
+    state is re-read through the existing adapter, and resume never dispatches.
     """
 
-    failure = _validate_pre_dispatch(
-        task=task, workstream_binding=workstream_binding
-    )
+    failure = _validate_checkpoint(checkpoint)
     if failure is not None:
         return PlanGateFlowResult(
             status=PlanGateFlowStatus.BINDING_INVALID,
-            operation=(operation if isinstance(operation, ProviderOperationRef) else None),
+            operation=(
+                checkpoint.operation
+                if isinstance(checkpoint, PlanGateCheckpoint)
+                and isinstance(checkpoint.operation, ProviderOperationRef)
+                else None
+            ),
             follow_result=None,
+            checkpoint=(checkpoint if isinstance(checkpoint, PlanGateCheckpoint) else None),
             failure_reason=failure,
         )
 
-    operation_failure = _validate_operation(
-        task=task,
-        operation=operation,
-        workstream_binding=workstream_binding,
-    )
-    if operation_failure is not None:
-        return PlanGateFlowResult(
-            status=PlanGateFlowStatus.BINDING_INVALID,
-            operation=(operation if isinstance(operation, ProviderOperationRef) else None),
-            follow_result=None,
-            failure_reason=operation_failure,
-        )
-
-    assert isinstance(operation, ProviderOperationRef)
+    assert isinstance(checkpoint, PlanGateCheckpoint)
     follow_result = follow_bound_operation(
-        task=task,
-        operation=operation,
+        task=checkpoint.task,
+        operation=checkpoint.operation,
         adapter=adapter,
         max_elapsed_seconds=max_elapsed_seconds,
         max_observations=max_observations,
         poll_interval_seconds=poll_interval_seconds,
-        workstream_binding=workstream_binding,
+        workstream_binding=checkpoint.workstream_binding,
         clock=clock,
         sleeper=sleeper,
     )
-    return _from_follow(
-        task=task,
-        operation=operation,
-        workstream_binding=workstream_binding,
-        follow_result=follow_result,
-    )
+    return _from_follow(checkpoint=checkpoint, follow_result=follow_result)
