@@ -156,6 +156,19 @@ def publish_jules_changeset_to_draft_pr(
             return DraftPublicationResult("BLOCKED", "CHANGESET_EVIDENCE_INVALID")
         if candidate.provider != "jules" or candidate.provider_operation_id != operation.provider_operation_id:
             return DraftPublicationResult("BLOCKED", "CHANGESET_OPERATION_MISMATCH")
+        if not isinstance(candidate.activity_id, str) or not candidate.activity_id:
+            return DraftPublicationResult("BLOCKED", "CHANGESET_ACTIVITY_INVALID")
+        expected_activity_name = f"sessions/{operation.provider_operation_id}/activities/{candidate.activity_id}"
+        if candidate.activity_name != expected_activity_name:
+            return DraftPublicationResult("BLOCKED", "CHANGESET_ACTIVITY_MISMATCH")
+        if candidate.session_completed is not True:
+            return DraftPublicationResult("BLOCKED", "CHANGESET_NOT_COMPLETED")
+        if not isinstance(candidate.source, str) or not candidate.source:
+            return DraftPublicationResult("BLOCKED", "CHANGESET_SOURCE_INVALID")
+        if candidate.suggested_commit_message is not None and (
+            not isinstance(candidate.suggested_commit_message, str) or not candidate.suggested_commit_message.strip()
+        ):
+            return DraftPublicationResult("BLOCKED", "CHANGESET_COMMIT_MESSAGE_INVALID")
         if not isinstance(candidate.base_commit_id, str) or not _SHA40.fullmatch(candidate.base_commit_id):
             return DraftPublicationResult("BLOCKED", "CHANGESET_BASE_INVALID")
         if candidate.base_commit_id.casefold() != task.expected_start_sha.casefold():
