@@ -173,12 +173,7 @@ def build_attention_queue(
     return tuple(
         sorted(
             items,
-            key=lambda item: (
-                _PRIORITY[item.category],
-                item.workstream_id or "",
-                item.repo,
-                item.pr,
-            ),
+            key=lambda item: (_PRIORITY[item.category], item.repo, item.pr),
         )
     )
 
