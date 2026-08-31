@@ -100,6 +100,10 @@ def validate_workstream_set(bindings: Sequence[WorkstreamBinding]) -> Workstream
     concurrent active set can validate it deterministically before observation,
     selection, or mutation. One task/GitHub target may belong to only one active
     workstream in this slice.
+
+    GitHub Issues and pull requests share the repository work-item number
+    namespace. A cross-type claim such as Issue #119 in one lane and PR #119 in
+    another is therefore treated as overlapping ownership.
     """
 
     if not isinstance(bindings, Sequence) or isinstance(bindings, (str, bytes)):
@@ -112,6 +116,7 @@ def validate_workstream_set(bindings: Sequence[WorkstreamBinding]) -> Workstream
     seen_tasks: set[str] = set()
     seen_issues: set[tuple[str, int]] = set()
     seen_prs: set[tuple[str, int]] = set()
+    seen_work_items: dict[tuple[str, int], str] = {}
     seen_branches: set[tuple[str, str]] = set()
 
     for binding in materialized:
@@ -129,12 +134,20 @@ def validate_workstream_set(bindings: Sequence[WorkstreamBinding]) -> Workstream
             target = (repo_key, issue)
             if target in seen_issues:
                 return WorkstreamValidation(False, "ISSUE_BOUND_TO_MULTIPLE_WORKSTREAMS")
+            existing_owner = seen_work_items.get(target)
+            if existing_owner is not None and existing_owner != binding.workstream_id:
+                return WorkstreamValidation(False, "GITHUB_WORK_ITEM_BOUND_TO_MULTIPLE_WORKSTREAMS")
             seen_issues.add(target)
+            seen_work_items[target] = binding.workstream_id
         for pr in binding.github_prs:
             target = (repo_key, pr)
             if target in seen_prs:
                 return WorkstreamValidation(False, "PR_BOUND_TO_MULTIPLE_WORKSTREAMS")
+            existing_owner = seen_work_items.get(target)
+            if existing_owner is not None and existing_owner != binding.workstream_id:
+                return WorkstreamValidation(False, "GITHUB_WORK_ITEM_BOUND_TO_MULTIPLE_WORKSTREAMS")
             seen_prs.add(target)
+            seen_work_items[target] = binding.workstream_id
         for branch_ref in binding.branch_refs:
             target = (repo_key, branch_ref)
             if target in seen_branches:
