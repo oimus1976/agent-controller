@@ -122,6 +122,13 @@ def _clock_value(clock: Callable[[], float]) -> float:
     return value
 
 
+def _elapsed(clock: Callable[[], float], started_at: float) -> float:
+    value = _clock_value(clock) - started_at
+    if value < 0:
+        raise ValueError("MONOTONIC_CLOCK_REVERSED")
+    return value
+
+
 def _observation_shape_valid(observation: object) -> bool:
     return (
         isinstance(observation, AgentObservation)
@@ -204,6 +211,36 @@ def _result(
     )
 
 
+def _clock_failure_result(
+    *,
+    task: TaskBinding,
+    operation: ProviderOperationRef,
+    workstream_binding: WorkstreamBinding | None,
+    exc: Exception,
+    observation_count: int,
+    elapsed_seconds: float,
+    first_observation: AgentObservation | None,
+    final_observation: AgentObservation | None,
+    transitions: tuple[FollowTransition, ...],
+) -> FollowResult:
+    reason = str(exc)
+    if reason not in {"CLOCK_MALFORMED", "MONOTONIC_CLOCK_REVERSED"}:
+        reason = "CLOCK_READ_FAILED"
+    return _result(
+        task=task,
+        operation=operation,
+        workstream_binding=workstream_binding,
+        stop_reason=FollowStopReason.UNCERTAIN,
+        outcome_state=ControllerState.UNCERTAIN,
+        observation_count=observation_count,
+        elapsed_seconds=elapsed_seconds,
+        first_observation=first_observation,
+        final_observation=final_observation,
+        transitions=transitions,
+        failure_reason=reason,
+    )
+
+
 def follow_bound_operation(
     *,
     task: TaskBinding,
@@ -220,6 +257,8 @@ def follow_bound_operation(
 
     This function is read-only. It never approves plans, sends provider messages,
     retries/cancels provider work, mutates GitHub, or changes human-final gates.
+    The elapsed bound controls this polling loop; each adapter remains responsible
+    for bounding its own individual provider read.
     """
 
     _validate_bounds(
@@ -296,15 +335,16 @@ def follow_bound_operation(
     try:
         started_at = _clock_value(clock)
     except Exception as exc:
-        return _result(
+        return _clock_failure_result(
             task=task,
             operation=operation,
             workstream_binding=workstream_binding,
-            stop_reason=FollowStopReason.UNCERTAIN,
-            outcome_state=ControllerState.UNCERTAIN,
-            failure_reason=(
-                str(exc) if str(exc) == "CLOCK_MALFORMED" else "CLOCK_READ_FAILED"
-            ),
+            exc=exc,
+            observation_count=0,
+            elapsed_seconds=0.0,
+            first_observation=None,
+            final_observation=None,
+            transitions=(),
         )
 
     first: AgentObservation | None = None
@@ -317,38 +357,18 @@ def follow_bound_operation(
     while True:
         if count > 0:
             try:
-                now = _clock_value(clock)
+                elapsed = _elapsed(clock, started_at)
             except Exception as exc:
-                return _result(
+                return _clock_failure_result(
                     task=task,
                     operation=operation,
                     workstream_binding=workstream_binding,
-                    stop_reason=FollowStopReason.UNCERTAIN,
-                    outcome_state=ControllerState.UNCERTAIN,
+                    exc=exc,
                     observation_count=count,
                     elapsed_seconds=elapsed,
                     first_observation=first,
                     final_observation=final,
                     transitions=tuple(transitions),
-                    failure_reason=(
-                        str(exc)
-                        if str(exc) == "CLOCK_MALFORMED"
-                        else "CLOCK_READ_FAILED"
-                    ),
-                )
-            elapsed = now - started_at
-            if elapsed < 0:
-                return _result(
-                    task=task,
-                    operation=operation,
-                    workstream_binding=workstream_binding,
-                    stop_reason=FollowStopReason.UNCERTAIN,
-                    outcome_state=ControllerState.UNCERTAIN,
-                    observation_count=count,
-                    first_observation=first,
-                    final_observation=final,
-                    transitions=tuple(transitions),
-                    failure_reason="MONOTONIC_CLOCK_REVERSED",
                 )
             if elapsed >= max_elapsed_seconds:
                 return _result(
@@ -435,60 +455,20 @@ def follow_bound_operation(
             )
             previous_signature = signature
 
-        stop = _stop_for_observation(observation)
-        if stop is not None:
-            stop_reason, outcome_state = stop
-            try:
-                elapsed_after_read = _clock_value(clock) - started_at
-                if elapsed_after_read >= 0:
-                    elapsed = elapsed_after_read
-            except Exception:
-                pass
-            return _result(
-                task=task,
-                operation=operation,
-                workstream_binding=workstream_binding,
-                stop_reason=stop_reason,
-                outcome_state=outcome_state,
-                observation_count=count,
-                elapsed_seconds=elapsed,
-                first_observation=first,
-                final_observation=final,
-                transitions=tuple(transitions),
-            )
-
         try:
-            elapsed_after_read = _clock_value(clock) - started_at
+            elapsed = _elapsed(clock, started_at)
         except Exception as exc:
-            return _result(
+            return _clock_failure_result(
                 task=task,
                 operation=operation,
                 workstream_binding=workstream_binding,
-                stop_reason=FollowStopReason.UNCERTAIN,
-                outcome_state=ControllerState.UNCERTAIN,
+                exc=exc,
                 observation_count=count,
                 elapsed_seconds=elapsed,
                 first_observation=first,
                 final_observation=final,
                 transitions=tuple(transitions),
-                failure_reason=(
-                    str(exc) if str(exc) == "CLOCK_MALFORMED" else "CLOCK_READ_FAILED"
-                ),
             )
-        if elapsed_after_read < 0:
-            return _result(
-                task=task,
-                operation=operation,
-                workstream_binding=workstream_binding,
-                stop_reason=FollowStopReason.UNCERTAIN,
-                outcome_state=ControllerState.UNCERTAIN,
-                observation_count=count,
-                first_observation=first,
-                final_observation=final,
-                transitions=tuple(transitions),
-                failure_reason="MONOTONIC_CLOCK_REVERSED",
-            )
-        elapsed = elapsed_after_read
 
         if elapsed >= max_elapsed_seconds:
             return _result(
@@ -497,6 +477,22 @@ def follow_bound_operation(
                 workstream_binding=workstream_binding,
                 stop_reason=FollowStopReason.MAX_ELAPSED,
                 outcome_state=observation.mapped_state,
+                observation_count=count,
+                elapsed_seconds=elapsed,
+                first_observation=first,
+                final_observation=final,
+                transitions=tuple(transitions),
+            )
+
+        stop = _stop_for_observation(observation)
+        if stop is not None:
+            stop_reason, outcome_state = stop
+            return _result(
+                task=task,
+                operation=operation,
+                workstream_binding=workstream_binding,
+                stop_reason=stop_reason,
+                outcome_state=outcome_state,
                 observation_count=count,
                 elapsed_seconds=elapsed,
                 first_observation=first,
