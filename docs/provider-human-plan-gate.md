@@ -12,24 +12,26 @@ The operator inspects and performs the provider-side action in the provider's ow
 
 ## Exact-operation checkpoint
 
-Immediately after the initial dispatch has been validated, Controller creates a frozen `PlanGateCheckpoint` containing the original `TaskBinding`, exact `ProviderOperationRef`, optional `WorkstreamBinding`, and redundant expected provider / provider-operation / workstream identity fields.
+Controller issues a frozen `PlanGateCheckpoint` **only when the bounded follow actually stops at a provider-neutral plan gate**. Non-plan stops such as artifact handoff, terminal claim, block, uncertainty, or timeout do not produce a resumable plan-gate checkpoint.
 
-Resume does not accept a caller-selected replacement operation. It accepts this checkpoint and validates the embedded identity against the expected identity before the first resumed provider read.
+The checkpoint contains the original `TaskBinding`, exact `ProviderOperationRef`, optional `WorkstreamBinding`, redundant expected provider / provider-operation / workstream identity fields, and the provider-neutral plan-gate state/input that justified issuance.
 
-This closes the gap where a different provider session could otherwise preserve the same Controller task/operation identifiers while changing only the provider operation id.
+Resume does not accept a caller-selected replacement operation. It accepts this checkpoint and validates that it was issued for a plan gate and that the embedded identity still matches the frozen expected identity before the first resumed provider read.
+
+This closes the gap where a different provider session could otherwise preserve the same Controller task/operation identifiers while changing only the provider operation id, and it prevents using this resume path after an unrelated terminal or handoff stop.
 
 ## Resume rule
 
-Resume requires the Controller-produced checkpoint containing the original `TaskBinding`, original exact `ProviderOperationRef`, and original `WorkstreamBinding` when named-lane mode is used.
+Resume requires the Controller-produced plan-gate checkpoint containing the original `TaskBinding`, original exact `ProviderOperationRef`, and original `WorkstreamBinding` when named-lane mode is used.
 
-Before the first resumed provider read, Controller revalidates checkpoint identity plus task/operation/workstream membership. A changed provider operation id, provider, task binding, operation binding, or lane fails closed with zero resumed provider reads.
+Before the first resumed provider read, Controller revalidates checkpoint gate evidence plus task/operation/workstream identity. A changed provider operation id, provider, task binding, operation binding, lane, or non-plan checkpoint fails closed with zero resumed provider reads.
 
 There is intentionally no replacement `operation=` argument, `approved=True`, free-form human message, or similar parameter. Human prose is not authoritative lifecycle evidence. The resumed flow re-reads the provider and uses the existing provider-neutral mapper/follow policy:
 
-- still awaiting plan approval -> surface the same exact human gate again;
+- still awaiting plan approval -> surface the same exact human gate again and issue a new plan-gate checkpoint;
 - execution started -> continue following the same operation;
 - blocked/failed/uncertain -> stop fail-closed;
-- artifact/review/terminal boundary -> return that handoff.
+- artifact/review/terminal boundary -> return that handoff with no resumable plan-gate checkpoint.
 
 Resume never redispatches a replacement session and never selects a session by repository proximity, recency, provider prose, or global attention ordering.
 
