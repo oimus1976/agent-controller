@@ -41,6 +41,20 @@ class GitHubDraftPublicationBackend(Protocol):
     def compare_files(self, repo: str, base_sha: str, head_sha: str) -> Sequence[Mapping[str, Any]]: ...
 
 
+def _base_branch(ref: str) -> str:
+    if ref.startswith("refs/heads/"):
+        value = ref[len("refs/heads/"):]
+    elif ref.startswith("heads/"):
+        value = ref[len("heads/"):]
+    elif ref.startswith("refs/"):
+        raise ValueError("EXPECTED_START_REF_NOT_BRANCH")
+    else:
+        value = ref
+    if not value or value.startswith("/") or value.endswith("/") or value in {"HEAD", "head", ".", ".."}:
+        raise ValueError("EXPECTED_START_REF_INVALID")
+    return value
+
+
 def _scope_allows(task: TaskBinding, paths: Sequence[str]) -> bool:
     allowed = tuple(task.objective_scope.allowed_paths or ())
     denied = tuple(task.objective_scope.denied_paths or ())
@@ -108,6 +122,7 @@ def publish_jules_changeset_to_draft_pr(
             return DraftPublicationResult("BLOCKED", "EXPECTED_START_SHA_INVALID")
         if not all(isinstance(v, str) and bool(v.strip()) for v in (destination_branch, pr_title, pr_body)):
             return DraftPublicationResult("BLOCKED", "PUBLICATION_METADATA_INVALID")
+        expected_base_branch = _base_branch(task.expected_start_ref)
 
         default_branch = github.get_default_branch(task.repo)
         guard = RepositoryWriteGuard(repo=task.repo, default_branch=default_branch)
@@ -116,6 +131,8 @@ def publish_jules_changeset_to_draft_pr(
             return DraftPublicationResult("BLOCKED", write.reason)
         branch = write.normalized_ref
         assert branch is not None
+        if not branch.startswith("controller/") or branch == "controller/":
+            return DraftPublicationResult("BLOCKED", "CONTROLLER_BRANCH_NAMESPACE_REQUIRED")
 
         observation = observe(operation)
         if not isinstance(observation, AgentObservation):
@@ -147,7 +164,6 @@ def publish_jules_changeset_to_draft_pr(
         if not paths or not _scope_allows(task, paths):
             return DraftPublicationResult("BLOCKED", "PATCH_SCOPE_VIOLATION")
 
-        # Re-read base and target immediately before the first mutation.
         fresh_base = github.get_ref_sha(task.repo, task.expected_start_ref)
         if fresh_base is None or fresh_base.casefold() != task.expected_start_sha.casefold():
             return DraftPublicationResult("BLOCKED", "EXPECTED_BASE_DRIFT_BEFORE_WRITE")
@@ -158,12 +174,11 @@ def publish_jules_changeset_to_draft_pr(
         if not isinstance(commit_sha, str) or not _SHA40.fullmatch(commit_sha):
             return DraftPublicationResult("UNCERTAIN", "CREATED_COMMIT_SHA_INVALID")
         github.create_branch(task.repo, branch, commit_sha)
-        created = github.create_draft_pr(repo=task.repo, head=branch, base=default_branch, title=pr_title, body=pr_body)
+        created = github.create_draft_pr(repo=task.repo, head=branch, base=expected_base_branch, title=pr_title, body=pr_body)
         pr_number = created.get("number") if isinstance(created, Mapping) else None
         if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
             return DraftPublicationResult("UNCERTAIN", "PR_IDENTITY_UNCERTAIN")
 
-        # Independent postcondition reads. Write responses are not authority.
         branch_sha = github.get_ref_sha(task.repo, branch)
         if branch_sha is None or branch_sha.casefold() != commit_sha.casefold():
             return DraftPublicationResult("UNCERTAIN", "BRANCH_POSTCONDITION_FAILED")
@@ -180,7 +195,7 @@ def publish_jules_changeset_to_draft_pr(
             return DraftPublicationResult("UNCERTAIN", "PR_IDENTITY_POSTCONDITION_FAILED")
         if head.get("ref") != branch or not isinstance(head.get("sha"), str) or head.get("sha").casefold() != branch_sha.casefold():
             return DraftPublicationResult("UNCERTAIN", "PR_HEAD_POSTCONDITION_FAILED")
-        if base.get("ref") != default_branch:
+        if base.get("ref") != expected_base_branch:
             return DraftPublicationResult("UNCERTAIN", "PR_BASE_POSTCONDITION_FAILED")
         open_prs = tuple(github.list_open_prs_for_branch(task.repo, branch))
         if len(open_prs) != 1 or open_prs[0].get("number") != pr_number:
