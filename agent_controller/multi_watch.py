@@ -18,6 +18,7 @@ _ALLOWED_TARGET_KEYS = frozenset(
         "allowed_paths",
         "denied_paths",
         "allow_docs_only",
+        "workstream_id",
     }
 )
 
@@ -37,11 +38,16 @@ def validate_targets(raw_targets: object) -> tuple[dict[str, object], ...]:
     if not isinstance(raw_targets, Sequence) or isinstance(raw_targets, (str, bytes)):
         raise TypeError("targets must be a sequence")
 
+    raw_items = tuple(raw_targets)
+    lane_mode = any(
+        isinstance(raw, Mapping) and "workstream_id" in raw for raw in raw_items
+    )
+
     validated: list[dict[str, object]] = []
     seen_targets: set[tuple[str, int]] = set()
     seen_state_files: set[str] = set()
 
-    for index, raw in enumerate(raw_targets):
+    for index, raw in enumerate(raw_items):
         if not isinstance(raw, Mapping):
             raise TypeError(f"target[{index}] must be a mapping")
 
@@ -56,6 +62,7 @@ def validate_targets(raw_targets: object) -> tuple[dict[str, object], ...]:
         allowed_paths = _validate_string_list("allowed_paths", raw.get("allowed_paths"))
         denied_paths = _validate_string_list("denied_paths", raw.get("denied_paths"))
         allow_docs_only = raw.get("allow_docs_only", False)
+        workstream_id = raw.get("workstream_id")
 
         if not isinstance(repo, str) or not repo or repo.count("/") != 1:
             raise ValueError(f"target[{index}].repo must be OWNER/REPO")
@@ -68,6 +75,14 @@ def validate_targets(raw_targets: object) -> tuple[dict[str, object], ...]:
             raise ValueError(f"target[{index}].state_file must be nonempty")
         if not isinstance(allow_docs_only, bool):
             raise ValueError(f"target[{index}].allow_docs_only must be bool")
+
+        if lane_mode:
+            if not isinstance(workstream_id, str) or not workstream_id:
+                raise ValueError(
+                    f"target[{index}].workstream_id must be nonempty when lane mode is used"
+                )
+        else:
+            workstream_id = None
 
         target_identity = (repo.casefold(), pr)
         if target_identity in seen_targets:
@@ -86,6 +101,7 @@ def validate_targets(raw_targets: object) -> tuple[dict[str, object], ...]:
                 "name": name,
                 "pr": pr,
                 "state_file": state_file,
+                "workstream_id": workstream_id,
                 "scope_policy": {
                     "allowed_paths": list(allowed_paths) if allowed_paths is not None else None,
                     "denied_paths": list(denied_paths) if denied_paths is not None else None,
@@ -106,13 +122,15 @@ def run_attention_watch(
 
     A watcher may return EVIDENCE_UNAVAILABLE for one target; that observation is
     still aggregated so other targets are not hidden. Configuration errors are
-    rejected before the first watcher call.
+    rejected before the first watcher call. When any target opts into lane mode,
+    every target must provide a Controller-owned workstream_id; provider/watch
+    output cannot override that binding.
     """
 
     targets = validate_targets(raw_targets)
     observations: list[Mapping[str, object]] = []
     for target in targets:
-        observations.append(
+        observation = dict(
             watch_once(
                 str(target["owner"]),
                 str(target["name"]),
@@ -121,6 +139,9 @@ def run_attention_watch(
                 target["scope_policy"],
             )
         )
+        if target["workstream_id"] is not None:
+            observation["workstream_id"] = target["workstream_id"]
+        observations.append(observation)
 
     queue = build_attention_queue(observations)
     return tuple(asdict(item) for item in queue)
