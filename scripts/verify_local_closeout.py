@@ -47,6 +47,9 @@ def main() -> int:
     fetch_refspec = f"+refs/heads/{args.branch}:{remote_ref}"
     fetched = git("fetch", args.remote, fetch_refspec, cwd=repo, check=False)
     if fetched.returncode != 0:
+        # Do not echo fetch output here: unusual remote URLs/errors can contain
+        # sensitive connection material. The operator can run Git directly when
+        # troubleshooting the remote.
         failures.append(
             f"could not refresh {args.remote}/{args.branch}; remote freshness is unverified"
         )
@@ -63,7 +66,12 @@ def main() -> int:
     elif status.stdout.strip():
         failures.append("working tree is not clean")
 
-    in_progress_markers = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"]
+    in_progress_markers = [
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "BISECT_LOG",
+    ]
     git_dir = git("rev-parse", "--git-dir", cwd=repo, check=False).stdout.strip()
     if git_dir:
         git_dir_path = Path(git_dir)
