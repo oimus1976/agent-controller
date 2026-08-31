@@ -20,6 +20,7 @@ class GitHubRestDraftPublicationBackend:
     def __init__(self, token: Optional[str] = None, api_url: str = "https://api.github.com") -> None:
         self._token = token
         self._api_url = api_url.rstrip("/")
+        self._tree_cache: dict[tuple[str, str], dict[str, tuple[str, str]]] = {}
 
     def _token_value(self) -> str:
         token = self._token or os.environ.get("GITHUB_TOKEN")
@@ -74,14 +75,41 @@ class GitHubRestDraftPublicationBackend:
             raise RuntimeError("malformed ref SHA")
         return sha
 
-    def get_file_text(self, repo: str, commit_sha: str, path: str) -> Optional[str]:
+    def _tree_entries(self, repo: str, commit_sha: str) -> dict[str, tuple[str, str]]:
+        key = (repo, commit_sha)
+        if key in self._tree_cache:
+            return self._tree_cache[key]
         owner, name = self._repo(repo)
-        try:
-            payload = self._request("GET", f"repos/{owner}/{name}/contents/{urllib.parse.quote(path, safe='/')}?ref={commit_sha}")
-        except RuntimeError as exc:
-            if " 404 " in str(exc):
-                return None
-            raise
+        commit = self._request("GET", f"repos/{owner}/{name}/git/commits/{commit_sha}")
+        tree_sha = commit.get("tree", {}).get("sha") if isinstance(commit, Mapping) else None
+        if not isinstance(tree_sha, str) or not _SHA40.fullmatch(tree_sha):
+            raise RuntimeError("base tree unavailable")
+        payload = self._request("GET", f"repos/{owner}/{name}/git/trees/{tree_sha}?recursive=1")
+        if not isinstance(payload, Mapping) or payload.get("truncated") is True:
+            raise RuntimeError("base tree listing unavailable or truncated")
+        rows = payload.get("tree")
+        if not isinstance(rows, list):
+            raise RuntimeError("base tree listing malformed")
+        entries: dict[str, tuple[str, str]] = {}
+        for row in rows:
+            if not isinstance(row, Mapping):
+                raise RuntimeError("base tree entry malformed")
+            path, mode, kind = row.get("path"), row.get("mode"), row.get("type")
+            if not all(isinstance(value, str) and value for value in (path, mode, kind)):
+                raise RuntimeError("base tree entry malformed")
+            entries[path] = (mode, kind)
+        self._tree_cache[key] = entries
+        return entries
+
+    def get_file_text(self, repo: str, commit_sha: str, path: str) -> Optional[str]:
+        entries = self._tree_entries(repo, commit_sha)
+        entry = entries.get(path)
+        if entry is None:
+            return None
+        if entry != ("100644", "blob"):
+            raise RuntimeError("base path is not supported regular 100644 text")
+        owner, name = self._repo(repo)
+        payload = self._request("GET", f"repos/{owner}/{name}/contents/{urllib.parse.quote(path, safe='/')}?ref={commit_sha}")
         if payload.get("type") != "file" or payload.get("encoding") != "base64" or not isinstance(payload.get("content"), str):
             raise RuntimeError("unsupported base file")
         try:
@@ -100,8 +128,6 @@ class GitHubRestDraftPublicationBackend:
             if change.old_path is not None and change.old_path != change.new_path:
                 entries.append({"path": change.old_path, "mode": "100644", "type": "blob", "sha": None})
             if change.new_path is None:
-                if change.old_path is not None and change.old_path == change.new_path:
-                    entries.append({"path": change.old_path, "mode": "100644", "type": "blob", "sha": None})
                 continue
             if change.new_text is None:
                 raise RuntimeError("new text missing")
