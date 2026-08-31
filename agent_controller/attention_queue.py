@@ -25,6 +25,7 @@ class AttentionItem:
     category: AttentionCategory
     reason: str
     human_action: str | None = None
+    workstream_id: str | None = None
 
 
 _PRIORITY = {
@@ -60,6 +61,14 @@ def classify_attention(observation: Mapping[str, object]) -> AttentionItem:
     current_draft = observation.get("current_draft")
     current_merged = observation.get("current_merged")
     current_state_enum = observation.get("current_state_enum")
+    raw_workstream_id = observation.get("workstream_id")
+
+    if raw_workstream_id is None:
+        workstream_id = None
+    elif not isinstance(raw_workstream_id, str) or not raw_workstream_id:
+        raise ValueError("workstream_id must be a nonempty string when present")
+    else:
+        workstream_id = raw_workstream_id
 
     if repo is None:
         raise ValueError("repo must be nonempty")
@@ -151,6 +160,7 @@ def classify_attention(observation: Mapping[str, object]) -> AttentionItem:
         category=category,
         reason=reason,
         human_action=human_action,
+        workstream_id=workstream_id,
     )
 
 
@@ -166,3 +176,22 @@ def build_attention_queue(
             key=lambda item: (_PRIORITY[item.category], item.repo, item.pr),
         )
     )
+
+
+def select_attention_for_workstream(
+    items: Sequence[AttentionItem], workstream_id: str
+) -> tuple[AttentionItem, ...]:
+    """Return only items explicitly bound to one workstream.
+
+    Global queue order is presentation only. It must never be used to infer that
+    an unrelated item is the continuation of the caller's active workstream.
+    Unbound items are intentionally excluded rather than guessed into a lane.
+    """
+
+    if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
+        raise TypeError("items must be a sequence")
+    if not isinstance(workstream_id, str) or not workstream_id:
+        raise ValueError("workstream_id must be a nonempty string")
+    if any(not isinstance(item, AttentionItem) for item in items):
+        raise TypeError("items must contain AttentionItem values")
+    return tuple(item for item in items if item.workstream_id == workstream_id)
