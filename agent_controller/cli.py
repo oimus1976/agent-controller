@@ -15,7 +15,10 @@ from .objective_target import (
     GitHubTargetExpectation,
     run_objective_target_handoff,
 )
-from .provider_adapters import CodexObservationAdapter
+from .jules_live import JulesApiClient, JulesDispatchClient, JulesReadClient
+from .provider_adapters import CodexObservationAdapter, JulesObservationAdapter
+from .provider_artifacts import JulesArtifactAdapter
+from .provider_runtime import JulesAgentAdapter
 from .provider_contract import (
     ObjectiveScope,
     ProviderOperationRef,
@@ -68,6 +71,8 @@ def main():
             "verify-codex-target",
             "request-codex-review",
             "request-codex-remediation",
+            "dispatch-jules",
+            "observe-jules",
         ],
         help="Command to run",
     )
@@ -106,7 +111,85 @@ def main():
         help="Immutable GitHub start SHA that the verified target must descend from and differ from",
     )
 
+    parser.add_argument("--prompt", help="Prompt to start the session with (dispatch-jules)")
+    parser.add_argument("--session-id", help="Existing Jules session id for observe-jules")
+
     args = parser.parse_args()
+
+    if args.command == "dispatch-jules":
+        repo = _require_repo(parser, args.repo)
+        if not args.target_ref:
+            parser.error("dispatch-jules requires --target-ref")
+        if not args.expected_start_sha:
+            parser.error("dispatch-jules requires --expected-start-sha")
+        if not args.prompt:
+            parser.error("dispatch-jules requires --prompt")
+
+        try:
+            task_id = f"task-jules-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+            operation_id = f"op-jules-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+            task = TaskBinding(
+                controller_task_id=task_id,
+                operation_id=operation_id,
+                provider="jules",
+                repo=repo,
+                expected_start_ref=args.target_ref,
+                expected_start_sha=args.expected_start_sha,
+                objective_scope=ObjectiveScope(
+                    allowed_paths=args.allowed_paths,
+                    denied_paths=args.denied_paths,
+                ),
+                requested_capability="JULES_LIVE_DISPATCH",
+                allowed_effects=("SESSION_CREATE",),
+                forbidden_effects=("AUTO_CREATE_PR", "PLAN_APPROVAL"),
+                approval_policy_id="adr-90-human-final",
+                created_at=_observed_at_now(),
+            )
+            api_client = JulesApiClient()
+            dispatch_client = JulesDispatchClient(api_client)
+            adapter = JulesAgentAdapter(
+                dispatch_client=dispatch_client,
+                observation=JulesObservationAdapter(
+                    client=JulesReadClient(api_client),
+                    observed_at=_observed_at_now,
+                ),
+                artifacts=JulesArtifactAdapter(
+                    client=None,  # type: ignore
+                    observed_at=_observed_at_now,
+                ),
+            )
+            # Dispatch through JulesAgentAdapter to enforce provider-neutral binding validation
+            ref = adapter.dispatch(task, prompt=args.prompt)
+            print(json.dumps(ref.to_dict(), indent=2))
+        except Exception as e:
+            print(f"Error dispatching Jules task: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.command == "observe-jules":
+        if not args.session_id:
+            parser.error("observe-jules requires --session-id")
+
+        try:
+            operation = ProviderOperationRef(
+                provider="jules",
+                provider_operation_id=args.session_id,
+                provider_url=None,
+                controller_task_id=f"live-jules:{args.session_id}",
+                operation_id=f"observe:{args.session_id}",
+            )
+            api_client = JulesApiClient()
+            read_client = JulesReadClient(api_client)
+            adapter = JulesObservationAdapter(
+                client=read_client,
+                observed_at=_observed_at_now,
+            )
+            observation = adapter.observe(operation)
+            print(json.dumps(observation.to_dict(), indent=2))
+        except Exception as e:
+            print(f"Error observing Jules session: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
 
     if args.command == "attention-queue":
         if not args.targets_file:

@@ -37,7 +37,7 @@ class TestProviderObservationAdapters(unittest.TestCase):
     def test_jules_adapter_delegates_client_then_mapper(self):
         client = FixtureReadClient(
             {
-                "status": "AWAITING_PLAN_APPROVAL",
+                "state": "AWAITING_PLAN_APPROVAL",
                 "plan_id": "plan-1",
                 "updated_at": "2026-08-24T01:40:00Z",
             }
