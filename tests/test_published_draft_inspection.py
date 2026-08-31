@@ -1,9 +1,10 @@
 import inspect
 import unittest
+from unittest import mock
 
 from agent_controller.jules_draft_publication import DraftPublicationResult
 from agent_controller.provider_contract import ObjectiveScope, TaskBinding
-from agent_controller.published_draft_inspection import inspect_published_draft_pr
+from agent_controller.published_draft_inspection import inspect_published_draft_pr, inspect_published_draft_pr_live
 from agent_controller.workstream import WorkstreamBinding
 
 
@@ -190,10 +191,35 @@ class PublishedDraftInspectionTests(unittest.TestCase):
         result, _ = run(harness=h)
         self.assertEqual(result.status, "UNCERTAIN")
 
-    def test_surface_has_no_ready_or_merge_argument(self):
-        params = inspect.signature(inspect_published_draft_pr).parameters
-        for forbidden in ("ready", "merge", "auto_merge", "approve_plan", "send_message"):
-            self.assertNotIn(forbidden, params)
+    def test_live_wrapper_delegates_to_existing_inspector_only(self):
+        evidence = {
+            "head_sha": HEAD,
+            "base_branch": "main",
+            "draft": True,
+            "merged": False,
+            "state": "open",
+            "classification": "NEEDS_REVIEW",
+            "actions_ci_status": "PENDING",
+            "scope_status": "SATISFIED",
+        }
+        with mock.patch("agent_controller.inspector.get_pr_details", side_effect=[pr_snapshot(), pr_snapshot()]) as read_mock, mock.patch(
+            "agent_controller.inspector.inspect_pr", return_value=evidence
+        ) as inspect_mock:
+            result = inspect_published_draft_pr_live(publication=publication(), task=task(), workstream=lane())
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(read_mock.call_count, 2)
+        inspect_mock.assert_called_once_with(
+            "oimus1976",
+            "agent-controller",
+            77,
+            {"allowed_paths": ["agent_controller/**", "tests/**"], "denied_paths": []},
+        )
+
+    def test_surfaces_have_no_ready_or_merge_argument(self):
+        for function in (inspect_published_draft_pr, inspect_published_draft_pr_live):
+            params = inspect.signature(function).parameters
+            for forbidden in ("ready", "merge", "auto_merge", "approve_plan", "send_message"):
+                self.assertNotIn(forbidden, params)
 
 
 if __name__ == "__main__":
