@@ -111,14 +111,13 @@ def parse_and_apply_text_patch(
         new_text = _apply(base, body)
         result.append(ParsedTextPatch(old_path, new_path, None if new_path is None else new_text))
 
-    # One path may not be mutated by two independent file blocks.
+    # A path may appear as both old/new within one file block, but not across blocks.
     seen: set[str] = set()
     for change in result:
-        for path in (change.old_path, change.new_path):
-            if path is not None:
-                if path in seen:
-                    raise ValueError("PATCH_PATH_COLLISION")
-                seen.add(path)
+        local = {path for path in (change.old_path, change.new_path) if path is not None}
+        if seen.intersection(local):
+            raise ValueError("PATCH_PATH_COLLISION")
+        seen.update(local)
     return tuple(result)
 
 
