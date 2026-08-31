@@ -55,11 +55,18 @@ def source_payload():
     }
 
 
-def valid_activity(activity_id="act-1", patch=PATCH, base_commit_id=BASE_SHA):
-    return {
+def valid_activity(
+    activity_id="act-1",
+    patch=PATCH,
+    base_commit_id=BASE_SHA,
+    *,
+    session_completed=False,
+):
+    activity = {
         "name": f"sessions/session-a/activities/{activity_id}",
         "id": activity_id,
         "originator": "agent",
+        "createTime": "2026-08-31T00:00:00Z",
         "artifacts": [
             {
                 "changeSet": {
@@ -73,6 +80,9 @@ def valid_activity(activity_id="act-1", patch=PATCH, base_commit_id=BASE_SHA):
             }
         ],
     }
+    if session_completed:
+        activity["sessionCompleted"] = {}
+    return activity
 
 
 class FakeTransport:
@@ -107,7 +117,9 @@ def make_reader(transport):
 
 class JulesChangeSetTests(unittest.TestCase):
     def test_one_page_valid_changeset_preserves_untrusted_patch_evidence(self):
-        transport = FakeTransport()
+        transport = FakeTransport(
+            [{"activities": [valid_activity(session_completed=True)]}]
+        )
         evidence = make_reader(transport).list_change_sets(
             task=make_task(), operation=make_operation()
         )
@@ -117,6 +129,8 @@ class JulesChangeSetTests(unittest.TestCase):
         self.assertEqual(item.provider, "jules")
         self.assertEqual(item.provider_operation_id, "session-a")
         self.assertEqual(item.activity_id, "act-1")
+        self.assertEqual(item.activity_create_time, "2026-08-31T00:00:00Z")
+        self.assertTrue(item.session_completed)
         self.assertEqual(item.source, SOURCE)
         self.assertEqual(item.unidiff_patch, PATCH)
         self.assertEqual(item.base_commit_id, BASE_SHA)
@@ -152,7 +166,7 @@ class JulesChangeSetTests(unittest.TestCase):
                 task=make_task(), operation=make_operation(), max_activity_pages=1
             )
 
-        for token in ("", "   ", 3, True):
+        for token in ("", "   ", " x ", 3, True):
             malformed = FakeTransport([{"activities": [], "nextPageToken": token}])
             with self.assertRaisesRegex(RuntimeError, "nextPageToken"):
                 make_reader(malformed).list_change_sets(
@@ -190,7 +204,29 @@ class JulesChangeSetTests(unittest.TestCase):
         )
         self.assertEqual(evidence, ())
 
-    def test_malformed_changeset_source_patch_and_base_fail_closed(self):
+    def test_official_style_incomplete_patch_snapshots_are_ignored(self):
+        missing_patch = valid_activity("act-missing-patch")
+        del missing_patch["artifacts"][0]["changeSet"]["gitPatch"]["unidiffPatch"]
+
+        empty_patch = valid_activity("act-empty-patch", patch="")
+
+        missing_base = valid_activity("act-missing-base")
+        del missing_base["artifacts"][0]["changeSet"]["gitPatch"]["baseCommitId"]
+
+        empty_base = valid_activity("act-empty-base", base_commit_id="")
+
+        final = valid_activity("act-final", session_completed=True)
+        transport = FakeTransport(
+            [{"activities": [missing_patch, empty_patch, missing_base, empty_base, final]}]
+        )
+
+        evidence = make_reader(transport).list_change_sets(
+            task=make_task(), operation=make_operation()
+        )
+        self.assertEqual([item.activity_id for item in evidence], ["act-final"])
+        self.assertTrue(evidence[0].session_completed)
+
+    def test_structural_changeset_and_source_errors_fail_closed(self):
         mutations = []
 
         malformed_change_set = valid_activity()
@@ -201,11 +237,13 @@ class JulesChangeSetTests(unittest.TestCase):
         wrong_source["artifacts"][0]["changeSet"]["source"] = "sources/github/other/repo"
         mutations.append(wrong_source)
 
-        empty_patch = valid_activity(patch="")
-        mutations.append(empty_patch)
+        malformed_patch_type = valid_activity()
+        malformed_patch_type["artifacts"][0]["changeSet"]["gitPatch"]["unidiffPatch"] = 5
+        mutations.append(malformed_patch_type)
 
-        empty_base = valid_activity(base_commit_id="")
-        mutations.append(empty_base)
+        malformed_base_type = valid_activity()
+        malformed_base_type["artifacts"][0]["changeSet"]["gitPatch"]["baseCommitId"] = 5
+        mutations.append(malformed_base_type)
 
         malformed_message = valid_activity()
         malformed_message["artifacts"][0]["changeSet"]["gitPatch"]["suggestedCommitMessage"] = 7
