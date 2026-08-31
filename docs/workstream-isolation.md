@@ -25,23 +25,25 @@ This slice does not replace existing provider identity binding. `TaskBinding -> 
 
 Workstream identity is orthogonal:
 
-- `WorkstreamBinding` binds Controller tasks and GitHub targets to one independent line of work;
+- `WorkstreamBinding` binds Controller tasks, GitHub Issues, PRs, and branch refs to one independent line of work;
 - provider operation membership is derived through the existing `controller_task_id`;
 - `multi_watch` may observe multiple lanes concurrently while preserving Controller-owned `workstream_id`;
 - `AttentionItem` carries lane identity and lane-scoped selection must be used for continuation decisions;
-- global attention ordering is presentation only;
-- the lane-aware `ENSURE_DRAFT` execution boundary checks exact workstream PR membership before any GitHub re-read or mutation.
+- global attention ordering remains the existing presentation order and grants no continuation authority;
+- the lane-aware `ENSURE_DRAFT` execution boundary checks exact workstream PR membership before any GitHub re-read or mutation;
+- the lane-aware reconciler checks exact workstream PR ownership before entering the historical watcher/planner/executor composition, so a wrong-lane target is rejected before any legacy reconciliation work begins.
 
 ## Compatibility boundary
 
-Historical single-target/unbound observation and `execute_action` entry points remain for compatibility in this MVP. They do not gain workstream authority merely because the new contract exists.
+Historical single-target/unbound observation, reconciliation, and `execute_action` entry points remain for compatibility in this MVP. They do not gain workstream authority merely because the new contract exists.
 
 New concurrent/lane-aware orchestration must:
 
 1. use explicit workstream IDs for all targets in a multi-target lane-aware watch;
 2. select follow-up attention by workstream, not by the first/highest-priority item in the global queue;
-3. use the explicit lane-aware mutation boundary with a `WorkstreamBinding`;
-4. never fall back silently to an unbound legacy mutation when a lane binding is missing or mismatched.
+3. use `reconcile_workstream_pr_once` for mutation-capable PR reconciliation so target ownership is proven before the legacy composition is entered;
+4. use the explicit lane-aware execution boundary when invoking execution directly;
+5. never fall back silently to an unbound legacy mutation when a lane binding is missing or mismatched.
 
 A later migration may make workstream binding mandatory for all mutation-capable Controller paths after routine use proves the contract and compatibility impact.
 
