@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import unittest
 
 from agent_controller.operation_follow import FollowStopReason, follow_bound_operation
@@ -176,6 +177,30 @@ class OperationFollowTests(unittest.TestCase):
         self.assertEqual(2.0, result.elapsed_seconds)
         self.assertEqual([1, 1], clock.sleeps)
 
+    def test_provider_read_time_counts_toward_elapsed_bound(self):
+        clock = FakeClock()
+
+        class SlowAdapter(FakeAdapter):
+            def observe(self, operation):
+                value = super().observe(operation)
+                clock.value += 3
+                return value
+
+        adapter = SlowAdapter([observation(ControllerState.EXECUTING)])
+        result = follow_bound_operation(
+            task=make_task(),
+            operation=make_operation(),
+            adapter=adapter,
+            max_elapsed_seconds=2,
+            max_observations=10,
+            poll_interval_seconds=1,
+            clock=clock.now,
+            sleeper=clock.sleep,
+        )
+        self.assertEqual(FollowStopReason.MAX_ELAPSED, result.stop_reason)
+        self.assertEqual(1, adapter.observe_calls)
+        self.assertEqual(3.0, result.elapsed_seconds)
+
     def test_terminal_failure_claim_stops_explicitly(self):
         result, _, _ = self.run_follow(
             [
@@ -209,6 +234,31 @@ class OperationFollowTests(unittest.TestCase):
         self.assertEqual(FollowStopReason.BINDING_INVALID, result.stop_reason)
         self.assertEqual(ControllerState.BLOCKED, result.outcome_state)
         self.assertEqual(0, adapter.observe_calls)
+
+    def test_malformed_task_operation_and_workstream_stop_before_provider_read(self):
+        cases = (
+            (object(), make_operation(), None, "TASK_BINDING_MALFORMED"),
+            (make_task(), object(), None, "OPERATION_BINDING_MALFORMED"),
+            (make_task(), make_operation(), object(), "WORKSTREAM_BINDING_MALFORMED"),
+        )
+        for task, operation, lane, reason in cases:
+            with self.subTest(reason=reason):
+                adapter = FakeAdapter([observation(ControllerState.EXECUTING)])
+                clock = FakeClock()
+                result = follow_bound_operation(
+                    task=task,
+                    operation=operation,
+                    adapter=adapter,
+                    max_elapsed_seconds=10,
+                    max_observations=3,
+                    poll_interval_seconds=1,
+                    workstream_binding=lane,
+                    clock=clock.now,
+                    sleeper=clock.sleep,
+                )
+                self.assertEqual(FollowStopReason.BINDING_INVALID, result.stop_reason)
+                self.assertEqual(reason, result.failure_reason)
+                self.assertEqual(0, adapter.observe_calls)
 
     def test_wrong_workstream_binding_stops_before_provider_read(self):
         binding = WorkstreamBinding(
@@ -271,7 +321,7 @@ class OperationFollowTests(unittest.TestCase):
                 self.assertEqual(FollowStopReason.HANDOFF_READY, result.stop_reason)
                 self.assertEqual(2, adapter.observe_calls)
 
-    def test_bounds_reject_boolean_zero_and_negative_values(self):
+    def test_bounds_reject_boolean_zero_negative_nan_and_infinite_values(self):
         adapter = FakeAdapter([])
         base = dict(
             task=make_task(),
@@ -283,10 +333,14 @@ class OperationFollowTests(unittest.TestCase):
         for key, value in (
             ("max_elapsed_seconds", 0),
             ("max_elapsed_seconds", True),
+            ("max_elapsed_seconds", math.inf),
+            ("max_elapsed_seconds", math.nan),
             ("max_observations", 0),
             ("max_observations", True),
             ("poll_interval_seconds", 0),
             ("poll_interval_seconds", True),
+            ("poll_interval_seconds", math.inf),
+            ("poll_interval_seconds", math.nan),
         ):
             with self.subTest(key=key, value=value):
                 kwargs = dict(
@@ -297,6 +351,22 @@ class OperationFollowTests(unittest.TestCase):
                 kwargs[key] = value
                 with self.assertRaises((TypeError, ValueError)):
                     follow_bound_operation(**base, **kwargs)
+        self.assertEqual(0, adapter.observe_calls)
+
+    def test_nonfinite_clock_fails_closed_without_provider_read(self):
+        adapter = FakeAdapter([observation(ControllerState.EXECUTING)])
+        result = follow_bound_operation(
+            task=make_task(),
+            operation=make_operation(),
+            adapter=adapter,
+            max_elapsed_seconds=10,
+            max_observations=3,
+            poll_interval_seconds=1,
+            clock=lambda: math.nan,
+            sleeper=lambda _: None,
+        )
+        self.assertEqual(FollowStopReason.UNCERTAIN, result.stop_reason)
+        self.assertEqual("CLOCK_MALFORMED", result.failure_reason)
         self.assertEqual(0, adapter.observe_calls)
 
     def test_result_serialization_keeps_compact_transition_history(self):
