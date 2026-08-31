@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from math import isfinite
 from time import monotonic, sleep
 from typing import Callable
 
@@ -56,10 +57,10 @@ class FollowTransition:
 
 @dataclass(frozen=True)
 class FollowResult:
-    controller_task_id: str
-    operation_id: str
-    provider: str
-    provider_operation_id: str
+    controller_task_id: str | None
+    operation_id: str | None
+    provider: str | None
+    provider_operation_id: str | None
     workstream_id: str | None
     stop_reason: FollowStopReason
     outcome_state: ControllerState
@@ -92,25 +93,13 @@ class FollowResult:
         }
 
 
-_STOP_STATES = frozenset(
-    {
-        ControllerState.PLAN_REVIEW_REQUIRED,
-        ControllerState.ARTIFACT_READY,
-        ControllerState.REVIEW_REQUIRED,
-        ControllerState.REVIEW_READY,
-        ControllerState.BLOCKED,
-        ControllerState.UNCERTAIN,
-    }
-)
-
-
 def _validate_bounds(
     *, max_elapsed_seconds: float, max_observations: int, poll_interval_seconds: float
 ) -> None:
     if isinstance(max_elapsed_seconds, bool) or not isinstance(max_elapsed_seconds, (int, float)):
         raise TypeError("max_elapsed_seconds must be numeric")
-    if max_elapsed_seconds <= 0:
-        raise ValueError("max_elapsed_seconds must be positive")
+    if not isfinite(float(max_elapsed_seconds)) or max_elapsed_seconds <= 0:
+        raise ValueError("max_elapsed_seconds must be positive and finite")
     if isinstance(max_observations, bool) or not isinstance(max_observations, int):
         raise TypeError("max_observations must be an integer")
     if max_observations <= 0:
@@ -119,8 +108,18 @@ def _validate_bounds(
         poll_interval_seconds, (int, float)
     ):
         raise TypeError("poll_interval_seconds must be numeric")
-    if poll_interval_seconds <= 0:
-        raise ValueError("poll_interval_seconds must be positive")
+    if not isfinite(float(poll_interval_seconds)) or poll_interval_seconds <= 0:
+        raise ValueError("poll_interval_seconds must be positive and finite")
+
+
+def _clock_value(clock: Callable[[], float]) -> float:
+    value = clock()
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("CLOCK_MALFORMED")
+    value = float(value)
+    if not isfinite(value):
+        raise ValueError("CLOCK_MALFORMED")
+    return value
 
 
 def _observation_shape_valid(observation: object) -> bool:
@@ -153,44 +152,51 @@ def _stop_for_observation(
         return FollowStopReason.BLOCKED, ControllerState.BLOCKED
     if observation.mapped_state is ControllerState.UNCERTAIN:
         return FollowStopReason.UNCERTAIN, ControllerState.UNCERTAIN
+    if observation.mapped_state is ControllerState.PLAN_REVIEW_REQUIRED:
+        return FollowStopReason.ATTENTION_REQUIRED, observation.mapped_state
     if observation.mapped_state in {
-        ControllerState.PLAN_REVIEW_REQUIRED,
         ControllerState.ARTIFACT_READY,
         ControllerState.REVIEW_REQUIRED,
         ControllerState.REVIEW_READY,
     }:
-        if observation.mapped_state is ControllerState.PLAN_REVIEW_REQUIRED:
-            return FollowStopReason.ATTENTION_REQUIRED, observation.mapped_state
         return FollowStopReason.HANDOFF_READY, observation.mapped_state
     return None
 
 
-def _base_result(
+def _result(
     *,
-    task: TaskBinding,
-    operation: ProviderOperationRef,
-    workstream_binding: WorkstreamBinding | None,
+    task: object,
+    operation: object,
+    workstream_binding: object,
     stop_reason: FollowStopReason,
     outcome_state: ControllerState,
-    observation_count: int,
-    elapsed_seconds: float,
-    first_observation: AgentObservation | None,
-    final_observation: AgentObservation | None,
-    transitions: tuple[FollowTransition, ...],
+    observation_count: int = 0,
+    elapsed_seconds: float = 0.0,
+    first_observation: AgentObservation | None = None,
+    final_observation: AgentObservation | None = None,
+    transitions: tuple[FollowTransition, ...] = (),
     failure_reason: str | None = None,
 ) -> FollowResult:
     return FollowResult(
-        controller_task_id=task.controller_task_id,
-        operation_id=task.operation_id,
-        provider=operation.provider,
-        provider_operation_id=operation.provider_operation_id,
+        controller_task_id=(
+            task.controller_task_id if isinstance(task, TaskBinding) else None
+        ),
+        operation_id=(task.operation_id if isinstance(task, TaskBinding) else None),
+        provider=(operation.provider if isinstance(operation, ProviderOperationRef) else None),
+        provider_operation_id=(
+            operation.provider_operation_id
+            if isinstance(operation, ProviderOperationRef)
+            else None
+        ),
         workstream_id=(
-            workstream_binding.workstream_id if workstream_binding is not None else None
+            workstream_binding.workstream_id
+            if isinstance(workstream_binding, WorkstreamBinding)
+            else None
         ),
         stop_reason=stop_reason,
         outcome_state=outcome_state,
         observation_count=observation_count,
-        elapsed_seconds=max(0.0, elapsed_seconds),
+        elapsed_seconds=max(0.0, float(elapsed_seconds)),
         first_observation=first_observation,
         final_observation=final_observation,
         transitions=transitions,
@@ -212,7 +218,7 @@ def follow_bound_operation(
 ) -> FollowResult:
     """Follow one exact provider operation until a provider-neutral stop boundary.
 
-    The function is read-only. It never approves plans, sends provider messages,
+    This function is read-only. It never approves plans, sends provider messages,
     retries/cancels provider work, mutates GitHub, or changes human-final gates.
     """
 
@@ -222,86 +228,83 @@ def follow_bound_operation(
         poll_interval_seconds=poll_interval_seconds,
     )
 
-    operation_binding = validate_operation_binding(task=task, operation=operation)
-    if not operation_binding.valid:
-        return _base_result(
+    if not isinstance(task, TaskBinding):
+        return _result(
             task=task,
             operation=operation,
             workstream_binding=workstream_binding,
             stop_reason=FollowStopReason.BINDING_INVALID,
             outcome_state=ControllerState.BLOCKED,
-            observation_count=0,
-            elapsed_seconds=0.0,
-            first_observation=None,
-            final_observation=None,
-            transitions=(),
+            failure_reason="TASK_BINDING_MALFORMED",
+        )
+    if not isinstance(operation, ProviderOperationRef):
+        return _result(
+            task=task,
+            operation=operation,
+            workstream_binding=workstream_binding,
+            stop_reason=FollowStopReason.BINDING_INVALID,
+            outcome_state=ControllerState.BLOCKED,
+            failure_reason="OPERATION_BINDING_MALFORMED",
+        )
+    if workstream_binding is not None and not isinstance(
+        workstream_binding, WorkstreamBinding
+    ):
+        return _result(
+            task=task,
+            operation=operation,
+            workstream_binding=workstream_binding,
+            stop_reason=FollowStopReason.BINDING_INVALID,
+            outcome_state=ControllerState.BLOCKED,
+            failure_reason="WORKSTREAM_BINDING_MALFORMED",
+        )
+
+    operation_binding = validate_operation_binding(task=task, operation=operation)
+    if not operation_binding.valid:
+        return _result(
+            task=task,
+            operation=operation,
+            workstream_binding=workstream_binding,
+            stop_reason=FollowStopReason.BINDING_INVALID,
+            outcome_state=ControllerState.BLOCKED,
             failure_reason=operation_binding.reason,
         )
 
     if workstream_binding is not None:
         task_lane = validate_task_workstream(binding=workstream_binding, task=task)
         if not task_lane.valid:
-            return _base_result(
+            return _result(
                 task=task,
                 operation=operation,
                 workstream_binding=workstream_binding,
                 stop_reason=FollowStopReason.BINDING_INVALID,
                 outcome_state=ControllerState.BLOCKED,
-                observation_count=0,
-                elapsed_seconds=0.0,
-                first_observation=None,
-                final_observation=None,
-                transitions=(),
                 failure_reason=task_lane.reason,
             )
         operation_lane = validate_operation_workstream(
             binding=workstream_binding, operation=operation
         )
         if not operation_lane.valid:
-            return _base_result(
+            return _result(
                 task=task,
                 operation=operation,
                 workstream_binding=workstream_binding,
                 stop_reason=FollowStopReason.BINDING_INVALID,
                 outcome_state=ControllerState.BLOCKED,
-                observation_count=0,
-                elapsed_seconds=0.0,
-                first_observation=None,
-                final_observation=None,
-                transitions=(),
                 failure_reason=operation_lane.reason,
             )
 
     try:
-        started_at = clock()
-    except Exception:
-        return _base_result(
+        started_at = _clock_value(clock)
+    except Exception as exc:
+        return _result(
             task=task,
             operation=operation,
             workstream_binding=workstream_binding,
             stop_reason=FollowStopReason.UNCERTAIN,
             outcome_state=ControllerState.UNCERTAIN,
-            observation_count=0,
-            elapsed_seconds=0.0,
-            first_observation=None,
-            final_observation=None,
-            transitions=(),
-            failure_reason="CLOCK_READ_FAILED",
-        )
-
-    if isinstance(started_at, bool) or not isinstance(started_at, (int, float)):
-        return _base_result(
-            task=task,
-            operation=operation,
-            workstream_binding=workstream_binding,
-            stop_reason=FollowStopReason.UNCERTAIN,
-            outcome_state=ControllerState.UNCERTAIN,
-            observation_count=0,
-            elapsed_seconds=0.0,
-            first_observation=None,
-            final_observation=None,
-            transitions=(),
-            failure_reason="CLOCK_MALFORMED",
+            failure_reason=(
+                str(exc) if str(exc) == "CLOCK_MALFORMED" else "CLOCK_READ_FAILED"
+            ),
         )
 
     first: AgentObservation | None = None
@@ -314,9 +317,9 @@ def follow_bound_operation(
     while True:
         if count > 0:
             try:
-                now = clock()
-            except Exception:
-                return _base_result(
+                now = _clock_value(clock)
+            except Exception as exc:
+                return _result(
                     task=task,
                     operation=operation,
                     workstream_binding=workstream_binding,
@@ -327,39 +330,28 @@ def follow_bound_operation(
                     first_observation=first,
                     final_observation=final,
                     transitions=tuple(transitions),
-                    failure_reason="CLOCK_READ_FAILED",
-                )
-            if isinstance(now, bool) or not isinstance(now, (int, float)):
-                return _base_result(
-                    task=task,
-                    operation=operation,
-                    workstream_binding=workstream_binding,
-                    stop_reason=FollowStopReason.UNCERTAIN,
-                    outcome_state=ControllerState.UNCERTAIN,
-                    observation_count=count,
-                    elapsed_seconds=elapsed,
-                    first_observation=first,
-                    final_observation=final,
-                    transitions=tuple(transitions),
-                    failure_reason="CLOCK_MALFORMED",
+                    failure_reason=(
+                        str(exc)
+                        if str(exc) == "CLOCK_MALFORMED"
+                        else "CLOCK_READ_FAILED"
+                    ),
                 )
             elapsed = now - started_at
             if elapsed < 0:
-                return _base_result(
+                return _result(
                     task=task,
                     operation=operation,
                     workstream_binding=workstream_binding,
                     stop_reason=FollowStopReason.UNCERTAIN,
                     outcome_state=ControllerState.UNCERTAIN,
                     observation_count=count,
-                    elapsed_seconds=0.0,
                     first_observation=first,
                     final_observation=final,
                     transitions=tuple(transitions),
                     failure_reason="MONOTONIC_CLOCK_REVERSED",
                 )
             if elapsed >= max_elapsed_seconds:
-                return _base_result(
+                return _result(
                     task=task,
                     operation=operation,
                     workstream_binding=workstream_binding,
@@ -377,7 +369,7 @@ def follow_bound_operation(
         try:
             observation = adapter.observe(operation)
         except Exception:
-            return _base_result(
+            return _result(
                 task=task,
                 operation=operation,
                 workstream_binding=workstream_binding,
@@ -392,7 +384,7 @@ def follow_bound_operation(
             )
 
         if not _observation_shape_valid(observation):
-            return _base_result(
+            return _result(
                 task=task,
                 operation=operation,
                 workstream_binding=workstream_binding,
@@ -410,7 +402,7 @@ def follow_bound_operation(
             operation=operation, observation=observation
         )
         if not evidence_binding.valid:
-            return _base_result(
+            return _result(
                 task=task,
                 operation=operation,
                 workstream_binding=workstream_binding,
@@ -447,13 +439,12 @@ def follow_bound_operation(
         if stop is not None:
             stop_reason, outcome_state = stop
             try:
-                now = clock()
-                elapsed = now - started_at
-                if elapsed < 0:
-                    raise ValueError("clock reversed")
+                elapsed_after_read = _clock_value(clock) - started_at
+                if elapsed_after_read >= 0:
+                    elapsed = elapsed_after_read
             except Exception:
-                elapsed = max(0.0, elapsed)
-            return _base_result(
+                pass
+            return _result(
                 task=task,
                 operation=operation,
                 workstream_binding=workstream_binding,
@@ -466,24 +457,10 @@ def follow_bound_operation(
                 transitions=tuple(transitions),
             )
 
-        if count >= max_observations:
-            return _base_result(
-                task=task,
-                operation=operation,
-                workstream_binding=workstream_binding,
-                stop_reason=FollowStopReason.MAX_OBSERVATIONS,
-                outcome_state=observation.mapped_state,
-                observation_count=count,
-                elapsed_seconds=elapsed,
-                first_observation=first,
-                final_observation=final,
-                transitions=tuple(transitions),
-            )
-
         try:
-            now = clock()
-        except Exception:
-            return _base_result(
+            elapsed_after_read = _clock_value(clock) - started_at
+        except Exception as exc:
+            return _result(
                 task=task,
                 operation=operation,
                 workstream_binding=workstream_binding,
@@ -494,39 +471,27 @@ def follow_bound_operation(
                 first_observation=first,
                 final_observation=final,
                 transitions=tuple(transitions),
-                failure_reason="CLOCK_READ_FAILED",
+                failure_reason=(
+                    str(exc) if str(exc) == "CLOCK_MALFORMED" else "CLOCK_READ_FAILED"
+                ),
             )
-        if isinstance(now, bool) or not isinstance(now, (int, float)):
-            return _base_result(
+        if elapsed_after_read < 0:
+            return _result(
                 task=task,
                 operation=operation,
                 workstream_binding=workstream_binding,
                 stop_reason=FollowStopReason.UNCERTAIN,
                 outcome_state=ControllerState.UNCERTAIN,
                 observation_count=count,
-                elapsed_seconds=elapsed,
-                first_observation=first,
-                final_observation=final,
-                transitions=tuple(transitions),
-                failure_reason="CLOCK_MALFORMED",
-            )
-        elapsed = now - started_at
-        if elapsed < 0:
-            return _base_result(
-                task=task,
-                operation=operation,
-                workstream_binding=workstream_binding,
-                stop_reason=FollowStopReason.UNCERTAIN,
-                outcome_state=ControllerState.UNCERTAIN,
-                observation_count=count,
-                elapsed_seconds=0.0,
                 first_observation=first,
                 final_observation=final,
                 transitions=tuple(transitions),
                 failure_reason="MONOTONIC_CLOCK_REVERSED",
             )
+        elapsed = elapsed_after_read
+
         if elapsed >= max_elapsed_seconds:
-            return _base_result(
+            return _result(
                 task=task,
                 operation=operation,
                 workstream_binding=workstream_binding,
@@ -539,11 +504,25 @@ def follow_bound_operation(
                 transitions=tuple(transitions),
             )
 
+        if count >= max_observations:
+            return _result(
+                task=task,
+                operation=operation,
+                workstream_binding=workstream_binding,
+                stop_reason=FollowStopReason.MAX_OBSERVATIONS,
+                outcome_state=observation.mapped_state,
+                observation_count=count,
+                elapsed_seconds=elapsed,
+                first_observation=first,
+                final_observation=final,
+                transitions=tuple(transitions),
+            )
+
         sleep_for = min(float(poll_interval_seconds), max_elapsed_seconds - elapsed)
         try:
             sleeper(sleep_for)
         except Exception:
-            return _base_result(
+            return _result(
                 task=task,
                 operation=operation,
                 workstream_binding=workstream_binding,
