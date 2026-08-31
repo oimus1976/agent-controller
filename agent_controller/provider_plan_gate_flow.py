@@ -34,7 +34,7 @@ class PlanGateFlowStatus(str, Enum):
 
 @dataclass(frozen=True)
 class PlanGateCheckpoint:
-    """Controller-owned exact identity that may be resumed after a human plan action."""
+    """Controller-owned exact identity issued only at a human plan gate."""
 
     task: TaskBinding
     operation: ProviderOperationRef
@@ -42,6 +42,8 @@ class PlanGateCheckpoint:
     expected_provider: str
     expected_provider_operation_id: str
     expected_workstream_id: str | None
+    gate_mapped_state: ControllerState
+    gate_awaiting_input: AwaitingInput
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -55,6 +57,8 @@ class PlanGateCheckpoint:
             "expected_provider": self.expected_provider,
             "expected_provider_operation_id": self.expected_provider_operation_id,
             "expected_workstream_id": self.expected_workstream_id,
+            "gate_mapped_state": self.gate_mapped_state.value,
+            "gate_awaiting_input": self.gate_awaiting_input.value,
         }
 
 
@@ -145,12 +149,28 @@ def _validate_operation(
     return None
 
 
-def _checkpoint(
+def _is_plan_gate(follow_result: FollowResult) -> bool:
+    final = follow_result.final_observation
+    if final is None:
+        return False
+    if follow_result.stop_reason is not FollowStopReason.ATTENTION_REQUIRED:
+        return False
+    return (
+        final.awaiting_input is AwaitingInput.PLAN_APPROVAL
+        or final.mapped_state is ControllerState.PLAN_REVIEW_REQUIRED
+    )
+
+
+def _checkpoint_for_gate(
     *,
     task: TaskBinding,
     operation: ProviderOperationRef,
     workstream_binding: WorkstreamBinding | None,
+    follow_result: FollowResult,
 ) -> PlanGateCheckpoint:
+    final = follow_result.final_observation
+    if final is None or not _is_plan_gate(follow_result):
+        raise ValueError("checkpoint may only be issued for a plan gate")
     return PlanGateCheckpoint(
         task=task,
         operation=operation,
@@ -160,6 +180,8 @@ def _checkpoint(
         expected_workstream_id=(
             workstream_binding.workstream_id if workstream_binding is not None else None
         ),
+        gate_mapped_state=final.mapped_state,
+        gate_awaiting_input=final.awaiting_input,
     )
 
 
@@ -174,6 +196,15 @@ def _validate_checkpoint(checkpoint: object) -> str | None:
         checkpoint.workstream_binding, WorkstreamBinding
     ):
         return "CHECKPOINT_WORKSTREAM_MALFORMED"
+    if not isinstance(checkpoint.gate_mapped_state, ControllerState):
+        return "CHECKPOINT_GATE_STATE_MALFORMED"
+    if not isinstance(checkpoint.gate_awaiting_input, AwaitingInput):
+        return "CHECKPOINT_GATE_INPUT_MALFORMED"
+    if not (
+        checkpoint.gate_awaiting_input is AwaitingInput.PLAN_APPROVAL
+        or checkpoint.gate_mapped_state is ControllerState.PLAN_REVIEW_REQUIRED
+    ):
+        return "CHECKPOINT_NOT_ISSUED_AT_PLAN_GATE"
 
     operation = checkpoint.operation
     if operation.provider != checkpoint.expected_provider:
@@ -202,38 +233,32 @@ def _validate_checkpoint(checkpoint: object) -> str | None:
     )
 
 
-def _is_plan_gate(follow_result: FollowResult) -> bool:
-    final = follow_result.final_observation
-    if final is None:
-        return False
-    if follow_result.stop_reason is not FollowStopReason.ATTENTION_REQUIRED:
-        return False
-    return (
-        final.awaiting_input is AwaitingInput.PLAN_APPROVAL
-        or final.mapped_state is ControllerState.PLAN_REVIEW_REQUIRED
-    )
-
-
 def _from_follow(
     *,
-    checkpoint: PlanGateCheckpoint,
+    task: TaskBinding,
+    operation: ProviderOperationRef,
+    workstream_binding: WorkstreamBinding | None,
     follow_result: FollowResult,
 ) -> PlanGateFlowResult:
-    operation = checkpoint.operation
     if not _is_plan_gate(follow_result):
         return PlanGateFlowResult(
             status=PlanGateFlowStatus.FOLLOW_STOPPED,
             operation=operation,
             follow_result=follow_result,
-            checkpoint=checkpoint,
         )
 
+    checkpoint = _checkpoint_for_gate(
+        task=task,
+        operation=operation,
+        workstream_binding=workstream_binding,
+        follow_result=follow_result,
+    )
     final = follow_result.final_observation
     assert final is not None
     action = HumanPlanAction(
         workstream_id=checkpoint.expected_workstream_id,
-        controller_task_id=checkpoint.task.controller_task_id,
-        operation_id=checkpoint.task.operation_id,
+        controller_task_id=task.controller_task_id,
+        operation_id=task.operation_id,
         provider=operation.provider,
         provider_operation_id=operation.provider_operation_id,
         provider_url=operation.provider_url,
@@ -260,7 +285,7 @@ def start_plan_gate_flow(
     clock: Callable[[], float] = monotonic,
     sleeper: Callable[[float], None] = sleep,
 ) -> PlanGateFlowResult:
-    """Dispatch once, freeze that exact operation, then follow to the next stop."""
+    """Dispatch once, then follow the exact returned operation to the next stop."""
 
     failure = _validate_pre_dispatch(
         task=task, workstream_binding=workstream_binding
@@ -297,11 +322,6 @@ def start_plan_gate_flow(
         )
 
     assert isinstance(operation, ProviderOperationRef)
-    checkpoint = _checkpoint(
-        task=task,
-        operation=operation,
-        workstream_binding=workstream_binding,
-    )
     follow_result = follow_bound_operation(
         task=task,
         operation=operation,
@@ -313,7 +333,12 @@ def start_plan_gate_flow(
         clock=clock,
         sleeper=sleeper,
     )
-    return _from_follow(checkpoint=checkpoint, follow_result=follow_result)
+    return _from_follow(
+        task=task,
+        operation=operation,
+        workstream_binding=workstream_binding,
+        follow_result=follow_result,
+    )
 
 
 def resume_plan_gate_flow(
@@ -326,7 +351,7 @@ def resume_plan_gate_flow(
     clock: Callable[[], float] = monotonic,
     sleeper: Callable[[float], None] = sleep,
 ) -> PlanGateFlowResult:
-    """Re-read and follow the exact operation frozen before the human gate.
+    """Re-read and follow the exact operation frozen at the human plan gate.
 
     No caller-supplied "approved" flag or replacement operation exists. Provider
     state is re-read through the existing adapter, and resume never dispatches.
@@ -343,7 +368,6 @@ def resume_plan_gate_flow(
                 else None
             ),
             follow_result=None,
-            checkpoint=(checkpoint if isinstance(checkpoint, PlanGateCheckpoint) else None),
             failure_reason=failure,
         )
 
@@ -359,4 +383,9 @@ def resume_plan_gate_flow(
         clock=clock,
         sleeper=sleeper,
     )
-    return _from_follow(checkpoint=checkpoint, follow_result=follow_result)
+    return _from_follow(
+        task=checkpoint.task,
+        operation=checkpoint.operation,
+        workstream_binding=checkpoint.workstream_binding,
+        follow_result=follow_result,
+    )
