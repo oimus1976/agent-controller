@@ -66,6 +66,8 @@ def make_checkpoint(task=None, operation=None, lane=None):
         expected_provider=operation.provider,
         expected_provider_operation_id=operation.provider_operation_id,
         expected_workstream_id=lane.workstream_id,
+        gate_mapped_state=ControllerState.PLAN_REVIEW_REQUIRED,
+        gate_awaiting_input=AwaitingInput.PLAN_APPROVAL,
     )
 
 
@@ -161,6 +163,12 @@ class ProviderPlanGateFlowTests(unittest.TestCase):
         self.assertEqual(result.checkpoint.expected_provider_operation_id, "session-a")
         self.assertEqual(result.checkpoint.expected_workstream_id, "lane-a")
         self.assertEqual(result.checkpoint.operation, operation)
+        self.assertEqual(
+            result.checkpoint.gate_mapped_state, ControllerState.PLAN_REVIEW_REQUIRED
+        )
+        self.assertEqual(
+            result.checkpoint.gate_awaiting_input, AwaitingInput.PLAN_APPROVAL
+        )
         self.assertIsNotNone(result.human_action)
         action = result.human_action
         self.assertEqual(action.workstream_id, "lane-a")
@@ -192,9 +200,10 @@ class ProviderPlanGateFlowTests(unittest.TestCase):
         self.assertEqual(result.follow_result.outcome_state, ControllerState.ARTIFACT_READY)
         self.assertEqual(adapter.dispatch_calls, 0)
         self.assertEqual(adapter.observe_calls, ["session-a", "session-a"])
-        self.assertEqual(result.checkpoint, checkpoint)
+        self.assertIsNone(result.checkpoint)
+        self.assertIsNone(result.human_action)
 
-    def test_resume_while_still_waiting_returns_same_human_gate(self):
+    def test_resume_while_still_waiting_returns_new_same_operation_gate_checkpoint(self):
         checkpoint = make_checkpoint()
         operation = checkpoint.operation
         adapter = FakeAdapter(
@@ -217,6 +226,8 @@ class ProviderPlanGateFlowTests(unittest.TestCase):
 
         self.assertEqual(result.status, PlanGateFlowStatus.HUMAN_PLAN_ACTION_REQUIRED)
         self.assertEqual(result.human_action.provider_operation_id, "session-a")
+        self.assertEqual(result.checkpoint.expected_provider_operation_id, "session-a")
+        self.assertEqual(result.checkpoint.expected_workstream_id, "lane-a")
         self.assertEqual(adapter.dispatch_calls, 0)
         self.assertEqual(adapter.observe_calls, ["session-a"])
 
@@ -232,6 +243,8 @@ class ProviderPlanGateFlowTests(unittest.TestCase):
             expected_provider="jules",
             expected_provider_operation_id=original.provider_operation_id,
             expected_workstream_id="lane-a",
+            gate_mapped_state=ControllerState.PLAN_REVIEW_REQUIRED,
+            gate_awaiting_input=AwaitingInput.PLAN_APPROVAL,
         )
         adapter = FakeAdapter(original, [obs(original, ControllerState.EXECUTING)])
         clock = FakeClock()
@@ -246,6 +259,34 @@ class ProviderPlanGateFlowTests(unittest.TestCase):
         self.assertEqual(result.failure_reason, "CHECKPOINT_PROVIDER_OPERATION_CHANGED")
         self.assertEqual(adapter.dispatch_calls, 0)
         self.assertEqual(adapter.observe_calls, [])
+
+    def test_non_plan_checkpoint_is_rejected_before_resumed_read(self):
+        task = make_task()
+        operation = make_operation(task)
+        lane = make_workstream(task)
+        not_a_gate = PlanGateCheckpoint(
+            task=task,
+            operation=operation,
+            workstream_binding=lane,
+            expected_provider="jules",
+            expected_provider_operation_id="session-a",
+            expected_workstream_id="lane-a",
+            gate_mapped_state=ControllerState.EXECUTING,
+            gate_awaiting_input=AwaitingInput.NONE,
+        )
+        adapter = FakeAdapter(operation, [obs(operation, ControllerState.ARTIFACT_READY)])
+        clock = FakeClock()
+
+        result = resume_plan_gate_flow(
+            checkpoint=not_a_gate,
+            adapter=adapter,
+            **self.follow_kwargs(clock),
+        )
+
+        self.assertEqual(result.status, PlanGateFlowStatus.BINDING_INVALID)
+        self.assertEqual(result.failure_reason, "CHECKPOINT_NOT_ISSUED_AT_PLAN_GATE")
+        self.assertEqual(adapter.observe_calls, [])
+        self.assertEqual(adapter.dispatch_calls, 0)
 
     def test_changed_workstream_in_checkpoint_blocks_before_resumed_read(self):
         task = make_task()
@@ -263,6 +304,8 @@ class ProviderPlanGateFlowTests(unittest.TestCase):
             expected_provider="jules",
             expected_provider_operation_id="session-a",
             expected_workstream_id="lane-a",
+            gate_mapped_state=ControllerState.PLAN_REVIEW_REQUIRED,
+            gate_awaiting_input=AwaitingInput.PLAN_APPROVAL,
         )
         adapter = FakeAdapter(operation, [obs(operation, ControllerState.EXECUTING)])
         clock = FakeClock()
@@ -308,9 +351,12 @@ class ProviderPlanGateFlowTests(unittest.TestCase):
 
         self.assertEqual(result.status, PlanGateFlowStatus.FOLLOW_STOPPED)
         self.assertEqual(adapter_a.observe_calls, ["session-a"])
-        self.assertEqual(result.checkpoint.expected_provider_operation_id, "session-a")
+        self.assertIsNone(result.checkpoint)
+        self.assertEqual(checkpoint_a.expected_provider_operation_id, "session-a")
         self.assertEqual(checkpoint_b.expected_provider_operation_id, "session-b")
-        self.assertNotEqual(result.checkpoint.expected_workstream_id, checkpoint_b.expected_workstream_id)
+        self.assertNotEqual(
+            checkpoint_a.expected_workstream_id, checkpoint_b.expected_workstream_id
+        )
 
     def test_provider_read_error_after_human_action_is_uncertain_without_redispatch(self):
         checkpoint = make_checkpoint()
@@ -327,8 +373,9 @@ class ProviderPlanGateFlowTests(unittest.TestCase):
         self.assertEqual(result.follow_result.outcome_state, ControllerState.UNCERTAIN)
         self.assertEqual(adapter.dispatch_calls, 0)
         self.assertEqual(adapter.observe_calls, ["session-a"])
+        self.assertIsNone(result.checkpoint)
 
-    def test_non_plan_stop_never_fabricates_plan_gate(self):
+    def test_non_plan_stop_never_fabricates_plan_gate_or_resume_checkpoint(self):
         task = make_task()
         operation = make_operation(task)
         lane = make_workstream(task)
@@ -347,8 +394,8 @@ class ProviderPlanGateFlowTests(unittest.TestCase):
 
         self.assertEqual(result.status, PlanGateFlowStatus.FOLLOW_STOPPED)
         self.assertIsNone(result.human_action)
+        self.assertIsNone(result.checkpoint)
         self.assertEqual(adapter.dispatch_calls, 1)
-        self.assertEqual(result.checkpoint.expected_provider_operation_id, "session-a")
 
     def test_wrong_lane_blocks_before_initial_dispatch(self):
         task = make_task()
