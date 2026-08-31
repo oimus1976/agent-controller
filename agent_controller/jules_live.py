@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from typing import Any, Callable, Mapping, Optional
 from urllib.error import HTTPError, URLError
@@ -12,6 +13,7 @@ from agent_controller.provider_contract import ProviderOperationRef, TaskBinding
 
 
 TransportCallable = Callable[[Request], tuple[int, Mapping[str, str], bytes]]
+DEFAULT_JULES_REQUEST_TIMEOUT_SECONDS = 30.0
 
 
 def _branch_from_ref(ref: str) -> str:
@@ -30,6 +32,15 @@ def _branch_from_ref(ref: str) -> str:
     return branch
 
 
+def _validate_request_timeout(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("request_timeout_seconds must be numeric")
+    timeout = float(value)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("request_timeout_seconds must be finite and positive")
+    return timeout
+
+
 class JulesApiClient:
     """Thin network client for the official Jules REST API (v1alpha).
 
@@ -37,6 +48,10 @@ class JulesApiClient:
     environment variable and sent only via the X-Goog-Api-Key HTTP header.
     Missing credentials fail before any network call, and error handling strictly
     prevents credential leakage.
+
+    Real urllib requests always use a finite per-request timeout. The injectable
+    transport seam remains deterministic test plumbing and therefore bypasses the
+    real urllib timeout mechanism.
     """
 
     def __init__(
@@ -44,10 +59,12 @@ class JulesApiClient:
         api_key: Optional[str] = None,
         base_url: str = "https://jules.googleapis.com",
         transport: Optional[TransportCallable] = None,
+        request_timeout_seconds: float = DEFAULT_JULES_REQUEST_TIMEOUT_SECONDS,
     ):
         self._explicit_api_key = api_key
         self.base_url = base_url.rstrip("/")
         self._transport = transport
+        self.request_timeout_seconds = _validate_request_timeout(request_timeout_seconds)
 
     def get_api_key(self) -> str:
         key = self._explicit_api_key or os.environ.get("JULES_API_KEY")
@@ -83,7 +100,7 @@ class JulesApiClient:
             if self._transport is not None:
                 status, resp_headers, resp_data = self._transport(req)
             else:
-                with urlopen(req) as resp:
+                with urlopen(req, timeout=self.request_timeout_seconds) as resp:
                     status = resp.status
                     resp_headers = dict(resp.headers)
                     resp_data = resp.read()
