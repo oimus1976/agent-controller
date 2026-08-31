@@ -2,6 +2,8 @@ import json
 import os
 from .inspector import get_pr_details
 from .mutator import convert_pull_request_to_draft
+from .workstream import WorkstreamBinding, validate_pr_workstream
+
 
 def load_policy(policy_path):
     if not policy_path or not os.path.exists(policy_path):
@@ -11,6 +13,7 @@ def load_policy(policy_path):
             return json.load(f)
     except (json.JSONDecodeError, IOError):
         return None
+
 
 def plan_action(owner, repo, pr_number, action, policy_path):
     plan = {
@@ -67,8 +70,9 @@ def plan_action(owner, repo, pr_number, action, policy_path):
     plan["reason"] = "READY_FOR_DRAFT_CONVERSION"
     return plan
 
-def execute_action(plan, owner, repo, pr_number, apply=False):
-    result = {
+
+def _execution_result(plan):
+    return {
         "planned_head_sha": plan.get("head_sha"),
         "execution_head_sha": None,
         "mutation_attempted": False,
@@ -78,10 +82,34 @@ def execute_action(plan, owner, repo, pr_number, apply=False):
         "failure_reason": None
     }
 
+
+def execute_action(
+    plan,
+    owner,
+    repo,
+    pr_number,
+    apply=False,
+    workstream_binding=None,
+):
+    result = _execution_result(plan)
+
     if plan.get("repo") != f"{owner}/{repo}" or plan.get("pr") != pr_number:
         result["final_outcome"] = "BLOCKED"
         result["failure_reason"] = "TARGET_MISMATCH"
         return result
+
+    if workstream_binding is not None:
+        if not isinstance(workstream_binding, WorkstreamBinding):
+            result["failure_reason"] = "WORKSTREAM_BINDING_MALFORMED"
+            return result
+        workstream = validate_pr_workstream(
+            binding=workstream_binding,
+            repo=f"{owner}/{repo}",
+            pr=pr_number,
+        )
+        if not workstream.valid:
+            result["failure_reason"] = workstream.reason
+            return result
 
     if plan.get("decision") == "NOOP":
         result["final_outcome"] = "NOOP"
@@ -106,7 +134,7 @@ def execute_action(plan, owner, repo, pr_number, apply=False):
     # 1. Fetch current objective PR evidence immediately before mutation
     try:
         pr_data = get_pr_details(owner, repo, pr_number)
-    except Exception as e:
+    except Exception:
         result["failure_reason"] = "EVIDENCE_FETCH_FAILED"
         return result
 
@@ -143,7 +171,7 @@ def execute_action(plan, owner, repo, pr_number, apply=False):
 
     try:
         convert_pull_request_to_draft(node_id)
-    except Exception as e:
+    except Exception:
         result["failure_reason"] = "MUTATION_FAILED"
         return result
 
@@ -159,9 +187,41 @@ def execute_action(plan, owner, repo, pr_number, apply=False):
             result["postcondition_result"] = False
             result["failure_reason"] = "POSTCONDITION_FAILED"
             result["final_outcome"] = "FAILED"
-    except Exception as e:
+    except Exception:
         result["postcondition_result"] = None
         result["failure_reason"] = "POSTCONDITION_VERIFICATION_FETCH_FAILED"
         result["final_outcome"] = "FAILED"
 
     return result
+
+
+def execute_workstream_action(
+    plan,
+    owner,
+    repo,
+    pr_number,
+    *,
+    workstream_binding,
+    apply=False,
+):
+    """Lane-aware mutation boundary.
+
+    Callers choosing this path must supply an explicit WorkstreamBinding. The
+    binding is validated before any GitHub evidence re-read or mutation. Legacy
+    execute_action remains available for pre-workstream callers, but lane-aware
+    orchestration must use this explicit boundary rather than guessing target
+    ownership from queue ordering or repository proximity.
+    """
+
+    if not isinstance(workstream_binding, WorkstreamBinding):
+        result = _execution_result(plan)
+        result["failure_reason"] = "WORKSTREAM_BINDING_REQUIRED"
+        return result
+    return execute_action(
+        plan,
+        owner,
+        repo,
+        pr_number,
+        apply=apply,
+        workstream_binding=workstream_binding,
+    )
