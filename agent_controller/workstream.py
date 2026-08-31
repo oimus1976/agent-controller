@@ -25,6 +25,7 @@ class WorkstreamBinding:
     repo: str
     root_work_item_ref: str
     task_ids: Sequence[str] = ()
+    github_issues: Sequence[int] = ()
     github_prs: Sequence[int] = ()
     branch_refs: Sequence[str] = ()
     depends_on_workstream_ids: Sequence[str] = ()
@@ -41,6 +42,7 @@ class WorkstreamBinding:
             raise ValueError("root_work_item_ref must be a nonempty string")
 
         task_ids = tuple(self.task_ids)
+        github_issues = tuple(self.github_issues)
         github_prs = tuple(self.github_prs)
         branch_refs = tuple(self.branch_refs)
         dependencies = tuple(self.depends_on_workstream_ids)
@@ -49,6 +51,14 @@ class WorkstreamBinding:
             raise ValueError("task_ids must contain nonempty strings")
         if len(set(task_ids)) != len(task_ids):
             raise ValueError("task_ids must not contain duplicates")
+
+        if any(
+            not isinstance(issue, int) or isinstance(issue, bool) or issue <= 0
+            for issue in github_issues
+        ):
+            raise ValueError("github_issues must contain positive integers")
+        if len(set(github_issues)) != len(github_issues):
+            raise ValueError("github_issues must not contain duplicates")
 
         if any(not isinstance(pr, int) or isinstance(pr, bool) or pr <= 0 for pr in github_prs):
             raise ValueError("github_prs must contain positive integers")
@@ -68,6 +78,7 @@ class WorkstreamBinding:
             raise ValueError("depends_on_workstream_ids must not contain duplicates")
 
         object.__setattr__(self, "task_ids", task_ids)
+        object.__setattr__(self, "github_issues", github_issues)
         object.__setattr__(self, "github_prs", github_prs)
         object.__setattr__(self, "branch_refs", branch_refs)
         object.__setattr__(self, "depends_on_workstream_ids", dependencies)
@@ -75,6 +86,7 @@ class WorkstreamBinding:
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
         data["task_ids"] = list(self.task_ids)
+        data["github_issues"] = list(self.github_issues)
         data["github_prs"] = list(self.github_prs)
         data["branch_refs"] = list(self.branch_refs)
         data["depends_on_workstream_ids"] = list(self.depends_on_workstream_ids)
@@ -99,11 +111,31 @@ def validate_operation_workstream(
     return WorkstreamValidation(True)
 
 
+def _validate_github_target_repo(binding: WorkstreamBinding, repo: str) -> WorkstreamValidation:
+    if not isinstance(repo, str) or repo.casefold() != binding.repo.casefold():
+        return WorkstreamValidation(False, "WORKSTREAM_REPO_MISMATCH")
+    return WorkstreamValidation(True)
+
+
+def validate_issue_workstream(
+    *, binding: WorkstreamBinding, repo: str, issue: int
+) -> WorkstreamValidation:
+    repo_result = _validate_github_target_repo(binding, repo)
+    if not repo_result.valid:
+        return repo_result
+    if not isinstance(issue, int) or isinstance(issue, bool) or issue <= 0:
+        return WorkstreamValidation(False, "INVALID_ISSUE_TARGET")
+    if issue not in binding.github_issues:
+        return WorkstreamValidation(False, "ISSUE_NOT_IN_WORKSTREAM")
+    return WorkstreamValidation(True)
+
+
 def validate_pr_workstream(
     *, binding: WorkstreamBinding, repo: str, pr: int
 ) -> WorkstreamValidation:
-    if not isinstance(repo, str) or repo.casefold() != binding.repo.casefold():
-        return WorkstreamValidation(False, "WORKSTREAM_REPO_MISMATCH")
+    repo_result = _validate_github_target_repo(binding, repo)
+    if not repo_result.valid:
+        return repo_result
     if not isinstance(pr, int) or isinstance(pr, bool) or pr <= 0:
         return WorkstreamValidation(False, "INVALID_PR_TARGET")
     if pr not in binding.github_prs:
@@ -114,8 +146,9 @@ def validate_pr_workstream(
 def validate_branch_workstream(
     *, binding: WorkstreamBinding, repo: str, branch_ref: str
 ) -> WorkstreamValidation:
-    if not isinstance(repo, str) or repo.casefold() != binding.repo.casefold():
-        return WorkstreamValidation(False, "WORKSTREAM_REPO_MISMATCH")
+    repo_result = _validate_github_target_repo(binding, repo)
+    if not repo_result.valid:
+        return repo_result
     if not isinstance(branch_ref, str) or not branch_ref:
         return WorkstreamValidation(False, "INVALID_BRANCH_TARGET")
     if branch_ref not in binding.branch_refs:
