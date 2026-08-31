@@ -432,6 +432,108 @@ class TestJulesLiveAdapter(unittest.TestCase):
         self.assertTrue(sent_body["requirePlanApproval"])
         self.assertEqual(sent_body["automationMode"], "AUTOMATION_MODE_UNSPECIFIED")
 
+    def test_dispatch_effects_policy_enforcement(self):
+        api_client = JulesApiClient(api_key="fake-key")
+        fake_github = FakeGitHubClient(
+            ref_shas={("oimus1976/agent-controller", "refs/heads/main"): "1234567890abcdef1234567890abcdef12345678"}
+        )
+        dispatch_client = JulesDispatchClient(api_client, github_client=fake_github)
+
+        # Missing SESSION_CREATE in allowed_effects
+        bad_task_1 = TaskBinding(
+            controller_task_id="t1",
+            operation_id="o1",
+            provider="jules",
+            repo="oimus1976/agent-controller",
+            expected_start_ref="refs/heads/main",
+            expected_start_sha="1234567890abcdef1234567890abcdef12345678",
+            objective_scope=ObjectiveScope(),
+            requested_capability="IMPLEMENT",
+            allowed_effects=(),
+            forbidden_effects=(),
+            approval_policy_id="p1",
+            created_at="2026-08-24T00:00:00Z",
+        )
+        with self.assertRaisesRegex(ValueError, "allowed_effects must contain 'SESSION_CREATE'"):
+            dispatch_client.dispatch(bad_task_1)
+
+        # SESSION_CREATE in forbidden_effects
+        bad_task_2 = TaskBinding(
+            controller_task_id="t2",
+            operation_id="o2",
+            provider="jules",
+            repo="oimus1976/agent-controller",
+            expected_start_ref="refs/heads/main",
+            expected_start_sha="1234567890abcdef1234567890abcdef12345678",
+            objective_scope=ObjectiveScope(),
+            requested_capability="IMPLEMENT",
+            allowed_effects=("SESSION_CREATE",),
+            forbidden_effects=("SESSION_CREATE",),
+            approval_policy_id="p1",
+            created_at="2026-08-24T00:00:00Z",
+        )
+        with self.assertRaisesRegex(ValueError, "forbidden_effects must not contain 'SESSION_CREATE'"):
+            dispatch_client.dispatch(bad_task_2)
+
+    def test_dispatch_create_session_response_id_name_disagreement_fails_closed(self):
+        def mock_transport(req):
+            if req.method == "GET":
+                return (
+                    200,
+                    {"Content-Type": "application/json"},
+                    json_bytes({
+                        "sources": [
+                            {
+                                "name": "sources/s1",
+                                "githubRepo": {"owner": "oimus1976", "repo": "agent-controller"},
+                            }
+                        ]
+                    }),
+                )
+            return (
+                200,
+                {"Content-Type": "application/json"},
+                json_bytes({
+                    "id": "session-123",
+                    "name": "sessions/different-session-id-456",
+                }),
+            )
+
+        api_client = JulesApiClient(api_key="fake-key", transport=mock_transport)
+        task = make_task()
+        fake_github = FakeGitHubClient(
+            ref_shas={("oimus1976/agent-controller", "refs/heads/main"): task.expected_start_sha}
+        )
+        dispatch_client = JulesDispatchClient(api_client, github_client=fake_github)
+
+        with self.assertRaisesRegex(RuntimeError, "disagree"):
+            dispatch_client.dispatch(task)
+
+    def test_source_resolution_malformed_github_repo_elements_fail_closed(self):
+        # Missing githubRepo entirely
+        client1 = JulesApiClient(
+            api_key="fake-key",
+            transport=lambda req: (200, {}, json_bytes({"sources": [{"name": "s1"}]})),
+        )
+        with self.assertRaisesRegex(RuntimeError, "githubRepo"):
+            client1.resolve_source("oimus1976/agent-controller")
+
+        # Non-mapping githubRepo
+        client2 = JulesApiClient(
+            api_key="fake-key",
+            transport=lambda req: (200, {}, json_bytes({"sources": [{"name": "s1", "githubRepo": "invalid"}]})),
+        )
+        with self.assertRaisesRegex(RuntimeError, "githubRepo"):
+            client2.resolve_source("oimus1976/agent-controller")
+
+        # Missing or non-string owner/repo in githubRepo
+        client3 = JulesApiClient(
+            api_key="fake-key",
+            transport=lambda req: (200, {}, json_bytes({"sources": [{"name": "s1", "githubRepo": {"owner": "oimus1976", "repo": ""}}]})),
+        )
+        with self.assertRaisesRegex(RuntimeError, "repo"):
+            client3.resolve_source("oimus1976/agent-controller")
+
     def test_dispatch_invalid_repo_format_fails_closed(self):
         api_client = JulesApiClient(api_key="fake-key")
         task = make_task(repo="invalid-repo-format")

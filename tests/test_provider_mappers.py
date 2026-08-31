@@ -146,6 +146,27 @@ class TestProviderMappers(unittest.TestCase):
             self.assertEqual(observation.mapped_state, ControllerState.UNCERTAIN)
             self.assertIsNotNone(observation.uncertainty_reason)
 
+    def test_jules_status_fallback_removed_and_status_completed_without_state_is_not_success(self):
+        # Payload with status COMPLETED but no state must NOT produce TerminalClaim.SUCCESS
+        observation = map_jules_observation(
+            provider_operation_id="jules-1",
+            raw_state={"status": "COMPLETED"},
+            observed_at="2026-08-24T01:35:00Z",
+        )
+        self.assertEqual(observation.mapped_state, ControllerState.UNCERTAIN)
+        self.assertEqual(observation.terminal_claim, TerminalClaim.NONE)
+        self.assertEqual(observation.uncertainty_reason, "JULES_STATE_MISSING")
+
+    def test_jules_state_unspecified_fails_closed_to_uncertain(self):
+        observation = map_jules_observation(
+            provider_operation_id="jules-1",
+            raw_state={"state": "STATE_UNSPECIFIED"},
+            observed_at="2026-08-24T01:35:00Z",
+        )
+        self.assertEqual(observation.mapped_state, ControllerState.UNCERTAIN)
+        self.assertEqual(observation.terminal_claim, TerminalClaim.NONE)
+        self.assertEqual(observation.uncertainty_reason, "JULES_STATE_UNSPECIFIED")
+
     def test_generic_user_wait_does_not_masquerade_as_plan_approval(self):
         jules = map_jules_observation(
             provider_operation_id="jules-1",

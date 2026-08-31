@@ -128,7 +128,7 @@ def map_jules_observation(
     provider_updated_at = _safe_timestamp(raw_state.get("updateTime")) or _safe_timestamp(
         raw_state.get("updated_at")
     )
-    state = _string(raw_state.get("state")) or _string(raw_state.get("status"))
+    state = _string(raw_state.get("state"))
     if state is None:
         return _uncertain(
             provider="jules",
@@ -136,10 +136,19 @@ def map_jules_observation(
             raw_state=raw_state,
             observed_at=observed_at,
             provider_updated_at=provider_updated_at,
-            reason="JULES_STATUS_MISSING",
+            reason="JULES_STATE_MISSING",
         )
 
     normalized = state.upper()
+    if normalized == "STATE_UNSPECIFIED":
+        return _uncertain(
+            provider="jules",
+            provider_operation_id=provider_operation_id,
+            raw_state=raw_state,
+            observed_at=observed_at,
+            provider_updated_at=provider_updated_at,
+            reason="JULES_STATE_UNSPECIFIED",
+        )
     common = dict(
         provider="jules",
         provider_operation_id=provider_operation_id,

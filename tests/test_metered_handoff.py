@@ -80,7 +80,7 @@ def operation(*, controller_task_id="task-1"):
 
 def observer(payload=None):
     return JulesObservationAdapter(
-        FakeObservationClient(payload or {"status": "COMPLETED", "updated_at": "2026-08-26T00:01:00Z"}),
+        FakeObservationClient(payload or {"state": "COMPLETED", "updated_at": "2026-08-26T00:01:00Z"}),
         lambda: "2026-08-26T00:02:00Z",
     )
 

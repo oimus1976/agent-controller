@@ -165,15 +165,15 @@ class JulesApiClient:
                 raise RuntimeError("Malformed source entry in Jules sources API response")
             gh_repo = src.get("githubRepo")
             if not isinstance(gh_repo, Mapping):
-                continue
+                raise RuntimeError("Malformed or missing 'githubRepo' in Jules source entry")
             src_owner = gh_repo.get("owner")
             src_name = gh_repo.get("repo")
-            if (
-                isinstance(src_owner, str)
-                and isinstance(src_name, str)
-                and src_owner.lower() == owner
-                and src_name.lower() == name
-            ):
+            if not isinstance(src_owner, str) or not src_owner.strip():
+                raise RuntimeError("Malformed or missing 'owner' in Jules source githubRepo entry")
+            if not isinstance(src_name, str) or not src_name.strip():
+                raise RuntimeError("Malformed or missing 'repo' in Jules source githubRepo entry")
+
+            if src_owner.lower() == owner and src_name.lower() == name:
                 src_resource_name = src.get("name")
                 if isinstance(src_resource_name, str) and src_resource_name:
                     matched.append(src_resource_name)
@@ -254,6 +254,11 @@ class JulesDispatchClient:
         if len(parts) != 2 or not all(parts) or parts[0].lower() == "sources":
             raise ValueError("TaskBinding.repo must be in OWNER/REPO format")
 
+        if "SESSION_CREATE" not in task.allowed_effects:
+            raise ValueError("TaskBinding.allowed_effects must contain 'SESSION_CREATE'")
+        if "SESSION_CREATE" in task.forbidden_effects:
+            raise ValueError("TaskBinding.forbidden_effects must not contain 'SESSION_CREATE'")
+
         if prompt is not None and (not isinstance(prompt, str) or not prompt.strip()):
             raise ValueError("prompt must be a non-empty string when specified")
 
@@ -288,8 +293,21 @@ class JulesDispatchClient:
 
         session_id = session.get("id")
         session_name = session.get("name")
-        if not session_id and session_name and isinstance(session_name, str):
-            session_id = session_name.split("/")[-1]
+
+        if session_id is not None and not isinstance(session_id, str):
+            raise RuntimeError("Jules API create_session response 'id' field is not a string")
+        if session_name is not None and not isinstance(session_name, str):
+            raise RuntimeError("Jules API create_session response 'name' field is not a string")
+
+        if session_id and session_name:
+            if session_name != f"sessions/{session_id}":
+                raise RuntimeError(
+                    f"Jules API create_session response 'name' {session_name!r} and 'id' {session_id!r} disagree"
+                )
+        elif session_name and not session_id:
+            if not session_name.startswith("sessions/") or session_name == "sessions/":
+                raise RuntimeError(f"Jules API create_session response 'name' {session_name!r} is malformed")
+            session_id = session_name[len("sessions/") :]
 
         if not session_id or not isinstance(session_id, str):
             raise RuntimeError("Jules API create_session response missing valid session ID")
