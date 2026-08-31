@@ -36,11 +36,15 @@ def _apply(base: str, body: Sequence[str]) -> str:
         match = _HUNK.match(body[i])
         if match is None:
             raise ValueError("PATCH_HUNK_HEADER_MALFORMED")
+        old_expected = int(match.group(2) if match.group(2) is not None else "1")
+        new_expected = int(match.group(4) if match.group(4) is not None else "1")
         target = max(int(match.group(1)) - 1, 0)
         if target < src or target > len(source):
             raise ValueError("PATCH_HUNK_RANGE_INVALID")
         out.extend(source[src:target])
         src = target
+        old_seen = 0
+        new_seen = 0
         i += 1
         while i < len(body) and not body[i].startswith("@@ "):
             line = body[i]
@@ -54,13 +58,19 @@ def _apply(base: str, body: Sequence[str]) -> str:
                     raise ValueError("PATCH_CONTEXT_MISMATCH")
                 out.append(text)
                 src += 1
+                old_seen += 1
+                new_seen += 1
             elif line[0] == "-":
                 if src >= len(source) or source[src] != text:
                     raise ValueError("PATCH_REMOVAL_MISMATCH")
                 src += 1
+                old_seen += 1
             else:
                 out.append(text)
+                new_seen += 1
             i += 1
+        if old_seen != old_expected or new_seen != new_expected:
+            raise ValueError("PATCH_HUNK_COUNT_MISMATCH")
     out.extend(source[src:])
     return "".join(out)
 
