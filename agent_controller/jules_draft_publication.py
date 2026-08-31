@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import re
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
@@ -13,6 +14,7 @@ from agent_controller.repository_write_guard import RepositoryWriteDecision, Rep
 from agent_controller.workstream import WorkstreamBinding, validate_branch_workstream, validate_operation_workstream, validate_task_workstream
 
 _SHA40 = re.compile(r"^[0-9a-fA-F]{40}$")
+_DRAFT_PR_EFFECT = "DRAFT_PR_CREATE"
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,8 @@ def _scope_allows(task: TaskBinding, paths: Sequence[str]) -> bool:
     allowed = tuple(task.objective_scope.allowed_paths or ())
     denied = tuple(task.objective_scope.denied_paths or ())
     if not allowed and not denied:
+        return False
+    if any(not isinstance(pattern, str) or not pattern for pattern in (*allowed, *denied)):
         return False
     for path in paths:
         if any(fnmatch.fnmatch(path, pattern) for pattern in denied):
@@ -114,6 +118,8 @@ def publish_jules_changeset_to_draft_pr(
                 return DraftPublicationResult("BLOCKED", check.reason)
         if task.provider != "jules" or operation.provider != "jules":
             return DraftPublicationResult("BLOCKED", "JULES_PROVIDER_REQUIRED")
+        if _DRAFT_PR_EFFECT not in task.allowed_effects or _DRAFT_PR_EFFECT in task.forbidden_effects:
+            return DraftPublicationResult("BLOCKED", "DRAFT_PR_EFFECT_NOT_ALLOWED")
         if not isinstance(task.repo, str) or not task.repo:
             return DraftPublicationResult("BLOCKED", "TASK_REPO_REQUIRED")
         if not isinstance(task.expected_start_ref, str) or not task.expected_start_ref:
@@ -148,10 +154,17 @@ def publish_jules_changeset_to_draft_pr(
         candidate = candidates[0]
         if not isinstance(candidate, JulesChangeSetEvidence):
             return DraftPublicationResult("BLOCKED", "CHANGESET_EVIDENCE_INVALID")
-        if candidate.provider_operation_id != operation.provider_operation_id:
+        if candidate.provider != "jules" or candidate.provider_operation_id != operation.provider_operation_id:
             return DraftPublicationResult("BLOCKED", "CHANGESET_OPERATION_MISMATCH")
+        if not isinstance(candidate.base_commit_id, str) or not _SHA40.fullmatch(candidate.base_commit_id):
+            return DraftPublicationResult("BLOCKED", "CHANGESET_BASE_INVALID")
         if candidate.base_commit_id.casefold() != task.expected_start_sha.casefold():
             return DraftPublicationResult("BLOCKED", "CHANGESET_BASE_MISMATCH")
+        if not isinstance(candidate.unidiff_patch, str) or not candidate.unidiff_patch:
+            return DraftPublicationResult("BLOCKED", "CHANGESET_PATCH_INVALID")
+        digest = hashlib.sha256(candidate.unidiff_patch.encode("utf-8")).hexdigest()
+        if candidate.patch_sha256 != digest:
+            return DraftPublicationResult("BLOCKED", "CHANGESET_DIGEST_MISMATCH")
 
         current_base = github.get_ref_sha(task.repo, task.expected_start_ref)
         if current_base is None or current_base.casefold() != task.expected_start_sha.casefold():
@@ -182,6 +195,9 @@ def publish_jules_changeset_to_draft_pr(
         branch_sha = github.get_ref_sha(task.repo, branch)
         if branch_sha is None or branch_sha.casefold() != commit_sha.casefold():
             return DraftPublicationResult("UNCERTAIN", "BRANCH_POSTCONDITION_FAILED")
+        post_base = github.get_ref_sha(task.repo, task.expected_start_ref)
+        if post_base is None or post_base.casefold() != task.expected_start_sha.casefold():
+            return DraftPublicationResult("UNCERTAIN", "BASE_POSTCONDITION_DRIFT")
         files = github.compare_files(task.repo, task.expected_start_sha, branch_sha)
         compared = _compare_paths(files)
         if set(compared) != set(paths) or not _scope_allows(task, compared):
@@ -201,7 +217,7 @@ def publish_jules_changeset_to_draft_pr(
         if len(open_prs) != 1 or open_prs[0].get("number") != pr_number:
             return DraftPublicationResult("UNCERTAIN", "PR_UNIQUENESS_POSTCONDITION_FAILED")
 
-        return DraftPublicationResult("PASS", branch=branch, commit_sha=branch_sha, pr_number=pr_number, patch_sha256=candidate.patch_sha256, activity_id=candidate.activity_id)
+        return DraftPublicationResult("PASS", branch=branch, commit_sha=branch_sha, pr_number=pr_number, patch_sha256=digest, activity_id=candidate.activity_id)
     except ValueError as exc:
         return DraftPublicationResult("BLOCKED", str(exc) or "PUBLICATION_VALIDATION_FAILED")
     except Exception:
