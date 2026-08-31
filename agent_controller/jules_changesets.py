@@ -37,8 +37,18 @@ class JulesChangeSetEvidence:
         return asdict(self)
 
 
-class JulesActivitiesApiClient(JulesApiClient):
-    """Read-only Jules client extension for the official activities.list API."""
+class JulesActivitiesReadClient:
+    """Narrow read-only seam for the official activities.list API.
+
+    It composes the existing authenticated/timeout-aware JulesApiClient rather
+    than subclassing it, so session-creation methods are not part of this
+    reader's public surface.
+    """
+
+    def __init__(self, api_client: JulesApiClient) -> None:
+        if not isinstance(api_client, JulesApiClient):
+            raise TypeError("api_client must be a JulesApiClient")
+        self._api_client = api_client
 
     def list_activities(
         self,
@@ -73,7 +83,9 @@ class JulesActivitiesApiClient(JulesApiClient):
             if page_token is not None:
                 path += f"&pageToken={quote(page_token, safe='')}"
 
-            response = self._request("GET", path)
+            # Reuse the existing authenticated request boundary so activity
+            # reads inherit API-key redaction and finite transport timeout.
+            response = self._api_client._request("GET", path)
             if not isinstance(response, Mapping):
                 raise RuntimeError("Malformed response payload from Jules activities API")
 
@@ -117,11 +129,14 @@ class JulesChangeSetReadClient:
 
     def __init__(
         self,
-        api_client: JulesActivitiesApiClient,
+        api_client: JulesApiClient,
         observed_at: ObservedAtFactory,
     ) -> None:
-        self.api_client = api_client
-        self.observed_at = observed_at
+        if not isinstance(api_client, JulesApiClient):
+            raise TypeError("api_client must be a JulesApiClient")
+        self._api_client = api_client
+        self._activities = JulesActivitiesReadClient(api_client)
+        self._observed_at = observed_at
 
     def list_change_sets(
         self,
@@ -149,13 +164,13 @@ class JulesChangeSetReadClient:
         if not clean_session_id or "/" in clean_session_id:
             raise ValueError("operation.provider_operation_id must identify one session")
 
-        expected_source = self.api_client.resolve_source(task.repo)
-        activities = self.api_client.list_activities(
+        expected_source = self._api_client.resolve_source(task.repo)
+        activities = self._activities.list_activities(
             clean_session_id,
             max_pages=max_activity_pages,
         )
 
-        observed_at = self.observed_at()
+        observed_at = self._observed_at()
         if not isinstance(observed_at, str) or not observed_at:
             raise RuntimeError("observed_at must return a non-empty string")
 
