@@ -74,6 +74,17 @@ class WorkstreamSetTests(unittest.TestCase):
                 self.assertFalse(result.valid)
                 self.assertEqual(reason, result.reason)
 
+    def test_issue_and_pr_same_number_cannot_be_split_across_lanes(self):
+        issue_lane = self._binding("issue-lane", issues=(119,))
+        pr_lane = self._binding("pr-lane", prs=(119,))
+        result = validate_workstream_set((issue_lane, pr_lane))
+        self.assertFalse(result.valid)
+        self.assertEqual("GITHUB_WORK_ITEM_BOUND_TO_MULTIPLE_WORKSTREAMS", result.reason)
+
+    def test_same_lane_may_record_same_number_as_issue_and_pr(self):
+        lane = self._binding("lane", issues=(119,), prs=(119,))
+        self.assertTrue(validate_workstream_set((lane,)).valid)
+
     def test_same_pr_number_in_different_repositories_is_not_a_collision(self):
         a = self._binding("a", repo="o/r1", prs=(7,))
         b = self._binding("b", repo="o/r2", prs=(7,))
