@@ -23,6 +23,14 @@ The core follow policy uses only provider-neutral `AgentObservation` fields. It 
 
 Provider-native Jules/Codex state names remain adapter concerns and are not inspected by the core loop.
 
+## Boundedness boundary
+
+The elapsed/count limits bound the Controller polling loop and prevent infinite repeated polling. They are not a generic thread-cancellation mechanism for an individual `adapter.observe()` call. Each provider adapter/transport remains responsible for bounding its own provider I/O.
+
+Accordingly, this MVP does **not** claim that `max_elapsed_seconds` can forcibly interrupt a provider read that never returns. Adding universal cross-provider call cancellation would require a separate transport/runtime design rather than hiding provider lifecycle behavior in the Controller core.
+
+The follow loop does account for provider-read duration once the read returns, validates finite monotonic clock evidence, and fails closed on malformed/reversed clock evidence.
+
 ## Evidence shape
 
 Repeated identical observations are counted but not appended to an unbounded transcript. The result retains:
