@@ -2,9 +2,10 @@ import json
 import unittest
 
 from agent_controller.jules_changesets import (
-    JulesActivitiesApiClient,
+    JulesActivitiesReadClient,
     JulesChangeSetReadClient,
 )
+from agent_controller.jules_live import JulesApiClient
 from agent_controller.provider_contract import (
     ObjectiveScope,
     ProviderOperationRef,
@@ -107,10 +108,13 @@ class FakeTransport:
         return 200, {}, json.dumps(payload).encode("utf-8")
 
 
+def make_api(transport):
+    return JulesApiClient(api_key="secret-key", transport=transport)
+
+
 def make_reader(transport):
-    api = JulesActivitiesApiClient(api_key="secret-key", transport=transport)
     return JulesChangeSetReadClient(
-        api_client=api,
+        api_client=make_api(transport),
         observed_at=lambda: "2026-08-31T00:00:01Z",
     )
 
@@ -274,10 +278,15 @@ class JulesChangeSetTests(unittest.TestCase):
         self.assertNotIn("secret-key", str(ctx.exception))
         self.assertIn("[REDACTED]", str(ctx.exception))
 
-    def test_public_surface_is_read_only(self):
-        api_names = set(dir(JulesActivitiesApiClient))
-        reader_names = set(dir(JulesChangeSetReadClient))
+    def test_reader_surfaces_are_read_only(self):
+        api = make_api(FakeTransport())
+        activity_names = set(dir(JulesActivitiesReadClient(api)))
+        reader_names = set(dir(JulesChangeSetReadClient(api, lambda: "now")))
+        self.assertIn("list_activities", activity_names)
+        self.assertIn("list_change_sets", reader_names)
         for forbidden in (
+            "create_session",
+            "dispatch",
             "approve_plan",
             "approvePlan",
             "send_message",
@@ -286,7 +295,7 @@ class JulesChangeSetTests(unittest.TestCase):
             "merge_pull_request",
             "apply_patch",
         ):
-            self.assertNotIn(forbidden, api_names)
+            self.assertNotIn(forbidden, activity_names)
             self.assertNotIn(forbidden, reader_names)
 
 
