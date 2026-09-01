@@ -1,3 +1,4 @@
 *.pyc
 __pycache__/
 .jules_e2e_smoke_state.json
+.venv-codex-observe/

@@ -9,6 +9,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
+# Direct script execution puts scripts/ on sys.path, not the repository root.
+# Bootstrap the trusted repository root so the documented PowerShell command
+# works without requiring an operator-managed PYTHONPATH override.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from agent_controller.github_draft_publication import GitHubRestDraftPublicationBackend
 from agent_controller.jules_e2e_smoke import build_live_smoke, run_operator_assisted_smoke
 from agent_controller.jules_live import JulesApiClient
