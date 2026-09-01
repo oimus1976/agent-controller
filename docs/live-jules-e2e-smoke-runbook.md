@@ -4,7 +4,7 @@ This runbook is the operator procedure for Issue #139. It proves the real Jules/
 
 ## Preconditions
 
-Use a trusted local checkout of `oimus1976/agent-controller` at the accepted `main` that includes the Issue #139 runner. The runner itself re-reads and freezes current `main`; it does not trust a pasted SHA.
+Use a trusted local checkout of `oimus1976/agent-controller`. Before running the smoke, switch that checkout to `main`, fast-forward it to the accepted GitHub `main`, and leave the working tree clean. The runner independently re-reads and freezes GitHub `main`, then refuses live dispatch unless the local repository root, current branch, local HEAD, and clean-tree state match that accepted main exactly.
 
 Required environment variables:
 
@@ -23,27 +23,29 @@ If the smoke document already exists, the runner blocks before session creation.
 
 ## Start exactly once
 
-From the repository root:
+On the owner machine, from the repository root after `git switch main` and `git pull --ff-only`:
 
 ```powershell
 python .\scripts\run_jules_e2e_smoke.py
 ```
 
-The default one-shot evidence marker is `.jules_e2e_smoke_state.json` in the current directory. If that file already exists, the runner refuses to dispatch another live session. Inspect the existing state, Jules session, and GitHub state instead of deleting the marker and retrying blindly.
+The one-shot evidence marker is the fixed file `.jules_e2e_smoke_state.json` in the repository root. There is no command-line override for its location. If that file already exists, the runner refuses to dispatch another live session. Inspect the existing state, Jules session, and GitHub state instead of deleting the marker and retrying blindly.
 
 Before dispatch the runner:
 
 1. validates the Jules credential without printing it;
-2. performs GitHub preflight reads;
-3. freezes the exact current `main` SHA;
-4. verifies the dedicated smoke document does not already exist;
+2. performs GitHub preflight reads and freezes the exact current `main` SHA;
+3. verifies the dedicated smoke document does not already exist;
+4. requires the local command to be running from the repository root on clean `main` at exactly that frozen GitHub SHA;
 5. constructs one TaskBinding and one WorkstreamBinding;
-6. creates the one-shot local state marker;
+6. creates the fixed one-shot local state marker;
 7. only then may create one Jules session.
 
 ## Human Jules plan gate
 
-The runner follows the exact returned session until it reaches the provider-neutral human plan gate. It prints `HUMAN PLAN ACTION REQUIRED` plus the bound Jules session identity/URL.
+The runner follows the exact returned session until it reaches the provider-neutral human plan gate. Before asking for operator input, it writes the bound Jules session ID and provider URL (when available) into the fixed state file, so an interruption at the gate still leaves a recoverable exact-session identity.
+
+It then prints `HUMAN PLAN ACTION REQUIRED` plus that same bound Jules session identity/URL.
 
 Open that exact session in Jules UI. Inspect the plan. The expected plan is limited to creating `docs/live-jules-e2e-smoke-result.md` and changing nothing else.
 
@@ -104,9 +106,9 @@ The runner's local state JSON contains the machine-readable subset and intention
 
 ## Fail-closed outcomes
 
-Stop and investigate rather than retry when any of these occur: plan gate not reached, plan still waiting after operator action, terminal failure, provider read timeout/uncertainty, ChangeSet zero/multiple candidates, base drift, scope violation, patch mismatch, destination collision, partial publication, PR postcondition mismatch, or inspection uncertainty.
+Stop and investigate rather than retry when any of these occur: local checkout mismatch/dirty state, plan gate not reached, plan still waiting after operator action, terminal failure, provider read timeout/uncertainty, ChangeSet zero/multiple candidates, base drift, scope violation, patch mismatch, destination collision, partial publication, PR postcondition mismatch, or inspection uncertainty.
 
-A leftover `controller/...` branch or Draft PR after an uncertain publication is evidence to inspect, not disposable residue.
+A leftover `controller/...` branch or Draft PR after an uncertain publication is evidence to inspect, not disposable residue. Likewise, the fixed state marker is evidence; do not delete or relocate it merely to obtain another dispatch.
 
 ## Closeout and cleanup
 
