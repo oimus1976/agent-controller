@@ -2,4 +2,6 @@
 __pycache__/
 .jules_e2e_smoke_state.json
 .jules_e2e_smoke_retry_145_state.json
+.jules_issue_task_spec.json
+.jules_issue_task_*_state.json
 .venv-codex-observe/
