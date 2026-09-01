@@ -33,13 +33,22 @@ def merged_pr(*, merged=True, state="closed", branch=BRANCH, head=HEAD, repo=REP
     }
 
 
+def open_pr(*, branch="other", repo=REPO, number=88):
+    return {
+        "number": number,
+        "state": "open",
+        "head": {"ref": branch, "repo": {"full_name": repo}},
+    }
+
+
 class RemoteHarness:
     def __init__(self):
         self.pr = merged_pr()
         self.branch_sha = HEAD
         self.open_prs = []
         self.default_branch = "main"
-        self.reads = {"pr": 0, "branch": 0, "open_prs": 0, "default": 0}
+        self.protected = False
+        self.reads = {"pr": 0, "branch": 0, "open_prs": 0, "default": 0, "protected": 0}
 
     def read_pr(self, repo, pr):
         self.reads["pr"] += 1
@@ -49,13 +58,17 @@ class RemoteHarness:
         self.reads["branch"] += 1
         return self.branch_sha
 
-    def list_open_prs(self, repo, branch):
+    def list_open_prs(self, repo):
         self.reads["open_prs"] += 1
         return self.open_prs
 
     def read_default(self, repo):
         self.reads["default"] += 1
         return self.default_branch
+
+    def read_protected(self, repo, branch):
+        self.reads["protected"] += 1
+        return self.protected
 
 
 def assess(h=None, active=()):
@@ -66,8 +79,9 @@ def assess(h=None, active=()):
         active_workstreams=active,
         read_pr=h.read_pr,
         read_branch_sha=h.read_branch,
-        list_open_prs_for_head=h.list_open_prs,
+        list_open_prs=h.list_open_prs,
         read_default_branch=h.read_default,
+        read_branch_protected=h.read_protected,
     )
     return result, h
 
@@ -92,7 +106,7 @@ class PostMergeCleanupTests(unittest.TestCase):
         self.assertEqual(result.status, "SAFE_TO_CONSIDER")
         self.assertEqual(result.branch, BRANCH)
         self.assertEqual(result.merged_pr_head, HEAD)
-        self.assertEqual(h.reads, {"pr": 1, "branch": 1, "open_prs": 1, "default": 1})
+        self.assertEqual(h.reads, {"pr": 1, "branch": 1, "open_prs": 1, "default": 1, "protected": 1})
 
     def test_unmerged_pr_is_not_safe_before_branch_reads(self):
         h = RemoteHarness()
@@ -101,11 +115,16 @@ class PostMergeCleanupTests(unittest.TestCase):
         self.assertEqual((result.status, result.reason), ("NOT_SAFE", "PR_NOT_MERGED"))
         self.assertEqual(h.reads["branch"], 0)
 
-    def test_default_branch_is_never_candidate(self):
+    def test_default_or_protected_branch_is_never_candidate(self):
         h = RemoteHarness()
         h.pr = merged_pr(branch="main")
         result, _ = assess(h)
         self.assertEqual((result.status, result.reason), ("NOT_SAFE", "CANONICAL_BRANCH"))
+
+        h = RemoteHarness()
+        h.protected = True
+        result, _ = assess(h)
+        self.assertEqual((result.status, result.reason), ("NOT_SAFE", "PROTECTED_BRANCH"))
 
     def test_branch_drift_is_not_safe(self):
         h = RemoteHarness()
@@ -113,11 +132,16 @@ class PostMergeCleanupTests(unittest.TestCase):
         result, _ = assess(h)
         self.assertEqual((result.status, result.reason), ("NOT_SAFE", "REMOTE_BRANCH_DRIFTED"))
 
-    def test_open_pr_using_branch_blocks(self):
+    def test_controller_filters_repository_open_prs_itself(self):
         h = RemoteHarness()
-        h.open_prs = [{"number": 88, "state": "open"}]
+        h.open_prs = [open_pr(branch="unrelated"), open_pr(branch=BRANCH)]
         result, _ = assess(h)
         self.assertEqual((result.status, result.reason), ("NOT_SAFE", "OPEN_PR_USES_BRANCH"))
+
+        h = RemoteHarness()
+        h.open_prs = [open_pr(branch="unrelated")]
+        result, _ = assess(h)
+        self.assertEqual(result.status, "SAFE_TO_CONSIDER")
 
     def test_active_workstream_ownership_blocks_before_branch_read(self):
         result, h = assess(active=(lane(),))
@@ -140,6 +164,11 @@ class PostMergeCleanupTests(unittest.TestCase):
         h.open_prs = ["bad"]
         result, _ = assess(h)
         self.assertEqual(result.status, "UNCERTAIN")
+
+        h = RemoteHarness()
+        h.protected = "unknown"
+        result, _ = assess(h)
+        self.assertEqual((result.status, result.reason), ("UNCERTAIN", "BRANCH_PROTECTION_UNAVAILABLE"))
 
     def test_local_closeout_pass_is_required_for_local_candidate(self):
         result = assess_local_worktree_cleanup_candidate(
