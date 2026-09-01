@@ -149,11 +149,18 @@ def publish_jules_changeset_to_draft_pr(
             return DraftPublicationResult("BLOCKED", "JULES_SESSION_NOT_COMPLETED_SUCCESSFULLY")
 
         candidates = change_reader.list_change_sets(task=task, operation=operation)
-        if len(candidates) != 1:
-            return DraftPublicationResult("BLOCKED", "CHANGESET_FINALITY_AMBIGUOUS")
-        candidate = candidates[0]
-        if not isinstance(candidate, JulesChangeSetEvidence):
+        if any(not isinstance(candidate, JulesChangeSetEvidence) for candidate in candidates):
             return DraftPublicationResult("BLOCKED", "CHANGESET_EVIDENCE_INVALID")
+        completed_candidates = tuple(
+            candidate for candidate in candidates if candidate.session_completed is True
+        )
+        if len(completed_candidates) == 0:
+            if len(candidates) == 1:
+                return DraftPublicationResult("BLOCKED", "CHANGESET_NOT_COMPLETED")
+            return DraftPublicationResult("BLOCKED", "CHANGESET_FINALITY_AMBIGUOUS")
+        if len(completed_candidates) > 1:
+            return DraftPublicationResult("BLOCKED", "CHANGESET_FINALITY_AMBIGUOUS")
+        candidate = completed_candidates[0]
         if candidate.provider != "jules" or candidate.provider_operation_id != operation.provider_operation_id:
             return DraftPublicationResult("BLOCKED", "CHANGESET_OPERATION_MISMATCH")
         if not isinstance(candidate.activity_id, str) or not candidate.activity_id:
