@@ -214,30 +214,39 @@ def assess_local_worktree_cleanup_candidate(
     repo: str,
     pr_number: int,
     topic_branch: str,
-    merged_pr_head: str,
     active_workstreams: Sequence[WorkstreamBinding],
+    read_pr: PrReader,
     closeout_output: str,
     closeout_returncode: int,
 ) -> CleanupCandidate:
-    """Surface advisory local-worktree cleanup evidence from explicit closeout PASS only."""
-    active_error = _validate_active_set(active_workstreams)
-    if active_error:
-        return CleanupCandidate("local_worktree", "UNCERTAIN", active_error, repo, pr_number)
-    if not isinstance(topic_branch, str) or not topic_branch.strip():
-        return CleanupCandidate("local_worktree", "UNCERTAIN", "TOPIC_BRANCH_INVALID", repo, pr_number)
-    branch = _normalize_branch(topic_branch.strip())
-    if not isinstance(merged_pr_head, str) or not _SHA_RE.fullmatch(merged_pr_head):
-        return CleanupCandidate("local_worktree", "UNCERTAIN", "MERGED_PR_HEAD_INVALID", repo, pr_number, branch)
-    merged_head = merged_pr_head.lower()
+    """Surface local-worktree candidacy only after re-reading the exact merged PR."""
+    try:
+        active_error = _validate_active_set(active_workstreams)
+        if active_error:
+            return CleanupCandidate("local_worktree", "UNCERTAIN", active_error, repo, pr_number)
+        if not isinstance(topic_branch, str) or not topic_branch.strip():
+            return CleanupCandidate("local_worktree", "UNCERTAIN", "TOPIC_BRANCH_INVALID", repo, pr_number)
+        branch = _normalize_branch(topic_branch.strip())
 
-    if _active_branch_owner(repo=repo, branch=branch, active_workstreams=active_workstreams):
-        return CleanupCandidate("local_worktree", "NOT_SAFE", "ACTIVE_WORKSTREAM_OWNS_BRANCH", repo, pr_number, branch, merged_head)
+        snapshot = read_pr(repo, pr_number)
+        pr_branch, merged_head, error = _extract_merged_pr_anchor(snapshot, repo=repo, pr_number=pr_number)
+        if error:
+            status = "NOT_SAFE" if error == "PR_NOT_MERGED" else "UNCERTAIN"
+            return CleanupCandidate("local_worktree", status, error, repo, pr_number, branch)
+        assert pr_branch is not None and merged_head is not None
+        if pr_branch != branch:
+            return CleanupCandidate("local_worktree", "NOT_SAFE", "TOPIC_BRANCH_NOT_PR_HEAD", repo, pr_number, branch, merged_head)
 
-    evidence = parse_local_closeout_evidence(
-        output=closeout_output,
-        returncode=closeout_returncode,
-        expected_pr_head=merged_head,
-    )
-    if not evidence.valid:
-        return CleanupCandidate("local_worktree", "NOT_SAFE", evidence.reason, repo, pr_number, branch, merged_head)
-    return CleanupCandidate("local_worktree", "SAFE_TO_CONSIDER", "LOCAL_CLOSEOUT_VERIFIED", repo, pr_number, branch, merged_head)
+        if _active_branch_owner(repo=repo, branch=branch, active_workstreams=active_workstreams):
+            return CleanupCandidate("local_worktree", "NOT_SAFE", "ACTIVE_WORKSTREAM_OWNS_BRANCH", repo, pr_number, branch, merged_head)
+
+        evidence = parse_local_closeout_evidence(
+            output=closeout_output,
+            returncode=closeout_returncode,
+            expected_pr_head=merged_head,
+        )
+        if not evidence.valid:
+            return CleanupCandidate("local_worktree", "NOT_SAFE", evidence.reason, repo, pr_number, branch, merged_head)
+        return CleanupCandidate("local_worktree", "SAFE_TO_CONSIDER", "LOCAL_CLOSEOUT_VERIFIED", repo, pr_number, branch, merged_head)
+    except Exception:
+        return CleanupCandidate("local_worktree", "UNCERTAIN", "EXTERNAL_READ_UNCERTAINTY", repo, pr_number)
