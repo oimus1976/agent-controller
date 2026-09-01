@@ -40,7 +40,7 @@ def _github_api_request_paginated(url, headers=None, timeout=DEFAULT_GITHUB_REQU
                 if isinstance(data, list):
                     results.extend(data)
                 else:
-                    return data
+                    return data  # Not a paginated list
 
                 link_header = response.headers.get("Link")
                 current_url = None
