@@ -294,7 +294,7 @@ def evaluate_scope(files, policy):
             if ext.lower() not in docs_extensions:
                 has_non_doc_change = True
 
-    if not allow_docs_only and not has_non_doc_change:
+    if not allowed_paths and not allow_docs_only and not has_non_doc_change:
         return "VIOLATION"
 
     return "SATISFIED"
