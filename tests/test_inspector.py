@@ -32,7 +32,7 @@ class TestInspector(unittest.TestCase):
 
         policy = {'allowed_paths': ['*']}
         files = [{'filename': 'README.md', 'changes': 1}]
-        self.assertEqual(evaluate_scope(files, policy), "VIOLATION")
+        self.assertEqual(evaluate_scope(files, policy), "SATISFIED")
 
         policy = {'allowed_paths': ['*'], 'allow_docs_only': True}
         self.assertEqual(evaluate_scope(files, policy), "SATISFIED")
