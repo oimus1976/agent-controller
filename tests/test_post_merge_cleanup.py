@@ -86,6 +86,19 @@ def assess(h=None, active=()):
     return result, h
 
 
+def local_assess(*, pr=None, branch=BRANCH, active=(), output=None, returncode=0):
+    snapshot = pr or merged_pr()
+    return assess_local_worktree_cleanup_candidate(
+        repo=REPO,
+        pr_number=77,
+        topic_branch=branch,
+        active_workstreams=active,
+        read_pr=lambda repo, number: snapshot,
+        closeout_output=PASS_OUTPUT if output is None else output,
+        closeout_returncode=returncode,
+    )
+
+
 PASS_OUTPUT = f"""LOCAL CLOSEOUT: PASS
 task_worktree_role=topic
 task_worktree=clean
@@ -171,27 +184,21 @@ class PostMergeCleanupTests(unittest.TestCase):
         self.assertEqual((result.status, result.reason), ("UNCERTAIN", "BRANCH_PROTECTION_UNAVAILABLE"))
 
     def test_local_closeout_pass_is_required_for_local_candidate(self):
-        result = assess_local_worktree_cleanup_candidate(
-            repo=REPO,
-            pr_number=77,
-            topic_branch=BRANCH,
-            merged_pr_head=HEAD,
-            active_workstreams=(),
-            closeout_output=PASS_OUTPUT,
-            closeout_returncode=0,
-        )
+        result = local_assess()
         self.assertEqual((result.status, result.reason), ("SAFE_TO_CONSIDER", "LOCAL_CLOSEOUT_VERIFIED"))
 
-        failed = assess_local_worktree_cleanup_candidate(
-            repo=REPO,
-            pr_number=77,
-            topic_branch=BRANCH,
-            merged_pr_head=HEAD,
-            active_workstreams=(),
-            closeout_output="LOCAL CLOSEOUT: FAIL\n- dirty",
-            closeout_returncode=1,
-        )
+        failed = local_assess(output="LOCAL CLOSEOUT: FAIL\n- dirty", returncode=1)
         self.assertEqual((failed.status, failed.reason), ("NOT_SAFE", "LOCAL_CLOSEOUT_FAILED"))
+
+    def test_local_candidate_re_reads_exact_merged_pr(self):
+        unmerged = local_assess(pr=merged_pr(merged=False, state="open"))
+        self.assertEqual((unmerged.status, unmerged.reason), ("NOT_SAFE", "PR_NOT_MERGED"))
+
+        wrong_branch = local_assess(branch="topic/other")
+        self.assertEqual((wrong_branch.status, wrong_branch.reason), ("NOT_SAFE", "TOPIC_BRANCH_NOT_PR_HEAD"))
+
+        wrong_repo = local_assess(pr=merged_pr(repo="other/repo"))
+        self.assertEqual(wrong_repo.status, "UNCERTAIN")
 
     def test_local_wrong_head_or_incomplete_pass_is_not_safe(self):
         wrong = PASS_OUTPUT.replace(f"task_head={HEAD}", f"task_head={'c' * 40}")
@@ -205,29 +212,13 @@ class PostMergeCleanupTests(unittest.TestCase):
         self.assertEqual(evidence.reason, "LOCAL_CLOSEOUT_PASS_EVIDENCE_INCOMPLETE")
 
     def test_local_active_workstream_ownership_blocks(self):
-        result = assess_local_worktree_cleanup_candidate(
-            repo=REPO,
-            pr_number=77,
-            topic_branch=BRANCH,
-            merged_pr_head=HEAD,
-            active_workstreams=(lane(),),
-            closeout_output=PASS_OUTPUT,
-            closeout_returncode=0,
-        )
+        result = local_assess(active=(lane(),))
         self.assertEqual((result.status, result.reason), ("NOT_SAFE", "ACTIVE_WORKSTREAM_OWNS_BRANCH"))
 
     def test_github_only_remote_candidate_does_not_fabricate_local_safety(self):
         remote, _ = assess()
         self.assertEqual(remote.status, "SAFE_TO_CONSIDER")
-        local = assess_local_worktree_cleanup_candidate(
-            repo=REPO,
-            pr_number=77,
-            topic_branch=BRANCH,
-            merged_pr_head=HEAD,
-            active_workstreams=(),
-            closeout_output="",
-            closeout_returncode=1,
-        )
+        local = local_assess(output="", returncode=1)
         self.assertEqual(local.status, "NOT_SAFE")
 
     def test_public_surfaces_have_no_destructive_action_parameters(self):
