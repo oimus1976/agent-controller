@@ -33,8 +33,9 @@ class LocalCloseoutEvidence:
 
 PrReader = Callable[[str, int], Mapping[str, Any]]
 BranchReader = Callable[[str, str], Optional[str]]
-OpenPrReader = Callable[[str, str], Sequence[Mapping[str, Any]]]
+OpenPrReader = Callable[[str], Sequence[Mapping[str, Any]]]
 DefaultBranchReader = Callable[[str], str]
+BranchProtectionReader = Callable[[str, str], bool]
 
 
 def _normalize_branch(ref: str) -> str:
@@ -73,7 +74,6 @@ def _extract_merged_pr_anchor(
     if snapshot.get("merged") is not True or snapshot.get("state") != "closed":
         return None, None, "PR_NOT_MERGED"
 
-    # Accept both GitHub REST-style nested identity and the connector's normalized shape.
     if isinstance(snapshot.get("head"), Mapping):
         head = snapshot["head"]
         branch = head.get("ref")
@@ -94,6 +94,22 @@ def _extract_merged_pr_anchor(
     return _normalize_branch(branch.strip()), sha.lower(), None
 
 
+def _open_pr_head_identity(item: Mapping[str, Any]) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    if item.get("state") != "open":
+        return None, None, "OPEN_PR_EVIDENCE_MALFORMED"
+    if isinstance(item.get("head"), Mapping):
+        head = item["head"]
+        branch = head.get("ref")
+        head_repo = head.get("repo")
+        repo = head_repo.get("full_name") if isinstance(head_repo, Mapping) else None
+    else:
+        branch = item.get("head")
+        repo = item.get("head_repo_full_name")
+    if not isinstance(branch, str) or not branch.strip() or not isinstance(repo, str) or not repo.strip():
+        return None, None, "OPEN_PR_EVIDENCE_MALFORMED"
+    return _normalize_branch(branch.strip()), repo, None
+
+
 def assess_remote_branch_cleanup_candidate(
     *,
     repo: str,
@@ -101,8 +117,9 @@ def assess_remote_branch_cleanup_candidate(
     active_workstreams: Sequence[WorkstreamBinding],
     read_pr: PrReader,
     read_branch_sha: BranchReader,
-    list_open_prs_for_head: OpenPrReader,
+    list_open_prs: OpenPrReader,
     read_default_branch: DefaultBranchReader,
+    read_branch_protected: BranchProtectionReader,
 ) -> CleanupCandidate:
     """Surface advisory remote-branch cleanup evidence; never delete anything."""
     try:
@@ -123,6 +140,12 @@ def assess_remote_branch_cleanup_candidate(
         if _normalize_branch(default_branch.strip()) == branch or branch.casefold() in {"head", ".", ".."}:
             return CleanupCandidate("remote_branch", "NOT_SAFE", "CANONICAL_BRANCH", repo, pr_number, branch, merged_head)
 
+        protected = read_branch_protected(repo, branch)
+        if not isinstance(protected, bool):
+            return CleanupCandidate("remote_branch", "UNCERTAIN", "BRANCH_PROTECTION_UNAVAILABLE", repo, pr_number, branch, merged_head)
+        if protected:
+            return CleanupCandidate("remote_branch", "NOT_SAFE", "PROTECTED_BRANCH", repo, pr_number, branch, merged_head)
+
         if _active_branch_owner(repo=repo, branch=branch, active_workstreams=active_workstreams):
             return CleanupCandidate("remote_branch", "NOT_SAFE", "ACTIVE_WORKSTREAM_OWNS_BRANCH", repo, pr_number, branch, merged_head)
 
@@ -134,16 +157,17 @@ def assess_remote_branch_cleanup_candidate(
         if current_sha.lower() != merged_head:
             return CleanupCandidate("remote_branch", "NOT_SAFE", "REMOTE_BRANCH_DRIFTED", repo, pr_number, branch, merged_head)
 
-        open_prs = list_open_prs_for_head(repo, branch)
+        open_prs = list_open_prs(repo)
         if not isinstance(open_prs, Sequence) or isinstance(open_prs, (str, bytes)):
             return CleanupCandidate("remote_branch", "UNCERTAIN", "OPEN_PR_EVIDENCE_MALFORMED", repo, pr_number, branch, merged_head)
         for item in open_prs:
             if not isinstance(item, Mapping):
                 return CleanupCandidate("remote_branch", "UNCERTAIN", "OPEN_PR_EVIDENCE_MALFORMED", repo, pr_number, branch, merged_head)
-            state = item.get("state")
-            if state != "open":
-                return CleanupCandidate("remote_branch", "UNCERTAIN", "OPEN_PR_EVIDENCE_MALFORMED", repo, pr_number, branch, merged_head)
-            return CleanupCandidate("remote_branch", "NOT_SAFE", "OPEN_PR_USES_BRANCH", repo, pr_number, branch, merged_head)
+            open_branch, open_repo, open_error = _open_pr_head_identity(item)
+            if open_error:
+                return CleanupCandidate("remote_branch", "UNCERTAIN", open_error, repo, pr_number, branch, merged_head)
+            if open_branch == branch and open_repo is not None and open_repo.casefold() == repo.casefold():
+                return CleanupCandidate("remote_branch", "NOT_SAFE", "OPEN_PR_USES_BRANCH", repo, pr_number, branch, merged_head)
 
         return CleanupCandidate("remote_branch", "SAFE_TO_CONSIDER", "EXACT_MERGED_BRANCH_UNOWNED", repo, pr_number, branch, merged_head)
     except Exception:
