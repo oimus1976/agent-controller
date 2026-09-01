@@ -1,0 +1,232 @@
+import inspect
+import unittest
+
+from agent_controller.post_merge_cleanup import (
+    assess_local_worktree_cleanup_candidate,
+    assess_remote_branch_cleanup_candidate,
+    parse_local_closeout_evidence,
+)
+from agent_controller.workstream import WorkstreamBinding
+
+
+REPO = "oimus1976/agent-controller"
+HEAD = "a" * 40
+BRANCH = "topic/merged"
+
+
+def lane(*, branch=BRANCH, workstream_id="lane-a"):
+    return WorkstreamBinding(
+        workstream_id=workstream_id,
+        repo=REPO,
+        root_work_item_ref="issue-x",
+        task_ids=(f"task-{workstream_id}",),
+        branch_refs=(branch,),
+    )
+
+
+def merged_pr(*, merged=True, state="closed", branch=BRANCH, head=HEAD, repo=REPO, number=77):
+    return {
+        "number": number,
+        "merged": merged,
+        "state": state,
+        "head": {"ref": branch, "sha": head, "repo": {"full_name": repo}},
+    }
+
+
+def open_pr(*, branch="other", repo=REPO, number=88):
+    return {
+        "number": number,
+        "state": "open",
+        "head": {"ref": branch, "repo": {"full_name": repo}},
+    }
+
+
+class RemoteHarness:
+    def __init__(self):
+        self.pr = merged_pr()
+        self.branch_sha = HEAD
+        self.open_prs = []
+        self.default_branch = "main"
+        self.protected = False
+        self.reads = {"pr": 0, "branch": 0, "open_prs": 0, "default": 0, "protected": 0}
+
+    def read_pr(self, repo, pr):
+        self.reads["pr"] += 1
+        return self.pr
+
+    def read_branch(self, repo, branch):
+        self.reads["branch"] += 1
+        return self.branch_sha
+
+    def list_open_prs(self, repo):
+        self.reads["open_prs"] += 1
+        return self.open_prs
+
+    def read_default(self, repo):
+        self.reads["default"] += 1
+        return self.default_branch
+
+    def read_protected(self, repo, branch):
+        self.reads["protected"] += 1
+        return self.protected
+
+
+def assess(h=None, active=()):
+    h = h or RemoteHarness()
+    result = assess_remote_branch_cleanup_candidate(
+        repo=REPO,
+        pr_number=77,
+        active_workstreams=active,
+        read_pr=h.read_pr,
+        read_branch_sha=h.read_branch,
+        list_open_prs=h.list_open_prs,
+        read_default_branch=h.read_default,
+        read_branch_protected=h.read_protected,
+    )
+    return result, h
+
+
+def local_assess(*, pr=None, branch=BRANCH, active=(), output=None, returncode=0):
+    snapshot = pr or merged_pr()
+    return assess_local_worktree_cleanup_candidate(
+        repo=REPO,
+        pr_number=77,
+        topic_branch=branch,
+        active_workstreams=active,
+        read_pr=lambda repo, number: snapshot,
+        closeout_output=PASS_OUTPUT if output is None else output,
+        closeout_returncode=returncode,
+    )
+
+
+PASS_OUTPUT = f"""LOCAL CLOSEOUT: PASS
+task_worktree_role=topic
+task_worktree=clean
+task_head={HEAD}
+expected_pr_head=matched
+canonical_worktree=ready
+branch=main
+head={'b' * 40}
+remote=origin/main
+freshness=canonical-branch-fetch-completed
+next_task_checkout=canonical-worktree
+"""
+
+
+class PostMergeCleanupTests(unittest.TestCase):
+    def test_exact_merged_unowned_branch_is_candidate(self):
+        result, h = assess()
+        self.assertEqual(result.status, "SAFE_TO_CONSIDER")
+        self.assertEqual(result.branch, BRANCH)
+        self.assertEqual(result.merged_pr_head, HEAD)
+        self.assertEqual(h.reads, {"pr": 1, "branch": 1, "open_prs": 1, "default": 1, "protected": 1})
+
+    def test_unmerged_pr_is_not_safe_before_branch_reads(self):
+        h = RemoteHarness()
+        h.pr = merged_pr(merged=False, state="open")
+        result, h = assess(h)
+        self.assertEqual((result.status, result.reason), ("NOT_SAFE", "PR_NOT_MERGED"))
+        self.assertEqual(h.reads["branch"], 0)
+
+    def test_default_or_protected_branch_is_never_candidate(self):
+        h = RemoteHarness()
+        h.pr = merged_pr(branch="main")
+        result, _ = assess(h)
+        self.assertEqual((result.status, result.reason), ("NOT_SAFE", "CANONICAL_BRANCH"))
+
+        h = RemoteHarness()
+        h.protected = True
+        result, _ = assess(h)
+        self.assertEqual((result.status, result.reason), ("NOT_SAFE", "PROTECTED_BRANCH"))
+
+    def test_branch_drift_is_not_safe(self):
+        h = RemoteHarness()
+        h.branch_sha = "c" * 40
+        result, _ = assess(h)
+        self.assertEqual((result.status, result.reason), ("NOT_SAFE", "REMOTE_BRANCH_DRIFTED"))
+
+    def test_controller_filters_repository_open_prs_itself(self):
+        h = RemoteHarness()
+        h.open_prs = [open_pr(branch="unrelated"), open_pr(branch=BRANCH)]
+        result, _ = assess(h)
+        self.assertEqual((result.status, result.reason), ("NOT_SAFE", "OPEN_PR_USES_BRANCH"))
+
+        h = RemoteHarness()
+        h.open_prs = [open_pr(branch="unrelated")]
+        result, _ = assess(h)
+        self.assertEqual(result.status, "SAFE_TO_CONSIDER")
+
+    def test_active_workstream_ownership_blocks_before_branch_read(self):
+        result, h = assess(active=(lane(),))
+        self.assertEqual((result.status, result.reason), ("NOT_SAFE", "ACTIVE_WORKSTREAM_OWNS_BRANCH"))
+        self.assertEqual(h.reads["branch"], 0)
+
+    def test_already_absent_is_distinct(self):
+        h = RemoteHarness()
+        h.branch_sha = None
+        result, _ = assess(h)
+        self.assertEqual((result.status, result.reason), ("ALREADY_ABSENT", "REMOTE_BRANCH_ABSENT"))
+
+    def test_malformed_github_evidence_is_uncertain(self):
+        h = RemoteHarness()
+        h.pr = {"number": 77, "merged": True, "state": "closed", "head": {}}
+        result, _ = assess(h)
+        self.assertEqual(result.status, "UNCERTAIN")
+
+        h = RemoteHarness()
+        h.open_prs = ["bad"]
+        result, _ = assess(h)
+        self.assertEqual(result.status, "UNCERTAIN")
+
+        h = RemoteHarness()
+        h.protected = "unknown"
+        result, _ = assess(h)
+        self.assertEqual((result.status, result.reason), ("UNCERTAIN", "BRANCH_PROTECTION_UNAVAILABLE"))
+
+    def test_local_closeout_pass_is_required_for_local_candidate(self):
+        result = local_assess()
+        self.assertEqual((result.status, result.reason), ("SAFE_TO_CONSIDER", "LOCAL_CLOSEOUT_VERIFIED"))
+
+        failed = local_assess(output="LOCAL CLOSEOUT: FAIL\n- dirty", returncode=1)
+        self.assertEqual((failed.status, failed.reason), ("NOT_SAFE", "LOCAL_CLOSEOUT_FAILED"))
+
+    def test_local_candidate_re_reads_exact_merged_pr(self):
+        unmerged = local_assess(pr=merged_pr(merged=False, state="open"))
+        self.assertEqual((unmerged.status, unmerged.reason), ("NOT_SAFE", "PR_NOT_MERGED"))
+
+        wrong_branch = local_assess(branch="topic/other")
+        self.assertEqual((wrong_branch.status, wrong_branch.reason), ("NOT_SAFE", "TOPIC_BRANCH_NOT_PR_HEAD"))
+
+        wrong_repo = local_assess(pr=merged_pr(repo="other/repo"))
+        self.assertEqual(wrong_repo.status, "UNCERTAIN")
+
+    def test_local_wrong_head_or_incomplete_pass_is_not_safe(self):
+        wrong = PASS_OUTPUT.replace(f"task_head={HEAD}", f"task_head={'c' * 40}")
+        evidence = parse_local_closeout_evidence(output=wrong, returncode=0, expected_pr_head=HEAD)
+        self.assertFalse(evidence.valid)
+        self.assertEqual(evidence.reason, "LOCAL_CLOSEOUT_HEAD_MISMATCH")
+
+        incomplete = PASS_OUTPUT.replace("canonical_worktree=ready\n", "")
+        evidence = parse_local_closeout_evidence(output=incomplete, returncode=0, expected_pr_head=HEAD)
+        self.assertFalse(evidence.valid)
+        self.assertEqual(evidence.reason, "LOCAL_CLOSEOUT_PASS_EVIDENCE_INCOMPLETE")
+
+    def test_local_active_workstream_ownership_blocks(self):
+        result = local_assess(active=(lane(),))
+        self.assertEqual((result.status, result.reason), ("NOT_SAFE", "ACTIVE_WORKSTREAM_OWNS_BRANCH"))
+
+    def test_github_only_remote_candidate_does_not_fabricate_local_safety(self):
+        remote, _ = assess()
+        self.assertEqual(remote.status, "SAFE_TO_CONSIDER")
+        local = local_assess(output="", returncode=1)
+        self.assertEqual(local.status, "NOT_SAFE")
+
+    def test_public_surfaces_have_no_destructive_action_parameters(self):
+        for fn in (assess_remote_branch_cleanup_candidate, assess_local_worktree_cleanup_candidate):
+            params = inspect.signature(fn).parameters
+            for forbidden in ("delete", "remove", "reset", "stash", "force", "prune"):
+                self.assertNotIn(forbidden, params)
+
+
+if __name__ == "__main__":
+    unittest.main()
