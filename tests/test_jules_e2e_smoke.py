@@ -1,4 +1,5 @@
 import inspect
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
@@ -28,6 +29,7 @@ from agent_controller.provider_plan_gate_flow import (
 )
 from agent_controller.published_draft_inspection import PublishedDraftInspectionResult
 from agent_controller.workstream import WorkstreamBinding
+from scripts import run_jules_e2e_smoke as smoke_script
 
 
 SHA = "a" * 40
@@ -281,6 +283,36 @@ class JulesE2ESmokeTests(unittest.TestCase):
         self.assertIn(branch, workstream.branch_refs)
         self.assertEqual(github.file, (task.repo, SHA, SMOKE_DOC_PATH))
 
+    def test_local_checkout_preflight_requires_root_main_exact_head_and_clean_tree(self):
+        cwd = Path.cwd().resolve()
+
+        def make_runner(*, branch="main", head=SHA, status=""):
+            def runner(command, **kwargs):
+                args = tuple(command[1:])
+                outputs = {
+                    ("rev-parse", "--show-toplevel"): str(cwd),
+                    ("branch", "--show-current"): branch,
+                    ("rev-parse", "HEAD"): head,
+                    ("status", "--porcelain"): status,
+                }
+                return subprocess.CompletedProcess(command, 0, stdout=outputs[args] + "\n", stderr="")
+
+            return runner
+
+        smoke_script._verify_local_checkout(expected_sha=SHA, cwd=cwd, runner=make_runner())
+        with self.assertRaisesRegex(RuntimeError, "BRANCH_NOT_MAIN"):
+            smoke_script._verify_local_checkout(
+                expected_sha=SHA, cwd=cwd, runner=make_runner(branch="topic")
+            )
+        with self.assertRaisesRegex(RuntimeError, "HEAD_NOT_ACCEPTED_MAIN"):
+            smoke_script._verify_local_checkout(
+                expected_sha=SHA, cwd=cwd, runner=make_runner(head=HEAD)
+            )
+        with self.assertRaisesRegex(RuntimeError, "CHECKOUT_DIRTY"):
+            smoke_script._verify_local_checkout(
+                expected_sha=SHA, cwd=cwd, runner=make_runner(status=" M file.txt")
+            )
+
     def test_public_surface_has_no_approval_ready_merge_or_redispatch_argument(self):
         params = set(inspect.signature(run_operator_assisted_smoke).parameters)
         for forbidden in ("approved", "approve", "ready", "merge", "redispatch", "session_id"):
@@ -289,6 +321,9 @@ class JulesE2ESmokeTests(unittest.TestCase):
         script = Path("scripts/run_jules_e2e_smoke.py").read_text(encoding="utf-8")
         self.assertIn("Pressing Enter here does NOT approve anything", script)
         self.assertIn("do not retry", script.lower())
+        self.assertIn('STATE_FILE = Path(".jules_e2e_smoke_state.json")', script)
+        self.assertNotIn("--state-file", script)
+        self.assertIn('"provider_operation_id": action.get("provider_operation_id")', script)
         self.assertNotIn("approvePlan", script)
         self.assertNotIn("mark_pull_request_ready", script)
         self.assertNotIn("merge_pull_request", script)
