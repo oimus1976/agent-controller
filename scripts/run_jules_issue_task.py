@@ -4,6 +4,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -16,22 +18,24 @@ from agent_controller.jules_draft_publication import publish_jules_changeset_to_
 from agent_controller.jules_e2e_smoke import run_operator_assisted_smoke
 from agent_controller.jules_issue_task import JulesIssueTaskSpec, build_issue_task
 from agent_controller.jules_live import JulesApiClient
+from agent_controller.resource_usage import ResourceUsageObservation, ResourceUsageSource
 from scripts import run_jules_e2e_smoke as smoke_runner
 
 
 SPEC_FILE = Path(".jules_issue_task_spec.json")
 
 
-def _load_spec(path: Path = SPEC_FILE) -> JulesIssueTaskSpec:
+def _load_spec(path: Path = SPEC_FILE) -> tuple[JulesIssueTaskSpec, int]:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw_bytes = path.read_bytes()
+        raw = json.loads(raw_bytes.decode("utf-8"))
     except FileNotFoundError as exc:
         raise RuntimeError("JULES_ISSUE_TASK_SPEC_MISSING") from exc
     except json.JSONDecodeError as exc:
         raise RuntimeError("JULES_ISSUE_TASK_SPEC_INVALID_JSON") from exc
     if not isinstance(raw, dict):
         raise RuntimeError("JULES_ISSUE_TASK_SPEC_NOT_OBJECT")
-    return JulesIssueTaskSpec.from_mapping(raw)
+    return JulesIssueTaskSpec.from_mapping(raw), len(raw_bytes)
 
 
 def _spec_evidence(spec: JulesIssueTaskSpec) -> tuple[dict[str, object], str]:
@@ -72,8 +76,10 @@ def _publication_with_issue_metadata(spec: JulesIssueTaskSpec):
 
 
 def main() -> int:
+    start_ns = time.monotonic_ns()
+    controller_run_id = str(uuid.uuid4())
     try:
-        spec = _load_spec()
+        spec, spec_bytes_read = _load_spec()
         spec_payload, spec_digest = _spec_evidence(spec)
     except Exception as exc:
         print(f"Issue-task spec validation failed before provider access: {exc}", file=sys.stderr)
@@ -137,6 +143,18 @@ def main() -> int:
         smoke_runner._replace_state(state_path, gated)
         smoke_runner._wait_for_human(action)
 
+    def _create_usage() -> ResourceUsageObservation:
+        return ResourceUsageObservation(
+            controller_task_id=task.controller_task_id,
+            operation_id=task.operation_id,
+            operation_version="1",
+            provider="jules",
+            controller_run_id=controller_run_id,
+            source=ResourceUsageSource.CONTROLLER_MEASURED,
+            bytes_read=spec_bytes_read,
+            elapsed_ms=(time.monotonic_ns() - start_ns) // 1_000_000,
+        )
+
     try:
         result = run_operator_assisted_smoke(
             task=task,
@@ -162,6 +180,7 @@ def main() -> int:
                 "state": "UNCAUGHT_UNCERTAINTY",
                 "finished_at": smoke_runner._now(),
                 "reason": str(exc),
+                "resource_usage": dict(_create_usage().to_mapping()),
             }
         )
         smoke_runner._replace_state(state_path, failed)
@@ -172,15 +191,21 @@ def main() -> int:
         return 1
 
     evidence = dict(armed)
+    result_dict = result.to_dict()
+    usage_dict = dict(_create_usage().to_mapping())
     evidence.update(
         {
             "state": result.status,
             "finished_at": smoke_runner._now(),
-            "result": result.to_dict(),
+            "result": result_dict,
+            "resource_usage": usage_dict,
         }
     )
     smoke_runner._replace_state(state_path, evidence)
-    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    
+    output = dict(result_dict)
+    output["resource_usage"] = usage_dict
+    print(json.dumps(output, indent=2, sort_keys=True))
     if result.status == "PASS":
         print(
             "\nBounded Jules issue task composition PASS. The published pull request is still Draft. "

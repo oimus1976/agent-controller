@@ -1,4 +1,5 @@
 import inspect
+import unittest.mock
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -74,6 +75,186 @@ class JulesIssueTaskRunnerTests(unittest.TestCase):
         ignore = Path(".gitignore").read_text(encoding="utf-8")
         self.assertIn(".jules_issue_task_spec.json", ignore)
         self.assertIn(".jules_issue_task_*_state.json", ignore)
+
+
+
+    @unittest.mock.patch("scripts.run_jules_e2e_smoke._wait_for_human")
+    @unittest.mock.patch("scripts.run_jules_e2e_smoke._replace_state")
+    @unittest.mock.patch("scripts.run_jules_e2e_smoke._write_once")
+    @unittest.mock.patch("scripts.run_jules_e2e_smoke._verify_local_checkout")
+    @unittest.mock.patch("scripts.run_jules_e2e_smoke._now")
+    @unittest.mock.patch("scripts.run_jules_issue_task.run_operator_assisted_smoke")
+    @unittest.mock.patch("scripts.run_jules_issue_task.JulesApiClient")
+    @unittest.mock.patch("scripts.run_jules_issue_task.GitHubRestDraftPublicationBackend")
+    @unittest.mock.patch("scripts.run_jules_issue_task._publication_with_issue_metadata")
+    @unittest.mock.patch("scripts.run_jules_issue_task._spec_evidence")
+    @unittest.mock.patch("scripts.run_jules_issue_task._load_spec")
+    @unittest.mock.patch("scripts.run_jules_issue_task.build_issue_task")
+    @unittest.mock.patch("time.monotonic_ns")
+    @unittest.mock.patch("uuid.uuid4")
+    def test_runner_records_resource_usage_on_success(
+        self,
+        mock_uuid4,
+        mock_monotonic_ns,
+        mock_build_issue_task,
+        mock_load_spec,
+        mock_spec_evidence,
+        mock_publication,
+        mock_github,
+        mock_api_client,
+        mock_run_operator,
+        mock_now,
+        mock_verify,
+        mock_write_once,
+        mock_replace_state,
+        mock_wait,
+    ):
+        mock_uuid4.return_value = unittest.mock.MagicMock(hex="run-1234", __str__=lambda self: "run-1234")
+        mock_monotonic_ns.side_effect = [1_000_000_000, 3_500_000_000] # start, end (2500ms elapsed)
+        mock_now.return_value = "2023-01-01T00:00:00Z"
+        
+        spec = SimpleNamespace(
+            schema_version=1,
+            issue_number=55,
+            repo="oimus1976/agent-controller",
+            expected_start_ref="main",
+            expected_start_sha="a" * 40,
+            controller_task_id="task-jules-issue-55-aaaaaaaaaaaa",
+            operation_id="op-jules-issue-55-aaaaaaaaaaaa",
+            workstream_id="jules-issue-55-aaaaaaaaaaaa",
+            destination_branch="controller/jules-issue-55-aaaaaaaaaaaa",
+            prompt="Implement Issue #55 slice A",
+            allowed_paths=("agent_controller/resource_meter.py",),
+            denied_paths=(".github/**",),
+            requested_capability="JULES_BOUNDED_ISSUE_IMPLEMENTATION",
+            allowed_effects=("SESSION_CREATE", "DRAFT_PR_CREATE"),
+            forbidden_effects=("AUTO_CREATE_PR", "PLAN_APPROVAL", "READY", "MERGE"),
+            approval_policy_id="adr-90-human-final",
+            state_filename=".state",
+        )
+        mock_load_spec.return_value = (spec, 1024) # 1024 bytes
+        mock_spec_evidence.return_value = ({"spec": "data"}, "digest123")
+        
+        task = SimpleNamespace(
+            repo="oimus1976/agent-controller",
+            expected_start_ref="main",
+            expected_start_sha="a"*40,
+            controller_task_id="task-jules-issue-55-aaaaaaaaaaaa",
+            operation_id="op-jules-issue-55-aaaaaaaaaaaa",
+        )
+        workstream = SimpleNamespace(workstream_id="jules-issue-55-aaaaaaaaaaaa")
+        mock_build_issue_task.return_value = (task, workstream, "dest-branch", "adapter", "change_reader", "github")
+        
+        mock_result = unittest.mock.MagicMock()
+        mock_result.status = "PASS"
+        mock_result.to_dict.return_value = {"status": "PASS", "data": "yes"}
+        mock_run_operator.return_value = mock_result
+        
+        # Patch sys.stdout to prevent noise and path.exists
+        with unittest.mock.patch("sys.stdout"), unittest.mock.patch("pathlib.Path.exists", return_value=False):
+            result = runner.main()
+            
+        self.assertEqual(result, 0)
+        
+        # Verify the final state replace call includes resource_usage
+        final_call = mock_replace_state.call_args_list[-1]
+        state_dict = final_call[0][1]
+        self.assertIn("resource_usage", state_dict)
+        usage = state_dict["resource_usage"]
+        
+        self.assertEqual(usage["controller_task_id"], "task-jules-issue-55-aaaaaaaaaaaa")
+        self.assertEqual(usage["operation_id"], "op-jules-issue-55-aaaaaaaaaaaa")
+        self.assertEqual(usage["operation_version"], "1")
+        self.assertEqual(usage["provider"], "jules")
+        self.assertEqual(usage["controller_run_id"], "run-1234")
+        self.assertEqual(usage["source"], "CONTROLLER_MEASURED")
+        self.assertEqual(usage["bytes_read"], 1024)
+        self.assertEqual(usage["elapsed_ms"], 2500)
+        
+        # Uncached and tokens should not be present (they are Optional but shouldn't be added explicitly as None in dict if not provided or left out depending on asdict, asdict includes None but we can check values)
+        self.assertIsNone(usage.get("uncached_input_tokens"))
+
+    @unittest.mock.patch("scripts.run_jules_e2e_smoke._wait_for_human")
+    @unittest.mock.patch("scripts.run_jules_e2e_smoke._replace_state")
+    @unittest.mock.patch("scripts.run_jules_e2e_smoke._write_once")
+    @unittest.mock.patch("scripts.run_jules_e2e_smoke._verify_local_checkout")
+    @unittest.mock.patch("scripts.run_jules_e2e_smoke._now")
+    @unittest.mock.patch("scripts.run_jules_issue_task.run_operator_assisted_smoke")
+    @unittest.mock.patch("scripts.run_jules_issue_task.JulesApiClient")
+    @unittest.mock.patch("scripts.run_jules_issue_task.GitHubRestDraftPublicationBackend")
+    @unittest.mock.patch("scripts.run_jules_issue_task._publication_with_issue_metadata")
+    @unittest.mock.patch("scripts.run_jules_issue_task._spec_evidence")
+    @unittest.mock.patch("scripts.run_jules_issue_task._load_spec")
+    @unittest.mock.patch("scripts.run_jules_issue_task.build_issue_task")
+    @unittest.mock.patch("time.monotonic_ns")
+    @unittest.mock.patch("uuid.uuid4")
+    def test_runner_records_resource_usage_on_exception(
+        self,
+        mock_uuid4,
+        mock_monotonic_ns,
+        mock_build_issue_task,
+        mock_load_spec,
+        mock_spec_evidence,
+        mock_publication,
+        mock_github,
+        mock_api_client,
+        mock_run_operator,
+        mock_now,
+        mock_verify,
+        mock_write_once,
+        mock_replace_state,
+        mock_wait,
+    ):
+        mock_uuid4.return_value = unittest.mock.MagicMock(hex="run-1234", __str__=lambda self: "run-1234")
+        mock_monotonic_ns.side_effect = [1_000_000_000, 3_500_000_000] # start, end (2500ms elapsed)
+        mock_now.return_value = "2023-01-01T00:00:00Z"
+        
+        spec = SimpleNamespace(
+            schema_version=1,
+            issue_number=55,
+            repo="oimus1976/agent-controller",
+            expected_start_ref="main",
+            expected_start_sha="a" * 40,
+            controller_task_id="task-jules-issue-55-aaaaaaaaaaaa",
+            operation_id="op-jules-issue-55-aaaaaaaaaaaa",
+            workstream_id="jules-issue-55-aaaaaaaaaaaa",
+            destination_branch="controller/jules-issue-55-aaaaaaaaaaaa",
+            prompt="Implement Issue #55 slice A",
+            allowed_paths=("agent_controller/resource_meter.py",),
+            denied_paths=(".github/**",),
+            requested_capability="JULES_BOUNDED_ISSUE_IMPLEMENTATION",
+            allowed_effects=("SESSION_CREATE", "DRAFT_PR_CREATE"),
+            forbidden_effects=("AUTO_CREATE_PR", "PLAN_APPROVAL", "READY", "MERGE"),
+            approval_policy_id="adr-90-human-final",
+            state_filename=".state",
+        )
+        mock_load_spec.return_value = (spec, 1024)
+        mock_spec_evidence.return_value = ({"spec": "data"}, "digest123")
+        
+        task = SimpleNamespace(
+            repo="oimus1976/agent-controller",
+            expected_start_ref="main",
+            expected_start_sha="a"*40,
+            controller_task_id="task-jules-issue-55-aaaaaaaaaaaa",
+            operation_id="op-jules-issue-55-aaaaaaaaaaaa",
+        )
+        workstream = SimpleNamespace(workstream_id="jules-issue-55-aaaaaaaaaaaa")
+        mock_build_issue_task.return_value = (task, workstream, "dest-branch", "adapter", "change_reader", "github")
+        
+        mock_run_operator.side_effect = RuntimeError("Something bad happened")
+        
+        # Patch sys.stdout and sys.stderr to prevent noise and path.exists
+        with unittest.mock.patch("sys.stdout"), unittest.mock.patch("sys.stderr"), unittest.mock.patch("pathlib.Path.exists", return_value=False):
+            result = runner.main()
+            
+        self.assertEqual(result, 1)
+        
+        final_call = mock_replace_state.call_args_list[-1]
+        state_dict = final_call[0][1]
+        self.assertEqual(state_dict["state"], "UNCAUGHT_UNCERTAINTY")
+        self.assertIn("resource_usage", state_dict)
+        usage = state_dict["resource_usage"]
+        self.assertEqual(usage["elapsed_ms"], 2500)
 
 
 if __name__ == "__main__":
