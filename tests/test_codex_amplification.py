@@ -271,10 +271,6 @@ class CodexAmplificationTests(unittest.TestCase):
         mock_comments.assert_not_called()
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class CodexRemediationGapClassificationTests(unittest.TestCase):
     def test_absent_marker_is_observed(self):
         result = classify_codex_remediation_gap(
@@ -374,15 +370,50 @@ class CodexRemediationGapClassificationTests(unittest.TestCase):
         self.assertEqual(result["status"], "NEEDS_ATTENTION")
         self.assertEqual(result["provider_completion"], "UNKNOWN")
 
-    def test_marker_without_command_is_treated_as_absent(self):
+    def test_marker_without_command_is_uncertain(self):
         head = "9999999999999999999999999999999999999999"
         result = classify_codex_remediation_gap(
             issue_comments=[
-                issue_comment(f"<!-- agent-controller:codex-remediation-request source_head={head} -->")
+                issue_comment(
+                    f"<!-- agent-controller:codex-remediation-request "
+                    f"source_head={head} -->"
+                )
             ],
             reviews=[],
             trusted_request_authors=(OWNER,),
             current_pr_head=head,
         )
-        self.assertEqual(result["status"], "OBSERVED")
-        self.assertEqual(result["reason"], "ABSENT_MARKER")
+        self.assertEqual(result["status"], "UNCERTAIN")
+        self.assertEqual(
+            result["reason"],
+            "MALFORMED_REMEDIATION_EVIDENCE",
+        )
+
+    def test_malformed_trusted_author_entry_is_rejected(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "trusted_request_authors must be a nonempty tuple",
+        ):
+            classify_codex_remediation_gap(
+                issue_comments=[],
+                reviews=[],
+                trusted_request_authors=(OWNER, None),
+                current_pr_head="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+
+    def test_malformed_evidence_is_uncertain(self):
+        result = classify_codex_remediation_gap(
+            issue_comments=[None],
+            reviews=[],
+            trusted_request_authors=(OWNER,),
+            current_pr_head="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        self.assertEqual(result["status"], "UNCERTAIN")
+        self.assertEqual(
+            result["reason"],
+            "MALFORMED_REMEDIATION_EVIDENCE",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

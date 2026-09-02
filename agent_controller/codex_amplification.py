@@ -52,57 +52,102 @@ def classify_codex_remediation_gap(
     trusted_request_authors: tuple[str, ...],
     current_pr_head: str,
 ) -> dict[str, Any]:
-    if not isinstance(trusted_request_authors, tuple) or not trusted_request_authors:
+    if (
+        not isinstance(trusted_request_authors, tuple)
+        or not trusted_request_authors
+        or any(
+            not isinstance(author, str) or not author
+            for author in trusted_request_authors
+        )
+    ):
         raise ValueError("trusted_request_authors must be a nonempty tuple")
 
-    if not isinstance(current_pr_head, str) or not re.fullmatch(r"[0-9a-f]{40}", current_pr_head):
+    if not isinstance(current_pr_head, str) or not re.fullmatch(
+        r"[0-9a-f]{40}", current_pr_head
+    ):
         return {
             "status": "UNCERTAIN",
             "reason": "MALFORMED_HEAD",
         }
 
     trusted = set(trusted_request_authors)
-    source_heads = set()
-    
+    source_heads: set[str] = set()
+
     for items in (issue_comments, reviews):
         for item in items:
             if not isinstance(item, Mapping):
-                continue
+                return {
+                    "status": "UNCERTAIN",
+                    "reason": "MALFORMED_REMEDIATION_EVIDENCE",
+                }
+
             login = _login(item)
             body = _body(item)
-            if login is None or body is None:
+
+            if login is None:
+                return {
+                    "status": "UNCERTAIN",
+                    "reason": "MALFORMED_REMEDIATION_EVIDENCE",
+                }
+
+            if body is None:
+                body = ""
+
+            if login not in trusted:
                 continue
-                
-            if login in trusted:
-                if "@codex address that feedback" in body.lower():
-                    shas = _REMEDIATION_MARKER_RE.findall(body)
-                    for sha in shas:
-                        source_heads.add(sha)
+
+            marker_present = "agent-controller:codex-remediation-request" in body
+            command_present = "@codex address that feedback" in body.lower()
+            shas = _REMEDIATION_MARKER_RE.findall(body)
+
+            if marker_present and (not command_present or not shas):
+                return {
+                    "status": "UNCERTAIN",
+                    "reason": "MALFORMED_REMEDIATION_EVIDENCE",
+                }
+
+            if command_present and not shas:
+                return {
+                    "status": "UNCERTAIN",
+                    "reason": "MALFORMED_REMEDIATION_EVIDENCE",
+                }
+
+            if command_present:
+                source_heads.update(shas)
 
     if not source_heads:
         return {
             "status": "OBSERVED",
             "reason": "ABSENT_MARKER",
         }
-        
+
     if len(source_heads) > 1:
         return {
             "status": "UNCERTAIN",
             "reason": "AMBIGUOUS_MULTIPLE_SOURCE_HEADS",
         }
-        
-    source_head = source_heads.pop()
+
+    source_head = next(iter(source_heads))
+
     if current_pr_head == source_head:
         return {
             "status": "NEEDS_ATTENTION",
             "provider_completion": "UNKNOWN",
-            "operator_guidance": "inspect the exact Codex task and, if complete, use human View task -> Update branch",
+            "operator_guidance": (
+                "inspect the exact Codex task and, if complete, "
+                "use human View task -> Update branch"
+            ),
         }
-    else:
-        return {
-            "status": "NEW_UNTRUSTED_HEAD",
-            "requirements": ["fresh objective scope", "exact-head CI", "exact-head review"],
-        }
+
+    return {
+        "status": "NEW_UNTRUSTED_HEAD",
+        "requirements": [
+            "fresh objective scope",
+            "exact-head CI",
+            "exact-head review",
+        ],
+    }
+
 
 def analyze_codex_request_amplification(
     *,
