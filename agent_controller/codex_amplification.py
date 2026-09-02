@@ -44,6 +44,66 @@ def _duplicate_count(counter: Counter[str]) -> int:
     return sum(max(0, count - 1) for count in counter.values())
 
 
+
+def classify_codex_remediation_gap(
+    *,
+    issue_comments: Iterable[Mapping[str, Any]],
+    reviews: Iterable[Mapping[str, Any]],
+    trusted_request_authors: tuple[str, ...],
+    current_pr_head: str,
+) -> dict[str, Any]:
+    if not isinstance(trusted_request_authors, tuple) or not trusted_request_authors:
+        raise ValueError("trusted_request_authors must be a nonempty tuple")
+
+    if not isinstance(current_pr_head, str) or not re.fullmatch(r"[0-9a-f]{40}", current_pr_head):
+        return {
+            "status": "UNCERTAIN",
+            "reason": "MALFORMED_HEAD",
+        }
+
+    trusted = set(trusted_request_authors)
+    source_heads = set()
+    
+    for items in (issue_comments, reviews):
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            login = _login(item)
+            body = _body(item)
+            if login is None or body is None:
+                continue
+                
+            if login in trusted:
+                if "@codex address that feedback" in body.lower():
+                    shas = _REMEDIATION_MARKER_RE.findall(body)
+                    for sha in shas:
+                        source_heads.add(sha)
+
+    if not source_heads:
+        return {
+            "status": "OBSERVED",
+            "reason": "ABSENT_MARKER",
+        }
+        
+    if len(source_heads) > 1:
+        return {
+            "status": "UNCERTAIN",
+            "reason": "AMBIGUOUS_MULTIPLE_SOURCE_HEADS",
+        }
+        
+    source_head = source_heads.pop()
+    if current_pr_head == source_head:
+        return {
+            "status": "NEEDS_ATTENTION",
+            "provider_completion": "UNKNOWN",
+            "operator_guidance": "inspect the exact Codex task and, if complete, use human View task -> Update branch",
+        }
+    else:
+        return {
+            "status": "NEW_UNTRUSTED_HEAD",
+            "requirements": ["fresh objective scope", "exact-head CI", "exact-head review"],
+        }
+
 def analyze_codex_request_amplification(
     *,
     issue_comments: Iterable[Mapping[str, Any]],
