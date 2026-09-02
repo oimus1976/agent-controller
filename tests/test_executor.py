@@ -53,7 +53,7 @@ class TestExecutor(unittest.TestCase):
             "node_id": "node123"
         }
         fd, path = tempfile.mkstemp()
-        with open(path, 'wb') as f:
+        with os.fdopen(fd, 'wb') as f:
             f.write(json.dumps(self.valid_policy).encode('utf-8'))
 
         plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", path)
@@ -71,7 +71,7 @@ class TestExecutor(unittest.TestCase):
             "node_id": "node123"
         }
         fd, path = tempfile.mkstemp()
-        with open(path, 'wb') as f:
+        with os.fdopen(fd, 'wb') as f:
             f.write(b'\xef\xbb\xbf' + json.dumps(self.valid_policy).encode('utf-8'))
 
         plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", path)
@@ -82,7 +82,7 @@ class TestExecutor(unittest.TestCase):
     @patch('agent_controller.executor.get_pr_details')
     def test_policy_invalid_utf8(self, mock_get_pr_details):
         fd, path = tempfile.mkstemp()
-        with open(path, 'wb') as f:
+        with os.fdopen(fd, 'wb') as f:
             f.write(b'\xff\xfe\x00\x00') # invalid utf-8
 
         plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", path)
