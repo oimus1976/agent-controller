@@ -130,7 +130,10 @@ def main() -> int:
         print(f"Could not arm one-shot issue-task state; no session was dispatched: {exc}", file=sys.stderr)
         return 2
 
+    current_state = armed
+
     def wait_and_persist_gate(action: dict[str, object]) -> None:
+        nonlocal current_state
         gated = dict(armed)
         gated.update(
             {
@@ -141,6 +144,7 @@ def main() -> int:
             }
         )
         smoke_runner._replace_state(state_path, gated)
+        current_state = gated
         smoke_runner._wait_for_human(action)
 
     def _create_usage() -> ResourceUsageObservation:
@@ -167,23 +171,36 @@ def main() -> int:
             publish=_publication_with_issue_metadata(spec),
         )
     except (KeyboardInterrupt, EOFError):
+        interrupted = dict(current_state)
+        usage_dict = dict(_create_usage().to_mapping())
+        interrupted.update(
+            {
+                "state": "INTERRUPTED_UNCERTAINTY",
+                "finished_at": smoke_runner._now(),
+                "resource_usage": usage_dict,
+            }
+        )
+        smoke_runner._replace_state(state_path, interrupted)
+        print(json.dumps({"resource_usage": usage_dict}, indent=2, sort_keys=True))
         print(
-            "\nIssue task interrupted. The fixed state file remains armed/gated. "
+            "\nIssue task interrupted. The fixed state file retains the session evidence. "
             "Do not rerun blindly; inspect the exact Jules session and GitHub state first.",
             file=sys.stderr,
         )
         return 130
     except Exception as exc:
         failed = dict(armed)
+        usage_dict = dict(_create_usage().to_mapping())
         failed.update(
             {
                 "state": "UNCAUGHT_UNCERTAINTY",
                 "finished_at": smoke_runner._now(),
                 "reason": str(exc),
-                "resource_usage": dict(_create_usage().to_mapping()),
+                "resource_usage": usage_dict,
             }
         )
         smoke_runner._replace_state(state_path, failed)
+        print(json.dumps({"resource_usage": usage_dict}, indent=2, sort_keys=True))
         print(
             "Issue task stopped with uncertainty. The one-shot state remains and blocks blind retry.",
             file=sys.stderr,
