@@ -186,7 +186,7 @@ class JulesIssueTaskRunnerTests(unittest.TestCase):
         
         self.assertEqual(usage["controller_task_id"], "task-jules-issue-55-aaaaaaaaaaaa")
         self.assertEqual(usage["operation_id"], "op-jules-issue-55-aaaaaaaaaaaa")
-        self.assertEqual(usage["operation_version"], "1")
+        self.assertEqual(usage["operation_version"], "mvp-v1")
         self.assertEqual(usage["provider"], "jules")
         self.assertEqual(usage["controller_run_id"], "run-1234")
         self.assertEqual(usage["source"], "CONTROLLER_MEASURED")

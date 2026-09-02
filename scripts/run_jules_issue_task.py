@@ -151,7 +151,7 @@ def main() -> int:
         return ResourceUsageObservation(
             controller_task_id=task.controller_task_id,
             operation_id=task.operation_id,
-            operation_version="1",
+            operation_version="mvp-v1",
             provider="jules",
             controller_run_id=controller_run_id,
             source=ResourceUsageSource.CONTROLLER_MEASURED,
