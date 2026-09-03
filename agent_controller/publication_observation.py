@@ -19,6 +19,14 @@ class PublicationObservationError(RuntimeError):
     classification = PublicationClassification.PUBLICATION_AMBIGUOUS
 
 
+def _normalize_branch_identity(branch: str) -> str:
+    if branch.startswith("refs/heads/"):
+        return branch[len("refs/heads/") :]
+    if branch.startswith("heads/"):
+        return branch[len("heads/") :]
+    return branch
+
+
 def observe_publication_state(
     *,
     provider: str,
@@ -48,7 +56,13 @@ def observe_publication_state(
 
     independently_observed_provider_sha = None
 
-    if provider_reported_branch is not None and provider_reported_branch != bound_branch:
+    provider_branch_is_distinct = (
+        provider_reported_branch is not None
+        and _normalize_branch_identity(provider_reported_branch)
+        != _normalize_branch_identity(bound_branch)
+    )
+
+    if provider_branch_is_distinct:
         try:
             independently_observed_provider_sha = target_client.get_ref_sha(
                 repo, provider_reported_branch

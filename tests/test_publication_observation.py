@@ -166,6 +166,25 @@ class PublicationObservationTests(unittest.TestCase):
             PublicationClassification.PUBLICATION_AMBIGUOUS,
         )
 
+    def test_equivalent_branch_ref_spellings_do_not_trigger_second_lookup(self):
+        for provider_branch in ("refs/heads/feature-1", "heads/feature-1"):
+            with self.subTest(provider_branch=provider_branch):
+                self.mock_client.reset_mock()
+                self.mock_client.get_ref_sha.return_value = "a" * 40
+                kwargs = self.default_kwargs.copy()
+                kwargs["provider_reported_branch"] = provider_branch
+                kwargs["provider_reported_completion"] = True
+
+                evidence = observe_publication_state(**kwargs)
+
+                self.assertEqual(
+                    evidence.classify(),
+                    PublicationClassification.WORKSPACE_COMPLETE_PUBLICATION_UNKNOWN,
+                )
+                self.mock_client.get_ref_sha.assert_called_once_with(
+                    "owner/repo", "feature-1"
+                )
+
     def test_same_branch_behavior_does_not_trigger_second_lookup(self):
         self.mock_client.get_ref_sha.return_value = "a" * 40
         kwargs = self.default_kwargs.copy()
