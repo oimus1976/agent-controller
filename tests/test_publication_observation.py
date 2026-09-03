@@ -2,7 +2,10 @@ import unittest
 from unittest.mock import Mock
 
 from agent_controller.provider_contract import PublicationClassification, PublicationStateEvidence
-from agent_controller.publication_observation import observe_publication_state
+from agent_controller.publication_observation import (
+    PublicationObservationError,
+    observe_publication_state,
+)
 
 
 class PublicationObservationTests(unittest.TestCase):
@@ -93,12 +96,55 @@ class PublicationObservationTests(unittest.TestCase):
         self.assertEqual(evidence.classify(), PublicationClassification.WORKSPACE_COMPLETE_PUBLICATION_UNKNOWN)
         self.assertIsNone(evidence.independently_observed_provider_sha)
 
+    def test_definite_absence_without_completion_is_ambiguous(self):
+        def mock_get_ref_sha(repo, branch):
+            if branch == "feature-1":
+                return "a" * 40
+            if branch == "new-branch":
+                return None
+            raise AssertionError(f"unexpected branch lookup: {branch}")
+
+        self.mock_client.get_ref_sha.side_effect = mock_get_ref_sha
+        kwargs = self.default_kwargs.copy()
+        kwargs["provider_reported_branch"] = "new-branch"
+
+        evidence = observe_publication_state(**kwargs)
+
+        self.assertEqual(
+            evidence.classify(),
+            PublicationClassification.PUBLICATION_AMBIGUOUS,
+        )
+        self.mock_client.get_ref_sha.assert_any_call("owner/repo", "new-branch")
+
+    def test_malformed_provider_branch_sha_is_ambiguous(self):
+        def mock_get_ref_sha(repo, branch):
+            if branch == "feature-1":
+                return "a" * 40
+            if branch == "new-branch":
+                return "not-a-valid-sha"
+            raise AssertionError(f"unexpected branch lookup: {branch}")
+
+        self.mock_client.get_ref_sha.side_effect = mock_get_ref_sha
+        kwargs = self.default_kwargs.copy()
+        kwargs["provider_reported_branch"] = "new-branch"
+
+        evidence = observe_publication_state(**kwargs)
+
+        self.assertEqual(
+            evidence.classify(),
+            PublicationClassification.PUBLICATION_AMBIGUOUS,
+        )
+
     def test_bound_branch_transport_failure_is_fail_closed(self):
         self.mock_client.get_ref_sha.side_effect = Exception("Network error")
 
-        evidence = observe_publication_state(**self.default_kwargs)
+        with self.assertRaises(PublicationObservationError) as ctx:
+            observe_publication_state(**self.default_kwargs)
 
-        self.assertIsNone(evidence)
+        self.assertEqual(
+            ctx.exception.classification,
+            PublicationClassification.PUBLICATION_AMBIGUOUS,
+        )
 
     def test_provider_branch_transport_failure_is_fail_closed(self):
         def mock_get_ref_sha(repo, branch):
@@ -112,9 +158,13 @@ class PublicationObservationTests(unittest.TestCase):
         kwargs = self.default_kwargs.copy()
         kwargs["provider_reported_branch"] = "new-branch"
 
-        evidence = observe_publication_state(**kwargs)
+        with self.assertRaises(PublicationObservationError) as ctx:
+            observe_publication_state(**kwargs)
 
-        self.assertIsNone(evidence)
+        self.assertEqual(
+            ctx.exception.classification,
+            PublicationClassification.PUBLICATION_AMBIGUOUS,
+        )
 
     def test_same_branch_behavior_does_not_trigger_second_lookup(self):
         self.mock_client.get_ref_sha.return_value = "a" * 40
@@ -139,10 +189,14 @@ class PublicationObservationTests(unittest.TestCase):
 
     def test_bound_branch_missing_fails_closed(self):
         self.mock_client.get_ref_sha.return_value = None
-        
-        evidence = observe_publication_state(**self.default_kwargs)
-        
-        self.assertIsNone(evidence)
+
+        with self.assertRaises(PublicationObservationError) as ctx:
+            observe_publication_state(**self.default_kwargs)
+
+        self.assertEqual(
+            ctx.exception.classification,
+            PublicationClassification.PUBLICATION_AMBIGUOUS,
+        )
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,24 @@ class GitHubRestTargetReadClientTests(unittest.TestCase):
 
         self.assertIsNone(sha)
 
+    def test_non_404_github_error_is_not_treated_as_missing_branch(self):
+        client = GitHubRestTargetReadClient()
+        for message in (
+            "GitHub API Error: 401 Unauthorized for URL ...",
+            "GitHub API Error: 500 Server Error for URL ...",
+        ):
+            with self.subTest(message=message):
+                with patch(
+                    "agent_controller.github_target_client._github_api_request",
+                    side_effect=Exception(message),
+                ):
+                    with self.assertRaises(Exception) as ctx:
+                        client.get_ref_sha(
+                            "oimus1976/example",
+                            "feature/task-1",
+                        )
+                    self.assertEqual(str(ctx.exception), message)
+
     def test_rejects_non_branch_refs_before_network_read(self):
         client = GitHubRestTargetReadClient()
         with patch("agent_controller.github_target_client._github_api_request") as request:
