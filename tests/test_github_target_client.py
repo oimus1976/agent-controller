@@ -16,6 +16,16 @@ class GitHubRestTargetReadClientTests(unittest.TestCase):
         self.assertEqual("b" * 40, sha)
         self.assertIn("/git/ref/heads/feature/task-1", request.call_args.args[0])
 
+    def test_returns_none_for_missing_branch(self):
+        client = GitHubRestTargetReadClient()
+        with patch(
+            "agent_controller.github_target_client._github_api_request",
+            side_effect=Exception("GitHub API Error: 404 Not Found for URL ..."),
+        ) as request:
+            sha = client.get_ref_sha("oimus1976/example", "feature/task-1")
+
+        self.assertIsNone(sha)
+
     def test_rejects_non_branch_refs_before_network_read(self):
         client = GitHubRestTargetReadClient()
         with patch("agent_controller.github_target_client._github_api_request") as request:
