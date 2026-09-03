@@ -76,4 +76,8 @@ def observe_jules_continuation_publication(
     return JulesContinuationResult(
         classification=PublicationClassification.PUBLICATION_AMBIGUOUS,
         guidance="attention required; publication ambiguous; no publication or retry recommendation.",
+        baseline_bound_sha=evidence.authoritative_baseline_bound_sha,
+        current_bound_sha=evidence.authoritative_current_bound_sha,
+        provider_reported_branch=evidence.provider_reported_branch,
+        independently_observed_provider_sha=evidence.independently_observed_provider_sha,
     )

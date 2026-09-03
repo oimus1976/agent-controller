@@ -95,6 +95,10 @@ class TestJulesContinuationPublication(unittest.TestCase):
         )
         self.assertIn("attention required", result.guidance)
         self.assertIn("no publication or retry recommendation", result.guidance)
+        self.assertEqual(result.baseline_bound_sha, "a" * 40)
+        self.assertEqual(result.current_bound_sha, "b" * 40)
+        self.assertEqual(result.provider_reported_branch, "new-feature")
+        self.assertEqual(result.independently_observed_provider_sha, "c" * 40)
 
     def test_definite_provider_branch_absence(self):
         def mock_get_ref_sha(repo, branch):
