@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+import re
 from types import MappingProxyType
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
@@ -47,6 +48,18 @@ class VerificationSource(str, Enum):
     LOCAL_DETERMINISTIC = "LOCAL_DETERMINISTIC"
     NONE = "NONE"
 
+
+class PublicationClassification(str, Enum):
+    WORKSPACE_COMPLETE_PUBLICATION_UNKNOWN = "WORKSPACE_COMPLETE_PUBLICATION_UNKNOWN"
+    BOUND_BRANCH_ADVANCED = "BOUND_BRANCH_ADVANCED"
+    NEW_PROVIDER_BRANCH_EXPOSED = "NEW_PROVIDER_BRANCH_EXPOSED"
+    PUBLICATION_AMBIGUOUS = "PUBLICATION_AMBIGUOUS"
+
+
+def _is_valid_sha(sha: Optional[str]) -> bool:
+    if not isinstance(sha, str):
+        return False
+    return bool(re.fullmatch(r"[0-9a-f]{40}", sha))
 
 def _deep_freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
@@ -175,6 +188,44 @@ class ArtifactEvidence:
         data["verification_source"] = self.verification_source.value
         data["verification_result"] = self.verification_result.value
         return data
+
+
+@dataclass(frozen=True)
+class PublicationStateEvidence:
+    provider: str
+    operation_id: str
+    repo: str
+    bound_branch: str
+    authoritative_baseline_bound_sha: str
+    authoritative_current_bound_sha: str
+    provider_reported_completion: bool = False
+    provider_reported_branch: Optional[str] = None
+    independently_observed_provider_sha: Optional[str] = None
+
+    def classify(self) -> PublicationClassification:
+        if not _is_valid_sha(self.authoritative_baseline_bound_sha):
+            return PublicationClassification.PUBLICATION_AMBIGUOUS
+        if not _is_valid_sha(self.authoritative_current_bound_sha):
+            return PublicationClassification.PUBLICATION_AMBIGUOUS
+        if self.independently_observed_provider_sha is not None:
+            if not _is_valid_sha(self.independently_observed_provider_sha):
+                return PublicationClassification.PUBLICATION_AMBIGUOUS
+
+        if self.authoritative_current_bound_sha != self.authoritative_baseline_bound_sha:
+            return PublicationClassification.BOUND_BRANCH_ADVANCED
+
+        if self.independently_observed_provider_sha is not None:
+            if self.provider_reported_branch == self.bound_branch:
+                return PublicationClassification.PUBLICATION_AMBIGUOUS
+            return PublicationClassification.NEW_PROVIDER_BRANCH_EXPOSED
+
+        if self.provider_reported_completion:
+            return PublicationClassification.WORKSPACE_COMPLETE_PUBLICATION_UNKNOWN
+
+        return PublicationClassification.PUBLICATION_AMBIGUOUS
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
 @runtime_checkable
