@@ -96,12 +96,13 @@ def classify_codex_remediation_gap(
                 }
 
             if body is None:
-                if surface_name == "issue_comment":
+                raw_body = item.get("body")
+                if surface_name == "issue_comment" or raw_body is not None:
                     return {
                         "status": "UNCERTAIN",
                         "reason": "MALFORMED_REMEDIATION_EVIDENCE",
                     }
-                # Empty review bodies are legitimate.
+                # A null review body is a legitimate empty review representation.
                 body = ""
 
             if login not in trusted:

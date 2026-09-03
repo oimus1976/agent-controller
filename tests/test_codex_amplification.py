@@ -445,6 +445,22 @@ class CodexRemediationGapClassificationTests(unittest.TestCase):
         self.assertEqual(result["status"], "OBSERVED")
         self.assertEqual(result["reason"], "ABSENT_MARKER")
 
+    def test_non_string_review_body_is_uncertain(self):
+        head = "dddddddddddddddddddddddddddddddddddddddd"
+        for malformed_body in (123, [], {"unexpected": "object"}):
+            with self.subTest(body=malformed_body):
+                result = classify_codex_remediation_gap(
+                    issue_comments=[],
+                    reviews=[review(malformed_body, login=OWNER, commit_id=head)],
+                    trusted_request_authors=(OWNER,),
+                    current_pr_head=head,
+                )
+                self.assertEqual(result["status"], "UNCERTAIN")
+                self.assertEqual(
+                    result["reason"],
+                    "MALFORMED_REMEDIATION_EVIDENCE",
+                )
+
     def test_malformed_marker_alongside_valid_marker_is_uncertain(self):
         head = "cccccccccccccccccccccccccccccccccccccccc"
         body = (
