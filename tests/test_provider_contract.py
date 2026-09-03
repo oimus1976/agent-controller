@@ -14,6 +14,8 @@ from agent_controller.provider_contract import (
     TerminalClaim,
     VerificationResult,
     VerificationSource,
+    PublicationClassification,
+    PublicationStateEvidence,
 )
 
 
@@ -181,6 +183,222 @@ class TestProviderContract(unittest.TestCase):
         self.assertNotIn("def cancel", source)
         self.assertNotIn("def retry", source)
         self.assertNotIn("def capabilities", source)
+
+    def test_publication_evidence_bound_branch_advanced(self):
+        evidence = PublicationStateEvidence(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="b" * 40,
+            provider_reported_completion=False,
+        )
+        self.assertEqual(evidence.classify(), PublicationClassification.BOUND_BRANCH_ADVANCED)
+
+    def test_publication_evidence_new_provider_branch_exposed(self):
+        evidence = PublicationStateEvidence(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="a" * 40,
+            provider_reported_completion=False,
+            provider_reported_branch="refs/heads/provider-work",
+            independently_observed_provider_sha="b" * 40,
+        )
+        self.assertEqual(evidence.classify(), PublicationClassification.NEW_PROVIDER_BRANCH_EXPOSED)
+
+    def test_publication_evidence_workspace_complete_publication_unknown(self):
+        evidence = PublicationStateEvidence(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="a" * 40,
+            provider_reported_completion=True,
+        )
+        self.assertEqual(evidence.classify(), PublicationClassification.WORKSPACE_COMPLETE_PUBLICATION_UNKNOWN)
+
+    def test_publication_evidence_ambiguous_invalid_baseline_sha(self):
+        evidence = PublicationStateEvidence(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="invalid",
+            authoritative_current_bound_sha="a" * 40,
+        )
+        self.assertEqual(evidence.classify(), PublicationClassification.PUBLICATION_AMBIGUOUS)
+
+    def test_publication_evidence_ambiguous_invalid_current_sha(self):
+        evidence = PublicationStateEvidence(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="invalid",
+        )
+        self.assertEqual(evidence.classify(), PublicationClassification.PUBLICATION_AMBIGUOUS)
+        
+    def test_publication_evidence_ambiguous_invalid_observed_sha(self):
+        evidence = PublicationStateEvidence(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="a" * 40,
+            independently_observed_provider_sha="invalid",
+        )
+        self.assertEqual(evidence.classify(), PublicationClassification.PUBLICATION_AMBIGUOUS)
+
+    def test_publication_evidence_ambiguous_provider_branch_equals_bound_branch(self):
+        evidence = PublicationStateEvidence(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="a" * 40,
+            provider_reported_branch="refs/heads/main",
+            independently_observed_provider_sha="b" * 40,
+        )
+        self.assertEqual(evidence.classify(), PublicationClassification.PUBLICATION_AMBIGUOUS)
+
+    def test_publication_evidence_conflicting_bound_and_provider_branch_is_ambiguous(self):
+        evidence = PublicationStateEvidence(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="b" * 40,
+            provider_reported_branch="refs/heads/provider-work",
+            independently_observed_provider_sha="c" * 40,
+        )
+        self.assertEqual(
+            evidence.classify(),
+            PublicationClassification.PUBLICATION_AMBIGUOUS,
+        )
+
+    def test_publication_evidence_observed_sha_without_provider_branch_is_ambiguous(self):
+        evidence = PublicationStateEvidence(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="a" * 40,
+            independently_observed_provider_sha="b" * 40,
+        )
+        self.assertEqual(
+            evidence.classify(),
+            PublicationClassification.PUBLICATION_AMBIGUOUS,
+        )
+
+    def test_publication_evidence_malformed_identity_fields_are_ambiguous(self):
+        base = dict(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="b" * 40,
+        )
+        for field in ("provider", "operation_id", "repo", "bound_branch"):
+            for malformed in ("", "   ", None, 123):
+                with self.subTest(field=field, malformed=malformed):
+                    kwargs = dict(base)
+                    kwargs[field] = malformed
+                    evidence = PublicationStateEvidence(**kwargs)
+                    self.assertEqual(
+                        evidence.classify(),
+                        PublicationClassification.PUBLICATION_AMBIGUOUS,
+                    )
+
+    def test_publication_evidence_non_bool_completion_is_ambiguous(self):
+        evidence = PublicationStateEvidence(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="a" * 40,
+            provider_reported_completion="complete",
+        )
+        self.assertEqual(
+            evidence.classify(),
+            PublicationClassification.PUBLICATION_AMBIGUOUS,
+        )
+
+    def test_publication_evidence_malformed_provider_branch_is_ambiguous(self):
+        for malformed in ("", "   ", 123):
+            with self.subTest(malformed=malformed):
+                evidence = PublicationStateEvidence(
+                    provider="example-provider",
+                    operation_id="op-1",
+                    repo="owner/repo",
+                    bound_branch="refs/heads/main",
+                    authoritative_baseline_bound_sha="a" * 40,
+                    authoritative_current_bound_sha="a" * 40,
+                    provider_reported_completion=True,
+                    provider_reported_branch=malformed,
+                )
+                self.assertEqual(
+                    evidence.classify(),
+                    PublicationClassification.PUBLICATION_AMBIGUOUS,
+                )
+
+    def test_publication_evidence_ambiguous_no_completion_no_advancement(self):
+        evidence = PublicationStateEvidence(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="a" * 40,
+            provider_reported_completion=False,
+        )
+        self.assertEqual(evidence.classify(), PublicationClassification.PUBLICATION_AMBIGUOUS)
+
+    def test_publication_evidence_immutable(self):
+        evidence = PublicationStateEvidence(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="b" * 40,
+        )
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            evidence.provider = "new-provider"
+
+    def test_publication_evidence_to_dict(self):
+        evidence = PublicationStateEvidence(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="b" * 40,
+            provider_reported_completion=True,
+            provider_reported_branch="refs/heads/provider-work",
+            independently_observed_provider_sha="c" * 40,
+        )
+        d = evidence.to_dict()
+        self.assertEqual(d["provider"], "example-provider")
+        self.assertEqual(d["operation_id"], "op-1")
+        self.assertEqual(d["repo"], "owner/repo")
+        self.assertEqual(d["bound_branch"], "refs/heads/main")
+        self.assertEqual(d["authoritative_baseline_bound_sha"], "a" * 40)
+        self.assertEqual(d["authoritative_current_bound_sha"], "b" * 40)
+        self.assertTrue(d["provider_reported_completion"])
+        self.assertEqual(d["provider_reported_branch"], "refs/heads/provider-work")
+        self.assertEqual(d["independently_observed_provider_sha"], "c" * 40)
 
 
 if __name__ == "__main__":
