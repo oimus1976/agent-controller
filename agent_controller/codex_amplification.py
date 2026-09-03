@@ -73,7 +73,12 @@ def classify_codex_remediation_gap(
     trusted = set(trusted_request_authors)
     source_heads: set[str] = set()
 
-    for items in (issue_comments, reviews):
+    request_surfaces = (
+        ("issue_comment", issue_comments),
+        ("review", reviews),
+    )
+
+    for surface_name, items in request_surfaces:
         for item in items:
             if not isinstance(item, Mapping):
                 return {
@@ -91,14 +96,28 @@ def classify_codex_remediation_gap(
                 }
 
             if body is None:
+                if surface_name == "issue_comment":
+                    return {
+                        "status": "UNCERTAIN",
+                        "reason": "MALFORMED_REMEDIATION_EVIDENCE",
+                    }
+                # Empty review bodies are legitimate.
                 body = ""
 
             if login not in trusted:
                 continue
 
-            marker_present = "agent-controller:codex-remediation-request" in body
+            marker_count = body.count("agent-controller:codex-remediation-request")
             command_present = "@codex address that feedback" in body.lower()
             shas = _REMEDIATION_MARKER_RE.findall(body)
+
+            if marker_count != len(shas):
+                return {
+                    "status": "UNCERTAIN",
+                    "reason": "MALFORMED_REMEDIATION_EVIDENCE",
+                }
+
+            marker_present = marker_count > 0
 
             if marker_present and (not command_present or not shas):
                 return {

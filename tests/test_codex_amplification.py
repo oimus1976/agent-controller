@@ -414,6 +414,55 @@ class CodexRemediationGapClassificationTests(unittest.TestCase):
             "MALFORMED_REMEDIATION_EVIDENCE",
         )
 
+    def test_missing_or_non_string_issue_comment_body_is_uncertain(self):
+        head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        malformed_comments = [
+            {"id": 1, "user": {"login": OWNER}},
+            {"id": 2, "user": {"login": OWNER}, "body": 123},
+        ]
+        for item in malformed_comments:
+            with self.subTest(item=item):
+                result = classify_codex_remediation_gap(
+                    issue_comments=[item],
+                    reviews=[],
+                    trusted_request_authors=(OWNER,),
+                    current_pr_head=head,
+                )
+                self.assertEqual(result["status"], "UNCERTAIN")
+                self.assertEqual(
+                    result["reason"],
+                    "MALFORMED_REMEDIATION_EVIDENCE",
+                )
+
+    def test_empty_review_body_is_preserved_and_not_malformed(self):
+        head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        result = classify_codex_remediation_gap(
+            issue_comments=[],
+            reviews=[review(None, login=OWNER, commit_id=head)],
+            trusted_request_authors=(OWNER,),
+            current_pr_head=head,
+        )
+        self.assertEqual(result["status"], "OBSERVED")
+        self.assertEqual(result["reason"], "ABSENT_MARKER")
+
+    def test_malformed_marker_alongside_valid_marker_is_uncertain(self):
+        head = "cccccccccccccccccccccccccccccccccccccccc"
+        body = (
+            remediation_request(head)
+            + "\n<!-- agent-controller:codex-remediation-request source_head=short -->"
+        )
+        result = classify_codex_remediation_gap(
+            issue_comments=[issue_comment(body)],
+            reviews=[],
+            trusted_request_authors=(OWNER,),
+            current_pr_head=head,
+        )
+        self.assertEqual(result["status"], "UNCERTAIN")
+        self.assertEqual(
+            result["reason"],
+            "MALFORMED_REMEDIATION_EVIDENCE",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
