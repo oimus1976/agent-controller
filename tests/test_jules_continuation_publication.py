@@ -23,6 +23,19 @@ class TestJulesContinuationPublication(unittest.TestCase):
             "target_client": self.mock_client,
         }
 
+    def test_non_jules_provider_fails_closed_before_read(self):
+        kwargs = self.default_kwargs.copy()
+        kwargs["provider"] = "codex"
+
+        result = observe_jules_continuation_publication(**kwargs)
+
+        self.assertEqual(
+            result.classification, PublicationClassification.PUBLICATION_AMBIGUOUS
+        )
+        self.assertIn("provider boundary mismatch", result.guidance)
+        self.assertIn("no publication or retry recommendation", result.guidance)
+        self.mock_client.get_ref_sha.assert_not_called()
+
     def test_workspace_complete_publication_unknown(self):
         self.mock_client.get_ref_sha.return_value = "a" * 40
         kwargs = self.default_kwargs.copy()

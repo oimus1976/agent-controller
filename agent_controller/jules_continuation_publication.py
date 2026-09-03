@@ -32,6 +32,12 @@ def observe_jules_continuation_publication(
     provider_reported_branch: Optional[str],
     target_client: TargetReadClient,
 ) -> JulesContinuationResult:
+    if provider != "jules":
+        return JulesContinuationResult(
+            classification=PublicationClassification.PUBLICATION_AMBIGUOUS,
+            guidance="attention required; publication ambiguous; provider boundary mismatch; no publication or retry recommendation.",
+        )
+
     try:
         evidence = observe_publication_state(
             provider=provider,
