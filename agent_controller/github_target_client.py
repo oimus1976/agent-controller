@@ -46,7 +46,13 @@ class GitHubRestTargetReadClient:
             "https://api.github.com/repos/"
             f"{quote(owner, safe='')}/{quote(name, safe='')}/git/ref/{quote(ref_path, safe='/')}"
         )
-        payload = _github_api_request(url)
+        try:
+            payload = _github_api_request(url)
+        except Exception as e:
+            if str(e).startswith("GitHub API Error: 404 "):
+                return None
+            raise
+
         if not isinstance(payload, Mapping):
             raise RuntimeError("GitHub ref response is malformed")
         obj = payload.get("object")
