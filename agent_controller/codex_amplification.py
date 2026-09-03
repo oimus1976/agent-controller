@@ -44,6 +44,136 @@ def _duplicate_count(counter: Counter[str]) -> int:
     return sum(max(0, count - 1) for count in counter.values())
 
 
+
+def classify_codex_remediation_gap(
+    *,
+    issue_comments: Iterable[Mapping[str, Any]],
+    reviews: Iterable[Mapping[str, Any]],
+    trusted_request_authors: tuple[str, ...],
+    current_pr_head: str,
+) -> dict[str, Any]:
+    if (
+        not isinstance(trusted_request_authors, tuple)
+        or not trusted_request_authors
+        or any(
+            not isinstance(author, str) or not author
+            for author in trusted_request_authors
+        )
+    ):
+        raise ValueError("trusted_request_authors must be a nonempty tuple")
+
+    if not isinstance(current_pr_head, str) or not re.fullmatch(
+        r"[0-9a-f]{40}", current_pr_head
+    ):
+        return {
+            "status": "UNCERTAIN",
+            "reason": "MALFORMED_HEAD",
+        }
+
+    trusted = set(trusted_request_authors)
+    source_heads: set[str] = set()
+
+    request_surfaces = (
+        ("issue_comment", issue_comments),
+        ("review", reviews),
+    )
+
+    for surface_name, items in request_surfaces:
+        for item in items:
+            if not isinstance(item, Mapping):
+                return {
+                    "status": "UNCERTAIN",
+                    "reason": "MALFORMED_REMEDIATION_EVIDENCE",
+                }
+
+            login = _login(item)
+            body = _body(item)
+
+            if login is None:
+                return {
+                    "status": "UNCERTAIN",
+                    "reason": "MALFORMED_REMEDIATION_EVIDENCE",
+                }
+
+            if body is None:
+                body_present = "body" in item
+                raw_body = item.get("body")
+                if (
+                    surface_name == "issue_comment"
+                    or not body_present
+                    or raw_body is not None
+                ):
+                    return {
+                        "status": "UNCERTAIN",
+                        "reason": "MALFORMED_REMEDIATION_EVIDENCE",
+                    }
+                # An explicitly present null review body is a legitimate empty review representation.
+                body = ""
+
+            if login not in trusted:
+                continue
+
+            marker_count = body.count("agent-controller:codex-remediation-request")
+            command_present = "@codex address that feedback" in body.lower()
+            shas = _REMEDIATION_MARKER_RE.findall(body)
+
+            if marker_count != len(shas):
+                return {
+                    "status": "UNCERTAIN",
+                    "reason": "MALFORMED_REMEDIATION_EVIDENCE",
+                }
+
+            marker_present = marker_count > 0
+
+            if marker_present and (not command_present or not shas):
+                return {
+                    "status": "UNCERTAIN",
+                    "reason": "MALFORMED_REMEDIATION_EVIDENCE",
+                }
+
+            if command_present and not shas:
+                return {
+                    "status": "UNCERTAIN",
+                    "reason": "MALFORMED_REMEDIATION_EVIDENCE",
+                }
+
+            if command_present:
+                source_heads.update(shas)
+
+    if not source_heads:
+        return {
+            "status": "OBSERVED",
+            "reason": "ABSENT_MARKER",
+        }
+
+    if len(source_heads) > 1:
+        return {
+            "status": "UNCERTAIN",
+            "reason": "AMBIGUOUS_MULTIPLE_SOURCE_HEADS",
+        }
+
+    source_head = next(iter(source_heads))
+
+    if current_pr_head == source_head:
+        return {
+            "status": "NEEDS_ATTENTION",
+            "provider_completion": "UNKNOWN",
+            "operator_guidance": (
+                "inspect the exact Codex task and, if complete, "
+                "use human View task -> Update branch"
+            ),
+        }
+
+    return {
+        "status": "NEW_UNTRUSTED_HEAD",
+        "requirements": [
+            "fresh objective scope",
+            "exact-head CI",
+            "exact-head review",
+        ],
+    }
+
+
 def analyze_codex_request_amplification(
     *,
     issue_comments: Iterable[Mapping[str, Any]],
