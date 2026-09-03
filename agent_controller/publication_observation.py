@@ -46,6 +46,11 @@ def observe_publication_state(
     (for example auth, transport, malformed responses, or a missing bound branch).
     The error explicitly carries PUBLICATION_AMBIGUOUS fail-closed semantics.
     """
+    if provider_reported_branch is not None and not isinstance(
+        provider_reported_branch, str
+    ):
+        raise PublicationObservationError("provider reported branch is malformed")
+
     try:
         current_bound_sha = target_client.get_ref_sha(repo, bound_branch)
     except Exception as exc:

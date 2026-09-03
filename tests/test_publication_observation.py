@@ -166,6 +166,19 @@ class PublicationObservationTests(unittest.TestCase):
             PublicationClassification.PUBLICATION_AMBIGUOUS,
         )
 
+    def test_non_string_provider_branch_fails_closed_before_lookup(self):
+        kwargs = self.default_kwargs.copy()
+        kwargs["provider_reported_branch"] = 123
+
+        with self.assertRaises(PublicationObservationError) as ctx:
+            observe_publication_state(**kwargs)
+
+        self.assertEqual(
+            ctx.exception.classification,
+            PublicationClassification.PUBLICATION_AMBIGUOUS,
+        )
+        self.mock_client.get_ref_sha.assert_not_called()
+
     def test_equivalent_branch_ref_spellings_do_not_trigger_second_lookup(self):
         for provider_branch in ("refs/heads/feature-1", "heads/feature-1"):
             with self.subTest(provider_branch=provider_branch):
