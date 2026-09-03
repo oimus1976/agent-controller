@@ -61,6 +61,10 @@ def _is_valid_sha(sha: Optional[str]) -> bool:
         return False
     return bool(re.fullmatch(r"[0-9a-f]{40}", sha))
 
+
+def _is_nonempty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
 def _deep_freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
         return MappingProxyType({key: _deep_freeze(item) for key, item in value.items()})
@@ -203,20 +207,52 @@ class PublicationStateEvidence:
     independently_observed_provider_sha: Optional[str] = None
 
     def classify(self) -> PublicationClassification:
+        for identity in (
+            self.provider,
+            self.operation_id,
+            self.repo,
+            self.bound_branch,
+        ):
+            if not _is_nonempty_string(identity):
+                return PublicationClassification.PUBLICATION_AMBIGUOUS
+
+        if type(self.provider_reported_completion) is not bool:
+            return PublicationClassification.PUBLICATION_AMBIGUOUS
+
         if not _is_valid_sha(self.authoritative_baseline_bound_sha):
             return PublicationClassification.PUBLICATION_AMBIGUOUS
         if not _is_valid_sha(self.authoritative_current_bound_sha):
             return PublicationClassification.PUBLICATION_AMBIGUOUS
+
+        if self.provider_reported_branch is not None:
+            if not _is_nonempty_string(self.provider_reported_branch):
+                return PublicationClassification.PUBLICATION_AMBIGUOUS
+
         if self.independently_observed_provider_sha is not None:
             if not _is_valid_sha(self.independently_observed_provider_sha):
                 return PublicationClassification.PUBLICATION_AMBIGUOUS
-
-        if self.authoritative_current_bound_sha != self.authoritative_baseline_bound_sha:
-            return PublicationClassification.BOUND_BRANCH_ADVANCED
-
-        if self.independently_observed_provider_sha is not None:
+            if self.provider_reported_branch is None:
+                return PublicationClassification.PUBLICATION_AMBIGUOUS
             if self.provider_reported_branch == self.bound_branch:
                 return PublicationClassification.PUBLICATION_AMBIGUOUS
+
+        bound_advanced = (
+            self.authoritative_current_bound_sha
+            != self.authoritative_baseline_bound_sha
+        )
+        distinct_provider_branch_observed = (
+            self.provider_reported_branch is not None
+            and self.provider_reported_branch != self.bound_branch
+            and self.independently_observed_provider_sha is not None
+        )
+
+        if bound_advanced and distinct_provider_branch_observed:
+            return PublicationClassification.PUBLICATION_AMBIGUOUS
+
+        if bound_advanced:
+            return PublicationClassification.BOUND_BRANCH_ADVANCED
+
+        if distinct_provider_branch_observed:
             return PublicationClassification.NEW_PROVIDER_BRANCH_EXPOSED
 
         if self.provider_reported_completion:

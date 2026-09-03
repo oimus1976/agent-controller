@@ -269,6 +269,90 @@ class TestProviderContract(unittest.TestCase):
         )
         self.assertEqual(evidence.classify(), PublicationClassification.PUBLICATION_AMBIGUOUS)
 
+    def test_publication_evidence_conflicting_bound_and_provider_branch_is_ambiguous(self):
+        evidence = PublicationStateEvidence(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="b" * 40,
+            provider_reported_branch="refs/heads/provider-work",
+            independently_observed_provider_sha="c" * 40,
+        )
+        self.assertEqual(
+            evidence.classify(),
+            PublicationClassification.PUBLICATION_AMBIGUOUS,
+        )
+
+    def test_publication_evidence_observed_sha_without_provider_branch_is_ambiguous(self):
+        evidence = PublicationStateEvidence(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="a" * 40,
+            independently_observed_provider_sha="b" * 40,
+        )
+        self.assertEqual(
+            evidence.classify(),
+            PublicationClassification.PUBLICATION_AMBIGUOUS,
+        )
+
+    def test_publication_evidence_malformed_identity_fields_are_ambiguous(self):
+        base = dict(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="b" * 40,
+        )
+        for field in ("provider", "operation_id", "repo", "bound_branch"):
+            for malformed in ("", "   ", None, 123):
+                with self.subTest(field=field, malformed=malformed):
+                    kwargs = dict(base)
+                    kwargs[field] = malformed
+                    evidence = PublicationStateEvidence(**kwargs)
+                    self.assertEqual(
+                        evidence.classify(),
+                        PublicationClassification.PUBLICATION_AMBIGUOUS,
+                    )
+
+    def test_publication_evidence_non_bool_completion_is_ambiguous(self):
+        evidence = PublicationStateEvidence(
+            provider="example-provider",
+            operation_id="op-1",
+            repo="owner/repo",
+            bound_branch="refs/heads/main",
+            authoritative_baseline_bound_sha="a" * 40,
+            authoritative_current_bound_sha="a" * 40,
+            provider_reported_completion="complete",
+        )
+        self.assertEqual(
+            evidence.classify(),
+            PublicationClassification.PUBLICATION_AMBIGUOUS,
+        )
+
+    def test_publication_evidence_malformed_provider_branch_is_ambiguous(self):
+        for malformed in ("", "   ", 123):
+            with self.subTest(malformed=malformed):
+                evidence = PublicationStateEvidence(
+                    provider="example-provider",
+                    operation_id="op-1",
+                    repo="owner/repo",
+                    bound_branch="refs/heads/main",
+                    authoritative_baseline_bound_sha="a" * 40,
+                    authoritative_current_bound_sha="a" * 40,
+                    provider_reported_completion=True,
+                    provider_reported_branch=malformed,
+                )
+                self.assertEqual(
+                    evidence.classify(),
+                    PublicationClassification.PUBLICATION_AMBIGUOUS,
+                )
+
     def test_publication_evidence_ambiguous_no_completion_no_advancement(self):
         evidence = PublicationStateEvidence(
             provider="example-provider",
