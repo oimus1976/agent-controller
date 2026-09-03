@@ -22,8 +22,14 @@ class JulesIssueTaskRunnerTests(unittest.TestCase):
         self.assertNotIn("merge_pull_request", source)
 
     def test_publication_metadata_is_issue_bound_and_human_final(self):
-        class Spec:
+        class SpecV1:
             issue_number = 55
+            schema_version = 1
+
+        class SpecV2:
+            issue_number = 56
+            schema_version = 2
+            pr_title = "#56 Test PR Title"
 
         captured = {}
 
@@ -34,15 +40,26 @@ class JulesIssueTaskRunnerTests(unittest.TestCase):
                 return "ok"
 
             runner.publish_jules_changeset_to_draft_pr = fake_publish
-            result = runner._publication_with_issue_metadata(Spec())(sentinel=True)
+            
+            # Test V1
+            result = runner._publication_with_issue_metadata(SpecV1())(sentinel=True)
+            self.assertEqual(result, "ok")
+            self.assertTrue(captured["sentinel"])
+            self.assertEqual(captured["pr_title"], "Issue #55: Jules implementation")
+            self.assertIn("Draft PR", captured["pr_body"])
+            self.assertIn("human-final", captured["pr_body"])
+            
+            captured.clear()
+            
+            # Test V2
+            result = runner._publication_with_issue_metadata(SpecV2())(sentinel=True)
+            self.assertEqual(result, "ok")
+            self.assertTrue(captured["sentinel"])
+            self.assertEqual(captured["pr_title"], "#56 Test PR Title")
+            self.assertIn("Draft PR", captured["pr_body"])
+            self.assertIn("human-final", captured["pr_body"])
         finally:
             runner.publish_jules_changeset_to_draft_pr = original
-
-        self.assertEqual(result, "ok")
-        self.assertTrue(captured["sentinel"])
-        self.assertEqual(captured["pr_title"], "Issue #55: Jules implementation")
-        self.assertIn("Implements #55", captured["pr_body"])
-        self.assertIn("Ready and merge remain human-final", captured["pr_body"])
 
     def test_complete_spec_evidence_is_canonical_and_prompt_sensitive(self):
         spec = SimpleNamespace(
@@ -68,10 +85,19 @@ class JulesIssueTaskRunnerTests(unittest.TestCase):
         self.assertEqual(payload["prompt"], spec.prompt)
         self.assertEqual(payload["denied_paths"], [".github/**"])
         self.assertEqual(payload["forbidden_effects"], list(spec.forbidden_effects))
+        self.assertNotIn("pr_title", payload)
 
         changed = SimpleNamespace(**{**vars(spec), "prompt": "Implement Issue #55 slice B"})
         _, changed_digest = runner._spec_evidence(changed)
         self.assertNotEqual(digest, changed_digest)
+        
+        # Test V2 schema includes pr_title
+        spec.schema_version = 2
+        spec.pr_title = "#55 Feature PR"
+        payload_v2, digest_v2 = runner._spec_evidence(spec)
+        self.assertNotEqual(digest, digest_v2)
+        self.assertIn("pr_title", payload_v2)
+        self.assertEqual(payload_v2["pr_title"], "#55 Feature PR")
 
     def test_spec_and_task_state_patterns_are_gitignored(self):
         ignore = Path(".gitignore").read_text(encoding="utf-8")

@@ -57,6 +57,9 @@ def _spec_evidence(spec: JulesIssueTaskSpec) -> tuple[dict[str, object], str]:
         "forbidden_effects": list(spec.forbidden_effects),
         "approval_policy_id": spec.approval_policy_id,
     }
+    if spec.schema_version == 2:
+        payload["pr_title"] = spec.pr_title
+
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return payload, digest
@@ -64,7 +67,11 @@ def _spec_evidence(spec: JulesIssueTaskSpec) -> tuple[dict[str, object], str]:
 
 def _publication_with_issue_metadata(spec: JulesIssueTaskSpec):
     def publish_issue(**kwargs: Any):
-        kwargs["pr_title"] = f"Issue #{spec.issue_number}: Jules implementation"
+        if spec.schema_version == 2:
+            kwargs["pr_title"] = spec.pr_title
+        else:
+            kwargs["pr_title"] = f"Issue #{spec.issue_number}: Jules implementation"
+            
         kwargs["pr_body"] = (
             f"Implements #{spec.issue_number}.\n\n"
             "This Draft PR was published by the bounded Agent Controller Jules issue-task runner. "
@@ -110,7 +117,7 @@ def main() -> int:
         return 2
 
     armed: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": spec.schema_version,
         "state": "ARMED_BEFORE_DISPATCH",
         "armed_at": smoke_runner._now(),
         "repo": task.repo,

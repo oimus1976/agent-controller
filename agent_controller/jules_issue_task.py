@@ -22,7 +22,7 @@ ALLOWED_EFFECTS = ("SESSION_CREATE", "DRAFT_PR_CREATE")
 FORBIDDEN_EFFECTS = ("AUTO_CREATE_PR", "PLAN_APPROVAL", "READY", "MERGE")
 APPROVAL_POLICY_ID = "adr-90-human-final"
 REQUESTED_CAPABILITY = "JULES_BOUNDED_ISSUE_IMPLEMENTATION"
-_SPEC_FIELDS = frozenset(
+_SPEC_FIELDS_V1 = frozenset(
     {
         "schema_version",
         "issue_number",
@@ -41,6 +41,10 @@ _SPEC_FIELDS = frozenset(
         "forbidden_effects",
         "approval_policy_id",
     }
+)
+
+_SPEC_FIELDS_V2 = frozenset(
+    set(_SPEC_FIELDS_V1) | {"pr_title"}
 )
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,127}$")
@@ -89,13 +93,26 @@ class JulesIssueTaskSpec:
     allowed_effects: tuple[str, ...]
     forbidden_effects: tuple[str, ...]
     approval_policy_id: str
+    pr_title: str | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "JulesIssueTaskSpec":
         if not isinstance(raw, Mapping):
             raise ValueError("task spec must be an object")
-        unknown = set(raw) - _SPEC_FIELDS
-        missing = _SPEC_FIELDS - set(raw)
+
+        if "schema_version" not in raw:
+            raise ValueError("missing task spec fields: ['schema_version']")
+        
+        schema_version = raw["schema_version"]
+        if schema_version == 1:
+            allowed_fields = _SPEC_FIELDS_V1
+        elif schema_version == 2:
+            allowed_fields = _SPEC_FIELDS_V2
+        else:
+            raise ValueError("unsupported task spec schema_version")
+
+        unknown = set(raw) - allowed_fields
+        missing = allowed_fields - set(raw)
         if unknown:
             raise ValueError(f"unknown task spec fields: {sorted(unknown)}")
         if missing:
@@ -104,9 +121,6 @@ class JulesIssueTaskSpec:
         issue_number = raw["issue_number"]
         if not isinstance(issue_number, int) or isinstance(issue_number, bool) or issue_number < 1:
             raise ValueError("issue_number must be a positive integer")
-        schema_version = raw["schema_version"]
-        if schema_version != 1:
-            raise ValueError("unsupported task spec schema_version")
 
         expected_start_sha = raw["expected_start_sha"]
         if not isinstance(expected_start_sha, str) or not _SHA_RE.fullmatch(expected_start_sha):
@@ -155,6 +169,23 @@ class JulesIssueTaskSpec:
             raise ValueError("forbidden_effects cannot differ from bounded Jules policy")
         if set(allowed_effects) & set(forbidden_effects):
             raise ValueError("allowed and forbidden effects overlap")
+            
+        pr_title = None
+        if schema_version == 2:
+            pr_title = raw["pr_title"]
+            if not isinstance(pr_title, str):
+                raise ValueError("pr_title must be a string")
+            if not pr_title or pr_title != pr_title.strip():
+                raise ValueError("pr_title must be a non-empty string with no leading or trailing whitespace")
+            if "\n" in pr_title or "\r" in pr_title:
+                raise ValueError("pr_title must be single-line")
+            if any(ord(c) < 32 for c in pr_title):
+                raise ValueError("pr_title must not contain control characters")
+            if len(pr_title) > 120:
+                raise ValueError("pr_title must be reasonably bounded in length (max 120)")
+            expected_prefix = f"#{issue_number} "
+            if not pr_title.startswith(expected_prefix):
+                raise ValueError(f"pr_title must explicitly bind the GitHub issue number with prefix '{expected_prefix}'")
 
         return cls(
             schema_version=schema_version,
@@ -173,6 +204,7 @@ class JulesIssueTaskSpec:
             allowed_effects=allowed_effects,
             forbidden_effects=forbidden_effects,
             approval_policy_id=APPROVAL_POLICY_ID,
+            pr_title=pr_title,
         )
 
     @property
