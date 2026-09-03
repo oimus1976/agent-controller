@@ -461,6 +461,27 @@ class CodexRemediationGapClassificationTests(unittest.TestCase):
                     "MALFORMED_REMEDIATION_EVIDENCE",
                 )
 
+    def test_missing_review_body_field_is_uncertain(self):
+        head = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        result = classify_codex_remediation_gap(
+            issue_comments=[],
+            reviews=[
+                {
+                    "id": 1,
+                    "user": {"login": OWNER},
+                    "commit_id": head,
+                    "state": "COMMENTED",
+                }
+            ],
+            trusted_request_authors=(OWNER,),
+            current_pr_head=head,
+        )
+        self.assertEqual(result["status"], "UNCERTAIN")
+        self.assertEqual(
+            result["reason"],
+            "MALFORMED_REMEDIATION_EVIDENCE",
+        )
+
     def test_malformed_marker_alongside_valid_marker_is_uncertain(self):
         head = "cccccccccccccccccccccccccccccccccccccccc"
         body = (
