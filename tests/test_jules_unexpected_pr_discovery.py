@@ -8,13 +8,24 @@ from agent_controller.jules_unexpected_pr_discovery import (
 
 
 class FakeDiscoveryClient:
-    def __init__(self, *, prs=(), ancestry=True, fail_search=False, fail_ancestry=False):
+    def __init__(self, *, prs=(), ancestry=True, fail_search=False, fail_ancestry=False, fail_get=False):
         self.prs = tuple(prs)
         self.ancestry = ancestry
         self.fail_search = fail_search
         self.fail_ancestry = fail_ancestry
+        self.fail_get = fail_get
+        self.get_calls = []
         self.search_calls = []
         self.ancestry_calls = []
+
+    def get_pull_request(self, repo, pr_number):
+        self.get_calls.append((repo, pr_number))
+        if self.fail_get:
+            raise RuntimeError("get failed")
+        matches = [pr for pr in self.prs if pr.number == pr_number]
+        if len(matches) != 1:
+            raise RuntimeError("PR not found")
+        return matches[0]
 
     def find_pull_requests_by_head(self, repo, head_ref):
         self.search_calls.append((repo, head_ref))
@@ -41,6 +52,7 @@ class TestUnexpectedJulesPRDiscovery(unittest.TestCase):
             expected_start_sha="a" * 40,
             provider_reported_completion=True,
             provider_reported_branch="jules/provider-output",
+            provider_reported_pull_request_url=None,
         )
 
     def fact(self, **overrides):
@@ -62,6 +74,66 @@ class TestUnexpectedJulesPRDiscovery(unittest.TestCase):
         values.update(overrides)
         return discover_unexpected_jules_pr(client=client, **values)
 
+    def test_terminal_pull_request_output_is_preferred_over_branch_search(self):
+        fact = self.fact(number=42)
+        client = FakeDiscoveryClient(prs=[fact])
+        result = self.run_discovery(
+            client,
+            provider_reported_pull_request_url="https://github.com/owner/repo/pull/42",
+        )
+        self.assertEqual(
+            result.classification,
+            JulesPRDiscoveryClassification.UNEXPECTED_PROVIDER_PR_EXPOSED,
+        )
+        self.assertEqual(result.pull_request, fact)
+        self.assertIn("Session.outputs.pullRequest", result.guidance)
+        self.assertEqual(client.get_calls, [("owner/repo", 42)])
+        self.assertEqual(client.search_calls, [])
+
+    def test_terminal_pull_request_output_malformed_or_cross_repo_fails_closed_without_fallback(self):
+        for url in (
+            "http://github.com/owner/repo/pull/42",
+            "https://example.com/owner/repo/pull/42",
+            "https://github.com/other/repo/pull/42",
+            "https://github.com/owner/repo/issues/42",
+            "https://github.com/owner/repo/pull/42?x=1",
+        ):
+            with self.subTest(url=url):
+                client = FakeDiscoveryClient(prs=[self.fact()])
+                result = self.run_discovery(client, provider_reported_pull_request_url=url)
+                self.assertEqual(
+                    result.classification,
+                    JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
+                )
+                self.assertEqual(client.get_calls, [])
+                self.assertEqual(client.search_calls, [])
+
+    def test_terminal_pull_request_output_github_read_failure_fails_closed_without_branch_guess(self):
+        client = FakeDiscoveryClient(prs=[self.fact()], fail_get=True)
+        result = self.run_discovery(
+            client,
+            provider_reported_pull_request_url="https://github.com/owner/repo/pull/42",
+        )
+        self.assertEqual(
+            result.classification,
+            JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
+        )
+        self.assertEqual(client.search_calls, [])
+
+    def test_terminal_pull_request_and_branch_disagreement_fails_closed(self):
+        fact = self.fact(head_ref="different/provider-output")
+        client = FakeDiscoveryClient(prs=[fact])
+        result = self.run_discovery(
+            client,
+            provider_reported_pull_request_url="https://github.com/owner/repo/pull/42",
+        )
+        self.assertEqual(
+            result.classification,
+            JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
+        )
+        self.assertIn("disagrees", result.guidance)
+        self.assertEqual(client.search_calls, [])
+
     def test_completed_unchanged_bound_pr_without_distinct_pr_is_unknown_not_empty(self):
         result = self.run_discovery(FakeDiscoveryClient())
         self.assertEqual(
@@ -78,10 +150,10 @@ class TestUnexpectedJulesPRDiscovery(unittest.TestCase):
             result.classification,
             JulesPRDiscoveryClassification.WORKSPACE_COMPLETE_PUBLICATION_UNKNOWN,
         )
-        self.assertIn("publication identity is unknown", result.guidance)
+        self.assertIn("publication identity", result.guidance)
         self.assertEqual(client.search_calls, [])
 
-    def test_exact_distinct_branch_with_one_pr_is_exposed(self):
+    def test_exact_distinct_branch_with_one_pr_is_exposed_as_fallback(self):
         fact = self.fact()
         client = FakeDiscoveryClient(prs=[fact])
         result = self.run_discovery(client)
@@ -90,6 +162,7 @@ class TestUnexpectedJulesPRDiscovery(unittest.TestCase):
             JulesPRDiscoveryClassification.UNEXPECTED_PROVIDER_PR_EXPOSED,
         )
         self.assertEqual(result.pull_request, fact)
+        self.assertIn("bounded provider-branch fallback", result.guidance)
         self.assertIn("observed Draft PR", result.guidance)
         self.assertIn("new untrusted evidence", result.guidance)
         self.assertEqual(client.search_calls, [("owner/repo", "jules/provider-output")])
@@ -180,6 +253,7 @@ class TestUnexpectedJulesPRDiscovery(unittest.TestCase):
             result.classification,
             JulesPRDiscoveryClassification.BOUND_BRANCH_ADVANCED,
         )
+        self.assertEqual(client.get_calls, [])
         self.assertEqual(client.search_calls, [])
         self.assertIn("restart scope/CI/review", result.guidance)
 
@@ -202,6 +276,7 @@ class TestUnexpectedJulesPRDiscovery(unittest.TestCase):
             result.classification,
             JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
         )
+        self.assertEqual(client.get_calls, [])
         self.assertEqual(client.search_calls, [])
 
 
