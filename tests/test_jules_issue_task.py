@@ -73,6 +73,9 @@ class JulesIssueTaskSpecTests(unittest.TestCase):
     def test_unknown_missing_and_identity_mismatch_fail_closed(self):
         with self.assertRaisesRegex(ValueError, "unknown task spec fields"):
             JulesIssueTaskSpec.from_mapping(valid_raw(extra="nope"))
+        with self.assertRaisesRegex(ValueError, "unknown task spec fields: \\['pr_title'\\]"):
+            JulesIssueTaskSpec.from_mapping(valid_raw(pr_title="#55 title"))
+            
         missing = valid_raw()
         missing.pop("prompt")
         with self.assertRaisesRegex(ValueError, "missing task spec fields"):
@@ -116,6 +119,64 @@ class JulesIssueTaskSpecTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "ISSUE_TASK_EXPECTED_BASE_DRIFT"):
             build_issue_task(spec, github=github, api_client=object())
         self.assertEqual(github.calls, [("oimus1976/agent-controller", "main")])
+
+    def test_schema_version_requires_integer_discriminator(self):
+        for invalid in (True, False, 1.0, 2.0, "2"):
+            with self.subTest(schema_version=invalid):
+                with self.assertRaisesRegex(ValueError, "schema_version must be an integer"):
+                    JulesIssueTaskSpec.from_mapping(valid_raw(schema_version=invalid))
+
+    def test_v2_spec_requires_valid_pr_title(self):
+        # Valid v2
+        spec = JulesIssueTaskSpec.from_mapping(valid_raw(
+            schema_version=2,
+            pr_title="#55 Implement feature XYZ"
+        ))
+        self.assertEqual(spec.schema_version, 2)
+        self.assertEqual(spec.pr_title, "#55 Implement feature XYZ")
+
+        # Missing pr_title in v2
+        with self.assertRaisesRegex(ValueError, "missing task spec fields: \\['pr_title'\\]"):
+            JulesIssueTaskSpec.from_mapping(valid_raw(schema_version=2))
+            
+        # Non-string pr_title
+        with self.assertRaisesRegex(ValueError, "pr_title must be a string"):
+            JulesIssueTaskSpec.from_mapping(valid_raw(schema_version=2, pr_title=123))
+
+        # Blank/empty pr_title
+        with self.assertRaisesRegex(ValueError, "pr_title must be a non-empty string with no leading or trailing whitespace"):
+            JulesIssueTaskSpec.from_mapping(valid_raw(schema_version=2, pr_title=""))
+
+        # Untrimmed pr_title
+        with self.assertRaisesRegex(ValueError, "pr_title must be a non-empty string with no leading or trailing whitespace"):
+            JulesIssueTaskSpec.from_mapping(valid_raw(schema_version=2, pr_title=" #55 Hello "))
+
+        # Multiline pr_title
+        with self.assertRaisesRegex(ValueError, "pr_title must be single-line"):
+            JulesIssueTaskSpec.from_mapping(valid_raw(schema_version=2, pr_title="#55 Hello\nWorld"))
+
+        # Control characters, including DEL and Unicode format controls
+        for bad_title in ("#55 Hello\tWorld", "#55 Hello\x7fWorld", "#55 Hello\u200bWorld"):
+            with self.subTest(pr_title=repr(bad_title)):
+                with self.assertRaisesRegex(ValueError, "pr_title must not contain control characters"):
+                    JulesIssueTaskSpec.from_mapping(valid_raw(schema_version=2, pr_title=bad_title))
+
+        # Unicode line/paragraph separators must remain single-line
+        for bad_title in ("#55 Hello\u2028World", "#55 Hello\u2029World"):
+            with self.subTest(pr_title=repr(bad_title)):
+                with self.assertRaisesRegex(ValueError, "pr_title must be single-line"):
+                    JulesIssueTaskSpec.from_mapping(valid_raw(schema_version=2, pr_title=bad_title))
+
+        # Too long pr_title
+        with self.assertRaisesRegex(ValueError, "pr_title must be reasonably bounded in length \\(max 120\\)"):
+            JulesIssueTaskSpec.from_mapping(valid_raw(schema_version=2, pr_title="#55 " + "A" * 120))
+
+        # Wrong issue prefix
+        with self.assertRaisesRegex(ValueError, "pr_title must explicitly bind the GitHub issue number with prefix '#55 '"):
+            JulesIssueTaskSpec.from_mapping(valid_raw(schema_version=2, pr_title="Implement #55 feature XYZ"))
+            
+        with self.assertRaisesRegex(ValueError, "pr_title must explicitly bind the GitHub issue number with prefix '#55 '"):
+            JulesIssueTaskSpec.from_mapping(valid_raw(schema_version=2, pr_title="#56 Wrong prefix"))
 
 
 if __name__ == "__main__":
