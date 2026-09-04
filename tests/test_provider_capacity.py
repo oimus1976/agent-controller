@@ -5,6 +5,7 @@ from agent_controller.provider_capacity import (
     ProviderAvailability,
     ProviderCandidate,
     ProviderCapacityObservation,
+    ProviderDeferralReason,
     recommend_provider,
 )
 
@@ -89,6 +90,10 @@ class ProviderRecommendationTests(unittest.TestCase):
             **kwargs,
         )
 
+    @staticmethod
+    def deferred_pairs(result):
+        return [(item.provider, item.reason) for item in result.deferred]
+
     def test_codex_exhausted_recommends_jules(self):
         result = self.recommend(
             [ProviderCandidate("codex", True), ProviderCandidate("jules", True)],
@@ -98,10 +103,11 @@ class ProviderRecommendationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(result.recommendation, "jules")
+        self.assertEqual(result.eligible, ("codex", "jules"))
         self.assertIn("AVAILABLE_CAPACITY", result.reason_codes)
         self.assertIn(
-            ("codex", "CAPACITY_EXHAUSTED"),
-            [(item.provider, item.reason) for item in result.deferred],
+            ("codex", ProviderDeferralReason.CAPACITY_EXHAUSTED),
+            self.deferred_pairs(result),
         )
 
     def test_exhausted_provider_is_not_recommended_for_new_review_request(self):
@@ -124,10 +130,10 @@ class ProviderRecommendationTests(unittest.TestCase):
             capacity_observations=[exhausted_codex],
         )
         self.assertIsNone(result.recommendation)
-        self.assertEqual(result.eligible, ())
+        self.assertEqual(result.eligible, ("codex",))
         self.assertIn(
-            ("codex", "CAPACITY_EXHAUSTED"),
-            [(item.provider, item.reason) for item in result.deferred],
+            ("codex", ProviderDeferralReason.CAPACITY_EXHAUSTED),
+            self.deferred_pairs(result),
         )
 
     def test_abundant_capacity_does_not_override_capability_ineligibility(self):
@@ -139,9 +145,10 @@ class ProviderRecommendationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(result.recommendation, "jules")
+        self.assertEqual(result.eligible, ("jules",))
         self.assertIn(
-            ("codex", "INSUFFICIENT_CAPABILITY"),
-            [(item.provider, item.reason) for item in result.deferred],
+            ("codex", ProviderDeferralReason.INSUFFICIENT_CAPABILITY),
+            self.deferred_pairs(result),
         )
 
     def test_unknown_capacity_is_not_zero_or_unlimited(self):
@@ -150,7 +157,7 @@ class ProviderRecommendationTests(unittest.TestCase):
             [observation("jules", ProviderAvailability.DEGRADED)],
         )
         self.assertEqual(result.recommendation, "jules")
-        self.assertEqual(result.eligible, ("jules", "codex"))
+        self.assertEqual(result.eligible, ("codex", "jules"))
         self.assertIn("DEGRADED_CAPACITY", result.reason_codes)
 
     def test_reserved_independent_review_provider_is_preserved(self):
@@ -163,10 +170,11 @@ class ProviderRecommendationTests(unittest.TestCase):
             reserved_independent_review_provider="codex",
         )
         self.assertEqual(result.recommendation, "jules")
+        self.assertEqual(result.eligible, ("codex", "jules"))
         self.assertIn("PRESERVE_SCARCE_REVIEW_PROVIDER", result.reason_codes)
         self.assertIn(
-            ("codex", "PRESERVE_SCARCE_REVIEW_PROVIDER"),
-            [(item.provider, item.reason) for item in result.deferred],
+            ("codex", ProviderDeferralReason.PRESERVE_SCARCE_REVIEW_PROVIDER),
+            self.deferred_pairs(result),
         )
 
     def test_reserved_provider_is_still_usable_when_it_is_only_option(self):
@@ -176,6 +184,7 @@ class ProviderRecommendationTests(unittest.TestCase):
             reserved_independent_review_provider="codex",
         )
         self.assertEqual(result.recommendation, "codex")
+        self.assertEqual(result.eligible, ("codex",))
         self.assertNotIn("PRESERVE_SCARCE_REVIEW_PROVIDER", result.reason_codes)
 
     def test_unauthorized_paid_usage_is_deferred(self):
@@ -190,9 +199,10 @@ class ProviderRecommendationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(result.recommendation, "jules")
+        self.assertEqual(result.eligible, ("jules", "paid-agent"))
         self.assertIn(
-            ("paid-agent", "PAID_USAGE_NOT_AUTHORIZED"),
-            [(item.provider, item.reason) for item in result.deferred],
+            ("paid-agent", ProviderDeferralReason.PAID_USAGE_NOT_AUTHORIZED),
+            self.deferred_pairs(result),
         )
 
     def test_paid_usage_can_be_recommended_only_when_explicitly_authorized(self):
@@ -202,6 +212,7 @@ class ProviderRecommendationTests(unittest.TestCase):
             paid_usage_authorized=True,
         )
         self.assertEqual(result.recommendation, "paid-agent")
+        self.assertEqual(result.eligible, ("paid-agent",))
         self.assertIn("PAID_USAGE_AUTHORIZED", result.reason_codes)
 
     def test_binding_mismatch_fails_closed(self):
@@ -228,14 +239,19 @@ class ProviderRecommendationTests(unittest.TestCase):
         second = self.recommend(list(reversed(candidates)), list(reversed(observations)))
         self.assertEqual(first, second)
         self.assertEqual(first.recommendation, "codex")
+        self.assertEqual(first.eligible, ("codex", "jules"))
 
-    def test_no_eligible_provider_returns_none(self):
+    def test_no_recommendable_provider_preserves_capability_eligible_set(self):
         result = self.recommend(
             [ProviderCandidate("codex", True), ProviderCandidate("jules", False)],
             [observation("codex", ProviderAvailability.UNAVAILABLE)],
         )
         self.assertIsNone(result.recommendation)
-        self.assertEqual(result.eligible, ())
+        self.assertEqual(result.eligible, ("codex",))
+        self.assertIn(
+            ("codex", ProviderDeferralReason.PROVIDER_UNAVAILABLE),
+            self.deferred_pairs(result),
+        )
         self.assertEqual(result.reason_codes, ())
 
 
