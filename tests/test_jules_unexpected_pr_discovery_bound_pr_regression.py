@@ -27,6 +27,22 @@ class _Client:
         return True
 
 
+def _discover(client):
+    return discover_unexpected_jules_pr(
+        provider="jules",
+        repo="owner/repo",
+        bound_branch="controller/task-1",
+        authoritative_baseline_bound_sha="a" * 40,
+        authoritative_current_bound_sha="a" * 40,
+        expected_base_ref="main",
+        expected_start_sha="a" * 40,
+        provider_reported_completion=True,
+        provider_reported_branch=None,
+        provider_reported_pull_request_url="https://github.com/owner/repo/pull/42",
+        client=client,
+    )
+
+
 class BoundPRTerminalOutputRegressionTests(unittest.TestCase):
     def test_terminal_output_for_bound_pr_is_not_classified_as_unexpected_provider_pr(self):
         fact = PullRequestFact(
@@ -40,20 +56,7 @@ class BoundPRTerminalOutputRegressionTests(unittest.TestCase):
             merged=False,
         )
         client = _Client(fact)
-
-        result = discover_unexpected_jules_pr(
-            provider="jules",
-            repo="owner/repo",
-            bound_branch="controller/task-1",
-            authoritative_baseline_bound_sha="a" * 40,
-            authoritative_current_bound_sha="a" * 40,
-            expected_base_ref="main",
-            expected_start_sha="a" * 40,
-            provider_reported_completion=True,
-            provider_reported_branch=None,
-            provider_reported_pull_request_url="https://github.com/owner/repo/pull/42",
-            client=client,
-        )
+        result = _discover(client)
 
         self.assertEqual(
             result.classification,
@@ -62,6 +65,39 @@ class BoundPRTerminalOutputRegressionTests(unittest.TestCase):
         self.assertIn("Controller-bound branch", result.guidance)
         self.assertEqual(client.get_calls, [("owner/repo", 42)])
         self.assertEqual(client.search_calls, [])
+        self.assertEqual(client.ancestry_calls, [])
+
+    def test_malformed_terminal_pr_fact_fails_closed_without_attribute_error(self):
+        client = _Client(None)
+        result = _discover(client)
+
+        self.assertEqual(
+            result.classification,
+            JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
+        )
+        self.assertIn("malformed GitHub PR evidence", result.guidance)
+        self.assertEqual(client.search_calls, [])
+        self.assertEqual(client.ancestry_calls, [])
+
+    def test_inconsistent_merged_open_terminal_pr_fact_fails_closed(self):
+        fact = PullRequestFact(
+            repo="owner/repo",
+            number=42,
+            base_ref="main",
+            head_ref="jules/provider-output",
+            head_sha="b" * 40,
+            draft=False,
+            open=True,
+            merged=True,
+        )
+        client = _Client(fact)
+        result = _discover(client)
+
+        self.assertEqual(
+            result.classification,
+            JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
+        )
+        self.assertIn("malformed GitHub PR evidence", result.guidance)
         self.assertEqual(client.ancestry_calls, [])
 
 
