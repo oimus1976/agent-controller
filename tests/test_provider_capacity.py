@@ -104,6 +104,32 @@ class ProviderRecommendationTests(unittest.TestCase):
             [(item.provider, item.reason) for item in result.deferred],
         )
 
+    def test_exhausted_provider_is_not_recommended_for_new_review_request(self):
+        review_binding = {
+            "controller_task_id": "task-168-review",
+            "workstream_id": "efficiency-provider-capacity",
+            "operation_id": "request-independent-review",
+            "operation_version": "1",
+        }
+        exhausted_codex = ProviderCapacityObservation(
+            **review_binding,
+            provider="codex",
+            observed_at="2026-09-04T18:50:00+09:00",
+            availability=ProviderAvailability.EXHAUSTED,
+            source=CapacityObservationSource.OPERATOR_OBSERVED,
+        )
+        result = recommend_provider(
+            **review_binding,
+            candidates=[ProviderCandidate("codex", True)],
+            capacity_observations=[exhausted_codex],
+        )
+        self.assertIsNone(result.recommendation)
+        self.assertEqual(result.eligible, ())
+        self.assertIn(
+            ("codex", "CAPACITY_EXHAUSTED"),
+            [(item.provider, item.reason) for item in result.deferred],
+        )
+
     def test_abundant_capacity_does_not_override_capability_ineligibility(self):
         result = self.recommend(
             [ProviderCandidate("codex", False), ProviderCandidate("jules", True)],
