@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -104,6 +105,8 @@ class JulesIssueTaskSpec:
             raise ValueError("missing task spec fields: ['schema_version']")
         
         schema_version = raw["schema_version"]
+        if not isinstance(schema_version, int) or isinstance(schema_version, bool):
+            raise ValueError("schema_version must be an integer")
         if schema_version == 1:
             allowed_fields = _SPEC_FIELDS_V1
         elif schema_version == 2:
@@ -177,9 +180,9 @@ class JulesIssueTaskSpec:
                 raise ValueError("pr_title must be a string")
             if not pr_title or pr_title != pr_title.strip():
                 raise ValueError("pr_title must be a non-empty string with no leading or trailing whitespace")
-            if "\n" in pr_title or "\r" in pr_title:
+            if any(c in "\r\n" or unicodedata.category(c) in {"Zl", "Zp"} for c in pr_title):
                 raise ValueError("pr_title must be single-line")
-            if any(ord(c) < 32 for c in pr_title):
+            if any(unicodedata.category(c).startswith("C") for c in pr_title):
                 raise ValueError("pr_title must not contain control characters")
             if len(pr_title) > 120:
                 raise ValueError("pr_title must be reasonably bounded in length (max 120)")

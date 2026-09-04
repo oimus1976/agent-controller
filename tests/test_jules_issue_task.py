@@ -120,6 +120,12 @@ class JulesIssueTaskSpecTests(unittest.TestCase):
             build_issue_task(spec, github=github, api_client=object())
         self.assertEqual(github.calls, [("oimus1976/agent-controller", "main")])
 
+    def test_schema_version_requires_integer_discriminator(self):
+        for invalid in (True, False, 1.0, 2.0, "2"):
+            with self.subTest(schema_version=invalid):
+                with self.assertRaisesRegex(ValueError, "schema_version must be an integer"):
+                    JulesIssueTaskSpec.from_mapping(valid_raw(schema_version=invalid))
+
     def test_v2_spec_requires_valid_pr_title(self):
         # Valid v2
         spec = JulesIssueTaskSpec.from_mapping(valid_raw(
@@ -149,9 +155,17 @@ class JulesIssueTaskSpecTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "pr_title must be single-line"):
             JulesIssueTaskSpec.from_mapping(valid_raw(schema_version=2, pr_title="#55 Hello\nWorld"))
 
-        # Control characters
-        with self.assertRaisesRegex(ValueError, "pr_title must not contain control characters"):
-            JulesIssueTaskSpec.from_mapping(valid_raw(schema_version=2, pr_title="#55 Hello\tWorld"))
+        # Control characters, including DEL and Unicode format controls
+        for bad_title in ("#55 Hello\tWorld", "#55 Hello\x7fWorld", "#55 Hello\u200bWorld"):
+            with self.subTest(pr_title=repr(bad_title)):
+                with self.assertRaisesRegex(ValueError, "pr_title must not contain control characters"):
+                    JulesIssueTaskSpec.from_mapping(valid_raw(schema_version=2, pr_title=bad_title))
+
+        # Unicode line/paragraph separators must remain single-line
+        for bad_title in ("#55 Hello\u2028World", "#55 Hello\u2029World"):
+            with self.subTest(pr_title=repr(bad_title)):
+                with self.assertRaisesRegex(ValueError, "pr_title must be single-line"):
+                    JulesIssueTaskSpec.from_mapping(valid_raw(schema_version=2, pr_title=bad_title))
 
         # Too long pr_title
         with self.assertRaisesRegex(ValueError, "pr_title must be reasonably bounded in length \\(max 120\\)"):
