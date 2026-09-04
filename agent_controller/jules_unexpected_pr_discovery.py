@@ -74,6 +74,8 @@ def _valid_pr_fact(fact: PullRequestFact) -> bool:
         and type(fact.draft) is bool
         and type(fact.open) is bool
         and type(fact.merged) is bool
+        and not (fact.open and fact.merged)
+        and not (fact.merged and fact.draft)
     )
 
 
@@ -227,6 +229,11 @@ def discover_unexpected_jules_pr(
             return JulesPRDiscoveryResult(
                 JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
                 "GitHub read of Jules terminal pullRequest output failed; publication remains ambiguous.",
+            )
+        if not isinstance(fact, PullRequestFact) or not _valid_pr_fact(fact):
+            return JulesPRDiscoveryResult(
+                JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
+                "malformed GitHub PR evidence from Jules terminal pullRequest; fail closed.",
             )
         if _normalize_ref(fact.head_ref) == _normalize_ref(bound_branch):
             return JulesPRDiscoveryResult(
