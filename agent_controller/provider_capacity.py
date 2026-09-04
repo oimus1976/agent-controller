@@ -22,6 +22,14 @@ class CapacityObservationSource(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class ProviderDeferralReason(str, Enum):
+    INSUFFICIENT_CAPABILITY = "INSUFFICIENT_CAPABILITY"
+    PAID_USAGE_NOT_AUTHORIZED = "PAID_USAGE_NOT_AUTHORIZED"
+    CAPACITY_EXHAUSTED = "CAPACITY_EXHAUSTED"
+    PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    PRESERVE_SCARCE_REVIEW_PROVIDER = "PRESERVE_SCARCE_REVIEW_PROVIDER"
+
+
 def _require_nonempty_string(name: str, value: object) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{name} must be nonempty")
@@ -107,7 +115,12 @@ class ProviderCandidate:
 @dataclass(frozen=True)
 class DeferredProvider:
     provider: str
-    reason: str
+    reason: ProviderDeferralReason
+
+    def __post_init__(self) -> None:
+        _require_nonempty_string("provider", self.provider)
+        if not isinstance(self.reason, ProviderDeferralReason):
+            raise TypeError("reason must be ProviderDeferralReason")
 
 
 @dataclass(frozen=True)
@@ -145,7 +158,9 @@ def recommend_provider(
     The operation binding may represent implementation, independent review, or another
     already-authorized provider role. Capacity filtering is role-agnostic: an
     EXHAUSTED provider is deferred for a new review request just as it is for a new
-    implementation request. This function performs no provider or GitHub effects.
+    implementation request. ``eligible`` preserves capability eligibility; quota,
+    availability, paid-usage policy, and review-provider preservation are represented
+    separately in ``deferred``. This function performs no provider or GitHub effects.
     """
 
     for name, value in (
@@ -169,6 +184,12 @@ def recommend_provider(
         if candidate.provider in candidate_by_provider:
             raise ValueError("candidate providers must be unique")
         candidate_by_provider[candidate.provider] = candidate
+
+    eligible = tuple(
+        provider
+        for provider in sorted(candidate_by_provider)
+        if candidate_by_provider[provider].capability_eligible
+    )
 
     observation_by_provider: dict[str, ProviderCapacityObservation] = {}
     expected_binding = (
@@ -198,10 +219,14 @@ def recommend_provider(
     for provider in sorted(candidate_by_provider):
         candidate = candidate_by_provider[provider]
         if not candidate.capability_eligible:
-            deferred.append(DeferredProvider(provider, "INSUFFICIENT_CAPABILITY"))
+            deferred.append(
+                DeferredProvider(provider, ProviderDeferralReason.INSUFFICIENT_CAPABILITY)
+            )
             continue
         if candidate.additional_paid_usage_required and not paid_usage_authorized:
-            deferred.append(DeferredProvider(provider, "PAID_USAGE_NOT_AUTHORIZED"))
+            deferred.append(
+                DeferredProvider(provider, ProviderDeferralReason.PAID_USAGE_NOT_AUTHORIZED)
+            )
             continue
 
         observation = observation_by_provider.get(provider)
@@ -209,10 +234,14 @@ def recommend_provider(
             observation.availability if observation is not None else ProviderAvailability.UNKNOWN
         )
         if availability == ProviderAvailability.EXHAUSTED:
-            deferred.append(DeferredProvider(provider, "CAPACITY_EXHAUSTED"))
+            deferred.append(
+                DeferredProvider(provider, ProviderDeferralReason.CAPACITY_EXHAUSTED)
+            )
             continue
         if availability == ProviderAvailability.UNAVAILABLE:
-            deferred.append(DeferredProvider(provider, "PROVIDER_UNAVAILABLE"))
+            deferred.append(
+                DeferredProvider(provider, ProviderDeferralReason.PROVIDER_UNAVAILABLE)
+            )
             continue
 
         usable.append((_AVAILABILITY_RANK[availability], provider))
@@ -223,7 +252,9 @@ def recommend_provider(
         for item in usable:
             if item[1] == reserved_independent_review_provider:
                 deferred.append(
-                    DeferredProvider(item[1], "PRESERVE_SCARCE_REVIEW_PROVIDER")
+                    DeferredProvider(
+                        item[1], ProviderDeferralReason.PRESERVE_SCARCE_REVIEW_PROVIDER
+                    )
                 )
                 preserved_review_provider = True
             else:
@@ -232,8 +263,7 @@ def recommend_provider(
             usable = retained
 
     usable.sort()
-    eligible = tuple(provider for _, provider in usable)
-    recommendation = eligible[0] if eligible else None
+    recommendation = usable[0][1] if usable else None
 
     reason_codes: list[str] = []
     if recommendation is not None:
