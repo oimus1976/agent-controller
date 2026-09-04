@@ -9,9 +9,9 @@ def load_policy(policy_path):
     if not policy_path or not os.path.exists(policy_path):
         return None
     try:
-        with open(policy_path, 'r') as f:
+        with open(policy_path, 'r', encoding='utf-8-sig') as f:
             return json.load(f)
-    except (json.JSONDecodeError, IOError):
+    except (json.JSONDecodeError, IOError, UnicodeDecodeError):
         return None
 
 

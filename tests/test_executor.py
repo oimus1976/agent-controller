@@ -43,6 +43,54 @@ class TestExecutor(unittest.TestCase):
         os.remove(path)
         mock_get_pr_details.assert_not_called()
 
+    @patch('agent_controller.executor.get_pr_details')
+    def test_policy_utf8(self, mock_get_pr_details):
+        mock_get_pr_details.return_value = {
+            "head": {"sha": "abcd"},
+            "draft": False,
+            "merged": False,
+            "state": "open",
+            "node_id": "node123"
+        }
+        fd, path = tempfile.mkstemp()
+        with os.fdopen(fd, 'wb') as f:
+            f.write(json.dumps(self.valid_policy).encode('utf-8'))
+
+        plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", path)
+        self.assertNotEqual(plan["reason"], "MISSING_OR_MALFORMED_POLICY")
+        os.remove(path)
+        mock_get_pr_details.assert_called()
+
+    @patch('agent_controller.executor.get_pr_details')
+    def test_policy_utf8_bom(self, mock_get_pr_details):
+        mock_get_pr_details.return_value = {
+            "head": {"sha": "abcd"},
+            "draft": False,
+            "merged": False,
+            "state": "open",
+            "node_id": "node123"
+        }
+        fd, path = tempfile.mkstemp()
+        with os.fdopen(fd, 'wb') as f:
+            f.write(b'\xef\xbb\xbf' + json.dumps(self.valid_policy).encode('utf-8'))
+
+        plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", path)
+        self.assertNotEqual(plan["reason"], "MISSING_OR_MALFORMED_POLICY")
+        os.remove(path)
+        mock_get_pr_details.assert_called()
+
+    @patch('agent_controller.executor.get_pr_details')
+    def test_policy_invalid_utf8(self, mock_get_pr_details):
+        fd, path = tempfile.mkstemp()
+        with os.fdopen(fd, 'wb') as f:
+            f.write(b'\xff\xfe\x00\x00') # invalid utf-8
+
+        plan = plan_action(self.owner, self.repo, self.pr_number, "ENSURE_DRAFT", path)
+        self.assertEqual(plan["decision"], "BLOCKED")
+        self.assertEqual(plan["reason"], "MISSING_OR_MALFORMED_POLICY")
+        os.remove(path)
+        mock_get_pr_details.assert_not_called()
+
     # 3. action not allowlisted -> BLOCKED, no mutation
     @patch('agent_controller.executor.get_pr_details')
     def test_action_not_allowlisted(self, mock_get_pr_details):
