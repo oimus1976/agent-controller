@@ -228,6 +228,11 @@ def discover_unexpected_jules_pr(
                 JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
                 "GitHub read of Jules terminal pullRequest output failed; publication remains ambiguous.",
             )
+        if _normalize_ref(fact.head_ref) == _normalize_ref(bound_branch):
+            return JulesPRDiscoveryResult(
+                JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
+                "Jules terminal pullRequest resolves to the Controller-bound branch; it is not an unexpected provider PR and must be reconciled through bound-branch observation.",
+            )
         mismatch = _verify_candidate(
             fact=fact,
             repo=repo,
