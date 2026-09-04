@@ -1,0 +1,263 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+from typing import Optional, Sequence
+
+
+class ProviderAvailability(str, Enum):
+    AVAILABLE = "AVAILABLE"
+    DEGRADED = "DEGRADED"
+    EXHAUSTED = "EXHAUSTED"
+    UNAVAILABLE = "UNAVAILABLE"
+    UNKNOWN = "UNKNOWN"
+
+
+class CapacityObservationSource(str, Enum):
+    ACCOUNT_TELEMETRY = "ACCOUNT_TELEMETRY"
+    PROVIDER_TELEMETRY = "PROVIDER_TELEMETRY"
+    CONTROLLER_MEASURED = "CONTROLLER_MEASURED"
+    OPERATOR_OBSERVED = "OPERATOR_OBSERVED"
+    UNKNOWN = "UNKNOWN"
+
+
+def _require_nonempty_string(name: str, value: object) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be nonempty")
+    return value
+
+
+def _require_aware_iso8601(name: str, value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    _require_nonempty_string(name, value)
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{name} must include a timezone offset")
+    return value
+
+
+@dataclass(frozen=True)
+class ProviderCapacityObservation:
+    controller_task_id: str
+    workstream_id: str
+    operation_id: str
+    operation_version: str
+    provider: str
+    observed_at: str
+    availability: ProviderAvailability
+    source: CapacityObservationSource
+    remaining_capacity: Optional[float] = None
+    capacity_unit: Optional[str] = None
+    reset_at: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "controller_task_id",
+            "workstream_id",
+            "operation_id",
+            "operation_version",
+            "provider",
+        ):
+            _require_nonempty_string(field_name, getattr(self, field_name))
+        _require_aware_iso8601("observed_at", self.observed_at)
+        _require_aware_iso8601("reset_at", self.reset_at)
+        if not isinstance(self.availability, ProviderAvailability):
+            raise TypeError("availability must be ProviderAvailability")
+        if not isinstance(self.source, CapacityObservationSource):
+            raise TypeError("source must be CapacityObservationSource")
+
+        if self.remaining_capacity is not None:
+            value = self.remaining_capacity
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                raise ValueError("remaining_capacity must be non-negative when present")
+            object.__setattr__(self, "remaining_capacity", float(value))
+        if self.capacity_unit is not None:
+            _require_nonempty_string("capacity_unit", self.capacity_unit)
+        if (self.remaining_capacity is None) != (self.capacity_unit is None):
+            raise ValueError("remaining_capacity and capacity_unit must be present together")
+
+    @property
+    def provider_or_account_telemetry(self) -> bool:
+        return self.source in {
+            CapacityObservationSource.ACCOUNT_TELEMETRY,
+            CapacityObservationSource.PROVIDER_TELEMETRY,
+        }
+
+
+@dataclass(frozen=True)
+class ProviderCandidate:
+    provider: str
+    capability_eligible: bool
+    additional_paid_usage_required: bool = False
+
+    def __post_init__(self) -> None:
+        _require_nonempty_string("provider", self.provider)
+        if not isinstance(self.capability_eligible, bool):
+            raise TypeError("capability_eligible must be bool")
+        if not isinstance(self.additional_paid_usage_required, bool):
+            raise TypeError("additional_paid_usage_required must be bool")
+
+
+@dataclass(frozen=True)
+class DeferredProvider:
+    provider: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class ProviderRecommendation:
+    controller_task_id: str
+    workstream_id: str
+    operation_id: str
+    operation_version: str
+    recommendation: Optional[str]
+    eligible: tuple[str, ...]
+    deferred: tuple[DeferredProvider, ...]
+    reason_codes: tuple[str, ...]
+
+
+_AVAILABILITY_RANK = {
+    ProviderAvailability.AVAILABLE: 0,
+    ProviderAvailability.DEGRADED: 1,
+    ProviderAvailability.UNKNOWN: 2,
+}
+
+
+def recommend_provider(
+    *,
+    controller_task_id: str,
+    workstream_id: str,
+    operation_id: str,
+    operation_version: str,
+    candidates: Sequence[ProviderCandidate],
+    capacity_observations: Sequence[ProviderCapacityObservation],
+    reserved_independent_review_provider: Optional[str] = None,
+    paid_usage_authorized: bool = False,
+) -> ProviderRecommendation:
+    """Return a pure advisory recommendation; perform no provider or GitHub effects."""
+
+    for name, value in (
+        ("controller_task_id", controller_task_id),
+        ("workstream_id", workstream_id),
+        ("operation_id", operation_id),
+        ("operation_version", operation_version),
+    ):
+        _require_nonempty_string(name, value)
+    if reserved_independent_review_provider is not None:
+        _require_nonempty_string(
+            "reserved_independent_review_provider", reserved_independent_review_provider
+        )
+    if not isinstance(paid_usage_authorized, bool):
+        raise TypeError("paid_usage_authorized must be bool")
+
+    candidate_by_provider: dict[str, ProviderCandidate] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, ProviderCandidate):
+            raise TypeError("candidates must contain ProviderCandidate")
+        if candidate.provider in candidate_by_provider:
+            raise ValueError("candidate providers must be unique")
+        candidate_by_provider[candidate.provider] = candidate
+
+    observation_by_provider: dict[str, ProviderCapacityObservation] = {}
+    expected_binding = (
+        controller_task_id,
+        workstream_id,
+        operation_id,
+        operation_version,
+    )
+    for observation in capacity_observations:
+        if not isinstance(observation, ProviderCapacityObservation):
+            raise TypeError("capacity_observations must contain ProviderCapacityObservation")
+        observed_binding = (
+            observation.controller_task_id,
+            observation.workstream_id,
+            observation.operation_id,
+            observation.operation_version,
+        )
+        if observed_binding != expected_binding:
+            raise ValueError("capacity observation binding mismatch")
+        if observation.provider in observation_by_provider:
+            raise ValueError("capacity observations must be unique per provider")
+        observation_by_provider[observation.provider] = observation
+
+    deferred: list[DeferredProvider] = []
+    usable: list[tuple[int, str]] = []
+
+    for provider in sorted(candidate_by_provider):
+        candidate = candidate_by_provider[provider]
+        if not candidate.capability_eligible:
+            deferred.append(DeferredProvider(provider, "INSUFFICIENT_CAPABILITY"))
+            continue
+        if candidate.additional_paid_usage_required and not paid_usage_authorized:
+            deferred.append(DeferredProvider(provider, "PAID_USAGE_NOT_AUTHORIZED"))
+            continue
+
+        observation = observation_by_provider.get(provider)
+        availability = (
+            observation.availability if observation is not None else ProviderAvailability.UNKNOWN
+        )
+        if availability == ProviderAvailability.EXHAUSTED:
+            deferred.append(DeferredProvider(provider, "CAPACITY_EXHAUSTED"))
+            continue
+        if availability == ProviderAvailability.UNAVAILABLE:
+            deferred.append(DeferredProvider(provider, "PROVIDER_UNAVAILABLE"))
+            continue
+
+        usable.append((_AVAILABILITY_RANK[availability], provider))
+
+    preserved_review_provider = False
+    if reserved_independent_review_provider is not None and len(usable) > 1:
+        retained: list[tuple[int, str]] = []
+        for item in usable:
+            if item[1] == reserved_independent_review_provider:
+                deferred.append(
+                    DeferredProvider(item[1], "PRESERVE_SCARCE_REVIEW_PROVIDER")
+                )
+                preserved_review_provider = True
+            else:
+                retained.append(item)
+        if retained:
+            usable = retained
+
+    usable.sort()
+    eligible = tuple(provider for _, provider in usable)
+    recommendation = eligible[0] if eligible else None
+
+    reason_codes: list[str] = []
+    if recommendation is not None:
+        reason_codes.append("CAPABILITY_MATCH")
+        observation = observation_by_provider.get(recommendation)
+        availability = (
+            observation.availability if observation is not None else ProviderAvailability.UNKNOWN
+        )
+        if availability == ProviderAvailability.AVAILABLE:
+            reason_codes.append("AVAILABLE_CAPACITY")
+        elif availability == ProviderAvailability.DEGRADED:
+            reason_codes.append("DEGRADED_CAPACITY")
+        else:
+            reason_codes.append("CAPACITY_UNKNOWN")
+        if preserved_review_provider:
+            reason_codes.append("PRESERVE_SCARCE_REVIEW_PROVIDER")
+        candidate = candidate_by_provider[recommendation]
+        reason_codes.append(
+            "PAID_USAGE_AUTHORIZED"
+            if candidate.additional_paid_usage_required
+            else "NO_ADDITIONAL_COST"
+        )
+
+    return ProviderRecommendation(
+        controller_task_id=controller_task_id,
+        workstream_id=workstream_id,
+        operation_id=operation_id,
+        operation_version=operation_version,
+        recommendation=recommendation,
+        eligible=eligible,
+        deferred=tuple(deferred),
+        reason_codes=tuple(reason_codes),
+    )
