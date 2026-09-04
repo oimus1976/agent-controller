@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+import math
 from typing import Optional, Sequence
 
 
@@ -27,6 +28,7 @@ class ProviderDeferralReason(str, Enum):
     PAID_USAGE_NOT_AUTHORIZED = "PAID_USAGE_NOT_AUTHORIZED"
     CAPACITY_EXHAUSTED = "CAPACITY_EXHAUSTED"
     PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    CAPACITY_REOBSERVATION_REQUIRED = "CAPACITY_REOBSERVATION_REQUIRED"
     PRESERVE_SCARCE_REVIEW_PROVIDER = "PRESERVE_SCARCE_REVIEW_PROVIDER"
 
 
@@ -36,9 +38,7 @@ def _require_nonempty_string(name: str, value: object) -> str:
     return value
 
 
-def _require_aware_iso8601(name: str, value: Optional[str]) -> Optional[str]:
-    if value is None:
-        return None
+def _parse_aware_iso8601(name: str, value: str) -> datetime:
     _require_nonempty_string(name, value)
     normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:
@@ -47,6 +47,13 @@ def _require_aware_iso8601(name: str, value: Optional[str]) -> Optional[str]:
         raise ValueError(f"{name} must be ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{name} must include a timezone offset")
+    return parsed
+
+
+def _require_aware_iso8601(name: str, value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    _parse_aware_iso8601(name, value)
     return value
 
 
@@ -82,8 +89,13 @@ class ProviderCapacityObservation:
 
         if self.remaining_capacity is not None:
             value = self.remaining_capacity
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
-                raise ValueError("remaining_capacity must be non-negative when present")
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError("remaining_capacity must be a finite non-negative number when present")
             object.__setattr__(self, "remaining_capacity", float(value))
         if self.capacity_unit is not None:
             _require_nonempty_string("capacity_unit", self.capacity_unit)
@@ -129,6 +141,7 @@ class ProviderRecommendation:
     workstream_id: str
     operation_id: str
     operation_version: str
+    decision_at: str
     recommendation: Optional[str]
     eligible: tuple[str, ...]
     deferred: tuple[DeferredProvider, ...]
@@ -148,6 +161,7 @@ def recommend_provider(
     workstream_id: str,
     operation_id: str,
     operation_version: str,
+    decision_at: str,
     candidates: Sequence[ProviderCandidate],
     capacity_observations: Sequence[ProviderCapacityObservation],
     reserved_independent_review_provider: Optional[str] = None,
@@ -155,12 +169,10 @@ def recommend_provider(
 ) -> ProviderRecommendation:
     """Return a pure advisory recommendation for any provider operation.
 
-    The operation binding may represent implementation, independent review, or another
-    already-authorized provider role. Capacity filtering is role-agnostic: an
-    EXHAUSTED provider is deferred for a new review request just as it is for a new
-    implementation request. ``eligible`` preserves capability eligibility; quota,
-    availability, paid-usage policy, and review-provider preservation are represented
-    separately in ``deferred``. This function performs no provider or GitHub effects.
+    ``decision_at`` makes the recommendation replayable and lets reset/replenishment
+    boundaries invalidate old capacity evidence. Reaching ``reset_at`` never promotes
+    a provider to AVAILABLE; that provider is deferred until a fresh observation is
+    supplied. This function performs no provider or GitHub effects.
     """
 
     for name, value in (
@@ -170,6 +182,7 @@ def recommend_provider(
         ("operation_version", operation_version),
     ):
         _require_nonempty_string(name, value)
+    decision_time = _parse_aware_iso8601("decision_at", decision_at)
     if reserved_independent_review_provider is not None:
         _require_nonempty_string(
             "reserved_independent_review_provider", reserved_independent_review_provider
@@ -211,6 +224,8 @@ def recommend_provider(
             raise ValueError("capacity observation binding mismatch")
         if observation.provider in observation_by_provider:
             raise ValueError("capacity observations must be unique per provider")
+        if _parse_aware_iso8601("observed_at", observation.observed_at) > decision_time:
+            raise ValueError("capacity observation cannot be newer than decision_at")
         observation_by_provider[observation.provider] = observation
 
     deferred: list[DeferredProvider] = []
@@ -230,6 +245,16 @@ def recommend_provider(
             continue
 
         observation = observation_by_provider.get(provider)
+        if observation is not None and observation.reset_at is not None:
+            reset_time = _parse_aware_iso8601("reset_at", observation.reset_at)
+            if decision_time >= reset_time:
+                deferred.append(
+                    DeferredProvider(
+                        provider, ProviderDeferralReason.CAPACITY_REOBSERVATION_REQUIRED
+                    )
+                )
+                continue
+
         availability = (
             observation.availability if observation is not None else ProviderAvailability.UNKNOWN
         )
@@ -292,6 +317,7 @@ def recommend_provider(
         workstream_id=workstream_id,
         operation_id=operation_id,
         operation_version=operation_version,
+        decision_at=decision_at,
         recommendation=recommendation,
         eligible=eligible,
         deferred=tuple(deferred),
