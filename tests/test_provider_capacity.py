@@ -1,3 +1,4 @@
+import math
 import unittest
 
 from agent_controller.provider_capacity import (
@@ -16,15 +17,24 @@ BINDING = {
     "operation_id": "recommend-implementation-provider",
     "operation_version": "1",
 }
+DECISION_AT = "2026-09-04T18:00:00+09:00"
 
 
-def observation(provider, availability, *, source=CapacityObservationSource.OPERATOR_OBSERVED):
+def observation(
+    provider,
+    availability,
+    *,
+    source=CapacityObservationSource.OPERATOR_OBSERVED,
+    observed_at="2026-09-04T16:45:00+09:00",
+    reset_at=None,
+):
     return ProviderCapacityObservation(
         **BINDING,
         provider=provider,
-        observed_at="2026-09-04T16:45:00+09:00",
+        observed_at=observed_at,
         availability=availability,
         source=source,
+        reset_at=reset_at,
     )
 
 
@@ -49,7 +59,7 @@ class ProviderCapacityObservationTests(unittest.TestCase):
         self.assertIsNone(item.capacity_unit)
         self.assertEqual(item.availability, ProviderAvailability.UNKNOWN)
 
-    def test_quota_value_requires_unit_and_is_non_negative(self):
+    def test_quota_value_requires_unit_and_is_finite_non_negative(self):
         with self.assertRaisesRegex(ValueError, "present together"):
             ProviderCapacityObservation(
                 **BINDING,
@@ -59,16 +69,18 @@ class ProviderCapacityObservationTests(unittest.TestCase):
                 source=CapacityObservationSource.OPERATOR_OBSERVED,
                 remaining_capacity=9,
             )
-        with self.assertRaisesRegex(ValueError, "non-negative"):
-            ProviderCapacityObservation(
-                **BINDING,
-                provider="codex",
-                observed_at="2026-09-04T16:45:00+09:00",
-                availability=ProviderAvailability.DEGRADED,
-                source=CapacityObservationSource.OPERATOR_OBSERVED,
-                remaining_capacity=-1,
-                capacity_unit="percent",
-            )
+        for value in (-1, math.nan, math.inf, -math.inf):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "finite non-negative"):
+                    ProviderCapacityObservation(
+                        **BINDING,
+                        provider="codex",
+                        observed_at="2026-09-04T16:45:00+09:00",
+                        availability=ProviderAvailability.DEGRADED,
+                        source=CapacityObservationSource.OPERATOR_OBSERVED,
+                        remaining_capacity=value,
+                        capacity_unit="percent",
+                    )
 
     def test_timestamps_require_timezone(self):
         with self.assertRaisesRegex(ValueError, "timezone offset"):
@@ -85,6 +97,7 @@ class ProviderRecommendationTests(unittest.TestCase):
     def recommend(self, candidates, observations, **kwargs):
         return recommend_provider(
             **BINDING,
+            decision_at=kwargs.pop("decision_at", DECISION_AT),
             candidates=candidates,
             capacity_observations=observations,
             **kwargs,
@@ -126,6 +139,7 @@ class ProviderRecommendationTests(unittest.TestCase):
         )
         result = recommend_provider(
             **review_binding,
+            decision_at="2026-09-04T19:00:00+09:00",
             candidates=[ProviderCandidate("codex", True)],
             capacity_observations=[exhausted_codex],
         )
@@ -135,6 +149,58 @@ class ProviderRecommendationTests(unittest.TestCase):
             ("codex", ProviderDeferralReason.CAPACITY_EXHAUSTED),
             self.deferred_pairs(result),
         )
+
+    def test_reset_boundary_requires_reobservation_and_never_auto_promotes(self):
+        exhausted = observation(
+            "codex",
+            ProviderAvailability.EXHAUSTED,
+            reset_at="2026-09-07T11:27:00+09:00",
+        )
+        before = self.recommend(
+            [ProviderCandidate("codex", True)],
+            [exhausted],
+            decision_at="2026-09-07T11:26:59+09:00",
+        )
+        self.assertIsNone(before.recommendation)
+        self.assertIn(
+            ("codex", ProviderDeferralReason.CAPACITY_EXHAUSTED),
+            self.deferred_pairs(before),
+        )
+
+        at_reset = self.recommend(
+            [ProviderCandidate("codex", True)],
+            [exhausted],
+            decision_at="2026-09-07T11:27:00+09:00",
+        )
+        self.assertIsNone(at_reset.recommendation)
+        self.assertIn(
+            ("codex", ProviderDeferralReason.CAPACITY_REOBSERVATION_REQUIRED),
+            self.deferred_pairs(at_reset),
+        )
+
+        refreshed = ProviderCapacityObservation(
+            **BINDING,
+            provider="codex",
+            observed_at="2026-09-07T11:28:00+09:00",
+            availability=ProviderAvailability.AVAILABLE,
+            source=CapacityObservationSource.OPERATOR_OBSERVED,
+        )
+        after_refresh = self.recommend(
+            [ProviderCandidate("codex", True)],
+            [refreshed],
+            decision_at="2026-09-07T11:29:00+09:00",
+        )
+        self.assertEqual(after_refresh.recommendation, "codex")
+        self.assertIn("AVAILABLE_CAPACITY", after_refresh.reason_codes)
+
+    def test_future_observation_fails_closed(self):
+        future = observation(
+            "codex",
+            ProviderAvailability.AVAILABLE,
+            observed_at="2026-09-04T18:00:01+09:00",
+        )
+        with self.assertRaisesRegex(ValueError, "newer than decision_at"):
+            self.recommend([ProviderCandidate("codex", True)], [future])
 
     def test_abundant_capacity_does_not_override_capability_ineligibility(self):
         result = self.recommend(
