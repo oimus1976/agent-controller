@@ -140,7 +140,13 @@ def recommend_provider(
     reserved_independent_review_provider: Optional[str] = None,
     paid_usage_authorized: bool = False,
 ) -> ProviderRecommendation:
-    """Return a pure advisory recommendation; perform no provider or GitHub effects."""
+    """Return a pure advisory recommendation for any provider operation.
+
+    The operation binding may represent implementation, independent review, or another
+    already-authorized provider role. Capacity filtering is role-agnostic: an
+    EXHAUSTED provider is deferred for a new review request just as it is for a new
+    implementation request. This function performs no provider or GitHub effects.
+    """
 
     for name, value in (
         ("controller_task_id", controller_task_id),
