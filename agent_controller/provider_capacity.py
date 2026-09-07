@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 import math
 from typing import Optional, Sequence
@@ -256,15 +256,16 @@ def recommend_provider(
         observation = observation_by_provider.get(provider)
         if observation is not None:
             observed_at = _parse_aware_iso8601("observed_at", observation.observed_at)
-            validity_boundary = observed_at + timedelta(seconds=max_observation_validity_seconds)
+            freshness_expired = (
+                decision_time - observed_at
+            ).total_seconds() >= max_observation_validity_seconds
 
-            boundary_time = validity_boundary
+            reset_expired = False
             if observation.reset_at is not None:
                 reset_time = _parse_aware_iso8601("reset_at", observation.reset_at)
-                if reset_time < validity_boundary:
-                    boundary_time = reset_time
+                reset_expired = decision_time >= reset_time
 
-            if decision_time >= boundary_time:
+            if freshness_expired or reset_expired:
                 deferred.append(
                     DeferredProvider(
                         provider, ProviderDeferralReason.CAPACITY_REOBSERVATION_REQUIRED

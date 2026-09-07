@@ -381,6 +381,14 @@ class ProviderRecommendationTests(unittest.TestCase):
                         max_observation_validity_seconds=val
                     )
 
+    def test_huge_finite_validity_does_not_overflow(self):
+        result = self.recommend(
+            [ProviderCandidate("codex", True)],
+            [observation("codex", ProviderAvailability.AVAILABLE)],
+            decision_at="2026-09-04T19:00:00+09:00",
+            max_observation_validity_seconds=1e300,
+        )
+        self.assertEqual(result.recommendation, "codex")
 
 if __name__ == "__main__":
     unittest.main()
