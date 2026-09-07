@@ -5,7 +5,7 @@ from enum import Enum
 import json
 import ntpath
 import re
-from typing import Iterable
+from typing import Callable, Iterable
 
 
 class AntigravityReviewStatus(str, Enum):
@@ -52,6 +52,7 @@ class AntigravityReviewDecision:
 
 _ALLOWED_REVIEW_EVENT_TYPES = frozenset({"init", "step_update", "result"})
 _ALLOWED_STEP_UPDATE_TYPES = frozenset({"user_input", "agent_response", "tool"})
+_ALLOWED_STEP_STATES = frozenset({"ACTIVE", "DONE"})
 _ALLOWED_READ_ONLY_TOOLS = frozenset(
     {"find_by_name", "view_file", "grep_search", "list_dir"}
 )
@@ -62,6 +63,10 @@ _TOOL_PATH_PARAMETER = {
     "list_dir": "DirectoryPath",
 }
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_GIT_SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+CanonicalPathResolver = Callable[[str], str]
 
 
 def _require_nonempty_string(name: str, value: object) -> str:
@@ -77,6 +82,29 @@ def _require_sha256(name: str, value: object) -> str:
     return text.lower()
 
 
+def _require_git_sha(name: str, value: object) -> str:
+    text = _require_nonempty_string(name, value)
+    if _GIT_SHA1_RE.fullmatch(text) is None:
+        raise ValueError(f"{name} must be a full 40-character hexadecimal Git object ID")
+    return text.lower()
+
+
+def _require_int(name: str, value: object, *, minimum: int | None = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    return value
+
+
+def _require_string_tuple(name: str, value: object) -> tuple[str, ...]:
+    if not isinstance(value, tuple):
+        raise ValueError(f"{name} must be a tuple")
+    for item in value:
+        _require_nonempty_string(f"{name} entry", item)
+    return value
+
+
 def _normalize_windows_absolute_path(name: str, value: object) -> str:
     text = _require_nonempty_string(name, value)
     normalized = ntpath.normpath(text)
@@ -86,43 +114,67 @@ def _normalize_windows_absolute_path(name: str, value: object) -> str:
     return ntpath.normcase(normalized)
 
 
+def _resolve_windows_absolute_path(
+    name: str,
+    value: object,
+    *,
+    canonical_path_resolver: CanonicalPathResolver,
+) -> str:
+    lexical = _normalize_windows_absolute_path(name, value)
+    try:
+        resolved = canonical_path_resolver(lexical)
+    except Exception as exc:
+        raise ValueError(f"{name} canonical resolution failed") from exc
+    return _normalize_windows_absolute_path(f"resolved {name}", resolved)
+
+
 def _require_path_within_workspace(
     name: str,
     value: object,
     *,
-    normalized_workspace: str,
+    resolved_workspace: str,
+    canonical_path_resolver: CanonicalPathResolver,
 ) -> str:
-    normalized_path = _normalize_windows_absolute_path(name, value)
+    resolved_path = _resolve_windows_absolute_path(
+        name,
+        value,
+        canonical_path_resolver=canonical_path_resolver,
+    )
     try:
-        common = ntpath.commonpath((normalized_workspace, normalized_path))
+        common = ntpath.commonpath((resolved_workspace, resolved_path))
     except ValueError as exc:
         raise ValueError(f"{name} must remain within the expected workspace") from exc
-    if ntpath.normcase(common) != normalized_workspace:
+    if ntpath.normcase(common) != resolved_workspace:
         raise ValueError(f"{name} must remain within the expected workspace")
-    return normalized_path
+    return resolved_path
 
 
 def parse_antigravity_stream_json(
     lines: Iterable[str],
     *,
     expected_workspace: str,
+    canonical_path_resolver: CanonicalPathResolver,
 ) -> AntigravityStreamResult:
     """Parse one fresh ``agy --output-format stream-json`` review transcript.
 
-    The parser is intentionally strict. Only event shapes and read-only tool
-    steps observed and accepted for the bounded review-only surface are allowed.
-    The provider-reported cwd must equal the exact expected Windows workspace,
-    and every characterized read tool must target that workspace or a descendant
-    path. Provider-native SUCCESS is retained as evidence only; callers must use
-    ``classify_antigravity_review`` before treating the operation as successful.
+    Only characterized event shapes and read-only tool steps are accepted. Tool
+    paths are checked after owner-machine canonical resolution so lexical
+    containment cannot hide a junction/symlink escape. Provider-native SUCCESS
+    remains evidence only; callers must use ``classify_antigravity_review``.
     """
 
-    normalized_workspace = _normalize_windows_absolute_path(
-        "expected_workspace", expected_workspace
+    if not callable(canonical_path_resolver):
+        raise ValueError("canonical_path_resolver must be callable")
+    resolved_workspace = _resolve_windows_absolute_path(
+        "expected_workspace",
+        expected_workspace,
+        canonical_path_resolver=canonical_path_resolver,
     )
     event_count = 0
     init_conversation_id: str | None = None
     terminal_result: AntigravityStreamResult | None = None
+    last_completed_step_index = -1
+    active_tool: tuple[int, str] | None = None
 
     for raw_line in lines:
         if not isinstance(raw_line, str):
@@ -157,10 +209,12 @@ def parse_antigravity_stream_json(
             init_payload = event.get("init")
             if not isinstance(init_payload, dict):
                 raise ValueError("init event must contain an object payload")
-            init_cwd = _normalize_windows_absolute_path(
-                "init cwd", init_payload.get("cwd")
+            init_cwd = _resolve_windows_absolute_path(
+                "init cwd",
+                init_payload.get("cwd"),
+                canonical_path_resolver=canonical_path_resolver,
             )
-            if init_cwd != normalized_workspace:
+            if init_cwd != resolved_workspace:
                 raise ValueError("Antigravity init cwd must equal the expected workspace")
             init_conversation_id = conversation_id
             continue
@@ -174,40 +228,68 @@ def parse_antigravity_stream_json(
             )
             if conversation_id != init_conversation_id:
                 raise ValueError("Antigravity conversation identity changed within one stream")
+            step_index = _require_int("step_update step_index", payload.get("step_index"), minimum=0)
+            state = _require_nonempty_string("step_update state", payload.get("state"))
+            if state not in _ALLOWED_STEP_STATES:
+                raise ValueError(f"unsupported Antigravity review step state: {state}")
             step_type = _require_nonempty_string(
                 "step_update step_type", payload.get("step_type")
             )
             if step_type not in _ALLOWED_STEP_UPDATE_TYPES:
-                raise ValueError(
-                    f"unsupported Antigravity review step type: {step_type}"
-                )
-            if step_type == "tool":
-                tool_name = _require_nonempty_string(
-                    "step_update tool_name", payload.get("tool_name")
-                )
-                if tool_name not in _ALLOWED_READ_ONLY_TOOLS:
-                    raise ValueError(
-                        f"unsupported Antigravity review tool: {tool_name}"
-                    )
-                tool_info = payload.get("tool_info")
-                if not isinstance(tool_info, dict):
-                    raise ValueError("tool step must contain tool_info")
-                tool_info_name = _require_nonempty_string(
-                    "tool_info name", tool_info.get("name")
-                )
-                if tool_info_name != tool_name:
-                    raise ValueError("Antigravity tool identity changed within one step")
-                parameters = tool_info.get("parameters")
-                if not isinstance(parameters, dict):
-                    raise ValueError("tool step must contain parameters")
-                path_parameter = _TOOL_PATH_PARAMETER[tool_name]
-                _require_path_within_workspace(
-                    f"{tool_name} {path_parameter}",
-                    parameters.get(path_parameter),
-                    normalized_workspace=normalized_workspace,
-                )
+                raise ValueError(f"unsupported Antigravity review step type: {step_type}")
+
+            if step_type != "tool":
+                if "tool_name" in payload or "tool_info" in payload:
+                    raise ValueError("non-tool step must not contain tool metadata")
+                if state != "DONE":
+                    raise ValueError("non-tool review steps must be DONE")
+                if active_tool is not None:
+                    raise ValueError("active tool step must complete before another step")
+                if step_index <= last_completed_step_index:
+                    raise ValueError("step_update indices must increase monotonically")
+                last_completed_step_index = step_index
+                continue
+
+            tool_name = _require_nonempty_string(
+                "step_update tool_name", payload.get("tool_name")
+            )
+            if tool_name not in _ALLOWED_READ_ONLY_TOOLS:
+                raise ValueError(f"unsupported Antigravity review tool: {tool_name}")
+            tool_info = payload.get("tool_info")
+            if not isinstance(tool_info, dict):
+                raise ValueError("tool step must contain tool_info")
+            tool_info_name = _require_nonempty_string("tool_info name", tool_info.get("name"))
+            if tool_info_name != tool_name:
+                raise ValueError("Antigravity tool identity changed within one step")
+            parameters = tool_info.get("parameters")
+            if not isinstance(parameters, dict):
+                raise ValueError("tool step must contain parameters")
+            path_parameter = _TOOL_PATH_PARAMETER[tool_name]
+            _require_path_within_workspace(
+                f"{tool_name} {path_parameter}",
+                parameters.get(path_parameter),
+                resolved_workspace=resolved_workspace,
+                canonical_path_resolver=canonical_path_resolver,
+            )
+
+            if state == "ACTIVE":
+                if active_tool is not None:
+                    raise ValueError("nested active tool steps are not allowed")
+                if step_index <= last_completed_step_index:
+                    raise ValueError("step_update indices must increase monotonically")
+                active_tool = (step_index, tool_name)
+                continue
+
+            if active_tool is None:
+                raise ValueError("tool DONE must match a preceding ACTIVE step")
+            if active_tool != (step_index, tool_name):
+                raise ValueError("tool DONE must match the active tool step")
+            last_completed_step_index = step_index
+            active_tool = None
             continue
 
+        if active_tool is not None:
+            raise ValueError("terminal result cannot arrive with an active tool step")
         payload = event.get("result")
         if not isinstance(payload, dict):
             raise ValueError("result event must contain an object payload")
@@ -222,7 +304,9 @@ def parse_antigravity_stream_json(
         if not isinstance(response, str):
             raise ValueError("result response must be a string")
 
-        raw_denied = payload.get("denied_actions", [])
+        if "denied_actions" not in payload:
+            raise ValueError("result denied_actions evidence is required")
+        raw_denied = payload["denied_actions"]
         if not isinstance(raw_denied, list):
             raise ValueError("denied_actions must be a list")
         denied_actions: list[AntigravityDeniedAction] = []
@@ -260,6 +344,24 @@ def parse_antigravity_stream_json(
     )
 
 
+def _validate_stream_result(stream: object) -> AntigravityStreamResult:
+    if not isinstance(stream, AntigravityStreamResult):
+        raise ValueError("stream_result must be AntigravityStreamResult")
+    _require_nonempty_string("stream_result conversation_id", stream.conversation_id)
+    _require_nonempty_string("stream_result top_level_status", stream.top_level_status)
+    if not isinstance(stream.response, str):
+        raise ValueError("stream_result response must be a string")
+    if not isinstance(stream.denied_actions, tuple):
+        raise ValueError("stream_result denied_actions must be a tuple")
+    for denied in stream.denied_actions:
+        if not isinstance(denied, AntigravityDeniedAction):
+            raise ValueError("stream_result denied_actions entries must be AntigravityDeniedAction")
+        _require_nonempty_string("denied action", denied.action)
+        _require_nonempty_string("denied display_name", denied.display_name)
+    _require_int("stream_result event_count", stream.event_count, minimum=1)
+    return stream
+
+
 def classify_antigravity_review(
     evidence: AntigravityReviewEvidence,
 ) -> AntigravityReviewDecision:
@@ -268,13 +370,11 @@ def classify_antigravity_review(
     if not isinstance(evidence, AntigravityReviewEvidence):
         raise TypeError("evidence must be AntigravityReviewEvidence")
 
-    for name, value in (
-        ("expected_reviewed_sha", evidence.expected_reviewed_sha),
-        ("before_head_sha", evidence.before_head_sha),
-        ("after_head_sha", evidence.after_head_sha),
-    ):
-        _require_nonempty_string(name, value)
-
+    expected_reviewed_sha = _require_git_sha(
+        "expected_reviewed_sha", evidence.expected_reviewed_sha
+    )
+    before_head_sha = _require_git_sha("before_head_sha", evidence.before_head_sha)
+    after_head_sha = _require_git_sha("after_head_sha", evidence.after_head_sha)
     expected_review_input_sha256 = _require_sha256(
         "expected_review_input_sha256", evidence.expected_review_input_sha256
     )
@@ -284,15 +384,24 @@ def classify_antigravity_review(
     after_review_input_sha256 = _require_sha256(
         "after_review_input_sha256", evidence.after_review_input_sha256
     )
+    process_exit_code = _require_int("process_exit_code", evidence.process_exit_code)
+    stream = _validate_stream_result(evidence.stream_result)
+    before_tracked_delta = _require_string_tuple(
+        "before_tracked_delta", evidence.before_tracked_delta
+    )
+    after_tracked_delta = _require_string_tuple(
+        "after_tracked_delta", evidence.after_tracked_delta
+    )
+    before_untracked = _require_string_tuple("before_untracked", evidence.before_untracked)
+    after_untracked = _require_string_tuple("after_untracked", evidence.after_untracked)
 
     reasons: list[str] = []
-    stream = evidence.stream_result
 
-    if evidence.before_head_sha != evidence.expected_reviewed_sha:
+    if before_head_sha != expected_reviewed_sha:
         reasons.append("START_SHA_MISMATCH")
-    if evidence.after_head_sha != evidence.expected_reviewed_sha:
+    if after_head_sha != expected_reviewed_sha:
         reasons.append("END_SHA_MISMATCH")
-    if evidence.after_head_sha != evidence.before_head_sha:
+    if after_head_sha != before_head_sha:
         reasons.append("HEAD_MUTATED")
     if before_review_input_sha256 != expected_review_input_sha256:
         reasons.append("START_REVIEW_INPUT_DIGEST_MISMATCH")
@@ -300,7 +409,7 @@ def classify_antigravity_review(
         reasons.append("END_REVIEW_INPUT_DIGEST_MISMATCH")
     if after_review_input_sha256 != before_review_input_sha256:
         reasons.append("REVIEW_INPUT_MUTATED")
-    if evidence.process_exit_code != 0:
+    if process_exit_code != 0:
         reasons.append("PROCESS_EXIT_NONZERO")
     if stream.top_level_status != "SUCCESS":
         reasons.append("PROVIDER_STATUS_NOT_SUCCESS")
@@ -308,9 +417,9 @@ def classify_antigravity_review(
         reasons.append("DENIED_ACTION_PRESENT")
     if not stream.response.strip():
         reasons.append("EMPTY_REVIEW_RESPONSE")
-    if evidence.after_tracked_delta != evidence.before_tracked_delta:
+    if after_tracked_delta != before_tracked_delta:
         reasons.append("TRACKED_BASELINE_MUTATED")
-    if evidence.after_untracked != evidence.before_untracked:
+    if after_untracked != before_untracked:
         reasons.append("UNTRACKED_BASELINE_MUTATED")
 
     if reasons:
