@@ -111,10 +111,10 @@ def parse_antigravity_stream_json(
 
     The parser is intentionally strict. Only event shapes and read-only tool
     steps observed and accepted for the bounded review-only surface are allowed.
-    Every characterized read tool must target the exact expected Windows
-    workspace or a descendant path. Provider-native SUCCESS is retained as
-    evidence only; callers must use ``classify_antigravity_review`` before
-    treating the operation as successful.
+    The provider-reported cwd must equal the exact expected Windows workspace,
+    and every characterized read tool must target that workspace or a descendant
+    path. Provider-native SUCCESS is retained as evidence only; callers must use
+    ``classify_antigravity_review`` before treating the operation as successful.
     """
 
     normalized_workspace = _normalize_windows_absolute_path(
@@ -154,6 +154,14 @@ def parse_antigravity_stream_json(
             )
             if init_conversation_id is not None:
                 raise ValueError("multiple init events are not allowed")
+            init_payload = event.get("init")
+            if not isinstance(init_payload, dict):
+                raise ValueError("init event must contain an object payload")
+            init_cwd = _normalize_windows_absolute_path(
+                "init cwd", init_payload.get("cwd")
+            )
+            if init_cwd != normalized_workspace:
+                raise ValueError("Antigravity init cwd must equal the expected workspace")
             init_conversation_id = conversation_id
             continue
 
