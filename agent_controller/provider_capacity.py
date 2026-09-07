@@ -190,8 +190,13 @@ def recommend_provider(
         )
     if not isinstance(paid_usage_authorized, bool):
         raise TypeError("paid_usage_authorized must be bool")
-    if not isinstance(max_observation_validity_seconds, (int, float)) or max_observation_validity_seconds <= 0:
-        raise ValueError("max_observation_validity_seconds must be a positive number")
+    if (
+        isinstance(max_observation_validity_seconds, bool)
+        or not isinstance(max_observation_validity_seconds, (int, float))
+        or not math.isfinite(float(max_observation_validity_seconds))
+        or max_observation_validity_seconds <= 0
+    ):
+        raise ValueError("max_observation_validity_seconds must be a finite positive number")
     max_observation_validity_seconds = float(max_observation_validity_seconds)
 
     candidate_by_provider: dict[str, ProviderCandidate] = {}

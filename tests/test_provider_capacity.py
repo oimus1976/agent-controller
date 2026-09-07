@@ -370,5 +370,17 @@ class ProviderRecommendationTests(unittest.TestCase):
         self.assertIn("AVAILABLE_CAPACITY", result.reason_codes)
 
 
+    def test_max_observation_validity_seconds_validation(self):
+        invalid_values = [True, False, math.nan, math.inf, -math.inf, 0, -1, -5.5, "3600", None]
+        for val in invalid_values:
+            with self.subTest(value=val):
+                with self.assertRaises((ValueError, TypeError)):
+                    self.recommend(
+                        [ProviderCandidate("codex", True)],
+                        [observation("codex", ProviderAvailability.AVAILABLE)],
+                        max_observation_validity_seconds=val
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()
