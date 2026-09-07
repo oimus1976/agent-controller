@@ -86,6 +86,9 @@ def parse_antigravity_stream_json(lines: Iterable[str]) -> AntigravityStreamResu
         line = raw_line.strip()
         if not line:
             continue
+        if terminal_result is not None:
+            raise ValueError("events after terminal result are not allowed")
+
         try:
             event = json.loads(line)
         except json.JSONDecodeError as exc:
@@ -97,6 +100,9 @@ def parse_antigravity_stream_json(lines: Iterable[str]) -> AntigravityStreamResu
         event_type = _require_nonempty_string("stream event type", event.get("event"))
         if event_type not in _ALLOWED_REVIEW_EVENT_TYPES:
             raise ValueError(f"unsupported Antigravity review event: {event_type}")
+
+        if init_conversation_id is None and event_type != "init":
+            raise ValueError("first Antigravity stream event must be init")
 
         if event_type == "init":
             conversation_id = _require_nonempty_string(
@@ -111,6 +117,11 @@ def parse_antigravity_stream_json(lines: Iterable[str]) -> AntigravityStreamResu
             payload = event.get("step_update")
             if not isinstance(payload, dict):
                 raise ValueError("step_update event must contain an object payload")
+            conversation_id = _require_nonempty_string(
+                "step_update conversation_id", payload.get("conversation_id")
+            )
+            if conversation_id != init_conversation_id:
+                raise ValueError("Antigravity conversation identity changed within one stream")
             step_type = _require_nonempty_string(
                 "step_update step_type", payload.get("step_type")
             )
@@ -120,8 +131,6 @@ def parse_antigravity_stream_json(lines: Iterable[str]) -> AntigravityStreamResu
                 )
             continue
 
-        if terminal_result is not None:
-            raise ValueError("multiple terminal result events are not allowed")
         payload = event.get("result")
         if not isinstance(payload, dict):
             raise ValueError("result event must contain an object payload")
@@ -129,6 +138,8 @@ def parse_antigravity_stream_json(lines: Iterable[str]) -> AntigravityStreamResu
         conversation_id = _require_nonempty_string(
             "result conversation_id", payload.get("conversation_id")
         )
+        if conversation_id != init_conversation_id:
+            raise ValueError("Antigravity conversation identity changed within one stream")
         top_level_status = _require_nonempty_string("result status", payload.get("status"))
         response = payload.get("response")
         if not isinstance(response, str):
@@ -162,8 +173,6 @@ def parse_antigravity_stream_json(lines: Iterable[str]) -> AntigravityStreamResu
         raise ValueError("Antigravity stream is missing terminal result")
     if init_conversation_id is None:
         raise ValueError("Antigravity stream is missing init event")
-    if terminal_result.conversation_id != init_conversation_id:
-        raise ValueError("Antigravity conversation identity changed within one stream")
 
     return AntigravityStreamResult(
         conversation_id=terminal_result.conversation_id,
