@@ -60,7 +60,7 @@ def result_event(*, conversation_id="c1", include_denied_actions=True):
     return json.dumps({"event": "result", "result": result}, separators=(",", ":"))
 
 
-def step_event(step_type, *, step_index=1, state="DONE", **extra):
+def step_event(step_type, *, step_index=0, state="DONE", **extra):
     payload = {
         "conversation_id": "c1",
         "step_index": step_index,
@@ -74,7 +74,7 @@ def step_event(step_type, *, step_index=1, state="DONE", **extra):
     )
 
 
-def tool_event(tool_name, path_parameter, path_value, *, step_index=1, state="ACTIVE"):
+def tool_event(tool_name, path_parameter, path_value, *, step_index=0, state="ACTIVE"):
     return step_event(
         "tool",
         step_index=step_index,
@@ -87,7 +87,7 @@ def tool_event(tool_name, path_parameter, path_value, *, step_index=1, state="AC
     )
 
 
-def tool_pair(tool_name, path_parameter, path_value, *, step_index=1):
+def tool_pair(tool_name, path_parameter, path_value, *, step_index=0):
     return (
         tool_event(
             tool_name,
@@ -200,7 +200,7 @@ class AntigravityStreamParserTests(unittest.TestCase):
                             "event": "step_update",
                             "step_update": {
                                 "conversation_id": "c2",
-                                "step_index": 1,
+                                "step_index": 0,
                                 "state": "DONE",
                                 "step_type": "agent_response",
                             },
@@ -212,7 +212,7 @@ class AntigravityStreamParserTests(unittest.TestCase):
 
     def test_event_after_terminal_result_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "events after terminal result are not allowed"):
-            parse([init_event(), result_event(), step_event("agent_response", step_index=2)])
+            parse([init_event(), result_event(), step_event("agent_response", step_index=0)])
 
     def test_unknown_event_fails_closed_even_if_result_would_succeed(self):
         with self.assertRaisesRegex(ValueError, "unsupported Antigravity review event"):
@@ -235,7 +235,7 @@ class AntigravityStreamParserTests(unittest.TestCase):
                 "event": "step_update",
                 "step_update": {
                     "conversation_id": "c1",
-                    "step_index": 1,
+                    "step_index": 0,
                     "step_type": "agent_response",
                 },
             },
@@ -255,13 +255,13 @@ class AntigravityStreamParserTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-tool step must not contain tool metadata"):
             parse([init_event(), disguised, result_event()])
 
-    def test_step_indices_must_increase_monotonically(self):
-        with self.assertRaisesRegex(ValueError, "indices must increase monotonically"):
+    def test_step_indices_must_be_contiguous_from_zero(self):
+        with self.assertRaisesRegex(ValueError, "indices must be contiguous from zero"):
             parse(
                 [
                     init_event(),
+                    step_event("agent_response", step_index=0),
                     step_event("agent_response", step_index=2),
-                    step_event("agent_response", step_index=1),
                     result_event(),
                 ]
             )
