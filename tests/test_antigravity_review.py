@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import unittest
 
 from agent_controller.antigravity_review import (
@@ -148,13 +149,25 @@ class AntigravityStreamParserTests(unittest.TestCase):
     def test_forbidden_tool_steps_fail_closed(self):
         for tool_name in ("write_to_file", "browser_subagent", "invoke_subagent", "run_command"):
             with self.subTest(tool_name=tool_name):
+                tool_event = json.dumps(
+                    {
+                        "event": "step_update",
+                        "step_update": {
+                            "conversation_id": "c1",
+                            "step_index": 1,
+                            "state": "ACTIVE",
+                            "step_type": "tool",
+                            "tool_name": tool_name,
+                            "tool_info": {"name": tool_name, "parameters": {}},
+                        },
+                    },
+                    separators=(",", ":"),
+                )
                 with self.assertRaisesRegex(ValueError, "unsupported Antigravity review tool"):
                     parse_antigravity_stream_json(
                         [
                             '{"event":"init","conversation_id":"c1","init":{}}',
-                            '{"event":"step_update","step_update":{"conversation_id":"c1",'
-                            f'"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"{tool_name}",'
-                            f'"tool_info":{{"name":"{tool_name}","parameters":{{}}}}}}',
+                            tool_event,
                             '{"event":"result","result":{"conversation_id":"c1",'
                             '"status":"SUCCESS","response":"NO_FINDINGS",'
                             '"denied_actions":[]}}',
