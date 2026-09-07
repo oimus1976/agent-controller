@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import json
+import ntpath
 import re
 from typing import Iterable
 
@@ -54,6 +55,12 @@ _ALLOWED_STEP_UPDATE_TYPES = frozenset({"user_input", "agent_response", "tool"})
 _ALLOWED_READ_ONLY_TOOLS = frozenset(
     {"find_by_name", "view_file", "grep_search", "list_dir"}
 )
+_TOOL_PATH_PARAMETER = {
+    "find_by_name": "SearchDirectory",
+    "view_file": "AbsolutePath",
+    "grep_search": "SearchPath",
+    "list_dir": "DirectoryPath",
+}
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
@@ -70,15 +77,49 @@ def _require_sha256(name: str, value: object) -> str:
     return text.lower()
 
 
-def parse_antigravity_stream_json(lines: Iterable[str]) -> AntigravityStreamResult:
+def _normalize_windows_absolute_path(name: str, value: object) -> str:
+    text = _require_nonempty_string(name, value)
+    normalized = ntpath.normpath(text)
+    drive, _ = ntpath.splitdrive(normalized)
+    if not ntpath.isabs(normalized) or not drive:
+        raise ValueError(f"{name} must be an absolute Windows path")
+    return ntpath.normcase(normalized)
+
+
+def _require_path_within_workspace(
+    name: str,
+    value: object,
+    *,
+    normalized_workspace: str,
+) -> str:
+    normalized_path = _normalize_windows_absolute_path(name, value)
+    try:
+        common = ntpath.commonpath((normalized_workspace, normalized_path))
+    except ValueError as exc:
+        raise ValueError(f"{name} must remain within the expected workspace") from exc
+    if ntpath.normcase(common) != normalized_workspace:
+        raise ValueError(f"{name} must remain within the expected workspace")
+    return normalized_path
+
+
+def parse_antigravity_stream_json(
+    lines: Iterable[str],
+    *,
+    expected_workspace: str,
+) -> AntigravityStreamResult:
     """Parse one fresh ``agy --output-format stream-json`` review transcript.
 
     The parser is intentionally strict. Only event shapes and read-only tool
     steps observed and accepted for the bounded review-only surface are allowed.
-    Provider-native SUCCESS is retained as evidence only; callers must use
-    ``classify_antigravity_review`` before treating the operation as successful.
+    Every characterized read tool must target the exact expected Windows
+    workspace or a descendant path. Provider-native SUCCESS is retained as
+    evidence only; callers must use ``classify_antigravity_review`` before
+    treating the operation as successful.
     """
 
+    normalized_workspace = _normalize_windows_absolute_path(
+        "expected_workspace", expected_workspace
+    )
     event_count = 0
     init_conversation_id: str | None = None
     terminal_result: AntigravityStreamResult | None = None
@@ -148,6 +189,15 @@ def parse_antigravity_stream_json(lines: Iterable[str]) -> AntigravityStreamResu
                 )
                 if tool_info_name != tool_name:
                     raise ValueError("Antigravity tool identity changed within one step")
+                parameters = tool_info.get("parameters")
+                if not isinstance(parameters, dict):
+                    raise ValueError("tool step must contain parameters")
+                path_parameter = _TOOL_PATH_PARAMETER[tool_name]
+                _require_path_within_workspace(
+                    f"{tool_name} {path_parameter}",
+                    parameters.get(path_parameter),
+                    normalized_workspace=normalized_workspace,
+                )
             continue
 
         payload = event.get("result")
