@@ -73,7 +73,7 @@ class AntigravityStreamParserTests(unittest.TestCase):
             )
 
     def test_missing_init_fails_closed(self):
-        with self.assertRaisesRegex(ValueError, "missing init event"):
+        with self.assertRaisesRegex(ValueError, "first Antigravity stream event must be init"):
             parse_antigravity_stream_json(
                 [
                     '{"event":"result","result":{"conversation_id":"c1",'
@@ -90,6 +90,32 @@ class AntigravityStreamParserTests(unittest.TestCase):
                     '{"event":"result","result":{"conversation_id":"c2",'
                     '"status":"SUCCESS","response":"NO_FINDINGS",'
                     '"denied_actions":[]}}',
+                ]
+            )
+
+    def test_step_update_conversation_identity_change_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "conversation identity changed"):
+            parse_antigravity_stream_json(
+                [
+                    '{"event":"init","conversation_id":"c1","init":{}}',
+                    '{"event":"step_update","step_update":{"conversation_id":"c2",'
+                    '"step_index":1,"state":"DONE","step_type":"agent_response"}}',
+                    '{"event":"result","result":{"conversation_id":"c1",'
+                    '"status":"SUCCESS","response":"NO_FINDINGS",'
+                    '"denied_actions":[]}}',
+                ]
+            )
+
+    def test_event_after_terminal_result_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "events after terminal result are not allowed"):
+            parse_antigravity_stream_json(
+                [
+                    '{"event":"init","conversation_id":"c1","init":{}}',
+                    '{"event":"result","result":{"conversation_id":"c1",'
+                    '"status":"SUCCESS","response":"NO_FINDINGS",'
+                    '"denied_actions":[]}}',
+                    '{"event":"step_update","step_update":{"conversation_id":"c1",'
+                    '"step_index":2,"state":"DONE","step_type":"agent_response"}}',
                 ]
             )
 
