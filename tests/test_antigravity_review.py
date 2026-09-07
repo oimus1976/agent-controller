@@ -11,6 +11,7 @@ from agent_controller.antigravity_review import (
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+FIXTURE_WORKSPACE = r"C:\fixture\repo"
 EXPECTED_SHA = "5f78ba0c1bbedbeb0f11463861c621e6b2d5a372"
 EXPECTED_REVIEW_INPUT_SHA256 = (
     "C72C6CE7B21B0CBB9A1AD37D8E6CE8129FD2C3509E5408B9D5CCD25DE95ACAAC"
@@ -22,8 +23,42 @@ def load_fixture(name):
     return (FIXTURES / name).read_text(encoding="utf-8").splitlines()
 
 
+def parse(lines, *, expected_workspace=FIXTURE_WORKSPACE):
+    return parse_antigravity_stream_json(
+        lines,
+        expected_workspace=expected_workspace,
+    )
+
+
 def success_stream():
-    return parse_antigravity_stream_json(load_fixture("antigravity_review_success.jsonl"))
+    return parse(load_fixture("antigravity_review_success.jsonl"))
+
+
+def tool_event(tool_name, path_parameter, path_value):
+    return json.dumps(
+        {
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "c1",
+                "step_index": 1,
+                "state": "ACTIVE",
+                "step_type": "tool",
+                "tool_name": tool_name,
+                "tool_info": {
+                    "name": tool_name,
+                    "parameters": {path_parameter: path_value},
+                },
+            },
+        },
+        separators=(",", ":"),
+    )
+
+
+def result_event():
+    return (
+        '{"event":"result","result":{"conversation_id":"c1",'
+        '"status":"SUCCESS","response":"NO_FINDINGS","denied_actions":[]}}'
+    )
 
 
 def evidence(**overrides):
@@ -55,37 +90,34 @@ class AntigravityStreamParserTests(unittest.TestCase):
         self.assertEqual(result.event_count, 13)
 
     def test_denied_action_can_coexist_with_top_level_success(self):
-        result = parse_antigravity_stream_json(
-            load_fixture("antigravity_review_denied_success.jsonl")
-        )
+        result = parse(load_fixture("antigravity_review_denied_success.jsonl"))
         self.assertEqual(result.top_level_status, "SUCCESS")
         self.assertEqual(result.response, "")
         self.assertEqual(len(result.denied_actions), 1)
         self.assertEqual(result.denied_actions[0].action, "write_file")
 
+    def test_expected_workspace_must_be_absolute_windows_path(self):
+        with self.assertRaisesRegex(ValueError, "absolute Windows path"):
+            parse(
+                ['{"event":"init","conversation_id":"c1","init":{}}'],
+                expected_workspace="relative/repo",
+            )
+
     def test_malformed_stream_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "malformed Antigravity stream-json"):
-            parse_antigravity_stream_json(["{not-json}"])
+            parse(["{not-json}"])
 
     def test_missing_terminal_result_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "missing terminal result"):
-            parse_antigravity_stream_json(
-                ['{"event":"init","conversation_id":"c1","init":{}}']
-            )
+            parse(['{"event":"init","conversation_id":"c1","init":{}}'])
 
     def test_missing_init_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "first Antigravity stream event must be init"):
-            parse_antigravity_stream_json(
-                [
-                    '{"event":"result","result":{"conversation_id":"c1",'
-                    '"status":"SUCCESS","response":"NO_FINDINGS",'
-                    '"denied_actions":[]}}'
-                ]
-            )
+            parse([result_event()])
 
     def test_conversation_identity_change_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "conversation identity changed"):
-            parse_antigravity_stream_json(
+            parse(
                 [
                     '{"event":"init","conversation_id":"c1","init":{}}',
                     '{"event":"result","result":{"conversation_id":"c2",'
@@ -96,25 +128,21 @@ class AntigravityStreamParserTests(unittest.TestCase):
 
     def test_step_update_conversation_identity_change_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "conversation identity changed"):
-            parse_antigravity_stream_json(
+            parse(
                 [
                     '{"event":"init","conversation_id":"c1","init":{}}',
                     '{"event":"step_update","step_update":{"conversation_id":"c2",'
                     '"step_index":1,"state":"DONE","step_type":"agent_response"}}',
-                    '{"event":"result","result":{"conversation_id":"c1",'
-                    '"status":"SUCCESS","response":"NO_FINDINGS",'
-                    '"denied_actions":[]}}',
+                    result_event(),
                 ]
             )
 
     def test_event_after_terminal_result_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "events after terminal result are not allowed"):
-            parse_antigravity_stream_json(
+            parse(
                 [
                     '{"event":"init","conversation_id":"c1","init":{}}',
-                    '{"event":"result","result":{"conversation_id":"c1",'
-                    '"status":"SUCCESS","response":"NO_FINDINGS",'
-                    '"denied_actions":[]}}',
+                    result_event(),
                     '{"event":"step_update","step_update":{"conversation_id":"c1",'
                     '"step_index":2,"state":"DONE","step_type":"agent_response"}}',
                 ]
@@ -122,34 +150,30 @@ class AntigravityStreamParserTests(unittest.TestCase):
 
     def test_unknown_event_fails_closed_even_if_result_would_succeed(self):
         with self.assertRaisesRegex(ValueError, "unsupported Antigravity review event"):
-            parse_antigravity_stream_json(
+            parse(
                 [
                     '{"event":"init","conversation_id":"c1","init":{}}',
                     '{"event":"tool_call","tool_call":{"name":"write_to_file",'
                     '"status":"SUCCESS"}}',
-                    '{"event":"result","result":{"conversation_id":"c1",'
-                    '"status":"SUCCESS","response":"NO_FINDINGS",'
-                    '"denied_actions":[]}}',
+                    result_event(),
                 ]
             )
 
     def test_non_characterized_step_type_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "unsupported Antigravity review step type"):
-            parse_antigravity_stream_json(
+            parse(
                 [
                     '{"event":"init","conversation_id":"c1","init":{}}',
                     '{"event":"step_update","step_update":{"conversation_id":"c1",'
                     '"step_index":1,"state":"DONE","step_type":"question"}}',
-                    '{"event":"result","result":{"conversation_id":"c1",'
-                    '"status":"SUCCESS","response":"NO_FINDINGS",'
-                    '"denied_actions":[]}}',
+                    result_event(),
                 ]
             )
 
     def test_forbidden_tool_steps_fail_closed(self):
         for tool_name in ("write_to_file", "browser_subagent", "invoke_subagent", "run_command"):
             with self.subTest(tool_name=tool_name):
-                tool_event = json.dumps(
+                forbidden = json.dumps(
                     {
                         "event": "step_update",
                         "step_update": {
@@ -164,28 +188,97 @@ class AntigravityStreamParserTests(unittest.TestCase):
                     separators=(",", ":"),
                 )
                 with self.assertRaisesRegex(ValueError, "unsupported Antigravity review tool"):
-                    parse_antigravity_stream_json(
+                    parse(
                         [
                             '{"event":"init","conversation_id":"c1","init":{}}',
-                            tool_event,
-                            '{"event":"result","result":{"conversation_id":"c1",'
-                            '"status":"SUCCESS","response":"NO_FINDINGS",'
-                            '"denied_actions":[]}}',
+                            forbidden,
+                            result_event(),
                         ]
                     )
 
     def test_tool_identity_mismatch_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "tool identity changed"):
-            parse_antigravity_stream_json(
+            parse(
                 [
                     '{"event":"init","conversation_id":"c1","init":{}}',
                     '{"event":"step_update","step_update":{"conversation_id":"c1",'
                     '"step_index":1,"state":"ACTIVE","step_type":"tool",'
                     '"tool_name":"view_file","tool_info":{"name":"list_dir",'
-                    '"parameters":{}}}}',
-                    '{"event":"result","result":{"conversation_id":"c1",'
-                    '"status":"SUCCESS","response":"NO_FINDINGS",'
-                    '"denied_actions":[]}}',
+                    '"parameters":{"AbsolutePath":"C:/fixture/repo/file.txt"}}}}',
+                    result_event(),
+                ]
+            )
+
+    def test_each_characterized_read_tool_accepts_workspace_descendant(self):
+        cases = (
+            ("find_by_name", "SearchDirectory", r"C:\fixture\repo\tests"),
+            ("view_file", "AbsolutePath", r"C:\fixture\repo\README.md"),
+            ("grep_search", "SearchPath", r"C:\fixture\repo\agent_controller"),
+            ("list_dir", "DirectoryPath", r"C:\fixture\repo"),
+        )
+        for tool_name, parameter, target in cases:
+            with self.subTest(tool_name=tool_name):
+                result = parse(
+                    [
+                        '{"event":"init","conversation_id":"c1","init":{}}',
+                        tool_event(tool_name, parameter, target),
+                        result_event(),
+                    ]
+                )
+                self.assertEqual(result.top_level_status, "SUCCESS")
+
+    def test_each_characterized_read_tool_rejects_workspace_escape(self):
+        cases = (
+            ("find_by_name", "SearchDirectory"),
+            ("view_file", "AbsolutePath"),
+            ("grep_search", "SearchPath"),
+            ("list_dir", "DirectoryPath"),
+        )
+        for tool_name, parameter in cases:
+            for target in (
+                r"C:\fixture\outside",
+                r"C:\fixture\repo\..\outside",
+                r"D:\fixture\repo",
+            ):
+                with self.subTest(tool_name=tool_name, target=target):
+                    with self.assertRaisesRegex(ValueError, "within the expected workspace"):
+                        parse(
+                            [
+                                '{"event":"init","conversation_id":"c1","init":{}}',
+                                tool_event(tool_name, parameter, target),
+                                result_event(),
+                            ]
+                        )
+
+    def test_read_tool_rejects_relative_or_missing_path_parameter(self):
+        with self.assertRaisesRegex(ValueError, "absolute Windows path"):
+            parse(
+                [
+                    '{"event":"init","conversation_id":"c1","init":{}}',
+                    tool_event("view_file", "AbsolutePath", "review-input.diff"),
+                    result_event(),
+                ]
+            )
+        missing = json.dumps(
+            {
+                "event": "step_update",
+                "step_update": {
+                    "conversation_id": "c1",
+                    "step_index": 1,
+                    "state": "ACTIVE",
+                    "step_type": "tool",
+                    "tool_name": "view_file",
+                    "tool_info": {"name": "view_file", "parameters": {}},
+                },
+            },
+            separators=(",", ":"),
+        )
+        with self.assertRaisesRegex(ValueError, "must be a nonempty string"):
+            parse(
+                [
+                    '{"event":"init","conversation_id":"c1","init":{}}',
+                    missing,
+                    result_event(),
                 ]
             )
 
@@ -206,9 +299,7 @@ class AntigravityReviewClassifierTests(unittest.TestCase):
         self.assertEqual(first, second)
 
     def test_denied_action_blocks_despite_top_level_success_and_exit_zero(self):
-        stream = parse_antigravity_stream_json(
-            load_fixture("antigravity_review_denied_success.jsonl")
-        )
+        stream = parse(load_fixture("antigravity_review_denied_success.jsonl"))
         decision = classify_antigravity_review(evidence(stream_result=stream))
         self.assertEqual(decision.status, AntigravityReviewStatus.BLOCKED)
         self.assertIn("DENIED_ACTION_PRESENT", decision.reason_codes)
