@@ -173,7 +173,7 @@ def parse_antigravity_stream_json(
     event_count = 0
     init_conversation_id: str | None = None
     terminal_result: AntigravityStreamResult | None = None
-    last_completed_step_index = -1
+    next_step_index = 0
     active_tool: tuple[int, str] | None = None
 
     for raw_line in lines:
@@ -245,9 +245,9 @@ def parse_antigravity_stream_json(
                     raise ValueError("non-tool review steps must be DONE")
                 if active_tool is not None:
                     raise ValueError("active tool step must complete before another step")
-                if step_index <= last_completed_step_index:
-                    raise ValueError("step_update indices must increase monotonically")
-                last_completed_step_index = step_index
+                if step_index != next_step_index:
+                    raise ValueError("step_update indices must be contiguous from zero")
+                next_step_index += 1
                 continue
 
             tool_name = _require_nonempty_string(
@@ -275,8 +275,8 @@ def parse_antigravity_stream_json(
             if state == "ACTIVE":
                 if active_tool is not None:
                     raise ValueError("nested active tool steps are not allowed")
-                if step_index <= last_completed_step_index:
-                    raise ValueError("step_update indices must increase monotonically")
+                if step_index != next_step_index:
+                    raise ValueError("step_update indices must be contiguous from zero")
                 active_tool = (step_index, tool_name)
                 continue
 
@@ -284,7 +284,7 @@ def parse_antigravity_stream_json(
                 raise ValueError("tool DONE must match a preceding ACTIVE step")
             if active_tool != (step_index, tool_name):
                 raise ValueError("tool DONE must match the active tool step")
-            last_completed_step_index = step_index
+            next_step_index += 1
             active_tool = None
             continue
 
