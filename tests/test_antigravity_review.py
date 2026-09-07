@@ -30,6 +30,17 @@ def parse(lines, *, expected_workspace=FIXTURE_WORKSPACE):
     )
 
 
+def init_event(*, cwd=FIXTURE_WORKSPACE, conversation_id="c1"):
+    return json.dumps(
+        {
+            "event": "init",
+            "conversation_id": conversation_id,
+            "init": {"cwd": cwd},
+        },
+        separators=(",", ":"),
+    )
+
+
 def success_stream():
     return parse(load_fixture("antigravity_review_success.jsonl"))
 
@@ -54,10 +65,18 @@ def tool_event(tool_name, path_parameter, path_value):
     )
 
 
-def result_event():
-    return (
-        '{"event":"result","result":{"conversation_id":"c1",'
-        '"status":"SUCCESS","response":"NO_FINDINGS","denied_actions":[]}}'
+def result_event(*, conversation_id="c1"):
+    return json.dumps(
+        {
+            "event": "result",
+            "result": {
+                "conversation_id": conversation_id,
+                "status": "SUCCESS",
+                "response": "NO_FINDINGS",
+                "denied_actions": [],
+            },
+        },
+        separators=(",", ":"),
     )
 
 
@@ -98,10 +117,21 @@ class AntigravityStreamParserTests(unittest.TestCase):
 
     def test_expected_workspace_must_be_absolute_windows_path(self):
         with self.assertRaisesRegex(ValueError, "absolute Windows path"):
-            parse(
-                ['{"event":"init","conversation_id":"c1","init":{}}'],
-                expected_workspace="relative/repo",
-            )
+            parse([init_event()], expected_workspace="relative/repo")
+
+    def test_init_cwd_must_equal_expected_workspace(self):
+        with self.assertRaisesRegex(ValueError, "init cwd must equal the expected workspace"):
+            parse([init_event(cwd=r"C:\fixture\outside"), result_event()])
+
+    def test_init_cwd_is_required_and_absolute(self):
+        missing_cwd = json.dumps(
+            {"event": "init", "conversation_id": "c1", "init": {}},
+            separators=(",", ":"),
+        )
+        with self.assertRaisesRegex(ValueError, "must be a nonempty string"):
+            parse([missing_cwd, result_event()])
+        with self.assertRaisesRegex(ValueError, "absolute Windows path"):
+            parse([init_event(cwd="relative/repo"), result_event()])
 
     def test_malformed_stream_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "malformed Antigravity stream-json"):
@@ -109,7 +139,7 @@ class AntigravityStreamParserTests(unittest.TestCase):
 
     def test_missing_terminal_result_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "missing terminal result"):
-            parse(['{"event":"init","conversation_id":"c1","init":{}}'])
+            parse([init_event()])
 
     def test_missing_init_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "first Antigravity stream event must be init"):
@@ -117,20 +147,13 @@ class AntigravityStreamParserTests(unittest.TestCase):
 
     def test_conversation_identity_change_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "conversation identity changed"):
-            parse(
-                [
-                    '{"event":"init","conversation_id":"c1","init":{}}',
-                    '{"event":"result","result":{"conversation_id":"c2",'
-                    '"status":"SUCCESS","response":"NO_FINDINGS",'
-                    '"denied_actions":[]}}',
-                ]
-            )
+            parse([init_event(), result_event(conversation_id="c2")])
 
     def test_step_update_conversation_identity_change_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "conversation identity changed"):
             parse(
                 [
-                    '{"event":"init","conversation_id":"c1","init":{}}',
+                    init_event(),
                     '{"event":"step_update","step_update":{"conversation_id":"c2",'
                     '"step_index":1,"state":"DONE","step_type":"agent_response"}}',
                     result_event(),
@@ -141,7 +164,7 @@ class AntigravityStreamParserTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "events after terminal result are not allowed"):
             parse(
                 [
-                    '{"event":"init","conversation_id":"c1","init":{}}',
+                    init_event(),
                     result_event(),
                     '{"event":"step_update","step_update":{"conversation_id":"c1",'
                     '"step_index":2,"state":"DONE","step_type":"agent_response"}}',
@@ -152,7 +175,7 @@ class AntigravityStreamParserTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported Antigravity review event"):
             parse(
                 [
-                    '{"event":"init","conversation_id":"c1","init":{}}',
+                    init_event(),
                     '{"event":"tool_call","tool_call":{"name":"write_to_file",'
                     '"status":"SUCCESS"}}',
                     result_event(),
@@ -163,7 +186,7 @@ class AntigravityStreamParserTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported Antigravity review step type"):
             parse(
                 [
-                    '{"event":"init","conversation_id":"c1","init":{}}',
+                    init_event(),
                     '{"event":"step_update","step_update":{"conversation_id":"c1",'
                     '"step_index":1,"state":"DONE","step_type":"question"}}',
                     result_event(),
@@ -188,26 +211,28 @@ class AntigravityStreamParserTests(unittest.TestCase):
                     separators=(",", ":"),
                 )
                 with self.assertRaisesRegex(ValueError, "unsupported Antigravity review tool"):
-                    parse(
-                        [
-                            '{"event":"init","conversation_id":"c1","init":{}}',
-                            forbidden,
-                            result_event(),
-                        ]
-                    )
+                    parse([init_event(), forbidden, result_event()])
 
     def test_tool_identity_mismatch_fails_closed(self):
+        mismatch = json.dumps(
+            {
+                "event": "step_update",
+                "step_update": {
+                    "conversation_id": "c1",
+                    "step_index": 1,
+                    "state": "ACTIVE",
+                    "step_type": "tool",
+                    "tool_name": "view_file",
+                    "tool_info": {
+                        "name": "list_dir",
+                        "parameters": {"AbsolutePath": r"C:\fixture\repo\file.txt"},
+                    },
+                },
+            },
+            separators=(",", ":"),
+        )
         with self.assertRaisesRegex(ValueError, "tool identity changed"):
-            parse(
-                [
-                    '{"event":"init","conversation_id":"c1","init":{}}',
-                    '{"event":"step_update","step_update":{"conversation_id":"c1",'
-                    '"step_index":1,"state":"ACTIVE","step_type":"tool",'
-                    '"tool_name":"view_file","tool_info":{"name":"list_dir",'
-                    '"parameters":{"AbsolutePath":"C:/fixture/repo/file.txt"}}}}',
-                    result_event(),
-                ]
-            )
+            parse([init_event(), mismatch, result_event()])
 
     def test_each_characterized_read_tool_accepts_workspace_descendant(self):
         cases = (
@@ -219,11 +244,7 @@ class AntigravityStreamParserTests(unittest.TestCase):
         for tool_name, parameter, target in cases:
             with self.subTest(tool_name=tool_name):
                 result = parse(
-                    [
-                        '{"event":"init","conversation_id":"c1","init":{}}',
-                        tool_event(tool_name, parameter, target),
-                        result_event(),
-                    ]
+                    [init_event(), tool_event(tool_name, parameter, target), result_event()]
                 )
                 self.assertEqual(result.top_level_status, "SUCCESS")
 
@@ -244,7 +265,7 @@ class AntigravityStreamParserTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "within the expected workspace"):
                         parse(
                             [
-                                '{"event":"init","conversation_id":"c1","init":{}}',
+                                init_event(),
                                 tool_event(tool_name, parameter, target),
                                 result_event(),
                             ]
@@ -254,7 +275,7 @@ class AntigravityStreamParserTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "absolute Windows path"):
             parse(
                 [
-                    '{"event":"init","conversation_id":"c1","init":{}}',
+                    init_event(),
                     tool_event("view_file", "AbsolutePath", "review-input.diff"),
                     result_event(),
                 ]
@@ -274,13 +295,7 @@ class AntigravityStreamParserTests(unittest.TestCase):
             separators=(",", ":"),
         )
         with self.assertRaisesRegex(ValueError, "must be a nonempty string"):
-            parse(
-                [
-                    '{"event":"init","conversation_id":"c1","init":{}}',
-                    missing,
-                    result_event(),
-                ]
-            )
+            parse([init_event(), missing, result_event()])
 
 
 class AntigravityReviewClassifierTests(unittest.TestCase):
