@@ -50,7 +50,10 @@ class AntigravityReviewDecision:
 
 
 _ALLOWED_REVIEW_EVENT_TYPES = frozenset({"init", "step_update", "result"})
-_ALLOWED_STEP_UPDATE_TYPES = frozenset({"agent_response"})
+_ALLOWED_STEP_UPDATE_TYPES = frozenset({"user_input", "agent_response", "tool"})
+_ALLOWED_READ_ONLY_TOOLS = frozenset(
+    {"find_by_name", "view_file", "grep_search", "list_dir"}
+)
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
@@ -70,10 +73,10 @@ def _require_sha256(name: str, value: object) -> str:
 def parse_antigravity_stream_json(lines: Iterable[str]) -> AntigravityStreamResult:
     """Parse one fresh ``agy --output-format stream-json`` review transcript.
 
-    The parser is intentionally strict. Only event shapes observed and accepted
-    for the bounded review-only surface are allowed. Provider-native SUCCESS is
-    retained as evidence only; callers must use ``classify_antigravity_review``
-    before treating the review operation as successful.
+    The parser is intentionally strict. Only event shapes and read-only tool
+    steps observed and accepted for the bounded review-only surface are allowed.
+    Provider-native SUCCESS is retained as evidence only; callers must use
+    ``classify_antigravity_review`` before treating the operation as successful.
     """
 
     event_count = 0
@@ -129,6 +132,22 @@ def parse_antigravity_stream_json(lines: Iterable[str]) -> AntigravityStreamResu
                 raise ValueError(
                     f"unsupported Antigravity review step type: {step_type}"
                 )
+            if step_type == "tool":
+                tool_name = _require_nonempty_string(
+                    "step_update tool_name", payload.get("tool_name")
+                )
+                if tool_name not in _ALLOWED_READ_ONLY_TOOLS:
+                    raise ValueError(
+                        f"unsupported Antigravity review tool: {tool_name}"
+                    )
+                tool_info = payload.get("tool_info")
+                if not isinstance(tool_info, dict):
+                    raise ValueError("tool step must contain tool_info")
+                tool_info_name = _require_nonempty_string(
+                    "tool_info name", tool_info.get("name")
+                )
+                if tool_info_name != tool_name:
+                    raise ValueError("Antigravity tool identity changed within one step")
             continue
 
         payload = event.get("result")
