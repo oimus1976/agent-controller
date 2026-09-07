@@ -45,13 +45,13 @@ def evidence(**overrides):
 
 
 class AntigravityStreamParserTests(unittest.TestCase):
-    def test_success_fixture_preserves_provider_evidence(self):
+    def test_characterized_success_fixture_preserves_provider_evidence(self):
         result = success_stream()
         self.assertEqual(result.conversation_id, "fixture-review-1")
         self.assertEqual(result.top_level_status, "SUCCESS")
         self.assertEqual(result.response, "NO_FINDINGS")
         self.assertEqual(result.denied_actions, ())
-        self.assertEqual(result.event_count, 3)
+        self.assertEqual(result.event_count, 13)
 
     def test_denied_action_can_coexist_with_top_level_success(self):
         result = parse_antigravity_stream_json(
@@ -119,7 +119,7 @@ class AntigravityStreamParserTests(unittest.TestCase):
                 ]
             )
 
-    def test_unknown_or_tool_event_fails_closed_even_if_result_would_succeed(self):
+    def test_unknown_event_fails_closed_even_if_result_would_succeed(self):
         with self.assertRaisesRegex(ValueError, "unsupported Antigravity review event"):
             parse_antigravity_stream_json(
                 [
@@ -132,13 +132,44 @@ class AntigravityStreamParserTests(unittest.TestCase):
                 ]
             )
 
-    def test_non_agent_response_step_update_fails_closed(self):
+    def test_non_characterized_step_type_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "unsupported Antigravity review step type"):
             parse_antigravity_stream_json(
                 [
                     '{"event":"init","conversation_id":"c1","init":{}}',
                     '{"event":"step_update","step_update":{"conversation_id":"c1",'
-                    '"step_index":1,"state":"DONE","step_type":"tool"}}',
+                    '"step_index":1,"state":"DONE","step_type":"question"}}',
+                    '{"event":"result","result":{"conversation_id":"c1",'
+                    '"status":"SUCCESS","response":"NO_FINDINGS",'
+                    '"denied_actions":[]}}',
+                ]
+            )
+
+    def test_forbidden_tool_steps_fail_closed(self):
+        for tool_name in ("write_to_file", "browser_subagent", "invoke_subagent", "run_command"):
+            with self.subTest(tool_name=tool_name):
+                with self.assertRaisesRegex(ValueError, "unsupported Antigravity review tool"):
+                    parse_antigravity_stream_json(
+                        [
+                            '{"event":"init","conversation_id":"c1","init":{}}',
+                            '{"event":"step_update","step_update":{"conversation_id":"c1",'
+                            f'"step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"{tool_name}",'
+                            f'"tool_info":{{"name":"{tool_name}","parameters":{{}}}}}}',
+                            '{"event":"result","result":{"conversation_id":"c1",'
+                            '"status":"SUCCESS","response":"NO_FINDINGS",'
+                            '"denied_actions":[]}}',
+                        ]
+                    )
+
+    def test_tool_identity_mismatch_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "tool identity changed"):
+            parse_antigravity_stream_json(
+                [
+                    '{"event":"init","conversation_id":"c1","init":{}}',
+                    '{"event":"step_update","step_update":{"conversation_id":"c1",'
+                    '"step_index":1,"state":"ACTIVE","step_type":"tool",'
+                    '"tool_name":"view_file","tool_info":{"name":"list_dir",'
+                    '"parameters":{}}}}',
                     '{"event":"result","result":{"conversation_id":"c1",'
                     '"status":"SUCCESS","response":"NO_FINDINGS",'
                     '"denied_actions":[]}}',
