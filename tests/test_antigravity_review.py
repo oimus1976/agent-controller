@@ -11,6 +11,10 @@ from agent_controller.antigravity_review import (
 
 FIXTURES = Path(__file__).parent / "fixtures"
 EXPECTED_SHA = "5f78ba0c1bbedbeb0f11463861c621e6b2d5a372"
+EXPECTED_REVIEW_INPUT_SHA256 = (
+    "C72C6CE7B21B0CBB9A1AD37D8E6CE8129FD2C3509E5408B9D5CCD25DE95ACAAC"
+)
+OTHER_REVIEW_INPUT_SHA256 = "0" * 64
 
 
 def load_fixture(name):
@@ -26,6 +30,9 @@ def evidence(**overrides):
         "expected_reviewed_sha": EXPECTED_SHA,
         "before_head_sha": EXPECTED_SHA,
         "after_head_sha": EXPECTED_SHA,
+        "expected_review_input_sha256": EXPECTED_REVIEW_INPUT_SHA256,
+        "before_review_input_sha256": EXPECTED_REVIEW_INPUT_SHA256,
+        "after_review_input_sha256": EXPECTED_REVIEW_INPUT_SHA256,
         "process_exit_code": 0,
         "stream_result": success_stream(),
         "before_tracked_delta": (),
@@ -81,6 +88,32 @@ class AntigravityStreamParserTests(unittest.TestCase):
                 [
                     '{"event":"init","conversation_id":"c1","init":{}}',
                     '{"event":"result","result":{"conversation_id":"c2",'
+                    '"status":"SUCCESS","response":"NO_FINDINGS",'
+                    '"denied_actions":[]}}',
+                ]
+            )
+
+    def test_unknown_or_tool_event_fails_closed_even_if_result_would_succeed(self):
+        with self.assertRaisesRegex(ValueError, "unsupported Antigravity review event"):
+            parse_antigravity_stream_json(
+                [
+                    '{"event":"init","conversation_id":"c1","init":{}}',
+                    '{"event":"tool_call","tool_call":{"name":"write_to_file",'
+                    '"status":"SUCCESS"}}',
+                    '{"event":"result","result":{"conversation_id":"c1",'
+                    '"status":"SUCCESS","response":"NO_FINDINGS",'
+                    '"denied_actions":[]}}',
+                ]
+            )
+
+    def test_non_agent_response_step_update_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "unsupported Antigravity review step type"):
+            parse_antigravity_stream_json(
+                [
+                    '{"event":"init","conversation_id":"c1","init":{}}',
+                    '{"event":"step_update","step_update":{"conversation_id":"c1",'
+                    '"step_index":1,"state":"DONE","step_type":"tool"}}',
+                    '{"event":"result","result":{"conversation_id":"c1",'
                     '"status":"SUCCESS","response":"NO_FINDINGS",'
                     '"denied_actions":[]}}',
                 ]
@@ -152,6 +185,25 @@ class AntigravityReviewClassifierTests(unittest.TestCase):
         self.assertEqual(decision.status, AntigravityReviewStatus.BLOCKED)
         self.assertIn("END_SHA_MISMATCH", decision.reason_codes)
         self.assertIn("HEAD_MUTATED", decision.reason_codes)
+
+    def test_review_input_digest_mismatch_blocks_even_when_head_matches(self):
+        decision = classify_antigravity_review(
+            evidence(before_review_input_sha256=OTHER_REVIEW_INPUT_SHA256)
+        )
+        self.assertEqual(decision.status, AntigravityReviewStatus.BLOCKED)
+        self.assertIn("START_REVIEW_INPUT_DIGEST_MISMATCH", decision.reason_codes)
+
+    def test_review_input_mutation_blocks(self):
+        decision = classify_antigravity_review(
+            evidence(after_review_input_sha256=OTHER_REVIEW_INPUT_SHA256)
+        )
+        self.assertEqual(decision.status, AntigravityReviewStatus.BLOCKED)
+        self.assertIn("END_REVIEW_INPUT_DIGEST_MISMATCH", decision.reason_codes)
+        self.assertIn("REVIEW_INPUT_MUTATED", decision.reason_codes)
+
+    def test_malformed_review_input_digest_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "SHA-256 digest"):
+            classify_antigravity_review(evidence(expected_review_input_sha256="not-a-digest"))
 
     def test_tracked_baseline_mutation_blocks(self):
         decision = classify_antigravity_review(
