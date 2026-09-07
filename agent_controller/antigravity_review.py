@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import json
+import re
 from typing import Iterable
 
 
@@ -31,6 +32,9 @@ class AntigravityReviewEvidence:
     expected_reviewed_sha: str
     before_head_sha: str
     after_head_sha: str
+    expected_review_input_sha256: str
+    before_review_input_sha256: str
+    after_review_input_sha256: str
     process_exit_code: int
     stream_result: AntigravityStreamResult
     before_tracked_delta: tuple[str, ...] = ()
@@ -45,18 +49,31 @@ class AntigravityReviewDecision:
     reason_codes: tuple[str, ...]
 
 
+_ALLOWED_REVIEW_EVENT_TYPES = frozenset({"init", "step_update", "result"})
+_ALLOWED_STEP_UPDATE_TYPES = frozenset({"agent_response"})
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
 def _require_nonempty_string(name: str, value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be a nonempty string")
     return value
 
 
+def _require_sha256(name: str, value: object) -> str:
+    text = _require_nonempty_string(name, value)
+    if _SHA256_RE.fullmatch(text) is None:
+        raise ValueError(f"{name} must be a 64-character hexadecimal SHA-256 digest")
+    return text.lower()
+
+
 def parse_antigravity_stream_json(lines: Iterable[str]) -> AntigravityStreamResult:
     """Parse one fresh ``agy --output-format stream-json`` review transcript.
 
-    The parser is intentionally strict. Provider-native SUCCESS is retained as
-    evidence only; callers must use ``classify_antigravity_review`` before
-    treating the review operation as successful.
+    The parser is intentionally strict. Only event shapes observed and accepted
+    for the bounded review-only surface are allowed. Provider-native SUCCESS is
+    retained as evidence only; callers must use ``classify_antigravity_review``
+    before treating the review operation as successful.
     """
 
     event_count = 0
@@ -77,7 +94,10 @@ def parse_antigravity_stream_json(lines: Iterable[str]) -> AntigravityStreamResu
             raise ValueError("Antigravity stream event must be an object")
 
         event_count += 1
-        event_type = event.get("event")
+        event_type = _require_nonempty_string("stream event type", event.get("event"))
+        if event_type not in _ALLOWED_REVIEW_EVENT_TYPES:
+            raise ValueError(f"unsupported Antigravity review event: {event_type}")
+
         if event_type == "init":
             conversation_id = _require_nonempty_string(
                 "init conversation_id", event.get("conversation_id")
@@ -87,7 +107,17 @@ def parse_antigravity_stream_json(lines: Iterable[str]) -> AntigravityStreamResu
             init_conversation_id = conversation_id
             continue
 
-        if event_type != "result":
+        if event_type == "step_update":
+            payload = event.get("step_update")
+            if not isinstance(payload, dict):
+                raise ValueError("step_update event must contain an object payload")
+            step_type = _require_nonempty_string(
+                "step_update step_type", payload.get("step_type")
+            )
+            if step_type not in _ALLOWED_STEP_UPDATE_TYPES:
+                raise ValueError(
+                    f"unsupported Antigravity review step type: {step_type}"
+                )
             continue
 
         if terminal_result is not None:
@@ -159,6 +189,16 @@ def classify_antigravity_review(
     ):
         _require_nonempty_string(name, value)
 
+    expected_review_input_sha256 = _require_sha256(
+        "expected_review_input_sha256", evidence.expected_review_input_sha256
+    )
+    before_review_input_sha256 = _require_sha256(
+        "before_review_input_sha256", evidence.before_review_input_sha256
+    )
+    after_review_input_sha256 = _require_sha256(
+        "after_review_input_sha256", evidence.after_review_input_sha256
+    )
+
     reasons: list[str] = []
     stream = evidence.stream_result
 
@@ -168,6 +208,12 @@ def classify_antigravity_review(
         reasons.append("END_SHA_MISMATCH")
     if evidence.after_head_sha != evidence.before_head_sha:
         reasons.append("HEAD_MUTATED")
+    if before_review_input_sha256 != expected_review_input_sha256:
+        reasons.append("START_REVIEW_INPUT_DIGEST_MISMATCH")
+    if after_review_input_sha256 != expected_review_input_sha256:
+        reasons.append("END_REVIEW_INPUT_DIGEST_MISMATCH")
+    if after_review_input_sha256 != before_review_input_sha256:
+        reasons.append("REVIEW_INPUT_MUTATED")
     if evidence.process_exit_code != 0:
         reasons.append("PROCESS_EXIT_NONZERO")
     if stream.top_level_status != "SUCCESS":
