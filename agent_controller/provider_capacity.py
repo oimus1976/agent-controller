@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 import math
 from typing import Optional, Sequence
@@ -164,6 +164,7 @@ def recommend_provider(
     decision_at: str,
     candidates: Sequence[ProviderCandidate],
     capacity_observations: Sequence[ProviderCapacityObservation],
+    max_observation_validity_seconds: float,
     reserved_independent_review_provider: Optional[str] = None,
     paid_usage_authorized: bool = False,
 ) -> ProviderRecommendation:
@@ -189,6 +190,14 @@ def recommend_provider(
         )
     if not isinstance(paid_usage_authorized, bool):
         raise TypeError("paid_usage_authorized must be bool")
+    if (
+        isinstance(max_observation_validity_seconds, bool)
+        or not isinstance(max_observation_validity_seconds, (int, float))
+        or not math.isfinite(float(max_observation_validity_seconds))
+        or max_observation_validity_seconds <= 0
+    ):
+        raise ValueError("max_observation_validity_seconds must be a finite positive number")
+    max_observation_validity_seconds = float(max_observation_validity_seconds)
 
     candidate_by_provider: dict[str, ProviderCandidate] = {}
     for candidate in candidates:
@@ -245,9 +254,17 @@ def recommend_provider(
             continue
 
         observation = observation_by_provider.get(provider)
-        if observation is not None and observation.reset_at is not None:
-            reset_time = _parse_aware_iso8601("reset_at", observation.reset_at)
-            if decision_time >= reset_time:
+        if observation is not None:
+            observed_at = _parse_aware_iso8601("observed_at", observation.observed_at)
+            validity_boundary = observed_at + timedelta(seconds=max_observation_validity_seconds)
+
+            boundary_time = validity_boundary
+            if observation.reset_at is not None:
+                reset_time = _parse_aware_iso8601("reset_at", observation.reset_at)
+                if reset_time < validity_boundary:
+                    boundary_time = reset_time
+
+            if decision_time >= boundary_time:
                 deferred.append(
                     DeferredProvider(
                         provider, ProviderDeferralReason.CAPACITY_REOBSERVATION_REQUIRED

@@ -95,6 +95,8 @@ class ProviderCapacityObservationTests(unittest.TestCase):
 
 class ProviderRecommendationTests(unittest.TestCase):
     def recommend(self, candidates, observations, **kwargs):
+        if "max_observation_validity_seconds" not in kwargs:
+            kwargs["max_observation_validity_seconds"] = 7200.0
         return recommend_provider(
             **BINDING,
             decision_at=kwargs.pop("decision_at", DECISION_AT),
@@ -142,6 +144,7 @@ class ProviderRecommendationTests(unittest.TestCase):
             decision_at="2026-09-04T19:00:00+09:00",
             candidates=[ProviderCandidate("codex", True)],
             capacity_observations=[exhausted_codex],
+            max_observation_validity_seconds=7200.0,
         )
         self.assertIsNone(result.recommendation)
         self.assertEqual(result.eligible, ("codex",))
@@ -154,6 +157,7 @@ class ProviderRecommendationTests(unittest.TestCase):
         exhausted = observation(
             "codex",
             ProviderAvailability.EXHAUSTED,
+            observed_at="2026-09-07T11:26:00+09:00",
             reset_at="2026-09-07T11:27:00+09:00",
         )
         before = self.recommend(
@@ -319,6 +323,63 @@ class ProviderRecommendationTests(unittest.TestCase):
             self.deferred_pairs(result),
         )
         self.assertEqual(result.reason_codes, ())
+
+
+    def test_stale_observation_requires_reobservation(self):
+        stale = observation("codex", ProviderAvailability.AVAILABLE, observed_at="2026-09-04T16:00:00+09:00")
+        result = self.recommend(
+            [ProviderCandidate("codex", True)],
+            [stale],
+            decision_at="2026-09-04T19:00:00+09:00",
+            max_observation_validity_seconds=3600.0,
+        )
+        self.assertIsNone(result.recommendation)
+        self.assertIn(
+            ("codex", ProviderDeferralReason.CAPACITY_REOBSERVATION_REQUIRED),
+            self.deferred_pairs(result),
+        )
+
+    def test_stale_observation_with_far_future_reset_at_requires_reobservation(self):
+        stale = observation(
+            "codex",
+            ProviderAvailability.AVAILABLE,
+            observed_at="2026-09-04T16:00:00+09:00",
+            reset_at="2026-09-05T16:00:00+09:00"
+        )
+        result = self.recommend(
+            [ProviderCandidate("codex", True)],
+            [stale],
+            decision_at="2026-09-04T19:00:00+09:00",
+            max_observation_validity_seconds=3600.0,
+        )
+        self.assertIsNone(result.recommendation)
+        self.assertIn(
+            ("codex", ProviderDeferralReason.CAPACITY_REOBSERVATION_REQUIRED),
+            self.deferred_pairs(result),
+        )
+
+    def test_fresh_observation_is_usable(self):
+        fresh = observation("codex", ProviderAvailability.AVAILABLE, observed_at="2026-09-04T18:30:00+09:00")
+        result = self.recommend(
+            [ProviderCandidate("codex", True)],
+            [fresh],
+            decision_at="2026-09-04T19:00:00+09:00",
+            max_observation_validity_seconds=3600.0,
+        )
+        self.assertEqual(result.recommendation, "codex")
+        self.assertIn("AVAILABLE_CAPACITY", result.reason_codes)
+
+
+    def test_max_observation_validity_seconds_validation(self):
+        invalid_values = [True, False, math.nan, math.inf, -math.inf, 0, -1, -5.5, "3600", None]
+        for val in invalid_values:
+            with self.subTest(value=val):
+                with self.assertRaises((ValueError, TypeError)):
+                    self.recommend(
+                        [ProviderCandidate("codex", True)],
+                        [observation("codex", ProviderAvailability.AVAILABLE)],
+                        max_observation_validity_seconds=val
+                    )
 
 
 if __name__ == "__main__":
