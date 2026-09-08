@@ -4,6 +4,11 @@ import argparse
 from pathlib import Path
 import sys
 
+
+REPO_ROOT = Path(__file__).resolve(strict=True).parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from agent_controller.antigravity_capacity_observer import write_statusline_capture
 
 
