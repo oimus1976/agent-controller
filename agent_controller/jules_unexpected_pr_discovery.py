@@ -24,6 +24,7 @@ class PullRequestFact:
     draft: bool
     open: bool
     merged: bool
+    head_repo: str | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ def _valid_pr_fact(fact: PullRequestFact) -> bool:
         and _nonempty(fact.base_ref)
         and _nonempty(fact.head_ref)
         and _valid_sha(fact.head_sha)
+        and _nonempty(fact.head_repo)
         and type(fact.draft) is bool
         and type(fact.open) is bool
         and type(fact.merged) is bool
@@ -118,6 +120,11 @@ def _verify_candidate(
         return JulesPRDiscoveryResult(
             JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
             "cross-repository PR evidence cannot be adopted.",
+        )
+    if fact.head_repo != repo:
+        return JulesPRDiscoveryResult(
+            JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
+            "foreign head-repository PR evidence cannot establish Jules publication identity; fail closed.",
         )
     if expected_head_ref is not None and _normalize_ref(fact.head_ref) != _normalize_ref(expected_head_ref):
         return JulesPRDiscoveryResult(
