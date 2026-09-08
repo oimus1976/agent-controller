@@ -14,6 +14,7 @@ from agent_controller.provider_capacity_pool import ProviderCapacityPoolObservat
 
 _MAX_CAPTURE_BYTES = 64 * 1024
 _CAPTURE_SCHEMA_VERSION = 1
+_CAPACITY_FIELDS = ("product", "version", "quota", "status", "error")
 
 
 CanonicalPathResolver = Callable[[str], str]
@@ -32,6 +33,18 @@ def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]
             raise ValueError(f"duplicate JSON key: {key}")
         result[key] = value
     return result
+
+
+def _capacity_only_payload(payload: str) -> str:
+    try:
+        root = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
+    except json.JSONDecodeError as exc:
+        raise ValueError("malformed Antigravity statusline JSON") from exc
+    if not isinstance(root, dict):
+        raise ValueError("Antigravity statusline root must be an object")
+
+    minimized = {name: root[name] for name in _CAPACITY_FIELDS if name in root}
+    return json.dumps(minimized, ensure_ascii=False, separators=(",", ":"))
 
 
 def _parse_aware_timestamp(name: str, value: object) -> datetime:
@@ -91,10 +104,11 @@ def write_statusline_capture(
     canonical_path_resolver: CanonicalPathResolver = _strict_realpath,
     max_bytes: int = _MAX_CAPTURE_BYTES,
 ) -> AntigravityStatuslineCapture:
-    """Atomically persist one raw Antigravity status-line stdin payload.
+    """Atomically persist only capacity-relevant Antigravity status-line telemetry.
 
-    The raw payload is stored as a string so duplicate provider JSON keys remain
-    visible to the existing fail-closed capacity parser.
+    Duplicate keys are rejected against the original stdin JSON before unrelated
+    status-line fields such as account identity, transcript path, workspace path,
+    conversation identity, and token context are discarded.
     """
 
     if not isinstance(payload, str) or not payload.strip():
@@ -103,12 +117,7 @@ def write_statusline_capture(
     if len(encoded) > max_bytes:
         raise ValueError("statusline payload exceeds size limit")
 
-    # Validate JSON syntax and duplicate keys without normalizing the raw payload.
-    try:
-        json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
-    except json.JSONDecodeError as exc:
-        raise ValueError("malformed Antigravity statusline JSON") from exc
-
+    minimized_payload = _capacity_only_payload(payload)
     timestamp = captured_at or datetime.now(timezone.utc).isoformat()
     _parse_aware_timestamp("captured_at", timestamp)
     resolved_root, resolved_path = _resolved_capture_path(
@@ -122,7 +131,7 @@ def write_statusline_capture(
         {
             "schema_version": _CAPTURE_SCHEMA_VERSION,
             "captured_at": timestamp,
-            "payload": payload,
+            "payload": minimized_payload,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -142,7 +151,7 @@ def write_statusline_capture(
             pass
         raise
 
-    return AntigravityStatuslineCapture(captured_at=timestamp, payload=payload)
+    return AntigravityStatuslineCapture(captured_at=timestamp, payload=minimized_payload)
 
 
 def read_statusline_capture(
