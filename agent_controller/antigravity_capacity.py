@@ -55,6 +55,14 @@ def parse_antigravity_statusline_capacity(
 
     if not isinstance(root, Mapping):
         raise ValueError("Antigravity statusline root must be an object")
+
+    status = root.get("status")
+    error = root.get("error")
+    if error not in (None, "") or (
+        isinstance(status, str) and status.strip().upper() in {"ERROR", "FAILED", "FAILURE"}
+    ):
+        raise ValueError("Antigravity error envelope is not capacity telemetry")
+
     if root.get("product") != "antigravity":
         raise ValueError("statusline product is not antigravity")
 
