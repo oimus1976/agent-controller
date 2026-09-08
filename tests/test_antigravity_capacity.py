@@ -77,6 +77,15 @@ class AntigravityCapacityParserTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "error envelope"):
             parse(payload)
 
+    def test_duplicate_envelope_keys_fail_closed(self):
+        payload = (
+            '{"product":"antigravity","version":"1.1.27",'
+            '"status":"ERROR","status":"OK",'
+            '"quota":{"gemini-weekly":{"remaining_fraction":0.5}}}'
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate JSON key: status"):
+            parse(payload)
+
     def test_missing_or_empty_quota_fails_closed(self):
         for quota in (None, {}):
             with self.subTest(quota=quota):
