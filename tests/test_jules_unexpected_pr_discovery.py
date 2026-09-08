@@ -121,6 +121,28 @@ class TestUnexpectedJulesPRDiscovery(unittest.TestCase):
         )
         self.assertEqual(client.search_calls, [])
 
+    def test_terminal_pull_request_number_mismatch_fails_closed_before_ancestry(self):
+        class MismatchedClient(FakeDiscoveryClient):
+            def get_pull_request(self, repo, pr_number):
+                self.get_calls.append((repo, pr_number))
+                return self.fact
+
+        fact = self.fact(number=43)
+        client = MismatchedClient(prs=[])
+        client.fact = fact
+        result = self.run_discovery(
+            client,
+            provider_reported_pull_request_url="https://github.com/owner/repo/pull/42",
+        )
+        self.assertEqual(
+            result.classification,
+            JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
+        )
+        self.assertIn("identity disagrees", result.guidance)
+        self.assertEqual(client.get_calls, [("owner/repo", 42)])
+        self.assertEqual(client.search_calls, [])
+        self.assertEqual(client.ancestry_calls, [])
+
     def test_terminal_pull_request_and_branch_disagreement_fails_closed(self):
         fact = self.fact(head_ref="different/provider-output")
         client = FakeDiscoveryClient(prs=[fact])
