@@ -54,6 +54,7 @@ class BoundPRTerminalOutputRegressionTests(unittest.TestCase):
             draft=True,
             open=True,
             merged=False,
+            head_repo="owner/repo",
         )
         client = _Client(fact)
         result = _discover(client)
@@ -89,6 +90,7 @@ class BoundPRTerminalOutputRegressionTests(unittest.TestCase):
             draft=False,
             open=True,
             merged=True,
+            head_repo="owner/repo",
         )
         client = _Client(fact)
         result = _discover(client)
