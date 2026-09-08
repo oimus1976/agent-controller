@@ -29,6 +29,15 @@ def _finite_fraction(value: object) -> float:
     return fraction
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
 def parse_antigravity_statusline_capacity(
     payload: str,
     *,
@@ -49,8 +58,8 @@ def parse_antigravity_statusline_capacity(
     if not isinstance(payload, str):
         raise TypeError("payload must be str")
     try:
-        root = json.loads(payload)
-    except (TypeError, json.JSONDecodeError) as exc:
+        root = json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
+    except json.JSONDecodeError as exc:
         raise ValueError("malformed Antigravity statusline JSON") from exc
 
     if not isinstance(root, Mapping):
