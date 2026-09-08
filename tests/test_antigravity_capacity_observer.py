@@ -131,28 +131,29 @@ class AntigravityCapacityObserverTests(unittest.TestCase):
                     max_bytes=32,
                 )
 
-    def test_capture_path_must_be_directly_beneath_resolved_root(self):
+    def test_read_rejects_capture_file_symlink_that_resolves_outside_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp).resolve()
             root = base / "capture"
             outside = base / "outside"
             root.mkdir()
             outside.mkdir()
-            path = root / "latest.json"
-
-            def escaping_resolver(value: str) -> str:
-                candidate = Path(value)
-                if candidate == path.parent:
-                    return str(outside)
-                return str(candidate)
+            outside_path = outside / "latest.json"
+            write_statusline_capture(
+                PAYLOAD,
+                capture_path=outside_path,
+                capture_root=outside,
+                captured_at="2026-09-09T00:00:00Z",
+            )
+            linked_path = root / "latest.json"
+            linked_path.symlink_to(outside_path)
 
             with self.assertRaisesRegex(ValueError, "directly beneath"):
-                write_statusline_capture(
-                    PAYLOAD,
-                    capture_path=path,
+                read_statusline_capture(
+                    capture_path=linked_path,
                     capture_root=root,
-                    captured_at="2026-09-09T00:00:00Z",
-                    canonical_path_resolver=escaping_resolver,
+                    now="2026-09-09T00:00:30Z",
+                    max_age_seconds=60,
                 )
 
     def test_unresolvable_capture_path_fails_closed_without_lexical_fallback(self):
