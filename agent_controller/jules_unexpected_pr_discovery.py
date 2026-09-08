@@ -242,6 +242,11 @@ def discover_unexpected_jules_pr(
                 JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
                 "malformed GitHub PR evidence from Jules terminal pullRequest; fail closed.",
             )
+        if fact.number != pr_number:
+            return JulesPRDiscoveryResult(
+                JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
+                "GitHub PR identity disagrees with Jules terminal pullRequest; fail closed.",
+            )
         if _normalize_ref(fact.head_ref) == _normalize_ref(bound_branch):
             return JulesPRDiscoveryResult(
                 JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
