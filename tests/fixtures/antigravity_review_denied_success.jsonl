@@ -1,0 +1,2 @@
+{"event":"init","conversation_id":"fixture-review-denied","init":{"cwd":"C:\\fixture\\repo","tools":["write_to_file"],"permission_mode":"request-review"}}
+{"event":"result","result":{"conversation_id":"fixture-review-denied","status":"SUCCESS","response":"","duration_seconds":1.0,"num_turns":1,"denied_actions":[{"action":"write_file","display_name":"WriteToFile"}]}}
