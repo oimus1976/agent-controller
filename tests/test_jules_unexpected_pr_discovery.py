@@ -65,6 +65,7 @@ class TestUnexpectedJulesPRDiscovery(unittest.TestCase):
             draft=True,
             open=True,
             merged=False,
+            head_repo="owner/repo",
         )
         values.update(overrides)
         return PullRequestFact(**values)
@@ -170,6 +171,17 @@ class TestUnexpectedJulesPRDiscovery(unittest.TestCase):
             client.ancestry_calls,
             [("owner/repo", "a" * 40, "b" * 40)],
         )
+
+    def test_same_branch_name_on_foreign_head_repo_fails_closed(self):
+        fact = self.fact(head_repo="other/fork")
+        client = FakeDiscoveryClient(prs=[fact])
+        result = self.run_discovery(client)
+        self.assertEqual(
+            result.classification,
+            JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
+        )
+        self.assertIn("foreign head-repository", result.guidance)
+        self.assertEqual(client.ancestry_calls, [])
 
     def test_non_draft_provider_pr_is_observed_effect_not_authorized_ready(self):
         fact = self.fact(draft=False)
