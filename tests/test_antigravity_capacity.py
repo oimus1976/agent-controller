@@ -65,8 +65,16 @@ class AntigravityCapacityParserTests(unittest.TestCase):
             parse("{not-json")
 
     def test_error_envelope_is_not_capacity_success(self):
-        payload = json.dumps({"status": "ERROR", "error": "quota unavailable"})
-        with self.assertRaises(ValueError):
+        payload = json.dumps(
+            {
+                "product": "antigravity",
+                "version": "1.1.27",
+                "status": "ERROR",
+                "error": "quota unavailable",
+                "quota": {"gemini-weekly": {"remaining_fraction": 0.5}},
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "error envelope"):
             parse(payload)
 
     def test_missing_or_empty_quota_fails_closed(self):
