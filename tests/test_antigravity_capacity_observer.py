@@ -22,7 +22,7 @@ CAPTURE_SCRIPT = REPO_ROOT / "scripts" / "capture_antigravity_statusline.py"
 
 
 class AntigravityCapacityObserverTests(unittest.TestCase):
-    def test_capture_round_trip_preserves_raw_payload_and_timestamp(self):
+    def test_capture_round_trip_preserves_capacity_payload_and_timestamp(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
             path = root / "latest.json"
@@ -40,6 +40,35 @@ class AntigravityCapacityObserverTests(unittest.TestCase):
             )
             self.assertEqual(observed, capture)
             self.assertEqual(observed.payload, PAYLOAD)
+
+    def test_capture_discards_unrelated_statusline_identity_and_workspace_fields(self):
+        payload = (
+            '{"product":"antigravity","version":"1.1.27",'
+            '"quota":{"gemini-weekly":{"remaining_fraction":0.5}},'
+            '"email":"secret@example.com","conversation_id":"conv-secret",'
+            '"transcript_path":"C:\\\\secret\\\\transcript.json",'
+            '"workspace":{"current_dir":"C:\\\\secret"}}'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            path = root / "latest.json"
+            write_statusline_capture(
+                payload,
+                capture_path=path,
+                capture_root=root,
+                captured_at="2026-09-09T00:00:00Z",
+            )
+            observed = read_statusline_capture(
+                capture_path=path,
+                capture_root=root,
+                now="2026-09-09T00:00:30Z",
+                max_age_seconds=60,
+            )
+            self.assertNotIn("secret@example.com", observed.payload)
+            self.assertNotIn("conv-secret", observed.payload)
+            self.assertNotIn("transcript_path", observed.payload)
+            self.assertNotIn("workspace", observed.payload)
+            self.assertIn('"quota"', observed.payload)
 
     def test_observer_reuses_existing_parser_and_capture_time(self):
         with tempfile.TemporaryDirectory() as tmp:
