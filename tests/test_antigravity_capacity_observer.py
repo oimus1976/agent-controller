@@ -1,4 +1,6 @@
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -15,6 +17,8 @@ PAYLOAD = (
     '"quota":{"gemini-weekly":{"remaining_fraction":0.5,'
     '"reset_time":"2026-09-14T02:00:00Z"}}}'
 )
+REPO_ROOT = Path(__file__).resolve(strict=True).parents[1]
+CAPTURE_SCRIPT = REPO_ROOT / "scripts" / "capture_antigravity_statusline.py"
 
 
 class AntigravityCapacityObserverTests(unittest.TestCase):
@@ -62,6 +66,39 @@ class AntigravityCapacityObserverTests(unittest.TestCase):
             self.assertEqual(observation.observed_at, "2026-09-09T00:00:00Z")
             self.assertEqual(observation.availability, ProviderAvailability.AVAILABLE)
             self.assertEqual(observations[0].capacity_pool, "gemini-weekly")
+
+    def test_capture_script_runs_from_foreign_cwd_and_reads_stdin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            capture_root = base / "capture"
+            foreign_cwd = base / "workspace"
+            capture_root.mkdir()
+            foreign_cwd.mkdir()
+            capture_path = capture_root / "latest.json"
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(CAPTURE_SCRIPT),
+                    "--capture-root",
+                    str(capture_root),
+                    "--capture-path",
+                    str(capture_path),
+                ],
+                cwd=foreign_cwd,
+                input=PAYLOAD,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            observed = read_statusline_capture(
+                capture_path=capture_path,
+                capture_root=capture_root,
+                now="2099-01-01T00:00:00Z",
+                max_age_seconds=10**10,
+            )
+            self.assertEqual(observed.payload, PAYLOAD)
 
     def test_stale_capture_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
