@@ -216,12 +216,15 @@ def discover_unexpected_jules_pr(
             JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
             "malformed provider completion evidence; fail closed.",
         )
-
-    if authoritative_current_bound_sha != authoritative_baseline_bound_sha:
+    if provider_reported_branch is not None and not _nonempty(provider_reported_branch):
         return JulesPRDiscoveryResult(
-            JulesPRDiscoveryClassification.BOUND_BRANCH_ADVANCED,
-            "bound branch advanced; treat the new head as untrusted and restart scope/CI/review evidence.",
+            JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
+            "malformed provider branch evidence; fail closed.",
         )
+
+    bound_branch_advanced = (
+        authoritative_current_bound_sha != authoritative_baseline_bound_sha
+    )
 
     if provider_reported_pull_request_url is not None:
         pr_number = _parse_exact_github_pr_url(provider_reported_pull_request_url, repo)
@@ -262,7 +265,18 @@ def discover_unexpected_jules_pr(
         )
         if mismatch is not None:
             return mismatch
+        if bound_branch_advanced:
+            return JulesPRDiscoveryResult(
+                JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
+                "bound branch advanced while a distinct Jules terminal PR was also verified; simultaneous publication effects are ambiguous and require fresh scope/CI/review evidence.",
+            )
         return _exposed_result(fact, "Jules terminal Session.outputs.pullRequest")
+
+    if bound_branch_advanced:
+        return JulesPRDiscoveryResult(
+            JulesPRDiscoveryClassification.BOUND_BRANCH_ADVANCED,
+            "bound branch advanced; treat the new head as untrusted and restart scope/CI/review evidence.",
+        )
 
     if provider_reported_branch is None:
         if provider_reported_completion:
@@ -273,12 +287,6 @@ def discover_unexpected_jules_pr(
         return JulesPRDiscoveryResult(
             JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
             "no terminal PR output or exact distinct provider branch is available for bounded PR discovery.",
-        )
-
-    if not _nonempty(provider_reported_branch):
-        return JulesPRDiscoveryResult(
-            JulesPRDiscoveryClassification.PUBLICATION_AMBIGUOUS,
-            "malformed provider branch evidence; fail closed.",
         )
 
     if _normalize_ref(provider_reported_branch) == _normalize_ref(bound_branch):
