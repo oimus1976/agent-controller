@@ -367,6 +367,19 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## [Unreleased]
+
+関連: Issue #168, PR #169
+
+### Added
+
+- provider-capacity observation/recommendation boundaryを明示。
+- bounded freshness semantics (有効期限) の導入によるstale observation失効の確実化。
+- paid-usage boundary、review-provider preservation の要件を明示。
+- recommendation-only / no-side-effect authority を維持する設計。
+
+---
+
 ## 2026-08-23 — Phase 4C architecture reset / provider-neutral decision
 
 関連: Issue #10, Draft PR #11, ADR Issue #12, Issue #13, Issue #14
