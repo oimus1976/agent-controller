@@ -15,6 +15,39 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-10 — Antigravity status-line capacity observer（Issue #177 / Draft PR #186）
+
+関連: Issue #168, Issue #177, PR #185, Draft PR #186
+
+### Added / changed
+
+- PR #185 で Antigravity status-line quota parser を provider-neutral capacity contract へ接続し、複数 quota pool を集約せず個別の `ProviderCapacityPoolObservation` として保持する境界を追加。
+- PR #186 で Controller-owned `statusLine` sink を追加し、stdin で受けた元 JSON を duplicate-key 検証した後、`product` / `version` / `quota` / `status` / `error` の capacity-relevant field だけを保存する。
+- identity / workspace / transcript / conversation / context 等の unrelated field は永続化前に破棄する。
+- capture root / path は strict canonical resolution で direct-child containment を検証し、resolution failure は lexical fallback せず fail closed。capture artifact は atomic replace で更新する。
+- `captured_at` と provider reset timestamp を分離し、stale / future / oversize / malformed / duplicate-key capture を成功として扱わない。
+- owner-machine pilot で Windows の direct quoted Python command が Antigravity `statusLine.command` 境界で失敗することを観測し、pilot 専用の temporary `.cmd` wrapper 経由で実行した。この wrapper 自体は repository へ追加せず cleanup で削除した。
+
+### Owner-machine validation
+
+- exact head `661ad10b0f412ed271f58d2094729a8bbdc29cd1` で targeted PR #186 tests PASS（Windows standard user で file symlink privilege がない場合のみ該当 test skip）。
+- 同 head の full deterministic unittest discovery は 816 tests PASS / 2 platform-or-privilege skips、dedicated Windows junction regression は 2 tests PASS。
+- synthetic payload の direct sink と `.cmd` wrapper 経由 capture はともに PASS。quota pool を保持しつつ identity/workspace 系 field が保存されないことを確認。
+- live pilot 中に Antigravity CLI が 1.1.27 から 1.1.28 へ更新されたため version drift を検出して一度停止し、1.1.28 の config UI で Telemetry / Non-Workspace Access / Use AI Credits がいずれも off であることを確認してから再開。
+- manual `/usage` 直後の live capture を observer へ通し、`3p-5h` / `3p-weekly` / `gemini-5h` / `gemini-weekly` の4 poolを `PROVIDER_TELEMETRY` として個別に正規化。全 pool で reset timestamp を保持し、provenance は `antigravity-cli-statusline/1.1.28`。
+- 1.1.28 が settings representation を migration したため、pilot cleanup は古い settings backup を丸ごと戻さず、current 1.1.28 representation から temporary `statusLine` だけを削除。capture artifact と temporary wrapper も削除し、paid-credit setting は未設定/off のまま維持。
+- 詳細な owner-machine evidence と cleanup rationale は `docs/antigravity-capacity-owner-pilot.md` に記録。
+
+### Safety / authority boundary
+
+- `captured_at` は Antigravity TUI が payload を Controller sink へ渡した時刻であり、provider/backend が quota を refresh した時刻の証明ではない。pilot では manual `/usage` を直前に実行したが、automatic UI driving は追加しない。
+- no model call for quota、no SDK/API/Vertex path、no paid credits、no provider/session/GitHub/routing mutation、no quota-pool aggregation を維持。
+- GitHub-hosted Actions は included monthly minutes 枯渇により exact-head job が開始できない状態であり、local exact-head PASS / owner-machine live PASS を GitHub-hosted CI PASS と読み替えない。
+- zero-paid exact-head CI fallback は Issue #187 の独立 workstream とし、PR #186 の scope を広げない。
+- Ready / merge は ADR #90 に従い human-final。この項目は Draft PR #186 の未merge実装を記録しており、mainへの採用済み状態を意味しない。
+
+---
+
 ## 2026-08-30 — Codex request amplification observation（Issue #113 / Draft PR #114）
 
 関連: Issue #55, Issue #113, Draft PR #114
