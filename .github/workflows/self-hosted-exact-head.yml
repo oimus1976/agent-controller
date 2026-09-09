@@ -35,11 +35,19 @@ jobs:
           INPUT_RUNNER_NONCE: ${{ inputs.runner_nonce }}
           EXPECTED_REPOSITORY: ${{ github.repository }}
           WORKFLOW_REF: ${{ github.ref }}
+          RUNNER_OS_NAME: ${{ runner.os }}
+          RUNNER_ARCH_NAME: ${{ runner.arch }}
         run: |
           $ErrorActionPreference = 'Stop'
 
           if ($env:WORKFLOW_REF -ne 'refs/heads/main') {
             throw 'fallback workflow must be dispatched from the trusted main branch'
+          }
+          if ($env:RUNNER_OS_NAME -ne 'Windows') {
+            throw "runner OS must be Windows, got $env:RUNNER_OS_NAME"
+          }
+          if ($env:RUNNER_ARCH_NAME -ne 'X64') {
+            throw "runner architecture must be X64, got $env:RUNNER_ARCH_NAME"
           }
           if ($env:INPUT_PR_NUMBER -notmatch '^[1-9][0-9]*$') {
             throw 'pr_number must be a positive decimal integer'
@@ -67,6 +75,8 @@ jobs:
           "validated_pr=$($pr.number)"
           "validated_head=$($pr.head.sha)"
           "validated_head_repo=$($pr.head.repo.full_name)"
+          "validated_runner_os=$env:RUNNER_OS_NAME"
+          "validated_runner_arch=$env:RUNNER_ARCH_NAME"
 
       - name: Checkout exact target SHA
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -151,7 +161,7 @@ jobs:
           "" >> $env:GITHUB_STEP_SUMMARY
           "- PR: #$env:INPUT_PR_NUMBER" >> $env:GITHUB_STEP_SUMMARY
           "- exact head: ``$env:INPUT_TARGET_SHA``" >> $env:GITHUB_STEP_SUMMARY
-          "- runner trust domain: repository-scoped one-job ephemeral self-hosted Windows runner" >> $env:GITHUB_STEP_SUMMARY
+          "- runner trust domain: repository-scoped one-job ephemeral self-hosted Windows/X64 runner" >> $env:GITHUB_STEP_SUMMARY
           "- full unittest suite: PASS" >> $env:GITHUB_STEP_SUMMARY
           "- Windows junction regression: PASS" >> $env:GITHUB_STEP_SUMMARY
           "- evidence is not GITHUB_HOSTED_CI_PASS" >> $env:GITHUB_STEP_SUMMARY
