@@ -212,7 +212,12 @@ class AntigravityCapacityObserverTests(unittest.TestCase):
                 captured_at="2026-09-09T00:00:00Z",
             )
             linked_path = root / "latest.json"
-            linked_path.symlink_to(outside_path)
+            try:
+                linked_path.symlink_to(outside_path)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    self.skipTest("file symlink unavailable without Windows symlink privilege")
+                raise
 
             with self.assertRaisesRegex(ValueError, "directly beneath"):
                 read_statusline_capture(
