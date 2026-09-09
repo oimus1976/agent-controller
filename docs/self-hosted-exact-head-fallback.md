@@ -16,33 +16,67 @@ The canonical `.github/workflows/tests.yml` remains unchanged. This fallback is 
 
 No class automatically promotes to another class. Ready / merge remain human-final under ADR #90.
 
-## Initial Windows pilot
+## Host-specific decision for the first pilot
 
-The first bounded pilot uses one Windows x64 self-hosted runner and runs:
+The available Agent Controller host is already a dedicated mini PC, not a general-purpose personal workstation:
 
-1. the full deterministic unittest suite;
-2. the real Windows junction containment regression.
+- HP ProDesk 400 G4 DM;
+- Intel Core i5-8500T, 6 cores / 6 logical processors;
+- approximately 16 GB RAM;
+- 256 GB SSD with approximately 198 GB free at characterization time;
+- Windows reports that a hypervisor is already detected.
 
-This gives GitHub-bound exact-head execution evidence on Windows, but does not claim OS-equivalence with the canonical Ubuntu job. A later Linux self-hosted pilot may reproduce the Ubuntu job if needed.
+Given this hardware, the first bounded design does **not** require a Windows guest VM. Running the Windows CI path directly on this dedicated host under a CI-only standard user gives a better resource/complexity trade-off than keeping an additional Windows VM resident on a 16 GB machine.
+
+This is a host-specific risk acceptance, not a claim that a Windows account boundary is equivalent to a disposable VM. The standard-user boundary reduces blast radius; it is not a sandbox.
+
+## Windows first-pilot execution model
+
+Use the dedicated Agent Controller mini PC as the Windows CI host, with these role boundaries:
+
+- `c-admin`: host administration/setup only; never the runner identity;
+- `agy-agent`: existing Antigravity characterization account; never the CI runner identity;
+- `ac-runner`: dedicated standard-user account for self-hosted CI only.
+
+The `ac-runner` profile must not contain owner/admin browser sessions, password-vault state, SSH private keys, provider/cloud API keys, Antigravity/Codex/Jules state, unrelated repository credentials, or other valuable material.
+
+The Windows runner is repository-scoped, one-job ephemeral, and routed only through a fresh one-time label. After each pilot job, the runner workspace/profile state is treated as potentially contaminated until cleanup/recreation is completed. `--ephemeral` de-registers the runner after one job; it does not reset the host filesystem.
+
+## Linux coverage decision
+
+The canonical hosted workflow also has an Ubuntu/Python 3.12 full-suite job. A Windows PASS must not be promoted to Ubuntu-equivalent evidence.
+
+If GitHub-hosted capacity remains unavailable long enough to justify Linux fallback coverage, add a separate Linux execution environment on the same mini PC rather than a second Windows VM.
+
+Preferred Linux shape:
+
+- Ubuntu Hyper-V VM rather than WSL2 when the goal is to approximate the canonical Ubuntu runner semantics;
+- 2 vCPU;
+- 3 GB RAM initially, with 4 GB as the upper pilot target if tests require it;
+- 30-40 GB dynamically expanding virtual disk;
+- no unrelated credentials or shared host secrets;
+- one-job ephemeral GitHub runner registration inside the VM;
+- VM powered off when not needed;
+- if practical, revert to a known-clean checkpoint or recreate the VM before later untrusted target execution.
+
+These limits preserve host headroom on a 16 GB machine while being ample for the current Python unittest workload. Do not run the Windows and Linux self-hosted CI jobs concurrently on this host during the first pilot.
 
 ## Runner trust requirements
 
-Before registration, the runner host/account must satisfy all of the following:
+Before registration, the Windows runner host/account must satisfy all of the following:
 
 - repository-scoped registration for `oimus1976/agent-controller` only;
-- dedicated standard-user runner identity;
-- no owner/admin browser session, password vault, SSH private key, cloud/provider API key, unrelated repository token, or other valuable credential reachable by the runner account;
-- dedicated/disposable machine or VM preferred;
+- dedicated standard-user runner identity (`ac-runner` for the first pilot);
+- no valuable credentials reachable by the runner account;
 - Python 3.12 installed and available to the runner account;
 - register for exactly one job with `--ephemeral`;
-- suppress the default routable labels with `--no-default-labels`;
+- suppress default routable labels with `--no-default-labels`;
 - assign one fresh high-entropy custom label `ac-ci-<16 hex>` for that pilot only;
 - do not execute fork PRs, arbitrary branch names, issue attachments, or unpublished agent worktrees;
-- operator confirms the target is an open same-repository PR and supplies its exact current 40-hex head SHA.
+- operator confirms the target is an open same-repository PR and supplies its exact current 40-hex head SHA;
+- runner workspace is not reused blindly after a job; cleanup/recreation is required before subsequent untrusted execution.
 
-GitHub recommends ephemeral self-hosted runners for autoscaling/use-once scenarios and notes that an ephemeral runner is automatically de-registered after one job. The one-time label reduces the chance that an unrelated queued workflow can claim the runner when it comes online. It is not a substitute for host isolation.
-
-A self-hosted runner still executes repository code with the local privileges of the runner account. Disposable runner state remains the preferred long-term design; after the one job, wipe or discard the pilot workspace/VM where practical.
+The one-time label reduces the chance that an unrelated queued workflow can claim the runner when it comes online. It is not a substitute for host isolation.
 
 ## Workflow safety properties
 
@@ -78,15 +112,32 @@ After merge, dispatch this workflow explicitly from `main`. The in-workflow `git
 ## Pilot operation
 
 1. Keep the runner unregistered until this workflow has been independently reviewed and human-merged to `main`.
-2. Generate a fresh random 16-hex nonce and derive label `ac-ci-<nonce>`.
-3. Register the runner repository-scoped using GitHub's short-lived registration token with `--ephemeral --no-default-labels --labels ac-ci-<nonce>`.
-4. Confirm the runner account and Python 3.12 runtime.
-5. Dispatch the trusted workflow explicitly from `main`, supplying the exact PR number, exact current head SHA, and the same nonce.
-6. Preserve the GitHub run/job identity and exact SHA as evidence.
-7. The runner should de-register after the single job. Wipe/discard its workspace or VM before reuse where practical.
+2. Create/verify the dedicated `ac-runner` standard-user account on the Agent Controller mini PC.
+3. Install only the runtime prerequisites needed by the runner account (Git, Python 3.12, Actions runner files).
+4. Generate a fresh random 16-hex nonce and derive label `ac-ci-<nonce>`.
+5. Register the runner repository-scoped using GitHub's short-lived registration token with `--ephemeral --no-default-labels --labels ac-ci-<nonce>`.
+6. Dispatch the trusted workflow explicitly from `main`, supplying the exact PR number, exact current head SHA, and the same nonce.
+7. Preserve the GitHub run/job identity and exact SHA as evidence.
+8. After the one job, confirm de-registration, remove/reset runner workspace state, and treat the account as contaminated until cleanup is complete.
+9. Add Linux VM fallback only if hosted Ubuntu capacity remains unavailable and Ubuntu-equivalent evidence becomes necessary.
 
 ## Failure semantics
 
 Any malformed input, GitHub API error, fork/head-repository mismatch, PR state mismatch, head drift, Python version mismatch, test failure, dirty/head-changed postcondition, or final PR drift fails the job. Do not infer PASS from partial steps.
 
 A capacity-blocked GitHub-hosted job remains distinct from self-hosted PASS and from code failure.
+
+## Residual risk acceptance
+
+The first Windows pilot intentionally accepts more residual host-persistence risk than a disposable Windows VM in exchange for substantially lower resource and operational cost on the available 16 GB dedicated host. This acceptance is bounded by:
+
+- dedicated physical host;
+- dedicated standard-user runner account;
+- no valuable credentials;
+- manual same-repository exact-head dispatch only;
+- one-job ephemeral registration;
+- one-time routing label;
+- explicit post-job cleanup;
+- human-final Ready/merge boundary.
+
+If the project later begins executing less-trusted repositories, fork code, automated dispatches, secrets-bearing jobs, or materially higher-risk workloads, this bare-metal exception must be revisited and a disposable Windows VM/image should become the default.
