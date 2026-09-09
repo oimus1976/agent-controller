@@ -11,6 +11,10 @@ on:
         description: Exact current 40-hex PR head SHA
         required: true
         type: string
+      runner_nonce:
+        description: One-time 16-hex nonce used only to address the ephemeral runner label
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -18,7 +22,7 @@ permissions:
 
 jobs:
   windows-exact-head:
-    runs-on: [self-hosted, Windows, X64, agent-controller-ci]
+    runs-on: ac-ci-${{ inputs.runner_nonce }}
     timeout-minutes: 10
 
     steps:
@@ -28,6 +32,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           INPUT_PR_NUMBER: ${{ inputs.pr_number }}
           INPUT_TARGET_SHA: ${{ inputs.target_sha }}
+          INPUT_RUNNER_NONCE: ${{ inputs.runner_nonce }}
           EXPECTED_REPOSITORY: ${{ github.repository }}
           WORKFLOW_REF: ${{ github.ref }}
         run: |
@@ -42,6 +47,9 @@ jobs:
           if ($env:INPUT_TARGET_SHA -notmatch '^[0-9a-fA-F]{40}$') {
             throw 'target_sha must be exactly 40 hexadecimal characters'
           }
+          if ($env:INPUT_RUNNER_NONCE -notmatch '^[0-9a-fA-F]{16}$') {
+            throw 'runner_nonce must be exactly 16 hexadecimal characters'
+          }
 
           $headers = @{
             Authorization = "Bearer $env:GH_TOKEN"
@@ -51,18 +59,10 @@ jobs:
           $uri = "https://api.github.com/repos/$env:EXPECTED_REPOSITORY/pulls/$env:INPUT_PR_NUMBER"
           $pr = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get
 
-          if ($pr.state -ne 'open') {
-            throw 'target PR is not open'
-          }
-          if ($null -eq $pr.head -or $null -eq $pr.head.repo) {
-            throw 'target PR head repository evidence is missing'
-          }
-          if ($pr.head.repo.full_name -ne $env:EXPECTED_REPOSITORY) {
-            throw 'fork or foreign head repository is not allowed'
-          }
-          if ($pr.head.sha -ne $env:INPUT_TARGET_SHA.ToLowerInvariant()) {
-            throw 'target_sha is not the current PR head'
-          }
+          if ($pr.state -ne 'open') { throw 'target PR is not open' }
+          if ($null -eq $pr.head -or $null -eq $pr.head.repo) { throw 'target PR head repository evidence is missing' }
+          if ($pr.head.repo.full_name -ne $env:EXPECTED_REPOSITORY) { throw 'fork or foreign head repository is not allowed' }
+          if ($pr.head.sha -ne $env:INPUT_TARGET_SHA.ToLowerInvariant()) { throw 'target_sha is not the current PR head' }
 
           "validated_pr=$($pr.number)"
           "validated_head=$($pr.head.sha)"
@@ -82,19 +82,12 @@ jobs:
           INPUT_TARGET_SHA: ${{ inputs.target_sha }}
         run: |
           $ErrorActionPreference = 'Stop'
-
           $head = (git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0) { throw 'git rev-parse failed' }
-          if ($head -ne $env:INPUT_TARGET_SHA.ToLowerInvariant()) {
-            throw "checkout HEAD mismatch: $head"
-          }
-
+          if ($head -ne $env:INPUT_TARGET_SHA.ToLowerInvariant()) { throw "checkout HEAD mismatch: $head" }
           $dirty = @(git status --porcelain)
           if ($LASTEXITCODE -ne 0) { throw 'git status failed' }
-          if ($dirty.Count -ne 0) {
-            throw 'working tree is not clean before tests'
-          }
-
+          if ($dirty.Count -ne 0) { throw 'working tree is not clean before tests' }
           python --version
           if ($LASTEXITCODE -ne 0) { throw 'python is unavailable' }
           python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)"
@@ -120,18 +113,12 @@ jobs:
           INPUT_TARGET_SHA: ${{ inputs.target_sha }}
         run: |
           $ErrorActionPreference = 'Stop'
-
           $head = (git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0) { throw 'post-test git rev-parse failed' }
-          if ($head -ne $env:INPUT_TARGET_SHA.ToLowerInvariant()) {
-            throw 'HEAD changed during tests'
-          }
-
+          if ($head -ne $env:INPUT_TARGET_SHA.ToLowerInvariant()) { throw 'HEAD changed during tests' }
           $dirty = @(git status --porcelain)
           if ($LASTEXITCODE -ne 0) { throw 'post-test git status failed' }
-          if ($dirty.Count -ne 0) {
-            throw 'working tree changed during tests'
-          }
+          if ($dirty.Count -ne 0) { throw 'working tree changed during tests' }
 
       - name: Revalidate current PR head after tests
         shell: powershell
@@ -142,7 +129,6 @@ jobs:
           EXPECTED_REPOSITORY: ${{ github.repository }}
         run: |
           $ErrorActionPreference = 'Stop'
-
           $headers = @{
             Authorization = "Bearer $env:GH_TOKEN"
             Accept = 'application/vnd.github+json'
@@ -150,19 +136,10 @@ jobs:
           }
           $uri = "https://api.github.com/repos/$env:EXPECTED_REPOSITORY/pulls/$env:INPUT_PR_NUMBER"
           $pr = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get
-
-          if ($pr.state -ne 'open') {
-            throw 'target PR is no longer open'
-          }
-          if ($null -eq $pr.head -or $null -eq $pr.head.repo) {
-            throw 'post-test PR head repository evidence is missing'
-          }
-          if ($pr.head.repo.full_name -ne $env:EXPECTED_REPOSITORY) {
-            throw 'post-test head repository drifted'
-          }
-          if ($pr.head.sha -ne $env:INPUT_TARGET_SHA.ToLowerInvariant()) {
-            throw 'PR head changed during self-hosted verification'
-          }
+          if ($pr.state -ne 'open') { throw 'target PR is no longer open' }
+          if ($null -eq $pr.head -or $null -eq $pr.head.repo) { throw 'post-test PR head repository evidence is missing' }
+          if ($pr.head.repo.full_name -ne $env:EXPECTED_REPOSITORY) { throw 'post-test head repository drifted' }
+          if ($pr.head.sha -ne $env:INPUT_TARGET_SHA.ToLowerInvariant()) { throw 'PR head changed during self-hosted verification' }
 
       - name: Record self-hosted evidence class
         shell: powershell
@@ -174,7 +151,7 @@ jobs:
           "" >> $env:GITHUB_STEP_SUMMARY
           "- PR: #$env:INPUT_PR_NUMBER" >> $env:GITHUB_STEP_SUMMARY
           "- exact head: ``$env:INPUT_TARGET_SHA``" >> $env:GITHUB_STEP_SUMMARY
-          "- runner trust domain: repository-scoped self-hosted Windows/X64/agent-controller-ci" >> $env:GITHUB_STEP_SUMMARY
+          "- runner trust domain: repository-scoped one-job ephemeral self-hosted Windows runner" >> $env:GITHUB_STEP_SUMMARY
           "- full unittest suite: PASS" >> $env:GITHUB_STEP_SUMMARY
           "- Windows junction regression: PASS" >> $env:GITHUB_STEP_SUMMARY
           "- evidence is not GITHUB_HOSTED_CI_PASS" >> $env:GITHUB_STEP_SUMMARY
