@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Preflight exact current same-repository PR head
+      - name: Preflight trusted runner and exact current same-repository PR head
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
@@ -49,6 +49,31 @@ jobs:
           if ($env:RUNNER_ARCH_NAME -ne 'X64') {
             throw "runner architecture must be X64, got $env:RUNNER_ARCH_NAME"
           }
+
+          $identity = (whoami).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'whoami failed' }
+          if ($identity -notmatch '\\ac-runner$') {
+            throw "runner identity must be dedicated ac-runner standard user, got $identity"
+          }
+          $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+          if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'runner identity must not be an administrator'
+          }
+
+          $forbiddenProfileState = @(
+            (Join-Path $HOME '.ssh'),
+            (Join-Path $HOME '.aws'),
+            (Join-Path $HOME '.azure'),
+            (Join-Path $HOME '.gemini'),
+            (Join-Path $HOME '.codex'),
+            (Join-Path $HOME '.config\gh')
+          )
+          foreach ($path in $forbiddenProfileState) {
+            if (Test-Path -LiteralPath $path) {
+              throw "runner profile contains forbidden credential/provider state: $path"
+            }
+          }
+
           if ($env:INPUT_PR_NUMBER -notmatch '^[1-9][0-9]*$') {
             throw 'pr_number must be a positive decimal integer'
           }
@@ -72,6 +97,7 @@ jobs:
           if ($pr.head.repo.full_name -ne $env:EXPECTED_REPOSITORY) { throw 'fork or foreign head repository is not allowed' }
           if ($pr.head.sha -ne $env:INPUT_TARGET_SHA.ToLowerInvariant()) { throw 'target_sha is not the current PR head' }
 
+          "validated_runner_identity=$identity"
           "validated_pr=$($pr.number)"
           "validated_head=$($pr.head.sha)"
           "validated_head_repo=$($pr.head.repo.full_name)"
@@ -161,7 +187,7 @@ jobs:
           "" >> $env:GITHUB_STEP_SUMMARY
           "- PR: #$env:INPUT_PR_NUMBER" >> $env:GITHUB_STEP_SUMMARY
           "- exact head: ``$env:INPUT_TARGET_SHA``" >> $env:GITHUB_STEP_SUMMARY
-          "- runner trust domain: repository-scoped one-job ephemeral self-hosted Windows/X64 runner" >> $env:GITHUB_STEP_SUMMARY
+          "- runner trust domain: repository-scoped one-job ephemeral self-hosted Windows/X64 runner under ac-runner" >> $env:GITHUB_STEP_SUMMARY
           "- full unittest suite: PASS" >> $env:GITHUB_STEP_SUMMARY
           "- Windows junction regression: PASS" >> $env:GITHUB_STEP_SUMMARY
           "- evidence is not GITHUB_HOSTED_CI_PASS" >> $env:GITHUB_STEP_SUMMARY
