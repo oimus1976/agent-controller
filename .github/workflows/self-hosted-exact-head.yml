@@ -203,8 +203,21 @@ jobs:
 
           $targetName = "act-$($env:INPUT_RUNNER_NONCE.ToLowerInvariant())"
           $targetSid = (Get-LocalUser -Name $targetName -ErrorAction Stop).SID.Value
-          & icacls.exe $env:GITHUB_WORKSPACE /grant:r "*${targetSid}:(OI)(CI)(RX)" | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'failed to grant disposable target read-only checkout access' }
+          $controlSid = (Get-LocalUser -Name 'ac-runner' -ErrorAction Stop).SID.Value
+          $systemSid = 'S-1-5-18'
+          $adminSid = 'S-1-5-32-544'
+          & icacls.exe $env:GITHUB_WORKSPACE /grant:r "*${controlSid}:(OI)(CI)(F)" "*${systemSid}:(OI)(CI)(F)" "*${adminSid}:(OI)(CI)(F)" /T /C | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'failed to preserve trusted checkout access before protecting ACLs' }
+          & icacls.exe $env:GITHUB_WORKSPACE /inheritance:r /T /C | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'failed to protect checkout ACLs from inheritance' }
+          & icacls.exe $env:GITHUB_WORKSPACE /remove:g "*${targetSid}" /T /C | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'failed to remove pre-existing disposable target grants' }
+          & icacls.exe $env:GITHUB_WORKSPACE /grant:r "*${targetSid}:(OI)(CI)(RX)" /T /C | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'failed to install disposable-target read/execute checkout ACLs' }
+          & icacls.exe $env:GITHUB_WORKSPACE /deny "*${targetSid}:(OI)(CI)(W,D,DC,WDAC,WO)" /T /C | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'failed to deny disposable target write-class checkout access' }
+          $workspaceAcl = Get-Acl -LiteralPath $env:GITHUB_WORKSPACE
+          if (-not $workspaceAcl.AreAccessRulesProtected) { throw 'workspace ACL inheritance remains enabled' }
 
       - name: Run target tests under disposable SID
         shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '{0}'"
@@ -238,6 +251,8 @@ jobs:
           $pythonLiteral = "'" + $trustedPython.Replace("'", "''") + "'"
           $workspaceLiteral = "'" + $env:GITHUB_WORKSPACE.Replace("'", "''") + "'"
           $targetSidLiteral = "'" + $targetSid.Replace("'", "''") + "'"
+          $workspaceProbeLiteral = "'" + (Join-Path $env:GITHUB_WORKSPACE '.github\workflows\self-hosted-exact-head.yml').Replace("'", "''") + "'"
+          $gitConfigProbeLiteral = "'" + (Join-Path $env:GITHUB_WORKSPACE '.git\config').Replace("'", "''") + "'"
           $command = @"
           `$ErrorActionPreference = 'Stop'
           if (([Security.Principal.WindowsIdentity]::GetCurrent().User.Value) -ne $targetSidLiteral) { exit 40 }
@@ -251,6 +266,26 @@ jobs:
             } catch [UnauthorizedAccessException] {
             } catch [IO.IOException] {
             }
+          }
+          try {
+            `$stream = [IO.File]::Open($workspaceProbeLiteral, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+            `$stream.Close()
+            Write-Error 'target workspace write probe unexpectedly succeeded'
+            exit 43
+          } catch [UnauthorizedAccessException] {
+          } catch {
+            Write-Error "target workspace write probe did not prove ACL denial: `$(`$_.Exception.Message)"
+            exit 44
+          }
+          try {
+            `$stream = [IO.File]::Open($gitConfigProbeLiteral, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+            `$stream.Close()
+            Write-Error 'target .git/config write probe unexpectedly succeeded'
+            exit 45
+          } catch [UnauthorizedAccessException] {
+          } catch {
+            Write-Error "target .git/config write probe did not prove ACL denial: `$(`$_.Exception.Message)"
+            exit 46
           }
           Set-Location -LiteralPath $workspaceLiteral
           & $pythonLiteral -B -m unittest discover -s tests -v
@@ -282,6 +317,27 @@ jobs:
           $targetName = "act-$($env:INPUT_RUNNER_NONCE.ToLowerInvariant())"
           $targetSid = (Get-LocalUser -Name $targetName -ErrorAction Stop).SID.Value
 
+          function Get-TargetOwnedProcesses {
+            $owned = @()
+            foreach ($candidate in @(Get-CimInstance Win32_Process -ErrorAction Stop)) {
+              $owner = Invoke-CimMethod -InputObject $candidate -MethodName GetOwnerSid -ErrorAction Stop
+              if ($owner.ReturnValue -eq 0 -and $owner.Sid -eq $targetSid) { $owned += $candidate }
+            }
+            return @($owned)
+          }
+          $quiescenceDeadline = [DateTime]::UtcNow.AddSeconds(10)
+          do {
+            $targetProcesses = @(Get-TargetOwnedProcesses)
+            foreach ($targetProcess in $targetProcesses) {
+              Stop-Process -Id $targetProcess.ProcessId -Force -ErrorAction Stop
+            }
+            if ($targetProcesses.Count -eq 0) { break }
+            if ([DateTime]::UtcNow -ge $quiescenceDeadline) { throw 'target process termination exceeded bounded deadline' }
+            Start-Sleep -Milliseconds 200
+          } while ($true)
+          $freshTargetProcesses = @(Get-TargetOwnedProcesses)
+          if ($freshTargetProcesses.Count -ne 0) { throw 'target process quiescence could not be proven' }
+
           if (Test-Path -LiteralPath $env:GITHUB_STEP_SUMMARY) {
             $summaryBeforePass = Get-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Raw
             if ($summaryBeforePass -match 'SELF_HOSTED_EXACT_HEAD_PASS') {
@@ -295,8 +351,10 @@ jobs:
           })
           if ($targetTasks.Count -ne 0) { throw 'target tests created scheduled-task persistence' }
 
-          & icacls.exe $env:GITHUB_WORKSPACE /remove:g "*${targetSid}" | Out-Null
+          & icacls.exe $env:GITHUB_WORKSPACE /remove:g "*${targetSid}" /T /C | Out-Null
           if ($LASTEXITCODE -ne 0) { throw 'failed to revoke target checkout access' }
+          & icacls.exe $env:GITHUB_WORKSPACE /deny "*${targetSid}:(OI)(CI)(F)" /T /C | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'failed to deny all residual target checkout access' }
 
           $head = (& $trustedGit rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0) { throw 'post-test git rev-parse failed' }
@@ -311,9 +369,30 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           INPUT_PR_NUMBER: ${{ inputs.pr_number }}
           INPUT_TARGET_SHA: ${{ inputs.target_sha }}
+          INPUT_RUNNER_NONCE: ${{ inputs.runner_nonce }}
           EXPECTED_REPOSITORY: ${{ github.repository }}
         run: |
           $ErrorActionPreference = 'Stop'
+          $targetName = "act-$($env:INPUT_RUNNER_NONCE.ToLowerInvariant())"
+          $targetSid = (Get-LocalUser -Name $targetName -ErrorAction Stop).SID.Value
+          function Get-TargetOwnedProcesses {
+            $owned = @()
+            foreach ($candidate in @(Get-CimInstance Win32_Process -ErrorAction Stop)) {
+              $owner = Invoke-CimMethod -InputObject $candidate -MethodName GetOwnerSid -ErrorAction Stop
+              if ($owner.ReturnValue -eq 0 -and $owner.Sid -eq $targetSid) { $owned += $candidate }
+            }
+            return @($owned)
+          }
+          $quiescenceDeadline = [DateTime]::UtcNow.AddSeconds(10)
+          do {
+            $targetProcesses = @(Get-TargetOwnedProcesses)
+            foreach ($targetProcess in $targetProcesses) { Stop-Process -Id $targetProcess.ProcessId -Force -ErrorAction Stop }
+            if ($targetProcesses.Count -eq 0) { break }
+            if ([DateTime]::UtcNow -ge $quiescenceDeadline) { throw 'target process termination exceeded bounded deadline' }
+            Start-Sleep -Milliseconds 200
+          } while ($true)
+          $freshTargetProcesses = @(Get-TargetOwnedProcesses)
+          if ($freshTargetProcesses.Count -ne 0) { throw 'target process quiescence could not be proven' }
           $headers = @{
             Authorization = "Bearer $env:GH_TOKEN"
             Accept = 'application/vnd.github+json'
@@ -333,6 +412,27 @@ jobs:
           INPUT_TARGET_SHA: ${{ inputs.target_sha }}
           INPUT_RUNNER_NONCE: ${{ inputs.runner_nonce }}
         run: |
+          $ErrorActionPreference = 'Stop'
+          $targetName = "act-$($env:INPUT_RUNNER_NONCE.ToLowerInvariant())"
+          $targetSid = (Get-LocalUser -Name $targetName -ErrorAction Stop).SID.Value
+          function Get-TargetOwnedProcesses {
+            $owned = @()
+            foreach ($candidate in @(Get-CimInstance Win32_Process -ErrorAction Stop)) {
+              $owner = Invoke-CimMethod -InputObject $candidate -MethodName GetOwnerSid -ErrorAction Stop
+              if ($owner.ReturnValue -eq 0 -and $owner.Sid -eq $targetSid) { $owned += $candidate }
+            }
+            return @($owned)
+          }
+          $quiescenceDeadline = [DateTime]::UtcNow.AddSeconds(10)
+          do {
+            $targetProcesses = @(Get-TargetOwnedProcesses)
+            foreach ($targetProcess in $targetProcesses) { Stop-Process -Id $targetProcess.ProcessId -Force -ErrorAction Stop }
+            if ($targetProcesses.Count -eq 0) { break }
+            if ([DateTime]::UtcNow -ge $quiescenceDeadline) { throw 'target process termination exceeded bounded deadline' }
+            Start-Sleep -Milliseconds 200
+          } while ($true)
+          $freshTargetProcesses = @(Get-TargetOwnedProcesses)
+          if ($freshTargetProcesses.Count -ne 0) { throw 'target process quiescence could not be proven' }
           "## SELF_HOSTED_EXACT_HEAD_PASS" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
           "- PR: #$env:INPUT_PR_NUMBER" >> $env:GITHUB_STEP_SUMMARY

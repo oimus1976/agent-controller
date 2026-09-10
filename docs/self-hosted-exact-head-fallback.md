@@ -45,12 +45,12 @@ The runner itself remains under `ac-runner`. The trusted workflow:
 1. validates `main`, Windows/X64, local control SID, target SID, local Administrators membership, clean target state, one-time credential ACL, open same-repository PR, and exact current PR head;
 2. checks out the exact immutable target SHA under `ac-runner` with checkout credentials not persisted;
 3. validates HEAD/cleanliness using fixed machine-wide Git and Python paths;
-4. grants the disposable target SID read/execute-only access to the checked-out tree;
+4. protects checkout ACLs from inheritance, preserves full control for `ac-runner`, SYSTEM, and local Administrators, explicitly denies the disposable target SID write-class rights (including rights obtained through group membership), and grants that SID read/execute-only access;
 5. launches the full unittest suite and Windows junction regression through `Start-Process -Credential ... -UseNewEnvironment -LoadUserProfile` under `act-<nonce>`;
 6. uses `-NoProfile` for both trusted and target PowerShell execution;
 7. verifies the target process did not inherit `GITHUB_*` or `GH_TOKEN` environment state and cannot open the runner command files (`GITHUB_STEP_SUMMARY`, `GITHUB_ENV`, `GITHUB_PATH`) or write to the `ac-runner` profile;
 8. removes the one-time target credential file **before** PR target code starts;
-9. after tests, under `ac-runner`, rejects scheduled-task persistence, rejects premature PASS-marker emission, revokes target checkout access, and rechecks exact HEAD/cleanliness;
+9. after tests, under `ac-runner`, repeatedly identifies and terminates target-SID processes within a fixed deadline, requires a fresh query to prove zero remain, rejects scheduled-task persistence, rejects premature PASS-marker emission, recursively removes the target grant and denies all residual target checkout access, and rechecks exact HEAD/cleanliness;
 10. performs a fresh GitHub API read of the PR head;
 11. only then writes `SELF_HOSTED_EXACT_HEAD_PASS`.
 
@@ -63,7 +63,7 @@ The first pilot requires these trusted read/execute runtime paths outside either
 - `C:\Program Files\Python312\python.exe` and Python 3.12.x;
 - `C:\Program Files\Git\cmd\git.exe`.
 
-The target account receives read/execute-only access to the repository checkout. Python runs with `-B` so target execution does not require writing `__pycache__` into the checkout.
+The target account receives read/execute-only access to the repository checkout. Inheritance is disabled throughout the checkout, trusted SYSTEM/Administrators/`ac-runner` access is preserved, and an explicit target-SID deny for write-class rights prevents broad group grants from restoring write access. Before any target test command, real target-credential file-open probes against a workspace file and `.git/config` must both fail specifically with access denied. Python runs with `-B` so target execution does not require writing `__pycache__` into the checkout.
 
 ## One-time target credential boundary
 
@@ -136,7 +136,9 @@ The GitHub runner remains:
 - target environment cannot inherit GitHub command/token variables;
 - target cannot write GitHub command files or the control profile;
 - target checkout access is read/execute-only and is revoked after tests;
+- target-credential write probes against a workspace file and `.git/config` both prove access denied before tests;
 - full unittest suite and Windows junction regression both pass;
+- fresh target-SID process queries prove quiescence before repository, API, and PASS-capable postconditions;
 - target-created scheduled-task persistence blocks PASS;
 - exact HEAD and clean tree are checked before and after target execution;
 - final PR state/repository/head are freshly revalidated;
@@ -166,7 +168,7 @@ WSL2 may remain useful for development but is not the preferred evidence path wh
 
 ## Failure semantics
 
-Malformed inputs, non-main dispatch, wrong runner OS/arch, control/target SID mismatch, direct/local Administrators membership, stale target account/profile/task state, unsafe credential ACL, GitHub API uncertainty, fork/head mismatch, head drift, trusted-runtime mismatch, target command-file write access, inherited GitHub environment, target test failure, target-created task persistence, dirty/head-changed postcondition, premature PASS marker, final PR drift, or uncertain cross-run cleanup all fail closed.
+Malformed inputs, non-main dispatch, wrong runner OS/arch, control/target SID mismatch, direct/local Administrators membership, stale target account/profile/task state, unsafe credential ACL, GitHub API uncertainty, fork/head mismatch, head drift, trusted-runtime mismatch, writable checkout ACLs, target command-file write access, inherited GitHub environment, target test failure, unquiesced target-SID processes, target-created task persistence, dirty/head-changed postcondition, premature PASS marker, final PR drift, or uncertain cross-run cleanup all fail closed.
 
 A capacity-blocked GitHub-hosted job remains distinct from self-hosted PASS and from code failure.
 

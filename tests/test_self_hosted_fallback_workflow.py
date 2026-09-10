@@ -35,9 +35,12 @@ def parse_strict_workflow_structure(text: str) -> dict[str, str]:
 
     job_names = []
     for line in lines[jobs_index + 1 :]:
-        match = re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)
-        if match:
-            job_names.append(match.group(1))
+        if not line.startswith("  ") or line.startswith("    "):
+            continue
+        match = re.fullmatch(r'''  (?:(?:"([^"]+)")|(?:'([^']+)')|([A-Za-z0-9_-]+)):\s*''', line)
+        if not match:
+            raise ValueError(f"invalid or unsupported job declaration: {line!r}")
+        job_names.append(next(group for group in match.groups() if group is not None))
     if job_names != ["windows-exact-head"]:
         raise ValueError(f"unexpected job set: {job_names!r}")
 
@@ -160,6 +163,13 @@ class SelfHostedFallbackWorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_strict_workflow_structure(mutated)
 
+    def test_structure_parser_rejects_quoted_extra_reusable_workflow_jobs(self):
+        for quoted_job in ('"shadow-job"', "'shadow-job'"):
+            with self.subTest(quoted_job=quoted_job):
+                mutated = self.text + f"\n  {quoted_job}:\n    uses: owner/repo/.github/workflows/unsafe.yml@main\n"
+                with self.assertRaises(ValueError):
+                    parse_strict_workflow_structure(mutated)
+
     def test_preflight_binds_local_control_sid_disposable_target_and_exact_head(self):
         preflight = self.step_blocks["Preflight trusted control and disposable target identities"]
         required = (
@@ -247,14 +257,38 @@ class SelfHostedFallbackWorkflowTests(unittest.TestCase):
 
     def test_checkout_access_is_read_only_and_revoked_after_tests(self):
         pre_test = self.step_blocks["Verify exact clean checkout and grant target read-only access"]
+        target_test = self.step_blocks["Run target tests under disposable SID"]
         post_test = self.step_blocks["Verify trusted postconditions and revoke target access"]
+        self.assertIn('/inheritance:r', pre_test)
+        self.assertIn('/deny', pre_test)
+        self.assertIn('(W,D,DC,WDAC,WO)', pre_test)
         self.assertIn('(OI)(CI)(RX)', pre_test)
         self.assertIn('/grant:r', pre_test)
+        self.assertIn("workspace ACL inheritance remains enabled", pre_test)
+        self.assertIn("target workspace write probe unexpectedly succeeded", target_test)
+        self.assertIn("target .git/config write probe unexpectedly succeeded", target_test)
+        self.assertIn("[UnauthorizedAccessException]", target_test)
         self.assertIn('/remove:g', post_test)
+        self.assertIn('"*${targetSid}:(OI)(CI)(F)" /T /C', post_test)
+        self.assertIn("failed to deny all residual target checkout access", post_test)
         self.assertIn("HEAD changed during tests", post_test)
         self.assertIn("working tree changed during tests", post_test)
         self.assertIn("target tests created scheduled-task persistence", post_test)
         self.assertIn("PASS evidence marker existed before trusted final evidence step", post_test)
+
+    def test_target_process_quiescence_precedes_every_sensitive_postcondition(self):
+        for name, first_sensitive_marker in (
+            ("Verify trusted postconditions and revoke target access", "GITHUB_STEP_SUMMARY"),
+            ("Revalidate current PR head after tests", "Invoke-RestMethod"),
+            ("Record self-hosted evidence class", ">> $env:GITHUB_STEP_SUMMARY"),
+        ):
+            with self.subTest(step=name):
+                block = self.step_blocks[name]
+                self.assertIn("Get-TargetOwnedProcesses", block)
+                self.assertIn("Stop-Process", block)
+                self.assertIn("target process quiescence could not be proven", block)
+                self.assertIn("freshTargetProcesses", block)
+                self.assertLess(block.index("freshTargetProcesses"), block.index(first_sensitive_marker))
 
     def test_trusted_postconditions_and_api_revalidation_precede_pass_emission(self):
         names = list(self.step_blocks)
