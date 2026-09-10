@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       runner_nonce:
-        description: One-time 16-hex nonce used only to address the ephemeral runner label
+        description: One-time 16-hex nonce used to bind runner and disposable target identity
         required: true
         type: string
 
@@ -26,8 +26,8 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Preflight trusted runner and exact current same-repository PR head
-        shell: powershell
+      - name: Preflight trusted control and disposable target identities
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '{0}'"
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_PR_NUMBER: ${{ inputs.pr_number }}
@@ -49,31 +49,6 @@ jobs:
           if ($env:RUNNER_ARCH_NAME -ne 'X64') {
             throw "runner architecture must be X64, got $env:RUNNER_ARCH_NAME"
           }
-
-          $identity = (whoami).Trim()
-          if ($LASTEXITCODE -ne 0) { throw 'whoami failed' }
-          if ($identity -notmatch '\\ac-runner$') {
-            throw "runner identity must be dedicated ac-runner standard user, got $identity"
-          }
-          $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-          if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-            throw 'runner identity must not be an administrator'
-          }
-
-          $forbiddenProfileState = @(
-            (Join-Path $HOME '.ssh'),
-            (Join-Path $HOME '.aws'),
-            (Join-Path $HOME '.azure'),
-            (Join-Path $HOME '.gemini'),
-            (Join-Path $HOME '.codex'),
-            (Join-Path $HOME '.config\gh')
-          )
-          foreach ($path in $forbiddenProfileState) {
-            if (Test-Path -LiteralPath $path) {
-              throw "runner profile contains forbidden credential/provider state: $path"
-            }
-          }
-
           if ($env:INPUT_PR_NUMBER -notmatch '^[1-9][0-9]*$') {
             throw 'pr_number must be a positive decimal integer'
           }
@@ -84,6 +59,101 @@ jobs:
             throw 'runner_nonce must be exactly 16 hexadecimal characters'
           }
 
+          $adminSid = 'S-1-5-32-544'
+          $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $controlUser = Get-LocalUser -Name 'ac-runner' -ErrorAction Stop
+          $controlSid = $controlUser.SID.Value
+          if ($currentIdentity.User.Value -ne $controlSid) {
+            throw "runner identity SID must equal local ac-runner SID; current=$($currentIdentity.User.Value) expected=$controlSid"
+          }
+          $tokenGroupSids = @($currentIdentity.Groups | ForEach-Object { $_.Value })
+          if ($tokenGroupSids -contains $adminSid) {
+            throw 'runner control identity carries local Administrators SID in its token'
+          }
+          $adminGroup = Get-LocalGroup -SID $adminSid -ErrorAction Stop
+          $adminMemberSids = @(Get-LocalGroupMember -Group $adminGroup -ErrorAction Stop | ForEach-Object { $_.SID.Value })
+          if ($adminMemberSids -contains $controlSid) {
+            throw 'local ac-runner account must not be a member of local Administrators'
+          }
+
+          $targetName = "act-$($env:INPUT_RUNNER_NONCE.ToLowerInvariant())"
+          if ($targetName.Length -ne 20) { throw 'derived disposable target account name must be exactly 20 characters' }
+          $targetUser = Get-LocalUser -Name $targetName -ErrorAction Stop
+          if (-not $targetUser.Enabled) { throw 'disposable target account is disabled' }
+          $targetSid = $targetUser.SID.Value
+          if ($targetSid -eq $controlSid) { throw 'control and target identities must have distinct SIDs' }
+          if ($adminMemberSids -contains $targetSid) {
+            throw 'disposable target account must not be a member of local Administrators'
+          }
+
+          $allTargetUsers = @(Get-LocalUser | Where-Object { $_.Name -like 'act-*' })
+          if ($allTargetUsers.Count -ne 1 -or $allTargetUsers[0].SID.Value -ne $targetSid) {
+            throw 'exactly one current disposable act-* target account may exist before a pilot'
+          }
+          $existingTargetProfiles = @(Get-CimInstance Win32_UserProfile -ErrorAction Stop | Where-Object { $_.SID -eq $targetSid })
+          if ($existingTargetProfiles.Count -ne 0) {
+            throw 'disposable target SID already has a Windows profile; target state is not fresh'
+          }
+          $targetTasks = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+            $_.Principal.UserId -eq $targetSid -or $_.Principal.UserId -eq "$env:COMPUTERNAME\$targetName"
+          })
+          if ($targetTasks.Count -ne 0) {
+            throw 'disposable target SID already owns scheduled-task state'
+          }
+
+          $forbiddenControlState = @(
+            (Join-Path $HOME '.ssh'),
+            (Join-Path $HOME '.aws'),
+            (Join-Path $HOME '.azure'),
+            (Join-Path $HOME '.gemini'),
+            (Join-Path $HOME '.codex'),
+            (Join-Path $HOME '.config\gh')
+          )
+          foreach ($path in $forbiddenControlState) {
+            if (Test-Path -LiteralPath $path) {
+              throw "runner control profile contains forbidden credential/provider state: $path"
+            }
+          }
+
+          $trustedPython = 'C:\Program Files\Python312\python.exe'
+          $trustedGit = 'C:\Program Files\Git\cmd\git.exe'
+          foreach ($tool in @($trustedPython, $trustedGit)) {
+            if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) {
+              throw "trusted machine-wide tool is missing: $tool"
+            }
+          }
+          & $trustedPython -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)"
+          if ($LASTEXITCODE -ne 0) { throw 'trusted Python major/minor must be exactly 3.12' }
+
+          $credentialRoot = 'C:\ProgramData\AgentController\ci-secrets'
+          $credentialFile = Join-Path $credentialRoot "$($env:INPUT_RUNNER_NONCE.ToLowerInvariant()).txt"
+          if (-not (Test-Path -LiteralPath $credentialFile -PathType Leaf)) {
+            throw 'one-time disposable-target credential file is missing'
+          }
+          $credentialAcl = Get-Acl -LiteralPath $credentialFile
+          if (-not $credentialAcl.AreAccessRulesProtected) {
+            throw 'one-time credential ACL must disable inheritance'
+          }
+          $forbiddenCredentialReaders = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545', $targetSid)
+          foreach ($rule in $credentialAcl.Access) {
+            if ($rule.AccessControlType -ne 'Allow') { continue }
+            $ruleSid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+            if ($forbiddenCredentialReaders -contains $ruleSid) {
+              throw "one-time credential file grants access to forbidden SID: $ruleSid"
+            }
+          }
+          $controlCanReadCredential = $false
+          foreach ($rule in $credentialAcl.Access) {
+            if ($rule.AccessControlType -ne 'Allow') { continue }
+            $ruleSid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+            if ($ruleSid -eq $controlSid -and (($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Read) -ne 0)) {
+              $controlCanReadCredential = $true
+            }
+          }
+          if (-not $controlCanReadCredential) {
+            throw 'one-time credential file is not explicitly readable by ac-runner SID'
+          }
+
           $headers = @{
             Authorization = "Bearer $env:GH_TOKEN"
             Accept = 'application/vnd.github+json'
@@ -91,13 +161,14 @@ jobs:
           }
           $uri = "https://api.github.com/repos/$env:EXPECTED_REPOSITORY/pulls/$env:INPUT_PR_NUMBER"
           $pr = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get
-
           if ($pr.state -ne 'open') { throw 'target PR is not open' }
           if ($null -eq $pr.head -or $null -eq $pr.head.repo) { throw 'target PR head repository evidence is missing' }
           if ($pr.head.repo.full_name -ne $env:EXPECTED_REPOSITORY) { throw 'fork or foreign head repository is not allowed' }
           if ($pr.head.sha -ne $env:INPUT_TARGET_SHA.ToLowerInvariant()) { throw 'target_sha is not the current PR head' }
 
-          "validated_runner_identity=$identity"
+          "validated_control_sid=$controlSid"
+          "validated_target_name=$targetName"
+          "validated_target_sid=$targetSid"
           "validated_pr=$($pr.number)"
           "validated_head=$($pr.head.sha)"
           "validated_head_repo=$($pr.head.repo.full_name)"
@@ -112,52 +183,129 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Verify exact clean checkout and Python 3.12
-        shell: powershell
+      - name: Verify exact clean checkout and grant target read-only access
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '{0}'"
         env:
           INPUT_TARGET_SHA: ${{ inputs.target_sha }}
+          INPUT_RUNNER_NONCE: ${{ inputs.runner_nonce }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $head = (git rev-parse HEAD).Trim()
+          $trustedGit = 'C:\Program Files\Git\cmd\git.exe'
+          $trustedPython = 'C:\Program Files\Python312\python.exe'
+          $head = (& $trustedGit rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0) { throw 'git rev-parse failed' }
           if ($head -ne $env:INPUT_TARGET_SHA.ToLowerInvariant()) { throw "checkout HEAD mismatch: $head" }
-          $dirty = @(git status --porcelain)
+          $dirty = @(& $trustedGit status --porcelain)
           if ($LASTEXITCODE -ne 0) { throw 'git status failed' }
           if ($dirty.Count -ne 0) { throw 'working tree is not clean before tests' }
-          python --version
-          if ($LASTEXITCODE -ne 0) { throw 'python is unavailable' }
-          python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)"
-          if ($LASTEXITCODE -ne 0) { throw 'Python major/minor must be exactly 3.12' }
+          & $trustedPython -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)"
+          if ($LASTEXITCODE -ne 0) { throw 'trusted Python major/minor must be exactly 3.12' }
 
-      - name: Run full deterministic suite
-        shell: powershell
+          $targetName = "act-$($env:INPUT_RUNNER_NONCE.ToLowerInvariant())"
+          $targetSid = (Get-LocalUser -Name $targetName -ErrorAction Stop).SID.Value
+          & icacls.exe $env:GITHUB_WORKSPACE /grant:r "*$targetSid:(OI)(CI)(RX)" /T /C | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'failed to grant disposable target read-only checkout access' }
+
+      - name: Run target tests under disposable SID
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '{0}'"
+        env:
+          INPUT_RUNNER_NONCE: ${{ inputs.runner_nonce }}
         run: |
           $ErrorActionPreference = 'Stop'
-          python -m unittest discover -s tests -v
-          if ($LASTEXITCODE -ne 0) { throw 'full deterministic suite failed' }
+          $trustedPython = 'C:\Program Files\Python312\python.exe'
+          $targetName = "act-$($env:INPUT_RUNNER_NONCE.ToLowerInvariant())"
+          $targetUser = Get-LocalUser -Name $targetName -ErrorAction Stop
+          $targetSid = $targetUser.SID.Value
+          $credentialFile = "C:\ProgramData\AgentController\ci-secrets\$($env:INPUT_RUNNER_NONCE.ToLowerInvariant()).txt"
+          $password = (Get-Content -LiteralPath $credentialFile -Raw -ErrorAction Stop).TrimEnd("`r", "`n")
+          if ([string]::IsNullOrWhiteSpace($password) -or $password.Length -gt 256) {
+            throw 'one-time disposable-target credential has invalid shape'
+          }
+          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+          $credential = New-Object Management.Automation.PSCredential("$env:COMPUTERNAME\$targetName", $securePassword)
+          Remove-Item -LiteralPath $credentialFile -Force
+          if (Test-Path -LiteralPath $credentialFile) { throw 'one-time credential file was not removed before target execution' }
+          $password = $null
 
-      - name: Run real Windows junction containment regression
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          python -m unittest discover -s tests -p "test_antigravity_windows_junction.py" -v
-          if ($LASTEXITCODE -ne 0) { throw 'Windows junction regression failed' }
+          $resultRoot = "C:\ProgramData\AgentController\ci-results\$($env:INPUT_RUNNER_NONCE.ToLowerInvariant())"
+          New-Item -ItemType Directory -Force -Path $resultRoot | Out-Null
+          & icacls.exe $resultRoot /inheritance:r /grant:r "*$targetSid:(OI)(CI)(M)" | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'failed to prepare disposable target result directory' }
 
-      - name: Verify checkout unchanged after tests
-        shell: powershell
+          $pathsToProbe = @($env:GITHUB_STEP_SUMMARY, $env:GITHUB_ENV, $env:GITHUB_PATH, (Join-Path $HOME 'ac-ci-control-write-probe.tmp'))
+          $probeLiterals = ($pathsToProbe | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ','
+          $pythonLiteral = "'" + $trustedPython.Replace("'", "''") + "'"
+          $workspaceLiteral = "'" + $env:GITHUB_WORKSPACE.Replace("'", "''") + "'"
+          $targetSidLiteral = "'" + $targetSid.Replace("'", "''") + "'"
+          $command = @"
+          `$ErrorActionPreference = 'Stop'
+          if (([Security.Principal.WindowsIdentity]::GetCurrent().User.Value) -ne $targetSidLiteral) { exit 40 }
+          `$forbiddenEnv = @(Get-ChildItem Env: | Where-Object { `$_.Name -like 'GITHUB_*' -or `$_.Name -eq 'GH_TOKEN' })
+          if (`$forbiddenEnv.Count -ne 0) { exit 41 }
+          foreach (`$probePath in @($probeLiterals)) {
+            try {
+              `$stream = [IO.File]::Open(`$probePath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Write, [IO.FileShare]::None)
+              `$stream.Close()
+              exit 42
+            } catch [UnauthorizedAccessException] {
+            } catch [IO.IOException] {
+            }
+          }
+          Set-Location -LiteralPath $workspaceLiteral
+          & $pythonLiteral -B -m unittest discover -s tests -v
+          if (`$LASTEXITCODE -ne 0) { exit 50 }
+          & $pythonLiteral -B -m unittest discover -s tests -p 'test_antigravity_windows_junction.py' -v
+          if (`$LASTEXITCODE -ne 0) { exit 51 }
+          exit 0
+          "@
+
+          $stdout = Join-Path $resultRoot 'target-stdout.log'
+          $stderr = Join-Path $resultRoot 'target-stderr.log'
+          $process = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+            -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', $command) `
+            -Credential $credential -LoadUserProfile -UseNewEnvironment -WorkingDirectory $env:GITHUB_WORKSPACE `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -Wait
+
+          if (Test-Path -LiteralPath $stdout) { Get-Content -LiteralPath $stdout }
+          if (Test-Path -LiteralPath $stderr) { Get-Content -LiteralPath $stderr | Write-Error -ErrorAction Continue }
+          if ($process.ExitCode -ne 0) { throw "disposable target test process failed closed with exit $($process.ExitCode)" }
+
+      - name: Verify trusted postconditions and revoke target access
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '{0}'"
         env:
           INPUT_TARGET_SHA: ${{ inputs.target_sha }}
+          INPUT_RUNNER_NONCE: ${{ inputs.runner_nonce }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $head = (git rev-parse HEAD).Trim()
+          $trustedGit = 'C:\Program Files\Git\cmd\git.exe'
+          $targetName = "act-$($env:INPUT_RUNNER_NONCE.ToLowerInvariant())"
+          $targetSid = (Get-LocalUser -Name $targetName -ErrorAction Stop).SID.Value
+
+          if (Test-Path -LiteralPath $env:GITHUB_STEP_SUMMARY) {
+            $summaryBeforePass = Get-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Raw
+            if ($summaryBeforePass -match 'SELF_HOSTED_EXACT_HEAD_PASS') {
+              throw 'PASS evidence marker existed before trusted final evidence step'
+            }
+          }
+          $credentialFile = "C:\ProgramData\AgentController\ci-secrets\$($env:INPUT_RUNNER_NONCE.ToLowerInvariant()).txt"
+          if (Test-Path -LiteralPath $credentialFile) { throw 'one-time target credential unexpectedly remains after tests' }
+          $targetTasks = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+            $_.Principal.UserId -eq $targetSid -or $_.Principal.UserId -eq "$env:COMPUTERNAME\$targetName"
+          })
+          if ($targetTasks.Count -ne 0) { throw 'target tests created scheduled-task persistence' }
+
+          & icacls.exe $env:GITHUB_WORKSPACE /remove:g "*$targetSid" /T /C | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'failed to revoke target checkout access' }
+
+          $head = (& $trustedGit rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0) { throw 'post-test git rev-parse failed' }
           if ($head -ne $env:INPUT_TARGET_SHA.ToLowerInvariant()) { throw 'HEAD changed during tests' }
-          $dirty = @(git status --porcelain)
+          $dirty = @(& $trustedGit status --porcelain)
           if ($LASTEXITCODE -ne 0) { throw 'post-test git status failed' }
           if ($dirty.Count -ne 0) { throw 'working tree changed during tests' }
 
       - name: Revalidate current PR head after tests
-        shell: powershell
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '{0}'"
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_PR_NUMBER: ${{ inputs.pr_number }}
@@ -178,16 +326,18 @@ jobs:
           if ($pr.head.sha -ne $env:INPUT_TARGET_SHA.ToLowerInvariant()) { throw 'PR head changed during self-hosted verification' }
 
       - name: Record self-hosted evidence class
-        shell: powershell
+        shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '{0}'"
         env:
           INPUT_PR_NUMBER: ${{ inputs.pr_number }}
           INPUT_TARGET_SHA: ${{ inputs.target_sha }}
+          INPUT_RUNNER_NONCE: ${{ inputs.runner_nonce }}
         run: |
           "## SELF_HOSTED_EXACT_HEAD_PASS" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
           "- PR: #$env:INPUT_PR_NUMBER" >> $env:GITHUB_STEP_SUMMARY
           "- exact head: ``$env:INPUT_TARGET_SHA``" >> $env:GITHUB_STEP_SUMMARY
-          "- runner trust domain: repository-scoped one-job ephemeral self-hosted Windows/X64 runner under ac-runner" >> $env:GITHUB_STEP_SUMMARY
+          "- trusted control: local non-admin ac-runner SID" >> $env:GITHUB_STEP_SUMMARY
+          "- target execution: disposable local act-$($env:INPUT_RUNNER_NONCE.ToLowerInvariant()) SID with isolated environment" >> $env:GITHUB_STEP_SUMMARY
           "- full unittest suite: PASS" >> $env:GITHUB_STEP_SUMMARY
           "- Windows junction regression: PASS" >> $env:GITHUB_STEP_SUMMARY
           "- evidence is not GITHUB_HOSTED_CI_PASS" >> $env:GITHUB_STEP_SUMMARY
