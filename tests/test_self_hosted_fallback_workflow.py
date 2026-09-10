@@ -51,6 +51,8 @@ def parse_strict_workflow_structure(text: str) -> dict[str, str]:
 
     if re.search(r"(?m)^\s+(?:if|continue-on-error):", text):
         raise ValueError("workflow conditions/continue-on-error are not allowed")
+    if re.search(r'''(?m)^\s+["'](?:if|continue-on-error)["']\s*:''', text):
+        raise ValueError("quoted workflow conditions/continue-on-error are not allowed")
 
     step_starts = []
     for index, line in enumerate(lines[steps_index + 1 :], start=steps_index + 1):
@@ -144,6 +146,14 @@ class SelfHostedFallbackWorkflowTests(unittest.TestCase):
         mutated = self.text.replace(needle, needle + "        if: false\n", 1)
         with self.assertRaises(ValueError):
             parse_strict_workflow_structure(mutated)
+
+    def test_structure_parser_rejects_quoted_skipped_gate(self):
+        needle = f"      - name: {EXPECTED_STEPS[0]}\n"
+        for quoted_key in ('"if"', "'if'"):
+            with self.subTest(quoted_key=quoted_key):
+                mutated = self.text.replace(needle, needle + f"        {quoted_key}: false\n", 1)
+                with self.assertRaises(ValueError):
+                    parse_strict_workflow_structure(mutated)
 
     def test_structure_parser_rejects_extra_reusable_workflow_job(self):
         mutated = self.text + "\n  shadow-job:\n    uses: owner/repo/.github/workflows/unsafe.yml@main\n"
