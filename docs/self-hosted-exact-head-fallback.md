@@ -11,150 +11,167 @@ The canonical `.github/workflows/tests.yml` remains unchanged. This fallback is 
 ## Evidence classes
 
 - `GITHUB_HOSTED_CI_PASS`: canonical GitHub-hosted workflow evidence.
-- `SELF_HOSTED_EXACT_HEAD_PASS`: manually dispatched GitHub Actions execution on a repository-scoped self-hosted runner after exact current PR head validation.
+- `SELF_HOSTED_EXACT_HEAD_PASS`: manually dispatched GitHub Actions execution on the bounded self-hosted fallback after exact current PR head validation.
 - `LOCAL_EXACT_HEAD_PASS`: operator-run local execution outside GitHub Actions.
 
 No class automatically promotes to another class. Ready / merge remain human-final under ADR #90.
 
-## Host-specific decision for the first pilot
+## Host-specific decision
 
-The available Agent Controller host is already a dedicated mini PC, not a general-purpose personal workstation:
+The available Agent Controller host is a dedicated HP ProDesk 400 G4 DM with Intel Core i5-8500T (6C/6T), approximately 16 GB RAM, 256 GB SSD, and approximately 198 GB free at characterization time.
 
-- HP ProDesk 400 G4 DM;
-- Intel Core i5-8500T, 6 cores / 6 logical processors;
-- approximately 16 GB RAM;
-- 256 GB SSD with approximately 198 GB free at characterization time;
-- Windows reports that a hypervisor is already detected.
+The first Windows fallback remains bare metal on this dedicated host. A resident Windows guest VM is not required for the first pilot. This is a resource/complexity trade-off, not a claim that Windows accounts are a sandbox.
 
-Given this hardware, the first bounded design does **not** require a Windows guest VM. Running the Windows CI path directly on this dedicated host under a CI-only standard user gives a better resource/complexity trade-off than keeping an additional Windows VM resident on a 16 GB machine.
+Codex review of PR #189 identified two stronger boundaries that the initial account-only design did not meet:
 
-This is a host-specific risk acceptance, not a claim that a Windows account boundary is equivalent to a disposable VM. The standard-user boundary reduces blast radius; it is not a sandbox.
+1. target-controlled tests must not execute in the same Windows identity/profile that performs trusted post-test verification and PASS emission;
+2. deleting only a reused user profile does not eliminate persistence outside that profile.
 
-## Windows first-pilot execution model
+The Windows design therefore uses a **persistent trusted control identity plus a disposable target identity/SID for each pilot**.
 
-Use the dedicated Agent Controller mini PC as the Windows CI host, with these role boundaries:
+## Windows identity model
 
-- `c-admin`: host administration/setup only; never the runner identity;
-- `agy-agent`: existing Antigravity characterization account; never the CI runner identity;
-- `ac-runner`: dedicated standard-user account for self-hosted CI only.
+- `c-admin`: host administration and target-account provisioning/cleanup only; never executes PR target code.
+- `agy-agent`: existing Antigravity characterization account; outside the CI trust domain.
+- `ac-runner`: persistent local standard-user **control** identity. The GitHub Actions runner and all trusted pre/post gates execute here. PR target Python does not.
+- `act-<16hex>`: one disposable local standard-user **target** account derived from the one-time runner nonce. It exists for one pilot only and is deleted after the job. A later pilot receives a new account name/SID.
 
-The `ac-runner` profile must not contain owner/admin browser sessions, password-vault state, SSH private keys, provider/cloud API keys, Antigravity/Codex/Jules state, unrelated repository credentials, or other valuable material.
+`ac-runner` and `act-<nonce>` must have distinct local SIDs and neither may be a member of local Administrators. The workflow compares the running token SID to the SID resolved for local `ac-runner`; a same-named domain account is not accepted. The workflow also inspects explicit local Administrators membership instead of relying only on an elevated-token check.
 
-The Windows runner is repository-scoped, one-job ephemeral, and routed only through a fresh one-time label. `--ephemeral` de-registers the Actions runner after one job; it does not reset the host filesystem.
+## Control/target separation
 
-## Bare-metal cleanup contract
+The runner itself remains under `ac-runner`. The trusted workflow:
 
-The Windows bare-metal exception is acceptable only if the **runner profile itself is disposable**. Repository cleanliness is not host cleanliness.
+1. validates `main`, Windows/X64, local control SID, target SID, local Administrators membership, clean target state, one-time credential ACL, open same-repository PR, and exact current PR head;
+2. checks out the exact immutable target SHA under `ac-runner` with checkout credentials not persisted;
+3. validates HEAD/cleanliness using fixed machine-wide Git and Python paths;
+4. grants the disposable target SID read/execute-only access to the checked-out tree;
+5. launches the full unittest suite and Windows junction regression through `Start-Process -Credential ... -UseNewEnvironment -LoadUserProfile` under `act-<nonce>`;
+6. uses `-NoProfile` for both trusted and target PowerShell execution;
+7. verifies the target process did not inherit `GITHUB_*` or `GH_TOKEN` environment state and cannot open the runner command files (`GITHUB_STEP_SUMMARY`, `GITHUB_ENV`, `GITHUB_PATH`) or write to the `ac-runner` profile;
+8. removes the one-time target credential file **before** PR target code starts;
+9. after tests, under `ac-runner`, rejects scheduled-task persistence, rejects premature PASS-marker emission, revokes target checkout access, and rechecks exact HEAD/cleanliness;
+10. performs a fresh GitHub API read of the PR head;
+11. only then writes `SELF_HOSTED_EXACT_HEAD_PASS`.
 
-For the first pilot and every later untrusted self-hosted execution:
+This keeps PR-controlled test execution out of the profile, command files, credentials, and environment used by the trusted post-test gates. The target still executes arbitrary same-repository PR code with the rights of its own standard-user SID; the host-kernel residual risk remains accepted only for this bounded manual pilot.
 
-1. `ac-runner` remains a standard user and is not added to Administrators.
-2. The runner is installed and executed only under the `ac-runner` profile.
-3. Before target checkout, the workflow itself verifies:
-   - current identity ends in `\\ac-runner`;
-   - the identity is not an administrator;
-   - common credential/provider-state locations such as `.ssh`, `.aws`, `.azure`, `.gemini`, `.codex`, and `.config\\gh` are absent.
-4. The job uses one repository-scoped `--ephemeral --no-default-labels` registration with a fresh `ac-ci-<16hex>` label.
-5. After the one job, no later job may reuse that profile merely because `git status` is clean.
-6. From `c-admin`, stop/log off the runner identity, confirm the user profile is not loaded, then delete the `ac-runner` Windows profile before the next untrusted execution. The local account may remain; the profile/workspace is recreated cleanly for the next pilot.
-7. If profile deletion/recreation cannot be completed or its state is uncertain, the next self-hosted run is blocked rather than treating the old profile as clean.
+## Trusted machine-wide runtime
 
-This gives the bare-metal design a concrete reset boundary without requiring a Windows guest VM. It does not protect the host kernel from malicious code; that residual risk is accepted only for manually selected same-repository PR heads under the constraints below.
+The first pilot requires these trusted read/execute runtime paths outside either user profile:
 
-## Linux coverage decision
+- `C:\Program Files\Python312\python.exe` and Python 3.12.x;
+- `C:\Program Files\Git\cmd\git.exe`.
 
-The canonical hosted workflow also has an Ubuntu/Python 3.12 full-suite job. A Windows PASS must not be promoted to Ubuntu-equivalent evidence.
+The target account receives read/execute-only access to the repository checkout. Python runs with `-B` so target execution does not require writing `__pycache__` into the checkout.
 
-If GitHub-hosted capacity remains unavailable long enough to justify Linux fallback coverage, add a separate Linux execution environment on the same mini PC rather than a second Windows VM.
+## One-time target credential boundary
 
-Preferred Linux shape:
+`c-admin` provisions the fresh `act-<nonce>` standard-user account before runner registration and writes its random one-time local password to:
 
-- Ubuntu Hyper-V VM rather than WSL2 when the goal is to approximate the canonical Ubuntu runner semantics;
-- 2 vCPU;
-- 3 GB RAM initially, with 4 GB as the upper pilot target if tests require it;
-- 30-40 GB dynamically expanding virtual disk;
-- no unrelated credentials or shared host secrets;
-- one-job ephemeral GitHub runner registration inside the VM;
-- VM powered off when not needed;
-- revert to a known-clean checkpoint or recreate the VM before later untrusted target execution where practical.
+`C:\ProgramData\AgentController\ci-secrets\<nonce>.txt`
 
-These limits preserve host headroom on a 16 GB machine while being ample for the current Python unittest workload. Do not run the Windows and Linux self-hosted CI jobs concurrently on this host during the first pilot.
+The credential is low-value and local to the disposable target identity, but it is still treated as secret material:
 
-## Runner trust requirements
+- ACL inheritance is disabled;
+- SYSTEM, local Administrators, and the exact `ac-runner` SID may read it;
+- Everyone, Authenticated Users, BUILTIN Users, and the target SID must not be granted access;
+- the workflow verifies those constraints before checkout;
+- `ac-runner` reads the password into a `PSCredential` and deletes the file before target code starts;
+- if the file remains or its ACL cannot be proven, the job fails closed.
 
-Before registration, the Windows runner host/account must satisfy all of the following:
+No GitHub PAT, SSH key, provider credential, browser session, Antigravity/Codex/Jules state, or owner credential is placed in either target state or the one-time credential file.
 
-- repository-scoped registration for `oimus1976/agent-controller` only;
-- dedicated standard-user runner identity (`ac-runner` for the first pilot);
-- no valuable credentials reachable by the runner account;
-- Python 3.12 installed and available to the runner account;
-- register for exactly one job with `--ephemeral`;
-- suppress default routable labels with `--no-default-labels`;
-- assign one fresh high-entropy custom label `ac-ci-<16 hex>` for that pilot only;
-- do not execute fork PRs, arbitrary branch names, issue attachments, or unpublished agent worktrees;
-- operator confirms the target is an open same-repository PR and supplies its exact current 40-hex head SHA;
-- the `ac-runner` profile is treated as contaminated after a job and is deleted/recreated before later untrusted execution.
+## Disposable SID / cross-run reset contract
 
-The one-time label reduces the chance that an unrelated queued workflow can claim the runner when it comes online. It is not a substitute for host isolation.
+A profile reset is no longer the claimed reuse boundary. The **target SID itself is disposable**.
+
+Before each pilot:
+
+1. no previous `act-*` account may remain;
+2. create exactly one fresh `act-<nonce>` local standard user with a new random password;
+3. confirm no Windows profile exists yet for that SID;
+4. confirm that SID is not in local Administrators and owns no scheduled task;
+5. create the protected one-time credential file;
+6. only then register the `ac-runner` GitHub runner and dispatch the trusted workflow from `main`.
+
+After each pilot, from `c-admin`:
+
+1. confirm the one-job GitHub runner deregistered;
+2. terminate/log off the disposable target identity if necessary;
+3. remove any scheduled task or other explicitly identified state owned by the target SID;
+4. delete the `act-<nonce>` local account and its Windows profile;
+5. remove the per-pilot result directory and any remaining credential artifact;
+6. verify that no `act-*` account/profile for the completed pilot remains;
+7. if cleanup is incomplete or uncertain, block the next untrusted self-hosted pilot.
+
+Recreating the same username is not used as a cleanup strategy. A later pilot uses a fresh nonce and therefore a fresh local account name and SID. Stale persistence bound to an old SID cannot be accepted as clean evidence and must be removed during administrator cleanup.
+
+## Runner routing and repository boundary
+
+The GitHub runner remains:
+
+- repository-scoped to `oimus1976/agent-controller`;
+- registered for exactly one job with `--ephemeral`;
+- registered with `--no-default-labels`;
+- assigned one fresh high-entropy `ac-ci-<16hex>` label;
+- selected only by `runs-on: ac-ci-${runner_nonce}`;
+- dispatched manually from the trusted `main` workflow definition;
+- limited to open same-repository PRs and an operator-supplied exact current 40-hex SHA.
+
+`--ephemeral` limits GitHub job reuse; it does not reset Windows state. The disposable target SID and administrator cleanup provide the cross-run target boundary.
 
 ## Workflow safety properties
 
-`.github/workflows/self-hosted-exact-head.yml` is intentionally separate from `tests.yml` and has these properties:
+`.github/workflows/self-hosted-exact-head.yml` intentionally remains separate from canonical `tests.yml` and requires:
 
 - `workflow_dispatch` only;
-- required `pr_number`, `target_sha`, and `runner_nonce` inputs;
-- `runs-on` resolves only to `ac-ci-${runner_nonce}` rather than any GitHub-hosted label or generic `self-hosted` label;
-- `runner_nonce` must be exactly 16 hexadecimal characters;
-- repository permissions are `contents: read` and `pull-requests: read` only;
-- the first step requires trusted `main`, Windows/X64, the dedicated non-admin `ac-runner` identity, absence of common credential/provider state, valid inputs, an open same-repository PR, and exact current head SHA **before target checkout**;
-- target checkout is by immutable SHA with `persist-credentials: false` and `clean: true`;
-- HEAD and clean working tree are checked before tests;
-- Python major/minor must be exactly 3.12;
-- full unittest suite and Windows junction regression must both pass;
-- HEAD and clean tree are checked after tests;
-- a final GitHub API read requires the PR to still be open, same-repository, and still at the same SHA;
-- only after every gate passes does the workflow emit `SELF_HOSTED_EXACT_HEAD_PASS`.
+- `contents: read` and `pull-requests: read` permissions only;
+- pinned `actions/checkout` by full commit SHA;
+- `persist-credentials: false` and `clean: true`;
+- all trusted PowerShell steps use `-NoProfile`;
+- exact local `ac-runner` SID and explicit non-admin membership checks;
+- exactly one fresh `act-<nonce>` account, no existing profile, and no pre-existing scheduled task for its SID;
+- target test process executes with alternate credentials and `-UseNewEnvironment`;
+- target environment cannot inherit GitHub command/token variables;
+- target cannot write GitHub command files or the control profile;
+- target checkout access is read/execute-only and is revoked after tests;
+- full unittest suite and Windows junction regression both pass;
+- target-created scheduled-task persistence blocks PASS;
+- exact HEAD and clean tree are checked before and after target execution;
+- final PR state/repository/head are freshly revalidated;
+- PASS evidence is emitted only by the trusted control identity after every preceding gate passes.
 
-The GitHub token is scoped to the preflight/final verification steps. It is not intentionally exported to target test steps. Checkout does not persist credentials in the repository configuration.
+Regression tests also reject unnamed workflow steps and bind each expected step name to its security-critical body predicates. Merely preserving marker strings is not sufficient.
 
-Regression tests assert the security-critical step ordering: preflight -> checkout -> checkout verification -> full suite -> Windows junction regression -> post-test checkout verification -> final PR-head revalidation -> PASS summary. Marker presence alone is not considered sufficient.
+## Bootstrap boundary
 
-## Workflow-ref bootstrap boundary
+The fallback cannot validate its own new workflow before that workflow exists on trusted `main`. PR #189 therefore still needs exact-head local regression, independent/adversarial review, and human Ready/merge before any runner is registered.
 
-`workflow_dispatch` is useful only after this workflow is present on trusted `main`. The fallback cannot serve as its own pre-merge CI substitute.
+After merge, dispatch explicitly from `main`; do not rely on a UI default branch selection.
 
-After merge, dispatch this workflow explicitly from `main`. The in-workflow `github.ref` check catches accidental non-main dispatch when the trusted workflow definition is used, but a topic branch can theoretically modify its own copy of a workflow. Therefore operator selection of `main` remains part of the trust boundary; the recommended invocation should explicitly specify `--ref main` rather than relying on a UI default.
+## Linux coverage
 
-## Pilot operation
+A Windows self-hosted PASS does not replace canonical Ubuntu/Python 3.12 evidence. If hosted capacity remains unavailable long enough to justify Linux fallback evidence, add a separate Ubuntu Hyper-V VM on the same mini PC:
 
-1. Keep the runner unregistered until this workflow has been independently reviewed and human-merged to `main`.
-2. Create/verify the dedicated `ac-runner` standard-user account on the Agent Controller mini PC.
-3. Ensure a clean/recreated `ac-runner` profile and install only the runtime prerequisites needed by the runner account (Git, Python 3.12, Actions runner files).
-4. Generate a fresh random 16-hex nonce and derive label `ac-ci-<nonce>`.
-5. Register the runner repository-scoped using GitHub's short-lived registration token with `--ephemeral --no-default-labels --labels ac-ci-<nonce>`.
-6. Dispatch the trusted workflow explicitly from `main`, supplying the exact PR number, exact current head SHA, and the same nonce.
-7. Preserve the GitHub run/job identity and exact SHA as evidence.
-8. After the one job, confirm de-registration and, from `c-admin`, delete the `ac-runner` Windows profile before any later untrusted execution. Fail closed if profile cleanup is uncertain.
-9. Add Linux VM fallback only if hosted Ubuntu capacity remains unavailable and Ubuntu-equivalent evidence becomes necessary.
+- 2 vCPU;
+- 3 GB RAM initially, up to 4 GB if required;
+- 30-40 GB dynamically expanding disk;
+- one-job ephemeral runner inside the VM;
+- powered off when unused;
+- known-clean checkpoint/recreate before later untrusted execution where practical;
+- no concurrent Windows/Linux self-hosted pilot jobs on this 16 GB host.
+
+WSL2 may remain useful for development but is not the preferred evidence path when approximating canonical Ubuntu runner semantics.
 
 ## Failure semantics
 
-Any malformed input, wrong/non-admin runner identity condition, forbidden profile state, GitHub API error, fork/head-repository mismatch, PR state mismatch, head drift, Python version mismatch, test failure, dirty/head-changed postcondition, final PR drift, or uncertain profile-reset state fails closed. Do not infer PASS from partial steps.
+Malformed inputs, non-main dispatch, wrong runner OS/arch, control/target SID mismatch, direct/local Administrators membership, stale target account/profile/task state, unsafe credential ACL, GitHub API uncertainty, fork/head mismatch, head drift, trusted-runtime mismatch, target command-file write access, inherited GitHub environment, target test failure, target-created task persistence, dirty/head-changed postcondition, premature PASS marker, final PR drift, or uncertain cross-run cleanup all fail closed.
 
 A capacity-blocked GitHub-hosted job remains distinct from self-hosted PASS and from code failure.
 
-## Residual risk acceptance
+## Human gate and escalation
 
-The first Windows pilot intentionally accepts more residual host-persistence risk than a disposable Windows VM in exchange for substantially lower resource and operational cost on the available 16 GB dedicated host. This acceptance is bounded by:
+The bare-metal choice retains more host risk than a disposable Windows VM. Human acceptance is limited to the dedicated mini PC, manually selected same-repository PR heads, no valuable runner/target credentials, disposable target SIDs, and human-final Ready/merge.
 
-- dedicated physical host;
-- dedicated standard-user runner account;
-- disposable runner profile between untrusted jobs;
-- no valuable credentials;
-- manual same-repository exact-head dispatch only;
-- one-job ephemeral registration;
-- one-time routing label;
-- workflow-level identity/profile-state preflight;
-- human-final Ready/merge boundary.
-
-If the project later begins executing less-trusted repositories, fork code, automated dispatches, secrets-bearing jobs, or materially higher-risk workloads, this bare-metal exception must be revisited and a disposable Windows VM/image should become the default.
+If the project later executes fork/other-repository code, automated dispatch, secrets-bearing target jobs, or materially higher-risk workloads, the bare-metal exception must be revisited and a disposable Windows VM/image should become the default.
