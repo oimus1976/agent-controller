@@ -203,7 +203,7 @@ jobs:
 
           $targetName = "act-$($env:INPUT_RUNNER_NONCE.ToLowerInvariant())"
           $targetSid = (Get-LocalUser -Name $targetName -ErrorAction Stop).SID.Value
-          & icacls.exe $env:GITHUB_WORKSPACE /grant:r "*$targetSid:(OI)(CI)(RX)" /T /C | Out-Null
+          & icacls.exe $env:GITHUB_WORKSPACE /grant:r "*$targetSid:(OI)(CI)(RX)" | Out-Null
           if ($LASTEXITCODE -ne 0) { throw 'failed to grant disposable target read-only checkout access' }
 
       - name: Run target tests under disposable SID
@@ -213,11 +213,12 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $trustedPython = 'C:\Program Files\Python312\python.exe'
+          $controlSid = (Get-LocalUser -Name 'ac-runner' -ErrorAction Stop).SID.Value
           $targetName = "act-$($env:INPUT_RUNNER_NONCE.ToLowerInvariant())"
           $targetUser = Get-LocalUser -Name $targetName -ErrorAction Stop
           $targetSid = $targetUser.SID.Value
           $credentialFile = "C:\ProgramData\AgentController\ci-secrets\$($env:INPUT_RUNNER_NONCE.ToLowerInvariant()).txt"
-          $password = (Get-Content -LiteralPath $credentialFile -Raw -ErrorAction Stop).TrimEnd("`r", "`n")
+          $password = (Get-Content -LiteralPath $credentialFile -Raw -ErrorAction Stop).TrimEnd([char[]]"`r`n")
           if ([string]::IsNullOrWhiteSpace($password) -or $password.Length -gt 256) {
             throw 'one-time disposable-target credential has invalid shape'
           }
@@ -229,7 +230,7 @@ jobs:
 
           $resultRoot = "C:\ProgramData\AgentController\ci-results\$($env:INPUT_RUNNER_NONCE.ToLowerInvariant())"
           New-Item -ItemType Directory -Force -Path $resultRoot | Out-Null
-          & icacls.exe $resultRoot /inheritance:r /grant:r "*$targetSid:(OI)(CI)(M)" | Out-Null
+          & icacls.exe $resultRoot /inheritance:r /grant:r "*$controlSid:(OI)(CI)(F)" "*$targetSid:(OI)(CI)(M)" | Out-Null
           if ($LASTEXITCODE -ne 0) { throw 'failed to prepare disposable target result directory' }
 
           $pathsToProbe = @($env:GITHUB_STEP_SUMMARY, $env:GITHUB_ENV, $env:GITHUB_PATH, (Join-Path $HOME 'ac-ci-control-write-probe.tmp'))
@@ -266,8 +267,8 @@ jobs:
             -Credential $credential -LoadUserProfile -UseNewEnvironment -WorkingDirectory $env:GITHUB_WORKSPACE `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -Wait
 
-          if (Test-Path -LiteralPath $stdout) { Get-Content -LiteralPath $stdout }
-          if (Test-Path -LiteralPath $stderr) { Get-Content -LiteralPath $stderr | Write-Error -ErrorAction Continue }
+          if (Test-Path -LiteralPath $stdout) { Get-Content -LiteralPath $stdout | ForEach-Object { Write-Host $_ } }
+          if (Test-Path -LiteralPath $stderr) { Get-Content -LiteralPath $stderr | ForEach-Object { Write-Host $_ } }
           if ($process.ExitCode -ne 0) { throw "disposable target test process failed closed with exit $($process.ExitCode)" }
 
       - name: Verify trusted postconditions and revoke target access
@@ -294,7 +295,7 @@ jobs:
           })
           if ($targetTasks.Count -ne 0) { throw 'target tests created scheduled-task persistence' }
 
-          & icacls.exe $env:GITHUB_WORKSPACE /remove:g "*$targetSid" /T /C | Out-Null
+          & icacls.exe $env:GITHUB_WORKSPACE /remove:g "*$targetSid" | Out-Null
           if ($LASTEXITCODE -ne 0) { throw 'failed to revoke target checkout access' }
 
           $head = (& $trustedGit rev-parse HEAD).Trim()
