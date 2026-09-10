@@ -203,7 +203,7 @@ jobs:
 
           $targetName = "act-$($env:INPUT_RUNNER_NONCE.ToLowerInvariant())"
           $targetSid = (Get-LocalUser -Name $targetName -ErrorAction Stop).SID.Value
-          & icacls.exe $env:GITHUB_WORKSPACE /grant:r "*$targetSid:(OI)(CI)(RX)" | Out-Null
+          & icacls.exe $env:GITHUB_WORKSPACE /grant:r "*${targetSid}:(OI)(CI)(RX)" | Out-Null
           if ($LASTEXITCODE -ne 0) { throw 'failed to grant disposable target read-only checkout access' }
 
       - name: Run target tests under disposable SID
@@ -230,7 +230,7 @@ jobs:
 
           $resultRoot = "C:\ProgramData\AgentController\ci-results\$($env:INPUT_RUNNER_NONCE.ToLowerInvariant())"
           New-Item -ItemType Directory -Force -Path $resultRoot | Out-Null
-          & icacls.exe $resultRoot /inheritance:r /grant:r "*$controlSid:(OI)(CI)(F)" "*$targetSid:(OI)(CI)(M)" | Out-Null
+          & icacls.exe $resultRoot /inheritance:r /grant:r "*${controlSid}:(OI)(CI)(F)" "*${targetSid}:(OI)(CI)(M)" | Out-Null
           if ($LASTEXITCODE -ne 0) { throw 'failed to prepare disposable target result directory' }
 
           $pathsToProbe = @($env:GITHUB_STEP_SUMMARY, $env:GITHUB_ENV, $env:GITHUB_PATH, (Join-Path $HOME 'ac-ci-control-write-probe.tmp'))
@@ -295,7 +295,7 @@ jobs:
           })
           if ($targetTasks.Count -ne 0) { throw 'target tests created scheduled-task persistence' }
 
-          & icacls.exe $env:GITHUB_WORKSPACE /remove:g "*$targetSid" | Out-Null
+          & icacls.exe $env:GITHUB_WORKSPACE /remove:g "*${targetSid}" | Out-Null
           if ($LASTEXITCODE -ne 0) { throw 'failed to revoke target checkout access' }
 
           $head = (& $trustedGit rev-parse HEAD).Trim()
