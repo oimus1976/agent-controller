@@ -21,10 +21,10 @@ For ordinary installation, configuration, recovery, build, and test work:
 2. If all required invariants pass and no observable anomaly predicate matches, return `PASS` and stop.
 3. Do not escalate only because a log is truncated, incomplete, noisy, or contains warnings. Treat that case according to whether required evidence is still available.
 4. Escalate only when at least one of these is true:
-   - a named observable anomaly predicate matches;
-   - required evidence is missing;
-   - observed state contradicts expected state.
-5. Free-form suspicion is not a valid escalation reason until it is reduced to a reproducible predicate.
+   - a named observable anomaly predicate matches and deeper evidence is needed to resolve it;
+   - required evidence is missing and a named predicate identifies what deeper evidence can resolve it.
+5. If observed state directly contradicts a required invariant, return `FAIL` unless a stricter trust policy requires `BLOCKED`.
+6. Free-form suspicion is not a valid escalation reason until it is reduced to a reproducible predicate.
 
 Normal stop condition:
 
@@ -96,7 +96,7 @@ L2: subsystem log
 L3: implementation / installer / framework internals
 ```
 
-Move to the next level only when the current level establishes a concrete predicate or cannot supply required evidence.
+Move to the next level only when the current level establishes a concrete predicate or cannot supply required evidence and a named predicate identifies what the next level can resolve.
 
 Do not jump directly to deeper internals because more logs are available.
 
@@ -107,7 +107,7 @@ Use the existing `VerificationResult` vocabulary consistently:
 - `PASS`: all required invariants are verified and no blocking predicate remains;
 - `FAIL`: observed evidence contradicts a required invariant;
 - `BLOCKED`: verification cannot validly proceed because a prerequisite, policy gate, or trust-boundary requirement blocks it;
-- `UNCERTAIN`: required evidence is unavailable or inconclusive;
+- `UNCERTAIN`: required evidence is unavailable or inconclusive and no bounded escalation can currently resolve it;
 - `NOT_RUN`: verification was not attempted.
 
 `UNCERTAIN` and `BLOCKED` must never be treated as `PASS`.
@@ -128,14 +128,14 @@ Do not:
 if security_sensitive:
     require every declared trust invariant
 
-if all required invariants pass and no blocking predicate matches:
+if all required invariants pass and no anomaly predicate matches:
     PASS and STOP
 elif observed state contradicts a required invariant:
-    FAIL
+    FAIL and STOP
 elif a policy or trust-boundary prerequisite blocks valid verification:
-    BLOCKED
-elif required evidence is missing or inconclusive:
-    UNCERTAIN
-elif a named observable predicate matches and deeper evidence is required:
+    BLOCKED and STOP
+elif a named observable predicate matches and deeper evidence can resolve it:
     escalate one level
+elif required evidence is missing or inconclusive:
+    UNCERTAIN and STOP
 ```
