@@ -124,9 +124,9 @@ def decide_verification(
 ) -> VerificationDecision:
     """Return the smallest policy decision for one bounded verification state.
 
-    This function classifies already-collected evidence only.  Evidence collection
+    This function classifies already-collected evidence only. Evidence collection
     itself is bounded separately by ``DiagnosticBudget.consume`` so callers cannot
-    repeat a same-level probe set.  A non-``None`` ``anomaly`` represents a named
+    repeat a same-level probe set. A non-``None`` ``anomaly`` represents a named
     observable predicate that has already matched; free-form suspicion has no input
     channel here and therefore cannot authorize escalation.
     """
@@ -135,9 +135,14 @@ def decide_verification(
     current_level = EvidenceLevel(current_level)
     required = tuple(required_positive_invariants) + tuple(required_negative_invariants)
     trust = tuple(trust_boundary_invariants)
-    applicable = required + (trust if verification_class is VerificationClass.SECURITY_SENSITIVE else ())
 
-    # Terminal evidence is classified before budget exhaustion.  Contradiction
+    # Explicitly supplied required trust evidence is never ignored, even if the
+    # caller classified the verification as normal. Security-sensitive verification
+    # additionally requires at least one explicitly declared trust invariant before
+    # PASS is possible.
+    applicable = required + trust
+
+    # Terminal evidence is classified before budget exhaustion. Contradiction
     # remains FAIL even when a policy/prerequisite gate is also blocked.
     if any(item.result is VerificationResult.FAIL for item in applicable):
         return _terminal(
@@ -176,9 +181,11 @@ def decide_verification(
         )
     )
 
+    declared_invariant_ids = {item.invariant_id for item in applicable}
+    predicate_is_bound = anomaly is not None and anomaly.affected_invariant in declared_invariant_ids
     next_level = _next_level(current_level)
     if (
-        anomaly is not None
+        predicate_is_bound
         and deeper_evidence_can_resolve
         and next_level is not None
         and diagnostic_budget.can_collect(next_level)
