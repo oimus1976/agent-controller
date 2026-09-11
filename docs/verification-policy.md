@@ -23,7 +23,7 @@ For ordinary installation, configuration, recovery, build, and test work:
 4. Escalate only when at least one of these is true:
    - a named observable anomaly predicate matches and deeper evidence is needed to resolve it;
    - required evidence is missing and a named predicate identifies what deeper evidence can resolve it.
-5. If observed state directly contradicts a required invariant, return `FAIL` unless a stricter trust policy requires `BLOCKED`.
+5. If observed state directly contradicts a required invariant, return `FAIL`.
 6. Free-form suspicion is not a valid escalation reason until it is reduced to a reproducible predicate.
 
 Normal stop condition:
@@ -44,15 +44,17 @@ For security-sensitive verification:
 1. Declare all required trust-boundary invariants explicitly.
 2. Do not infer a trust invariant from general functional success.
 3. Do not substitute approximate, indirect, or missing evidence for a required trust invariant.
-4. If a required trust invariant is not verified, return `UNCERTAIN` or `BLOCKED`; never promote it to `PASS`.
-5. Preserve existing fail-closed behavior for ambiguous access, ownership, credentials, isolation, exact-head, persistence, and cleanup state.
-6. Once every declared trust invariant is explicitly verified and no trust-boundary uncertainty remains, return `PASS` and stop; do not continue into implementation internals without a matching predicate.
+4. If a required invariant is unverified and a named predicate identifies deeper evidence that can resolve it within the remaining escalation budget, escalate one level before returning a terminal result.
+5. If a prerequisite or policy gate prevents valid verification, return `BLOCKED`. If required evidence remains unavailable or inconclusive after bounded escalation, return `UNCERTAIN`. Never promote either to `PASS`.
+6. Preserve existing fail-closed behavior for ambiguous access, ownership, credentials, isolation, exact-head, persistence, and cleanup state.
+7. Return `PASS` only when every applicable required invariant, including every trust-boundary invariant, is explicitly verified, no observable anomaly predicate matches, and no trust-boundary uncertainty remains.
 
 Security stop condition:
 
 ```text
-all required positive invariants PASS
-AND all required negative invariants PASS
+all applicable required invariants PASS
+AND all required trust-boundary invariants PASS
+AND no observable anomaly predicate matched
 AND no trust-boundary uncertainty remains
 => PASS
 => STOP
@@ -98,16 +100,18 @@ L3: implementation / installer / framework internals
 
 Move to the next level only when the current level establishes a concrete predicate or cannot supply required evidence and a named predicate identifies what the next level can resolve.
 
+Each verification run must have a finite escalation budget. A more specific runbook may define a stricter finite budget. Otherwise, allow at most one escalation transition per level and no same-level diagnostic retry after a predicate is established. Budget exhaustion terminates as `UNCERTAIN` unless observed evidence already requires `FAIL` or a prerequisite/policy gate requires `BLOCKED`.
+
 Do not jump directly to deeper internals because more logs are available.
 
 ## 6. Outcomes
 
 Use the existing `VerificationResult` vocabulary consistently:
 
-- `PASS`: all required invariants are verified and no blocking predicate remains;
+- `PASS`: all applicable required invariants are verified, no observable anomaly predicate matches, and no required uncertainty remains;
 - `FAIL`: observed evidence contradicts a required invariant;
 - `BLOCKED`: verification cannot validly proceed because a prerequisite, policy gate, or trust-boundary requirement blocks it;
-- `UNCERTAIN`: required evidence is unavailable or inconclusive and no bounded escalation can currently resolve it;
+- `UNCERTAIN`: required evidence is unavailable or inconclusive and bounded escalation cannot currently resolve it;
 - `NOT_RUN`: verification was not attempted.
 
 `UNCERTAIN` and `BLOCKED` must never be treated as `PASS`.
@@ -120,22 +124,25 @@ Do not:
 - treat every truncated or incomplete log as failure or automatic escalation;
 - continue deep diagnostics after sufficient evidence already satisfies the applicable stop condition;
 - weaken or skip declared trust-boundary invariants because the operation appears to work;
+- exceed the declared escalation budget;
 - use fail-closed as a justification for unbounded investigation.
 
 ## 8. Minimal decision rule
 
 ```text
-if security_sensitive:
-    require every declared trust invariant
-
-if all required invariants pass and no anomaly predicate matches:
-    PASS and STOP
-elif observed state contradicts a required invariant:
+if observed state contradicts a required invariant:
     FAIL and STOP
-elif a policy or trust-boundary prerequisite blocks valid verification:
+elif a prerequisite or policy gate blocks valid verification:
     BLOCKED and STOP
-elif a named observable predicate matches and deeper evidence can resolve it:
+elif all applicable required invariants pass
+     and no observable anomaly predicate matches
+     and no required uncertainty remains:
+    PASS and STOP
+elif a named observable predicate matches
+     and deeper evidence can resolve it
+     and escalation budget remains:
     escalate one level
-elif required evidence is missing or inconclusive:
+elif required evidence is missing or inconclusive
+     or escalation budget is exhausted:
     UNCERTAIN and STOP
 ```
