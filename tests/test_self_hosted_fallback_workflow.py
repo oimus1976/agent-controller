@@ -1,3 +1,4 @@
+import base64
 from pathlib import Path
 import re
 import shutil
@@ -289,6 +290,83 @@ class SelfHostedFallbackWorkflowTests(unittest.TestCase):
                 self.assertIn("target process quiescence could not be proven", block)
                 self.assertIn("freshTargetProcesses", block)
                 self.assertLess(block.index("freshTargetProcesses"), block.index(first_sensitive_marker))
+        post = self.step_blocks["Verify trusted postconditions and revoke target access"]
+        self.assertLess(post.index("freshTargetProcesses"), post.index("Get-ScheduledTask"))
+        self.assertLess(post.index("Get-ScheduledTask"), post.index("& $trustedGit rev-parse"))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process ownership regression")
+    def test_actual_quiescence_gates_reject_unresolved_ownership(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        if powershell is None:
+            self.skipTest("Windows PowerShell is unavailable")
+        gates = []
+        for block in extract_run_blocks(self.text):
+            if "function Get-TargetOwnedProcesses" in block:
+                start = block.index("function Get-TargetOwnedProcesses")
+                end = block.index("\n", block.index("if ($freshTargetProcesses.Count"))
+                gates.append(block[start:end])
+        self.assertEqual(len(gates), 3)
+        scenarios = (
+            ("other", True, 0),
+            ("target", True, 1),
+            ("denied", False, 0),
+            ("privilege", False, 0),
+            ("missing_result", False, 0),
+            ("missing_status", False, 0),
+            ("missing_sid", False, 0),
+            ("query_exception", False, 0),
+            ("enumeration_exception", False, 0),
+            ("final_denied", False, 0),
+        )
+        for index, gate in enumerate(gates):
+            for scenario, accepted, kills in scenarios:
+                with self.subTest(gate=index, scenario=scenario):
+                    # Execute the workflow's real gate; all OS interactions are mocked.
+                    harness = r"""
+                        $ErrorActionPreference = 'Stop'
+                        $targetSid = 'S-1-5-21-100'
+                        $script:round = 0
+                        $script:kills = 0
+                        function Get-CimInstance {
+                            param($ClassName, $ErrorAction)
+                            $script:round++
+                            if ($scenario -eq 'enumeration_exception') { throw 'enumeration failed' }
+                            [pscustomobject]@{ ProcessId = 123 }
+                        }
+                        function Invoke-CimMethod {
+                            param($InputObject, $MethodName, $ErrorAction)
+                            if ($scenario -eq 'query_exception') { throw 'query failed' }
+                            if ($scenario -eq 'missing_result') { return $null }
+                            if ($scenario -eq 'missing_status') { return [pscustomobject]@{ Sid = $targetSid } }
+                            if ($scenario -eq 'missing_sid') { return [pscustomobject]@{ ReturnValue = 0 } }
+                            $code = 0
+                            if ($scenario -eq 'denied' -or ($scenario -eq 'final_denied' -and $script:round -gt 1)) { $code = 2 }
+                            if ($scenario -eq 'privilege') { $code = 3 }
+                            $sid = 'S-1-5-21-200'
+                            if ($scenario -eq 'target' -and $script:kills -eq 0) { $sid = $targetSid }
+                            [pscustomobject]@{ ReturnValue = $code; Sid = $sid }
+                        }
+                        function Stop-Process {
+                            param($Id, [switch]$Force, $ErrorAction)
+                            $script:kills++
+                        }
+                        function Start-Sleep { param($Milliseconds) }
+                    """
+                    script = "$scenario = '" + scenario + "'\n" + harness
+                    script += "\ntry {\n" + gate + """
+                        Write-Output "GATE_ACCEPTED:$script:kills"
+                    } catch {
+                        Write-Output 'GATE_REJECTED'
+                    }
+                    """
+                    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+                    result = subprocess.run(
+                        [powershell, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                        text=True, capture_output=True, timeout=10, check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    expected = f"GATE_ACCEPTED:{kills}" if accepted else "GATE_REJECTED"
+                    self.assertEqual(result.stdout.strip(), expected, result.stderr)
 
     def test_trusted_postconditions_and_api_revalidation_precede_pass_emission(self):
         names = list(self.step_blocks)

@@ -321,7 +321,10 @@ jobs:
             $owned = @()
             foreach ($candidate in @(Get-CimInstance Win32_Process -ErrorAction Stop)) {
               $owner = Invoke-CimMethod -InputObject $candidate -MethodName GetOwnerSid -ErrorAction Stop
-              if ($owner.ReturnValue -eq 0 -and $owner.Sid -eq $targetSid) { $owned += $candidate }
+              if ($null -eq $owner -or $null -eq $owner.ReturnValue -or $owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace($owner.Sid)) {
+                throw "process ownership unresolved for PID $($candidate.ProcessId); GetOwnerSid ReturnValue=$($owner.ReturnValue)"
+              }
+              if ($owner.Sid -eq $targetSid) { $owned += $candidate }
             }
             return @($owned)
           }
@@ -379,7 +382,10 @@ jobs:
             $owned = @()
             foreach ($candidate in @(Get-CimInstance Win32_Process -ErrorAction Stop)) {
               $owner = Invoke-CimMethod -InputObject $candidate -MethodName GetOwnerSid -ErrorAction Stop
-              if ($owner.ReturnValue -eq 0 -and $owner.Sid -eq $targetSid) { $owned += $candidate }
+              if ($null -eq $owner -or $null -eq $owner.ReturnValue -or $owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace($owner.Sid)) {
+                throw "process ownership unresolved for PID $($candidate.ProcessId); GetOwnerSid ReturnValue=$($owner.ReturnValue)"
+              }
+              if ($owner.Sid -eq $targetSid) { $owned += $candidate }
             }
             return @($owned)
           }
@@ -419,7 +425,10 @@ jobs:
             $owned = @()
             foreach ($candidate in @(Get-CimInstance Win32_Process -ErrorAction Stop)) {
               $owner = Invoke-CimMethod -InputObject $candidate -MethodName GetOwnerSid -ErrorAction Stop
-              if ($owner.ReturnValue -eq 0 -and $owner.Sid -eq $targetSid) { $owned += $candidate }
+              if ($null -eq $owner -or $null -eq $owner.ReturnValue -or $owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace($owner.Sid)) {
+                throw "process ownership unresolved for PID $($candidate.ProcessId); GetOwnerSid ReturnValue=$($owner.ReturnValue)"
+              }
+              if ($owner.Sid -eq $targetSid) { $owned += $candidate }
             }
             return @($owned)
           }
