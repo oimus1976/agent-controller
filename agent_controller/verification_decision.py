@@ -56,7 +56,7 @@ class MatchedAnomalyPredicate:
 
 @dataclass(frozen=True)
 class DiagnosticBudget:
-    """Finite evidence-collection budget with at most one attempt per level."""
+    """Finite evidence budget consumed sequentially from L0 through L3."""
 
     remaining_attempts: int
     attempted_levels: tuple[EvidenceLevel, ...] = ()
@@ -69,14 +69,24 @@ class DiagnosticBudget:
         levels = tuple(EvidenceLevel(level) for level in self.attempted_levels)
         if len(set(levels)) != len(levels):
             raise ValueError("attempted_levels must not contain duplicates")
+        if len(levels) > len(EvidenceLevel):
+            raise ValueError("attempted_levels exceeds the evidence-level range")
+        expected_prefix = tuple(EvidenceLevel(index) for index in range(len(levels)))
+        if levels != expected_prefix:
+            raise ValueError("attempted_levels must be a contiguous prefix starting at L0")
         object.__setattr__(self, "attempted_levels", levels)
+
+    def _next_collectable_level(self) -> Optional[EvidenceLevel]:
+        if len(self.attempted_levels) >= len(EvidenceLevel):
+            return None
+        return EvidenceLevel(len(self.attempted_levels))
 
     def can_collect(self, level: EvidenceLevel) -> bool:
         level = EvidenceLevel(level)
-        return self.remaining_attempts > 0 and level not in self.attempted_levels
+        return self.remaining_attempts > 0 and level == self._next_collectable_level()
 
     def consume(self, level: EvidenceLevel) -> "DiagnosticBudget":
-        """Consume one predeclared evidence-collection attempt at ``level``."""
+        """Consume the next sequential predeclared evidence-collection attempt."""
 
         level = EvidenceLevel(level)
         if not self.can_collect(level):
@@ -126,9 +136,10 @@ def decide_verification(
 
     This function classifies already-collected evidence only. Evidence collection
     itself is bounded separately by ``DiagnosticBudget.consume`` so callers cannot
-    repeat a same-level probe set. A non-``None`` ``anomaly`` represents a named
-    observable predicate that has already matched; free-form suspicion has no input
-    channel here and therefore cannot authorize escalation.
+    repeat a same-level probe set or jump over an evidence level. A non-``None``
+    ``anomaly`` represents a named observable predicate that has already matched;
+    free-form suspicion has no input channel here and therefore cannot authorize
+    escalation.
     """
 
     verification_class = VerificationClass(verification_class)

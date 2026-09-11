@@ -31,7 +31,11 @@ class VerificationDecisionTests(unittest.TestCase):
         self.assertIsNone(decision.next_level)
 
     def test_final_allowed_evidence_attempt_can_still_produce_pass(self):
-        exhausted_after_final_attempt = DiagnosticBudget(remaining_attempts=1).consume(EvidenceLevel.L1)
+        exhausted_after_final_attempt = (
+            DiagnosticBudget(remaining_attempts=2)
+            .consume(EvidenceLevel.L0)
+            .consume(EvidenceLevel.L1)
+        )
 
         decision = decide_verification(
             verification_class=VerificationClass.NORMAL,
@@ -101,6 +105,11 @@ class VerificationDecisionTests(unittest.TestCase):
         self.assertEqual(decision.next_level, EvidenceLevel.L1)
 
     def test_exit_zero_missing_artifact_predicate_can_request_one_level_escalation(self):
+        budget_after_l1 = (
+            DiagnosticBudget(remaining_attempts=3)
+            .consume(EvidenceLevel.L0)
+            .consume(EvidenceLevel.L1)
+        )
         decision = decide_verification(
             verification_class=VerificationClass.NORMAL,
             required_positive_invariants=(self.inv("artifact_exists", VerificationResult.NOT_RUN),),
@@ -112,13 +121,14 @@ class VerificationDecisionTests(unittest.TestCase):
             ),
             current_level=EvidenceLevel.L1,
             deeper_evidence_can_resolve=True,
-            diagnostic_budget=DiagnosticBudget(remaining_attempts=1),
+            diagnostic_budget=budget_after_l1,
         )
 
         self.assertEqual(decision.action, VerificationAction.ESCALATE_ONE_LEVEL)
         self.assertEqual(decision.next_level, EvidenceLevel.L2)
 
     def test_path_mismatch_predicate_can_request_one_level_escalation(self):
+        budget_after_l0 = DiagnosticBudget(remaining_attempts=2).consume(EvidenceLevel.L0)
         decision = decide_verification(
             verification_class=VerificationClass.SECURITY_SENSITIVE,
             required_positive_invariants=(self.inv("functional_success", VerificationResult.PASS),),
@@ -131,7 +141,7 @@ class VerificationDecisionTests(unittest.TestCase):
             ),
             current_level=EvidenceLevel.L0,
             deeper_evidence_can_resolve=True,
-            diagnostic_budget=DiagnosticBudget(remaining_attempts=1),
+            diagnostic_budget=budget_after_l0,
         )
 
         self.assertEqual(decision.action, VerificationAction.ESCALATE_ONE_LEVEL)
@@ -274,7 +284,15 @@ class VerificationDecisionTests(unittest.TestCase):
             ),
             current_level=EvidenceLevel.L3,
             deeper_evidence_can_resolve=True,
-            diagnostic_budget=DiagnosticBudget(remaining_attempts=1),
+            diagnostic_budget=DiagnosticBudget(
+                remaining_attempts=1,
+                attempted_levels=(
+                    EvidenceLevel.L0,
+                    EvidenceLevel.L1,
+                    EvidenceLevel.L2,
+                    EvidenceLevel.L3,
+                ),
+            ),
         )
 
         self.assertEqual(decision.action, VerificationAction.UNCERTAIN_STOP)
@@ -283,7 +301,7 @@ class VerificationDecisionTests(unittest.TestCase):
     def test_already_attempted_next_level_cannot_be_repeated(self):
         budget = DiagnosticBudget(
             remaining_attempts=2,
-            attempted_levels=(EvidenceLevel.L1,),
+            attempted_levels=(EvidenceLevel.L0, EvidenceLevel.L1),
         )
         decision = decide_verification(
             verification_class=VerificationClass.NORMAL,
@@ -313,6 +331,37 @@ class DiagnosticBudgetTests(unittest.TestCase):
                 remaining_attempts=1,
                 attempted_levels=(EvidenceLevel.L0, EvidenceLevel.L0),
             )
+
+    def test_fresh_budget_cannot_skip_directly_to_l3(self):
+        budget = DiagnosticBudget(remaining_attempts=4)
+
+        self.assertTrue(budget.can_collect(EvidenceLevel.L0))
+        self.assertFalse(budget.can_collect(EvidenceLevel.L3))
+        with self.assertRaises(ValueError):
+            budget.consume(EvidenceLevel.L3)
+
+    def test_rejects_noncontiguous_attempted_level_history(self):
+        with self.assertRaises(ValueError):
+            DiagnosticBudget(
+                remaining_attempts=2,
+                attempted_levels=(EvidenceLevel.L0, EvidenceLevel.L2),
+            )
+
+    def test_sequential_consumption_advances_one_level_at_a_time(self):
+        budget = DiagnosticBudget(remaining_attempts=4)
+        after_l0 = budget.consume(EvidenceLevel.L0)
+
+        self.assertTrue(after_l0.can_collect(EvidenceLevel.L1))
+        self.assertFalse(after_l0.can_collect(EvidenceLevel.L2))
+        with self.assertRaises(ValueError):
+            after_l0.consume(EvidenceLevel.L2)
+
+        after_l1 = after_l0.consume(EvidenceLevel.L1)
+        after_l2 = after_l1.consume(EvidenceLevel.L2)
+        self.assertEqual(
+            after_l2.attempted_levels,
+            (EvidenceLevel.L0, EvidenceLevel.L1, EvidenceLevel.L2),
+        )
 
 
 if __name__ == "__main__":
