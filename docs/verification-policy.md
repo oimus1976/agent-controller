@@ -44,7 +44,7 @@ For security-sensitive verification:
 1. Declare all required trust-boundary invariants explicitly.
 2. Do not infer a trust invariant from general functional success.
 3. Do not substitute approximate, indirect, or missing evidence for a required trust invariant.
-4. If a required invariant is unverified and a named predicate identifies deeper evidence that can resolve it within the remaining escalation budget, escalate one level before returning a terminal result.
+4. If a required invariant is unverified and a named predicate identifies deeper evidence that can resolve it within the remaining diagnostic budget, escalate one level before returning a terminal result.
 5. If a prerequisite or policy gate prevents valid verification, return `BLOCKED`. If required evidence remains unavailable or inconclusive after bounded escalation, return `UNCERTAIN`. Never promote either to `PASS`.
 6. Preserve existing fail-closed behavior for ambiguous access, ownership, credentials, isolation, exact-head, persistence, and cleanup state.
 7. Return `PASS` only when every applicable required invariant, including every trust-boundary invariant, is explicitly verified, no observable anomaly predicate matches, and no trust-boundary uncertainty remains.
