@@ -66,6 +66,17 @@ class VerificationDecisionTests(unittest.TestCase):
         self.assertEqual(decision.action, VerificationAction.FAIL_STOP)
         self.assertEqual(decision.result, VerificationResult.FAIL)
 
+    def test_explicit_trust_contradiction_is_not_ignored_when_classified_normal(self):
+        decision = decide_verification(
+            verification_class=VerificationClass.NORMAL,
+            required_positive_invariants=(self.inv("functional_success", VerificationResult.PASS),),
+            trust_boundary_invariants=(self.inv("exact_head", VerificationResult.FAIL),),
+            diagnostic_budget=DiagnosticBudget(remaining_attempts=3),
+        )
+
+        self.assertEqual(decision.action, VerificationAction.FAIL_STOP)
+        self.assertEqual(decision.result, VerificationResult.FAIL)
+
     def test_missing_trust_evidence_escalates_one_level_when_named_predicate_can_resolve_it(self):
         budget_after_l0 = DiagnosticBudget(remaining_attempts=2).consume(EvidenceLevel.L0)
         anomaly = MatchedAnomalyPredicate(
@@ -126,6 +137,24 @@ class VerificationDecisionTests(unittest.TestCase):
         self.assertEqual(decision.action, VerificationAction.ESCALATE_ONE_LEVEL)
         self.assertEqual(decision.next_level, EvidenceLevel.L1)
 
+    def test_predicate_for_undeclared_invariant_cannot_authorize_escalation(self):
+        decision = decide_verification(
+            verification_class=VerificationClass.NORMAL,
+            required_positive_invariants=(self.inv("artifact_exists", VerificationResult.NOT_RUN),),
+            anomaly=MatchedAnomalyPredicate(
+                predicate_id="UNRELATED_PATH_MISMATCH",
+                observed="path A",
+                expected="path B",
+                affected_invariant="trusted_runtime_path",
+            ),
+            current_level=EvidenceLevel.L0,
+            deeper_evidence_can_resolve=True,
+            diagnostic_budget=DiagnosticBudget(remaining_attempts=3),
+        )
+
+        self.assertEqual(decision.action, VerificationAction.UNCERTAIN_STOP)
+        self.assertEqual(decision.result, VerificationResult.UNCERTAIN)
+
     def test_free_form_suspicion_without_named_predicate_cannot_trigger_escalation(self):
         decision = decide_verification(
             verification_class=VerificationClass.NORMAL,
@@ -136,6 +165,24 @@ class VerificationDecisionTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.action, VerificationAction.PASS_STOP)
+
+    def test_matched_predicate_prevents_pass_when_deeper_evidence_cannot_resolve(self):
+        decision = decide_verification(
+            verification_class=VerificationClass.NORMAL,
+            required_positive_invariants=(self.inv("artifact_exists", VerificationResult.PASS),),
+            anomaly=MatchedAnomalyPredicate(
+                predicate_id="ARTIFACT_METADATA_MISMATCH",
+                observed="unexpected metadata",
+                expected="expected metadata",
+                affected_invariant="artifact_exists",
+            ),
+            current_level=EvidenceLevel.L1,
+            deeper_evidence_can_resolve=False,
+            diagnostic_budget=DiagnosticBudget(remaining_attempts=2),
+        )
+
+        self.assertEqual(decision.action, VerificationAction.UNCERTAIN_STOP)
+        self.assertEqual(decision.result, VerificationResult.UNCERTAIN)
 
     def test_missing_required_evidence_without_named_predicate_is_uncertain(self):
         decision = decide_verification(
