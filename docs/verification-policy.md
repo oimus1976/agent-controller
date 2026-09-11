@@ -100,7 +100,7 @@ L3: implementation / installer / framework internals
 
 Move to the next level only when the current level establishes a concrete predicate or cannot supply required evidence and a named predicate identifies what the next level can resolve.
 
-Each verification run must have a finite escalation budget. A more specific runbook may define a stricter finite budget. Otherwise, allow at most one escalation transition per level and no same-level diagnostic retry after a predicate is established. Budget exhaustion terminates as `UNCERTAIN` unless observed evidence already requires `FAIL` or a prerequisite/policy gate requires `BLOCKED`.
+Each verification run must have a finite diagnostic budget that covers all evidence collection, including work before any predicate is established. A more specific runbook may define a stricter finite budget. Otherwise, each level gets one evidence-collection attempt; that attempt may batch a finite set of predeclared probes. Do not add or repeat same-level probes after that attempt. Budget exhaustion terminates as `UNCERTAIN` unless observed evidence already requires `FAIL` or a prerequisite/policy gate requires `BLOCKED`.
 
 Do not jump directly to deeper internals because more logs are available.
 
@@ -110,7 +110,7 @@ Use the existing `VerificationResult` vocabulary consistently:
 
 - `PASS`: all applicable required invariants are verified, no observable anomaly predicate matches, and no required uncertainty remains;
 - `FAIL`: observed evidence contradicts a required invariant;
-- `BLOCKED`: verification cannot validly proceed because a prerequisite, policy gate, or trust-boundary requirement blocks it;
+- `BLOCKED`: verification cannot validly proceed because a prerequisite or policy gate blocks it;
 - `UNCERTAIN`: required evidence is unavailable or inconclusive and bounded escalation cannot currently resolve it;
 - `NOT_RUN`: verification was not attempted.
 
@@ -124,7 +124,7 @@ Do not:
 - treat every truncated or incomplete log as failure or automatic escalation;
 - continue deep diagnostics after sufficient evidence already satisfies the applicable stop condition;
 - weaken or skip declared trust-boundary invariants because the operation appears to work;
-- exceed the declared escalation budget;
+- exceed the declared diagnostic budget;
 - use fail-closed as a justification for unbounded investigation.
 
 ## 8. Minimal decision rule
@@ -140,9 +140,9 @@ elif all applicable required invariants pass
     PASS and STOP
 elif a named observable predicate matches
      and deeper evidence can resolve it
-     and escalation budget remains:
+     and diagnostic budget remains:
     escalate one level
 elif required evidence is missing or inconclusive
-     or escalation budget is exhausted:
+     or diagnostic budget is exhausted:
     UNCERTAIN and STOP
 ```
