@@ -44,7 +44,7 @@ For security-sensitive verification:
 1. Declare all required trust-boundary invariants explicitly.
 2. Do not infer a trust invariant from general functional success.
 3. Do not substitute approximate, indirect, or missing evidence for a required trust invariant.
-4. If a required trust invariant is not verified, return `UNKNOWN` or `BLOCKED`; never promote it to `PASS`.
+4. If a required trust invariant is not verified, return `UNCERTAIN` or `BLOCKED`; never promote it to `PASS`.
 5. Preserve existing fail-closed behavior for ambiguous access, ownership, credentials, isolation, exact-head, persistence, and cleanup state.
 6. Once every declared trust invariant is explicitly verified and no trust-boundary uncertainty remains, return `PASS` and stop; do not continue into implementation internals without a matching predicate.
 
@@ -102,13 +102,15 @@ Do not jump directly to deeper internals because more logs are available.
 
 ## 6. Outcomes
 
-Use these outcomes consistently:
+Use the existing `VerificationResult` vocabulary consistently:
 
-- `PASS`: all required invariants for the applicable policy are verified and no blocking predicate remains;
-- `UNKNOWN`: required evidence is unavailable or inconclusive;
-- `BLOCKED`: a required invariant failed, a blocking predicate matched, or security-sensitive uncertainty requires fail-closed behavior.
+- `PASS`: all required invariants are verified and no blocking predicate remains;
+- `FAIL`: observed evidence contradicts a required invariant;
+- `BLOCKED`: verification cannot validly proceed because a prerequisite, policy gate, or trust-boundary requirement blocks it;
+- `UNCERTAIN`: required evidence is unavailable or inconclusive;
+- `NOT_RUN`: verification was not attempted.
 
-`UNKNOWN` must never be treated as `PASS`.
+`UNCERTAIN` and `BLOCKED` must never be treated as `PASS`.
 
 ## 7. Prohibited behavior
 
@@ -128,10 +130,12 @@ if security_sensitive:
 
 if all required invariants pass and no blocking predicate matches:
     PASS and STOP
-elif a named observable predicate matches:
-    escalate one level if deeper evidence is required
-elif required evidence is missing:
-    UNKNOWN
-else:
+elif observed state contradicts a required invariant:
+    FAIL
+elif a policy or trust-boundary prerequisite blocks valid verification:
     BLOCKED
+elif required evidence is missing or inconclusive:
+    UNCERTAIN
+elif a named observable predicate matches and deeper evidence is required:
+    escalate one level
 ```
