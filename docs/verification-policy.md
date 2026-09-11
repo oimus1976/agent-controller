@@ -100,7 +100,7 @@ L3: implementation / installer / framework internals
 
 Move to the next level only when the current level establishes a concrete predicate or cannot supply required evidence and a named predicate identifies what the next level can resolve.
 
-Each verification run must have a finite diagnostic budget that covers all evidence collection, including work before any predicate is established. A more specific runbook may define a stricter finite budget. Otherwise, each level gets one evidence-collection attempt; that attempt may batch a finite set of predeclared probes. Do not add or repeat same-level probes after that attempt. Budget exhaustion terminates as `UNCERTAIN` unless observed evidence already requires `FAIL` or a prerequisite/policy gate requires `BLOCKED`.
+Each verification run must have a finite diagnostic budget that covers all evidence collection, including work before any predicate is established. A more specific runbook may define a stricter finite budget. Otherwise, each level gets one evidence-collection attempt; that attempt may batch a finite set of predeclared probes. Do not add or repeat same-level probes after that attempt. After the final allowed attempt, first classify the collected evidence using the normal outcome order (`FAIL`, `BLOCKED`, then `PASS` where its stop condition is satisfied); return `UNCERTAIN` for budget exhaustion only when no other terminal outcome is already established.
 
 Do not jump directly to deeper internals because more logs are available.
 
