@@ -230,7 +230,6 @@ class SelfHostedFallbackWorkflowTests(unittest.TestCase):
                 "Verify trusted postconditions and revoke target access",
             )
         )
-        self.assertIn('"*${targetSid}:(OI)(CI)(RX)"', relevant)
         self.assertIn('"*${controlSid}:(OI)(CI)(F)"', relevant)
         self.assertIn('"*${targetSid}:(OI)(CI)(M)"', relevant)
         self.assertIn('"*${targetSid}"', relevant)
@@ -260,12 +259,9 @@ class SelfHostedFallbackWorkflowTests(unittest.TestCase):
         pre_test = self.step_blocks["Verify exact clean checkout and grant target read-only access"]
         target_test = self.step_blocks["Run target tests under disposable SID"]
         post_test = self.step_blocks["Verify trusted postconditions and revoke target access"]
-        self.assertIn('/inheritance:r', pre_test)
-        self.assertIn('/deny', pre_test)
-        self.assertIn('(W,D,DC,WDAC,WO)', pre_test)
-        self.assertIn('(OI)(CI)(RX)', pre_test)
-        self.assertIn('/grant:r', pre_test)
-        self.assertIn("workspace ACL inheritance remains enabled", pre_test)
+        self.assertNotIn('/inheritance:r', pre_test)
+        self.assertIn('SetSecurityDescriptorSddlForm', pre_test)
+        self.assertIn('final checkout ACL verification failed', pre_test)
         self.assertIn("target workspace write probe unexpectedly succeeded", target_test)
         self.assertIn("target .git/config write probe unexpectedly succeeded", target_test)
         self.assertIn("[UnauthorizedAccessException]", target_test)

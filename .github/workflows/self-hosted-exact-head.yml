@@ -134,24 +134,28 @@ jobs:
           if (-not $credentialAcl.AreAccessRulesProtected) {
             throw 'one-time credential ACL must disable inheritance'
           }
-          $forbiddenCredentialReaders = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545', $targetSid)
+          # Only the provisioning administrators own this file. The control SID
+          # needs Read + Delete (Synchronize is added by Windows), never Write.
+          $credentialOwner = $credentialAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+          if ($credentialOwner -notin @('S-1-5-18', $adminSid)) { throw 'unsafe credential owner' }
+          $credentialRequired = [Security.AccessControl.FileSystemRights]'Read, Delete'
+          $credentialAllowed = $credentialRequired -bor [Security.AccessControl.FileSystemRights]::Synchronize
+          $controlCredentialRights = 0
           foreach ($rule in $credentialAcl.Access) {
-            if ($rule.AccessControlType -ne 'Allow') { continue }
             $ruleSid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-            if ($forbiddenCredentialReaders -contains $ruleSid) {
+            if ($rule.IsInherited -or $rule.InheritanceFlags -ne 'None' -or $rule.PropagationFlags -ne 'None' -or $rule.AccessControlType -ne 'Allow') {
+              throw 'one-time credential ACL contains an unsupported ACE'
+            }
+            if ($ruleSid -notin @('S-1-5-18', $adminSid, $controlSid)) {
               throw "one-time credential file grants access to forbidden SID: $ruleSid"
             }
-          }
-          $controlCanReadCredential = $false
-          foreach ($rule in $credentialAcl.Access) {
-            if ($rule.AccessControlType -ne 'Allow') { continue }
-            $ruleSid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-            if ($ruleSid -eq $controlSid -and (($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Read) -ne 0)) {
-              $controlCanReadCredential = $true
+            if ($ruleSid -eq $controlSid) {
+              if (($rule.FileSystemRights -band (-bnot $credentialAllowed)) -ne 0) { throw 'excess credential authority for ac-runner SID' }
+              $controlCredentialRights = $controlCredentialRights -bor $rule.FileSystemRights
             }
           }
-          if (-not $controlCanReadCredential) {
-            throw 'one-time credential file is not explicitly readable by ac-runner SID'
+          if (($controlCredentialRights -band $credentialRequired) -ne $credentialRequired) {
+            throw 'one-time credential file must explicitly permit Read and Delete for ac-runner SID'
           }
 
           $headers = @{
@@ -206,18 +210,62 @@ jobs:
           $controlSid = (Get-LocalUser -Name 'ac-runner' -ErrorAction Stop).SID.Value
           $systemSid = 'S-1-5-18'
           $adminSid = 'S-1-5-32-544'
-          & icacls.exe $env:GITHUB_WORKSPACE /grant:r "*${controlSid}:(OI)(CI)(F)" "*${systemSid}:(OI)(CI)(F)" "*${adminSid}:(OI)(CI)(F)" /T /C | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'failed to preserve trusted checkout access before protecting ACLs' }
-          & icacls.exe $env:GITHUB_WORKSPACE /inheritance:r /T /C | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'failed to protect checkout ACLs from inheritance' }
-          & icacls.exe $env:GITHUB_WORKSPACE /remove:g "*${targetSid}" /T /C | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'failed to remove pre-existing disposable target grants' }
-          & icacls.exe $env:GITHUB_WORKSPACE /grant:r "*${targetSid}:(OI)(CI)(RX)" /T /C | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'failed to install disposable-target read/execute checkout ACLs' }
-          & icacls.exe $env:GITHUB_WORKSPACE /deny "*${targetSid}:(OI)(CI)(W,D,DC,WDAC,WO)" /T /C | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'failed to deny disposable target write-class checkout access' }
-          $workspaceAcl = Get-Acl -LiteralPath $env:GITHUB_WORKSPACE
-          if (-not $workspaceAcl.AreAccessRulesProtected) { throw 'workspace ACL inheritance remains enabled' }
+          # Inventory without following links, including hidden .git children.
+          # Inspect ancestors too: a normal leaf beneath a junction is not safe.
+          function Assert-CheckoutItem($path) {
+            $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "checkout reparse point: $path" }
+            return $item
+          }
+          $ancestor = Assert-CheckoutItem $env:GITHUB_WORKSPACE
+          while ($null -ne $ancestor.Parent) { $ancestor = Assert-CheckoutItem $ancestor.Parent.FullName }
+          $items = [Collections.Generic.List[object]]::new()
+          $pending = [Collections.Generic.Stack[string]]::new()
+          $pending.Push($env:GITHUB_WORKSPACE)
+          while ($pending.Count -gt 0) {
+            $item = Assert-CheckoutItem $pending.Pop()
+            $items.Add($item)
+            if ($item.PSIsContainer) {
+              foreach ($child in @(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction Stop)) {
+                $pending.Push($child.FullName)
+              }
+            }
+          }
+          $accessSection = [Security.AccessControl.AccessControlSections]::Access
+          $targetDenied = '0x{0:x}' -f [int][Security.AccessControl.FileSystemRights]'Write, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
+          # No inheritable ACEs: every existing object gets its own complete DACL.
+          $checkoutSddl = "D:P(D;;$targetDenied;;;$targetSid)(A;;FA;;;$systemSid)(A;;FA;;;$adminSid)(A;;FA;;;$controlSid)(A;;FRFX;;;$targetSid)"
+          $checkoutSddl = [Security.AccessControl.RawSecurityDescriptor]::new($checkoutSddl).GetSddlForm($accessSection)
+          # Children first prevents parent replacement from stripping the only
+          # inherited cleanup grants on a not-yet-hardened child.
+          for ($index = $items.Count - 1; $index -ge 0; $index--) {
+            $item = Assert-CheckoutItem $items[$index].FullName
+            $acl = Get-Acl -LiteralPath $item.FullName -ErrorAction Stop
+            $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+            if ($ownerSid -notin @($systemSid, $adminSid, $controlSid)) { throw "unsafe checkout owner: $($item.FullName)" }
+            # Persist only the DACL, never copied owner/audit state requiring
+            # privileges that the non-admin control identity does not hold.
+            if ($item.PSIsContainer) { $acl = [Security.AccessControl.DirectorySecurity]::new() }
+            else { $acl = [Security.AccessControl.FileSecurity]::new() }
+            $acl.SetSecurityDescriptorSddlForm($checkoutSddl, $accessSection)
+            $item.SetAccessControl($acl)
+            $observed = Get-Acl -LiteralPath $item.FullName -ErrorAction Stop
+            # Windows may retain the AI history flag on a protected DACL. It
+            # does not enable inheritance; every ACE must still match exactly.
+            $observedSddl = $observed.GetSecurityDescriptorSddlForm($accessSection) -replace '^D:PAI(?=\()', 'D:P'
+            if (-not $observed.AreAccessRulesProtected -or $observedSddl -ne $checkoutSddl) {
+              throw "checkout child ACL does not match required explicit DACL: $($item.FullName)"
+            }
+          }
+          # Re-read every child after all parent changes, not just the root.
+          foreach ($entry in $items) {
+            $item = Assert-CheckoutItem $entry.FullName
+            $observed = Get-Acl -LiteralPath $item.FullName -ErrorAction Stop
+            $observedSddl = $observed.GetSecurityDescriptorSddlForm($accessSection) -replace '^D:PAI(?=\()', 'D:P'
+            if (-not $observed.AreAccessRulesProtected -or $observedSddl -ne $checkoutSddl) {
+              throw "final checkout ACL verification failed: $($item.FullName)"
+            }
+          }
 
       - name: Run target tests under disposable SID
         shell: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "& '{0}'"
