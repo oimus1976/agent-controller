@@ -20,6 +20,31 @@ class DiagnosticBudgetCopyAuthorityTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             replace(source)
 
+    def test_public_constructor_cannot_reconstruct_history(self):
+        after_l0 = DiagnosticBudget(remaining_attempts=4).consume(EvidenceLevel.L0)
+
+        with self.assertRaises(TypeError):
+            DiagnosticBudget(
+                remaining_attempts=after_l0.remaining_attempts,
+                attempted_levels=after_l0.attempted_levels,
+            )
+        with self.assertRaises(TypeError):
+            DiagnosticBudget(after_l0.remaining_attempts, after_l0.attempted_levels)
+        self.assertTrue(after_l0.accounts_for(EvidenceLevel.L0))
+        self.assertTrue(after_l0.can_collect(EvidenceLevel.L1))
+
+    def test_public_constructor_cannot_fabricate_complete_history(self):
+        with self.assertRaises(TypeError):
+            DiagnosticBudget(
+                remaining_attempts=1,
+                attempted_levels=(
+                    EvidenceLevel.L0,
+                    EvidenceLevel.L1,
+                    EvidenceLevel.L2,
+                    EvidenceLevel.L3,
+                ),
+            )
+
     def test_shallow_copies_before_consumption_share_single_use_authority(self):
         source = DiagnosticBudget(remaining_attempts=4)
         first_copy = copy(source)
