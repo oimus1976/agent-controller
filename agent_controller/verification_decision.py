@@ -57,27 +57,32 @@ class MatchedAnomalyPredicate:
 
 @dataclass
 class _BudgetAuthority:
-    """Shared linear authority for all copies of one diagnostic-budget state."""
+    """Shared linear authority for all views of one diagnostic-budget run."""
 
     generation: int
     lock: Any = field(default_factory=Lock, repr=False, compare=False)
 
 
-@dataclass(frozen=True)
 class DiagnosticBudget:
     """Single-use finite evidence budget consumed sequentially from L0 through L3."""
 
-    remaining_attempts: int
-    attempted_levels: tuple[EvidenceLevel, ...] = ()
-    _authority: Optional[_BudgetAuthority] = field(default=None, repr=False, compare=False)
-    _generation: Optional[int] = field(default=None, repr=False, compare=False)
+    __slots__ = (
+        "_remaining_attempts",
+        "_attempted_levels",
+        "_authority",
+        "_generation",
+    )
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.remaining_attempts, int) or isinstance(self.remaining_attempts, bool):
+    def __init__(
+        self,
+        remaining_attempts: int,
+        attempted_levels: tuple[EvidenceLevel, ...] = (),
+    ) -> None:
+        if not isinstance(remaining_attempts, int) or isinstance(remaining_attempts, bool):
             raise ValueError("remaining_attempts must be an integer")
-        if self.remaining_attempts < 0:
+        if remaining_attempts < 0:
             raise ValueError("remaining_attempts must be non-negative")
-        levels = tuple(EvidenceLevel(level) for level in self.attempted_levels)
+        levels = tuple(EvidenceLevel(level) for level in attempted_levels)
         if len(set(levels)) != len(levels):
             raise ValueError("attempted_levels must not contain duplicates")
         if len(levels) > len(EvidenceLevel):
@@ -85,42 +90,70 @@ class DiagnosticBudget:
         expected_prefix = tuple(EvidenceLevel(index) for index in range(len(levels)))
         if levels != expected_prefix:
             raise ValueError("attempted_levels must be a contiguous prefix starting at L0")
-        object.__setattr__(self, "attempted_levels", levels)
 
-        expected_generation = len(levels)
-        authority = self._authority
-        generation = self._generation
-        if authority is None:
-            authority = _BudgetAuthority(generation=expected_generation)
-            object.__setattr__(self, "_authority", authority)
-        if generation is None:
-            generation = expected_generation
-            object.__setattr__(self, "_generation", generation)
-        if not isinstance(generation, int) or isinstance(generation, bool):
-            raise ValueError("diagnostic budget generation must be an integer")
-        if generation != expected_generation:
-            raise ValueError("diagnostic budget generation must match attempted_levels")
+        generation = len(levels)
+        self._remaining_attempts = remaining_attempts
+        self._attempted_levels = levels
+        self._authority = _BudgetAuthority(generation=generation)
+        self._generation = generation
+
+    @classmethod
+    def _from_authority(
+        cls,
+        *,
+        remaining_attempts: int,
+        attempted_levels: tuple[EvidenceLevel, ...],
+        authority: _BudgetAuthority,
+        generation: int,
+    ) -> "DiagnosticBudget":
+        instance = cls.__new__(cls)
+        instance._remaining_attempts = remaining_attempts
+        instance._attempted_levels = attempted_levels
+        instance._authority = authority
+        instance._generation = generation
+        return instance
+
+    @property
+    def remaining_attempts(self) -> int:
+        return self._remaining_attempts
+
+    @property
+    def attempted_levels(self) -> tuple[EvidenceLevel, ...]:
+        return self._attempted_levels
+
+    def __copy__(self) -> "DiagnosticBudget":
+        return self._from_authority(
+            remaining_attempts=self._remaining_attempts,
+            attempted_levels=self._attempted_levels,
+            authority=self._authority,
+            generation=self._generation,
+        )
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "DiagnosticBudget":
+        copied = self.__copy__()
+        memo[id(self)] = copied
+        return copied
 
     def _is_live(self) -> bool:
         return self._authority.generation == self._generation
 
     def _next_collectable_level(self) -> Optional[EvidenceLevel]:
-        if len(self.attempted_levels) >= len(EvidenceLevel):
+        if len(self._attempted_levels) >= len(EvidenceLevel):
             return None
-        return EvidenceLevel(len(self.attempted_levels))
+        return EvidenceLevel(len(self._attempted_levels))
 
     def accounts_for(self, level: EvidenceLevel) -> bool:
         """Return whether this live budget accounts for evidence through ``level``."""
 
         level = EvidenceLevel(level)
         expected_history = tuple(EvidenceLevel(index) for index in range(int(level) + 1))
-        return self._is_live() and self.attempted_levels == expected_history
+        return self._is_live() and self._attempted_levels == expected_history
 
     def can_collect(self, level: EvidenceLevel) -> bool:
         level = EvidenceLevel(level)
         return (
             self._is_live()
-            and self.remaining_attempts > 0
+            and self._remaining_attempts > 0
             and level == self._next_collectable_level()
         )
 
@@ -132,18 +165,18 @@ class DiagnosticBudget:
         with authority.lock:
             if (
                 authority.generation != self._generation
-                or self.remaining_attempts <= 0
+                or self._remaining_attempts <= 0
                 or level != self._next_collectable_level()
             ):
                 raise ValueError("diagnostic evidence collection is not permitted")
             authority.generation += 1
             next_generation = self._generation + 1
 
-        return DiagnosticBudget(
-            remaining_attempts=self.remaining_attempts - 1,
-            attempted_levels=self.attempted_levels + (level,),
-            _authority=authority,
-            _generation=next_generation,
+        return self._from_authority(
+            remaining_attempts=self._remaining_attempts - 1,
+            attempted_levels=self._attempted_levels + (level,),
+            authority=authority,
+            generation=next_generation,
         )
 
 
@@ -197,14 +230,8 @@ def decide_verification(
     required = tuple(required_positive_invariants) + tuple(required_negative_invariants)
     trust = tuple(trust_boundary_invariants)
 
-    # Explicitly supplied required trust evidence is never ignored, even if the
-    # caller classified the verification as normal. Security-sensitive verification
-    # additionally requires at least one explicitly declared trust invariant before
-    # PASS is possible.
     applicable = required + trust
 
-    # Terminal evidence is classified before budget/history uncertainty. Contradiction
-    # remains FAIL even when a policy/prerequisite gate is also blocked.
     if any(item.result is VerificationResult.FAIL for item in applicable):
         return _terminal(
             VerificationAction.FAIL_STOP,
@@ -219,9 +246,6 @@ def decide_verification(
             "prerequisite or policy gate blocked valid verification",
         )
 
-    # Evidence at current_level is valid for bounded decisions only when every level
-    # through it has been charged exactly once to the one live budget generation.
-    # Copied or stale budget values share authority and cannot revive old generations.
     if not diagnostic_budget.accounts_for(current_level):
         return _terminal(
             VerificationAction.UNCERTAIN_STOP,
