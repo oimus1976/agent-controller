@@ -73,43 +73,32 @@ class DiagnosticBudget:
         "_generation",
     )
 
-    def __init__(
-        self,
-        remaining_attempts: int,
-        attempted_levels: tuple[EvidenceLevel, ...] = (),
-    ) -> None:
+    def __init__(self, remaining_attempts: int) -> None:
+        """Create one fresh diagnostic run with no pre-existing evidence history."""
+
         if not isinstance(remaining_attempts, int) or isinstance(remaining_attempts, bool):
             raise ValueError("remaining_attempts must be an integer")
         if remaining_attempts < 0:
             raise ValueError("remaining_attempts must be non-negative")
-        levels = tuple(EvidenceLevel(level) for level in attempted_levels)
-        if len(set(levels)) != len(levels):
-            raise ValueError("attempted_levels must not contain duplicates")
-        if len(levels) > len(EvidenceLevel):
-            raise ValueError("attempted_levels exceeds the evidence-level range")
-        expected_prefix = tuple(EvidenceLevel(index) for index in range(len(levels)))
-        if levels != expected_prefix:
-            raise ValueError("attempted_levels must be a contiguous prefix starting at L0")
 
-        generation = len(levels)
         self._remaining_attempts = remaining_attempts
-        self._attempted_levels = levels
-        self._authority = _BudgetAuthority(generation=generation)
-        self._generation = generation
+        self._attempted_levels: tuple[EvidenceLevel, ...] = ()
+        self._authority = _BudgetAuthority(generation=0)
+        self._generation = 0
 
-    @classmethod
-    def _from_authority(
-        cls,
+    def _new_shared_view(
+        self,
         *,
         remaining_attempts: int,
         attempted_levels: tuple[EvidenceLevel, ...],
-        authority: _BudgetAuthority,
         generation: int,
     ) -> "DiagnosticBudget":
-        instance = cls.__new__(cls)
+        """Create an internal view that must share this run's existing authority."""
+
+        instance = self.__class__.__new__(self.__class__)
         instance._remaining_attempts = remaining_attempts
         instance._attempted_levels = attempted_levels
-        instance._authority = authority
+        instance._authority = self._authority
         instance._generation = generation
         return instance
 
@@ -122,10 +111,9 @@ class DiagnosticBudget:
         return self._attempted_levels
 
     def __copy__(self) -> "DiagnosticBudget":
-        return self._from_authority(
+        return self._new_shared_view(
             remaining_attempts=self._remaining_attempts,
             attempted_levels=self._attempted_levels,
-            authority=self._authority,
             generation=self._generation,
         )
 
@@ -172,10 +160,9 @@ class DiagnosticBudget:
             authority.generation += 1
             next_generation = self._generation + 1
 
-        return self._from_authority(
+        return self._new_shared_view(
             remaining_attempts=self._remaining_attempts - 1,
             attempted_levels=self._attempted_levels + (level,),
-            authority=authority,
             generation=next_generation,
         )
 
@@ -219,10 +206,10 @@ def decide_verification(
 
     This function classifies already-collected evidence only. Evidence collection
     itself is bounded separately by ``DiagnosticBudget.consume`` so callers cannot
-    repeat a same-level probe set, fork via copied budget values, or jump over an
-    evidence level. A non-``None`` ``anomaly`` represents a named observable
-    predicate that has already matched; free-form suspicion has no input channel
-    here and therefore cannot authorize escalation.
+    repeat a same-level probe set, fork via copied/reconstructed public budget values,
+    or jump over an evidence level. A non-``None`` ``anomaly`` represents a named
+    observable predicate that has already matched; free-form suspicion has no input
+    channel here and therefore cannot authorize escalation.
     """
 
     verification_class = VerificationClass(verification_class)
