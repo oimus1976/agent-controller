@@ -42,7 +42,7 @@ The Windows design therefore uses a **persistent trusted control identity plus a
 
 The runner itself remains under `ac-runner`. The trusted workflow:
 
-1. validates `main`, Windows/X64, local control SID, target SID, local Administrators membership, clean target state, one-time credential ACL, open same-repository PR, and exact current PR head;
+1. validates `main`, Windows/X64, local control SID, target SID, local Administrators membership, clean target state, one-time credential ACL, open same-repository PR, and exact current PR head, then as the final trusted pre-check before checkout rejects any existing reparse point in `GITHUB_WORKSPACE` or its lexical ancestors;
 2. checks out the exact immutable target SHA under `ac-runner` with checkout credentials not persisted;
 3. validates HEAD/cleanliness using fixed machine-wide Git and Python paths;
 4. protects checkout ACLs from inheritance, preserves full control for `ac-runner`, SYSTEM, and local Administrators, explicitly denies the disposable target SID write-class rights (including rights obtained through group membership), and grants that SID read/execute-only access;
@@ -65,6 +65,8 @@ The first pilot requires these trusted read/execute runtime paths outside either
 
 The target account receives read/execute-only access to the repository checkout. Inheritance is disabled throughout the checkout, trusted SYSTEM/Administrators/`ac-runner` access is preserved, and an explicit target-SID deny for write-class rights prevents broad group grants from restoring write access. Before any target test command, real target-credential file-open probes against a workspace file and `.git/config` must both fail specifically with access denied. Python runs with `-B` so target execution does not require writing `__pycache__` into the checkout.
 
+Immediately before `actions/checkout(clean: true)`, trusted preflight walks the lexical `GITHUB_WORKSPACE` path upward and rejects every existing reparse-point component so checkout cannot first mutate a redirected destination. After checkout, hardening inventories every object, including hidden `.git` children, again rejects reparse points (including workspace ancestors), and writes a complete explicit protected DACL to each child before its parent. Only SYSTEM, local Administrators, or `ac-runner` may own checkout objects. Every DACL grants those three SIDs FullControl, grants the target ReadAndExecute, and denies target Write, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, and TakeOwnership. Each write is read back, then every object is checked again after all parent changes. Cleanup authority therefore exists before target launch and does not depend on successful postconditions. Native command exit codes alone are not ACL evidence.
+
 ## One-time target credential boundary
 
 `c-admin` provisions the fresh `act-<nonce>` standard-user account before runner registration and writes its random one-time local password to:
@@ -74,9 +76,10 @@ The target account receives read/execute-only access to the repository checkout.
 The credential is low-value and local to the disposable target identity, but it is still treated as secret material:
 
 - ACL inheritance is disabled;
-- SYSTEM, local Administrators, and the exact `ac-runner` SID may read it;
-- Everyone, Authenticated Users, BUILTIN Users, and the target SID must not be granted access;
-- the workflow verifies those constraints before checkout;
+- SYSTEM or local Administrators must own it; those are the only allowed SIDs besides the exact `ac-runner` SID;
+- provision the exact `ac-runner` SID with **Read, Delete, Synchronize** on this file only. Read alone is insufficient. No Write, replacement, ChangePermissions, or TakeOwnership authority is allowed; do not grant directory write/delete-child rights to compensate for missing file Delete;
+- Everyone, Authenticated Users, BUILTIN Users, the target SID, and all other SIDs must not be granted access;
+- preflight requires the complete Read and Delete masks and rejects excess control rights, inherited/propagating ACEs, and deny ACEs rather than inferring effective access from partial Read bits;
 - `ac-runner` reads the password into a `PSCredential` and deletes the file before target code starts;
 - if the file remains or its ACL cannot be proven, the job fails closed.
 
@@ -132,6 +135,7 @@ The GitHub runner remains:
 - all trusted PowerShell steps use `-NoProfile`;
 - exact local `ac-runner` SID and explicit non-admin membership checks;
 - exactly one fresh `act-<nonce>` account, no existing profile, and no pre-existing scheduled task for its SID;
+- `GITHUB_WORKSPACE` and every existing lexical ancestor are rejected if any is a reparse point before `actions/checkout(clean: true)` can mutate the workspace;
 - target test process executes with alternate credentials and `-UseNewEnvironment`;
 - target environment cannot inherit GitHub command/token variables;
 - target cannot write GitHub command files or the control profile;
@@ -171,6 +175,8 @@ WSL2 may remain useful for development but is not the preferred evidence path wh
 Malformed inputs, non-main dispatch, wrong runner OS/arch, control/target SID mismatch, direct/local Administrators membership, stale target account/profile/task state, unsafe credential ACL, GitHub API uncertainty, fork/head mismatch, head drift, trusted-runtime mismatch, writable checkout ACLs, target command-file write access, inherited GitHub environment, target test failure, unquiesced target-SID processes, target-created task persistence, dirty/head-changed postcondition, premature PASS marker, final PR drift, or uncertain cross-run cleanup all fail closed.
 
 A capacity-blocked GitHub-hosted job remains distinct from self-hosted PASS and from code failure.
+
+Issue #197 repairs credential delete authority and child ACL cleanup authority. A fresh nonce/SID/ephemeral-runner pilot is still required before reuse or `SELF_HOSTED_EXACT_HEAD_PASS`. It does not fix the separate #196 failure-path revocation concern: the trusted postcondition step remains success-only, and administrator cleanup is still required after failed execution.
 
 ## Human gate and escalation
 
