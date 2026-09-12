@@ -1,4 +1,5 @@
 import unittest
+from copy import copy, deepcopy
 from dataclasses import replace
 
 from agent_controller.provider_contract import VerificationResult
@@ -13,21 +14,16 @@ from agent_controller.verification_decision import (
 
 
 class DiagnosticBudgetCopyAuthorityTests(unittest.TestCase):
-    def test_replace_after_consumption_cannot_revive_consumed_source(self):
+    def test_dataclasses_replace_is_rejected(self):
         source = DiagnosticBudget(remaining_attempts=4)
-        successor = source.consume(EvidenceLevel.L0)
-        revived_candidate = replace(source)
 
-        self.assertFalse(revived_candidate.can_collect(EvidenceLevel.L0))
-        self.assertFalse(revived_candidate.accounts_for(EvidenceLevel.L0))
-        with self.assertRaises(ValueError):
-            revived_candidate.consume(EvidenceLevel.L0)
-        self.assertTrue(successor.can_collect(EvidenceLevel.L1))
+        with self.assertRaises(TypeError):
+            replace(source)
 
-    def test_replacements_before_consumption_share_single_use_authority(self):
+    def test_shallow_copies_before_consumption_share_single_use_authority(self):
         source = DiagnosticBudget(remaining_attempts=4)
-        first_copy = replace(source)
-        second_copy = replace(source)
+        first_copy = copy(source)
+        second_copy = copy(source)
 
         successor = first_copy.consume(EvidenceLevel.L0)
 
@@ -38,9 +34,21 @@ class DiagnosticBudgetCopyAuthorityTests(unittest.TestCase):
         self.assertTrue(successor.accounts_for(EvidenceLevel.L0))
         self.assertTrue(successor.can_collect(EvidenceLevel.L1))
 
-    def test_replaced_successor_cannot_fork_next_level(self):
+    def test_deepcopy_cannot_fork_authority(self):
+        source = DiagnosticBudget(remaining_attempts=4)
+        first_copy = deepcopy(source)
+        second_copy = deepcopy(source)
+
+        successor = first_copy.consume(EvidenceLevel.L0)
+
+        self.assertFalse(second_copy.can_collect(EvidenceLevel.L0))
+        with self.assertRaises(ValueError):
+            second_copy.consume(EvidenceLevel.L0)
+        self.assertTrue(successor.can_collect(EvidenceLevel.L1))
+
+    def test_copied_successor_cannot_fork_next_level(self):
         after_l0 = DiagnosticBudget(remaining_attempts=4).consume(EvidenceLevel.L0)
-        sibling = replace(after_l0)
+        sibling = copy(after_l0)
 
         after_l1 = after_l0.consume(EvidenceLevel.L1)
 
@@ -51,10 +59,10 @@ class DiagnosticBudgetCopyAuthorityTests(unittest.TestCase):
         self.assertTrue(after_l1.accounts_for(EvidenceLevel.L1))
         self.assertTrue(after_l1.can_collect(EvidenceLevel.L2))
 
-    def test_stale_replacement_cannot_restore_pass(self):
+    def test_stale_copy_cannot_restore_pass(self):
         source = DiagnosticBudget(remaining_attempts=2)
         live_after_l0 = source.consume(EvidenceLevel.L0)
-        stale_copy = replace(source)
+        stale_copy = copy(source)
         invariant = InvariantEvidence("artifact_exists", VerificationResult.PASS)
 
         stale_decision = decide_verification(
