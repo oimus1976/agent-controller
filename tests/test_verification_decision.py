@@ -322,6 +322,13 @@ class VerificationDecisionTests(unittest.TestCase):
         self.assertEqual(decision.result, VerificationResult.PASS)
 
     def test_l3_cannot_escalate_past_final_level(self):
+        budget_at_l3 = (
+            DiagnosticBudget(remaining_attempts=5)
+            .consume(EvidenceLevel.L0)
+            .consume(EvidenceLevel.L1)
+            .consume(EvidenceLevel.L2)
+            .consume(EvidenceLevel.L3)
+        )
         decision = decide_verification(
             verification_class=VerificationClass.NORMAL,
             required_positive_invariants=(self.inv("artifact_exists", VerificationResult.NOT_RUN),),
@@ -333,24 +340,17 @@ class VerificationDecisionTests(unittest.TestCase):
             ),
             current_level=EvidenceLevel.L3,
             deeper_evidence_can_resolve=True,
-            diagnostic_budget=DiagnosticBudget(
-                remaining_attempts=1,
-                attempted_levels=(
-                    EvidenceLevel.L0,
-                    EvidenceLevel.L1,
-                    EvidenceLevel.L2,
-                    EvidenceLevel.L3,
-                ),
-            ),
+            diagnostic_budget=budget_at_l3,
         )
 
         self.assertEqual(decision.action, VerificationAction.UNCERTAIN_STOP)
         self.assertEqual(decision.result, VerificationResult.UNCERTAIN)
 
     def test_stale_current_level_cannot_reuse_already_advanced_budget(self):
-        budget = DiagnosticBudget(
-            remaining_attempts=2,
-            attempted_levels=(EvidenceLevel.L0, EvidenceLevel.L1),
+        budget = (
+            DiagnosticBudget(remaining_attempts=4)
+            .consume(EvidenceLevel.L0)
+            .consume(EvidenceLevel.L1)
         )
         decision = decide_verification(
             verification_class=VerificationClass.NORMAL,
@@ -375,12 +375,16 @@ class DiagnosticBudgetTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             DiagnosticBudget(remaining_attempts=-1)
 
-    def test_rejects_duplicate_attempted_levels(self):
-        with self.assertRaises(ValueError):
+    def test_public_constructor_rejects_history_keyword(self):
+        with self.assertRaises(TypeError):
             DiagnosticBudget(
                 remaining_attempts=1,
-                attempted_levels=(EvidenceLevel.L0, EvidenceLevel.L0),
+                attempted_levels=(EvidenceLevel.L0,),
             )
+
+    def test_public_constructor_rejects_history_positional_argument(self):
+        with self.assertRaises(TypeError):
+            DiagnosticBudget(2, (EvidenceLevel.L0,))
 
     def test_fresh_budget_cannot_skip_directly_to_l3(self):
         budget = DiagnosticBudget(remaining_attempts=4)
@@ -389,13 +393,6 @@ class DiagnosticBudgetTests(unittest.TestCase):
         self.assertFalse(budget.can_collect(EvidenceLevel.L3))
         with self.assertRaises(ValueError):
             budget.consume(EvidenceLevel.L3)
-
-    def test_rejects_noncontiguous_attempted_level_history(self):
-        with self.assertRaises(ValueError):
-            DiagnosticBudget(
-                remaining_attempts=2,
-                attempted_levels=(EvidenceLevel.L0, EvidenceLevel.L2),
-            )
 
     def test_source_budget_is_single_use_even_when_aliased(self):
         source = DiagnosticBudget(remaining_attempts=4)
