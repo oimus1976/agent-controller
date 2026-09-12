@@ -170,6 +170,29 @@ jobs:
           if ($pr.head.repo.full_name -ne $env:EXPECTED_REPOSITORY) { throw 'fork or foreign head repository is not allowed' }
           if ($pr.head.sha -ne $env:INPUT_TARGET_SHA.ToLowerInvariant()) { throw 'target_sha is not the current PR head' }
 
+          # This is intentionally the final trusted preflight gate before
+          # actions/checkout(clean: true). Walk the lexical workspace path
+          # upward and reject every existing reparse point before checkout can
+          # mutate a redirected destination. Missing leaf components are safe
+          # only when their existing ancestors are ordinary directories.
+          if ([string]::IsNullOrWhiteSpace($env:GITHUB_WORKSPACE) -or -not [IO.Path]::IsPathRooted($env:GITHUB_WORKSPACE)) {
+            throw 'GITHUB_WORKSPACE must be a non-empty rooted path before checkout'
+          }
+          $workspacePath = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)
+          $workspaceCursor = [IO.DirectoryInfo]::new($workspacePath)
+          while ($null -ne $workspaceCursor) {
+            if (Test-Path -LiteralPath $workspaceCursor.FullName -ErrorAction Stop) {
+              $workspaceItem = Get-Item -LiteralPath $workspaceCursor.FullName -Force -ErrorAction Stop
+              if (-not $workspaceItem.PSIsContainer) {
+                throw "pre-check workspace path component is not a directory: $($workspaceCursor.FullName)"
+              }
+              if ($workspaceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "pre-check workspace reparse point: $($workspaceCursor.FullName)"
+              }
+            }
+            $workspaceCursor = $workspaceCursor.Parent
+          }
+
           "validated_control_sid=$controlSid"
           "validated_target_name=$targetName"
           "validated_target_sid=$targetSid"
@@ -178,6 +201,7 @@ jobs:
           "validated_head_repo=$($pr.head.repo.full_name)"
           "validated_runner_os=$env:RUNNER_OS_NAME"
           "validated_runner_arch=$env:RUNNER_ARCH_NAME"
+          "validated_workspace_path=$workspacePath"
 
       - name: Checkout exact target SHA
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
