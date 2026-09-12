@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from typing import Any, Optional, Sequence
 
@@ -56,10 +56,11 @@ class MatchedAnomalyPredicate:
 
 @dataclass(frozen=True)
 class DiagnosticBudget:
-    """Finite evidence budget consumed sequentially from L0 through L3."""
+    """Single-use finite evidence budget consumed sequentially from L0 through L3."""
 
     remaining_attempts: int
     attempted_levels: tuple[EvidenceLevel, ...] = ()
+    _successor_issued: bool = field(default=False, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.remaining_attempts, int) or isinstance(self.remaining_attempts, bool):
@@ -81,16 +82,28 @@ class DiagnosticBudget:
             return None
         return EvidenceLevel(len(self.attempted_levels))
 
+    def accounts_for(self, level: EvidenceLevel) -> bool:
+        """Return whether this live budget accounts for evidence through ``level``."""
+
+        level = EvidenceLevel(level)
+        expected_history = tuple(EvidenceLevel(index) for index in range(int(level) + 1))
+        return not self._successor_issued and self.attempted_levels == expected_history
+
     def can_collect(self, level: EvidenceLevel) -> bool:
         level = EvidenceLevel(level)
-        return self.remaining_attempts > 0 and level == self._next_collectable_level()
+        return (
+            not self._successor_issued
+            and self.remaining_attempts > 0
+            and level == self._next_collectable_level()
+        )
 
     def consume(self, level: EvidenceLevel) -> "DiagnosticBudget":
-        """Consume the next sequential predeclared evidence-collection attempt."""
+        """Consume the next sequential attempt and invalidate this source budget."""
 
         level = EvidenceLevel(level)
         if not self.can_collect(level):
             raise ValueError("diagnostic evidence collection is not permitted")
+        object.__setattr__(self, "_successor_issued", True)
         return DiagnosticBudget(
             remaining_attempts=self.remaining_attempts - 1,
             attempted_levels=self.attempted_levels + (level,),
@@ -136,10 +149,10 @@ def decide_verification(
 
     This function classifies already-collected evidence only. Evidence collection
     itself is bounded separately by ``DiagnosticBudget.consume`` so callers cannot
-    repeat a same-level probe set or jump over an evidence level. A non-``None``
-    ``anomaly`` represents a named observable predicate that has already matched;
-    free-form suspicion has no input channel here and therefore cannot authorize
-    escalation.
+    repeat a same-level probe set, branch from a consumed budget, or jump over an
+    evidence level. A non-``None`` ``anomaly`` represents a named observable
+    predicate that has already matched; free-form suspicion has no input channel
+    here and therefore cannot authorize escalation.
     """
 
     verification_class = VerificationClass(verification_class)
@@ -153,7 +166,7 @@ def decide_verification(
     # PASS is possible.
     applicable = required + trust
 
-    # Terminal evidence is classified before budget exhaustion. Contradiction
+    # Terminal evidence is classified before budget/history uncertainty. Contradiction
     # remains FAIL even when a policy/prerequisite gate is also blocked.
     if any(item.result is VerificationResult.FAIL for item in applicable):
         return _terminal(
@@ -167,6 +180,16 @@ def decide_verification(
             VerificationAction.BLOCKED_STOP,
             VerificationResult.BLOCKED,
             "prerequisite or policy gate blocked valid verification",
+        )
+
+    # Evidence at current_level is valid for bounded decisions only when every level
+    # through it has been charged exactly once to the live budget state. A consumed
+    # parent budget is stale and cannot be reused to classify or branch evidence.
+    if not diagnostic_budget.accounts_for(current_level):
+        return _terminal(
+            VerificationAction.UNCERTAIN_STOP,
+            VerificationResult.UNCERTAIN,
+            "diagnostic budget history does not account for current evidence level",
         )
 
     has_declared_required = bool(applicable)
