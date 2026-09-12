@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
+from threading import Lock
 from typing import Any, Optional, Sequence
 
 from agent_controller.provider_contract import VerificationResult
@@ -54,13 +55,22 @@ class MatchedAnomalyPredicate:
             raise ValueError("affected_invariant must be a non-empty string")
 
 
+@dataclass
+class _BudgetAuthority:
+    """Shared linear authority for all copies of one diagnostic-budget state."""
+
+    generation: int
+    lock: Any = field(default_factory=Lock, repr=False, compare=False)
+
+
 @dataclass(frozen=True)
 class DiagnosticBudget:
     """Single-use finite evidence budget consumed sequentially from L0 through L3."""
 
     remaining_attempts: int
     attempted_levels: tuple[EvidenceLevel, ...] = ()
-    _successor_issued: bool = field(default=False, init=False, repr=False, compare=False)
+    _authority: Optional[_BudgetAuthority] = field(default=None, repr=False, compare=False)
+    _generation: Optional[int] = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.remaining_attempts, int) or isinstance(self.remaining_attempts, bool):
@@ -77,6 +87,23 @@ class DiagnosticBudget:
             raise ValueError("attempted_levels must be a contiguous prefix starting at L0")
         object.__setattr__(self, "attempted_levels", levels)
 
+        expected_generation = len(levels)
+        authority = self._authority
+        generation = self._generation
+        if authority is None:
+            authority = _BudgetAuthority(generation=expected_generation)
+            object.__setattr__(self, "_authority", authority)
+        if generation is None:
+            generation = expected_generation
+            object.__setattr__(self, "_generation", generation)
+        if not isinstance(generation, int) or isinstance(generation, bool):
+            raise ValueError("diagnostic budget generation must be an integer")
+        if generation != expected_generation:
+            raise ValueError("diagnostic budget generation must match attempted_levels")
+
+    def _is_live(self) -> bool:
+        return self._authority.generation == self._generation
+
     def _next_collectable_level(self) -> Optional[EvidenceLevel]:
         if len(self.attempted_levels) >= len(EvidenceLevel):
             return None
@@ -87,26 +114,36 @@ class DiagnosticBudget:
 
         level = EvidenceLevel(level)
         expected_history = tuple(EvidenceLevel(index) for index in range(int(level) + 1))
-        return not self._successor_issued and self.attempted_levels == expected_history
+        return self._is_live() and self.attempted_levels == expected_history
 
     def can_collect(self, level: EvidenceLevel) -> bool:
         level = EvidenceLevel(level)
         return (
-            not self._successor_issued
+            self._is_live()
             and self.remaining_attempts > 0
             and level == self._next_collectable_level()
         )
 
     def consume(self, level: EvidenceLevel) -> "DiagnosticBudget":
-        """Consume the next sequential attempt and invalidate this source budget."""
+        """Consume the next sequential attempt using the shared linear authority."""
 
         level = EvidenceLevel(level)
-        if not self.can_collect(level):
-            raise ValueError("diagnostic evidence collection is not permitted")
-        object.__setattr__(self, "_successor_issued", True)
+        authority = self._authority
+        with authority.lock:
+            if (
+                authority.generation != self._generation
+                or self.remaining_attempts <= 0
+                or level != self._next_collectable_level()
+            ):
+                raise ValueError("diagnostic evidence collection is not permitted")
+            authority.generation += 1
+            next_generation = self._generation + 1
+
         return DiagnosticBudget(
             remaining_attempts=self.remaining_attempts - 1,
             attempted_levels=self.attempted_levels + (level,),
+            _authority=authority,
+            _generation=next_generation,
         )
 
 
@@ -149,7 +186,7 @@ def decide_verification(
 
     This function classifies already-collected evidence only. Evidence collection
     itself is bounded separately by ``DiagnosticBudget.consume`` so callers cannot
-    repeat a same-level probe set, branch from a consumed budget, or jump over an
+    repeat a same-level probe set, fork via copied budget values, or jump over an
     evidence level. A non-``None`` ``anomaly`` represents a named observable
     predicate that has already matched; free-form suspicion has no input channel
     here and therefore cannot authorize escalation.
@@ -183,8 +220,8 @@ def decide_verification(
         )
 
     # Evidence at current_level is valid for bounded decisions only when every level
-    # through it has been charged exactly once to the live budget state. A consumed
-    # parent budget is stale and cannot be reused to classify or branch evidence.
+    # through it has been charged exactly once to the one live budget generation.
+    # Copied or stale budget values share authority and cannot revive old generations.
     if not diagnostic_budget.accounts_for(current_level):
         return _terminal(
             VerificationAction.UNCERTAIN_STOP,
