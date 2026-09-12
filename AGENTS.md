@@ -1,6 +1,20 @@
 # Agent Instructions
 
-This repository predates full `ai-dev-starter` adoption. Existing repository docs, ADRs, Issues, PRs, and code remain authoritative for project-specific behavior and governance. This file adds only the cross-project post-merge local closeout rule.
+This repository predates full `ai-dev-starter` adoption. Existing repository docs, ADRs, Issues, PRs, and code remain authoritative for project-specific behavior and governance. This file adds only selected cross-project operational rules that agents must apply directly while working in this repository.
+
+## Independent implementation and review
+
+Implementation and review must remain independent.
+
+- The implementing session/agent must not be the sole reviewer of its own work.
+- Independent review must bind to an exact commit/head and start from a fresh review context.
+- Review findings may be remediated by the original implementer or another implementation agent, but remediation is not self-validating.
+- After remediation changes the exact head, require a fresh reviewer to review the new head; the agent/session that performed the remediation must not be the sole evidence that the fix is correct.
+- For security-sensitive trust-boundary, credential, permission, destructive-effect, or fail-closed changes, add cross-model or cross-agent review when practical.
+- Self-review, tests, linting, and remediation-thread confirmation are supplemental evidence, not substitutes for independent review.
+- Ready and merge remain human-final under ADR #90.
+
+Canonical rationale and scope: ADR #199, `ADR: Independent implementation and fresh-head review after remediation`.
 
 ## Post-merge local closeout
 
