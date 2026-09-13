@@ -158,6 +158,10 @@ Current Actions-log disposition:
 
 `ACTIONS_LOG_SURFACE_REVIEWED`
 
+### Repository-local audit record / changelog — COMPLETE IN DRAFT
+
+`CHANGELOG.md` now contains the Issue #196 / Draft PR #203 public-readiness and safety-boundary record, including completed history/surface audit evidence, forward anonymization policy, human-final authority, the self-hosted publication blocker, and the private hosted-CI limitation.
+
 ## Repository change in PR #203
 
 ### Hosted Actions checkout hardening — IMPLEMENTED IN DRAFT
@@ -166,13 +170,18 @@ Current Actions-log disposition:
 
 A deterministic regression verifies checkout step boundaries and rejects any hosted checkout that persists credentials.
 
-Current PR #203 exact head at the last synchronized audit point:
+The most recent hosted exact-head observation before this document synchronization was:
 
-`d1651b1015f4c834ac2c4d30f549ecb9a9223fa6`
+- PR head: `52655052f22df82bd61524efca969786238c20f9`;
+- run: `34745681520`;
+- `unittest`: failure before runner/step execution, `steps=null`;
+- `windows-junction`: failure before runner/step execution, `steps=null`.
 
-Private hosted run `34740171485` did **not** prove CI PASS: both canonical hosted jobs failed before runner assignment/step execution because of private-plan capacity. This remains classified:
+This remains classified:
 
 `HOSTED_CI_NOT_EXECUTED / PRIVATE_CAPACITY_BLOCKED`
+
+It is not an implementation-test failure and it is not a CI PASS. Documentation-only synchronization after that observation does not change this private-plan limitation.
 
 Post-public closeout must prove the canonical hosted jobs actually receive GitHub-hosted runners and execute.
 
@@ -205,19 +214,13 @@ Because public GitHub-hosted Actions removes the original private-hosted-capacit
 
 Do not disable it prematurely if doing so would interfere with the isolated private #201/#202/#193 verification workstream; coordinate the final lifecycle action near publication.
 
-### 3. Repository-local audit record / changelog synchronization — REQUIRED BEFORE READY
-
-This readiness document must stay synchronized with the final publication-candidate evidence.
-
-Add a #196 public-readiness/safety-boundary entry to `CHANGELOG.md` before any Ready transition.
-
-### 4. Exact-head validation — REQUIRED BEFORE READY
+### 3. Exact-head validation — REQUIRED BEFORE READY
 
 The current private hosted CI state is not a PASS because jobs fail before runner assignment. Before Ready/merge, retain exact-head local/independent validation appropriate to the changed files and clearly record the private hosted-CI limitation.
 
 After publication, hosted CI must be re-run/observed and actually execute on GitHub-hosted runners.
 
-### 5. Public `main` protection — REQUIRED IMMEDIATELY AFTER VISIBILITY CHANGE
+### 4. Public `main` protection — REQUIRED IMMEDIATELY AFTER VISIBILITY CHANGE
 
 After the human changes visibility to public, configure and read back a GitHub-side rule for `main` before treating publication as complete.
 
@@ -243,7 +246,7 @@ Any self-hosted workflow retained in a public repository requires a separate exp
 
 The safe sequence is:
 
-1. complete the remaining license, self-hosted lifecycle, repository-local documentation/changelog, and exact-head validation gates;
+1. complete the remaining license, self-hosted lifecycle, and exact-head validation gates;
 2. merge only reviewed public-readiness changes through the normal human Ready/merge gate;
 3. refresh exact `main`, publication-reachable history, retained artifacts, and Actions inventory immediately before visibility change if repository state materially changed;
 4. record `READY_FOR_HUMAN_VISIBILITY_GATE` only when every pre-public blocker is closed;
@@ -267,14 +270,14 @@ Completed publication-audit areas:
 - retained Actions artifact inventory/content review;
 - Actions run inventory and available-log secret scan;
 - no-log run classification;
-- full self-hosted-run log review.
+- full self-hosted-run log review;
+- repository-local readiness/changelog synchronization.
 
 Remaining blockers:
 
 - human license selection and root `LICENSE`;
 - self-hosted fallback retire/disable-or-remediate decision and verification;
-- `CHANGELOG.md` public-readiness/safety-boundary entry;
-- exact-head validation / independent review before Ready;
+- exact-head local/independent validation before Ready;
 - post-public `main` protection and hosted-CI execution verification after the human visibility change.
 
 This document must be refreshed from GitHub source-of-truth evidence if the publication candidate materially changes before the visibility gate.
