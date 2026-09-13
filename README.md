@@ -28,4 +28,4 @@ Do not place credentials, private keys, or unnecessary machine-specific identifi
 
 ## License
 
-No open-source license has been selected yet. Public publication remains blocked on an explicit license decision and corresponding repository license file.
+This project is licensed under the MIT License. See [`LICENSE`](LICENSE).

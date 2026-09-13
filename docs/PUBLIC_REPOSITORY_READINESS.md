@@ -187,17 +187,15 @@ Post-public closeout must prove the canonical hosted jobs actually receive GitHu
 
 ## Remaining blockers before human visibility gate
 
-### 1. License — REQUIRED
+### 1. License — COMPLETE IN DRAFT
 
-No open-source license has been selected for this repository.
+The human selected the MIT License on 2026-09-13.
 
-Before publication:
+- the root `LICENSE` contains the standard MIT License;
+- the copyright line is `Copyright (c) 2026 oimus1976`;
+- README/project metadata must remain consistent with MIT through publication.
 
-- human selects the license;
-- add the corresponding root `LICENSE` file;
-- ensure README/project metadata is consistent with that license.
-
-The default recommendation is MIT unless the human prefers Apache-2.0 for its explicit patent grant and more detailed terms.
+This closes the license-selection blocker for PR #203. It does not authorize Ready, merge, or a repository visibility change.
 
 ### 2. Self-hosted exact-head fallback — BLOCKER
 
@@ -246,7 +244,7 @@ Any self-hosted workflow retained in a public repository requires a separate exp
 
 The safe sequence is:
 
-1. complete the remaining license, self-hosted lifecycle, and exact-head validation gates;
+1. complete the remaining self-hosted lifecycle and exact-head validation gates;
 2. merge only reviewed public-readiness changes through the normal human Ready/merge gate;
 3. refresh exact `main`, publication-reachable history, retained artifacts, and Actions inventory immediately before visibility change if repository state materially changed;
 4. record `READY_FOR_HUMAN_VISIBILITY_GATE` only when every pre-public blocker is closed;
@@ -271,11 +269,11 @@ Completed publication-audit areas:
 - Actions run inventory and available-log secret scan;
 - no-log run classification;
 - full self-hosted-run log review;
-- repository-local readiness/changelog synchronization.
+- repository-local readiness/changelog synchronization;
+- human MIT license selection and root `LICENSE` addition.
 
 Remaining blockers:
 
-- human license selection and root `LICENSE`;
 - self-hosted fallback retire/disable-or-remediate decision and verification;
 - exact-head local/independent validation before Ready;
 - post-public `main` protection and hosted-CI execution verification after the human visibility change.
