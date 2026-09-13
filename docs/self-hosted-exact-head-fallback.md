@@ -110,7 +110,7 @@ After each pilot, from `c-admin`:
 6. verify that no `act-*` account/profile for the completed pilot remains;
 7. if cleanup is incomplete or uncertain, block the next untrusted self-hosted pilot.
 
-Recreating the same username is not used as a cleanup strategy. A later pilot uses a fresh nonce and therefore a fresh local account name/SID. Stale persistence bound to an old SID cannot be accepted as clean evidence and must be removed during administrator cleanup.
+Recreating the same username is not used as a cleanup strategy. A later pilot uses a fresh nonce and therefore a fresh local account name and SID. Stale persistence bound to an old SID cannot be accepted as clean evidence and must be removed during administrator cleanup.
 
 ## Runner routing and repository boundary
 
