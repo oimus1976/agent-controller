@@ -28,11 +28,15 @@ def uses_value(line):
     return value.split(" #", 1)[0].strip()
 
 
+def is_checkout_action(action):
+    return action is not None and action.lower().startswith(CHECKOUT_PREFIX)
+
+
 def checkout_step_blocks(lines):
     blocks = []
     for index, line in enumerate(lines):
         action = uses_value(line)
-        if action is None or not action.startswith(CHECKOUT_PREFIX):
+        if not is_checkout_action(action):
             continue
 
         start = index
@@ -52,7 +56,7 @@ def literal_checkout_lines(lines):
     matches = []
     for line in lines:
         non_comment = line.split("#", 1)[0]
-        if CHECKOUT_PREFIX in non_comment:
+        if CHECKOUT_PREFIX in non_comment.lower():
             matches.append(line)
     return matches
 
@@ -66,6 +70,18 @@ def complete_checkout_step_blocks(lines):
             "or spelling must fail closed"
         )
     return blocks
+
+
+def assert_workflow_permissions_are_read_only(lines):
+    declarations = [
+        line for line in lines
+        if line.lstrip().startswith("permissions:")
+    ]
+    if declarations != ["permissions:"]:
+        raise AssertionError(
+            "hosted workflow must use exactly one workflow-level "
+            "permissions declaration"
+        )
 
 
 class HostedActionsWorkflowHardeningTests(unittest.TestCase):
@@ -133,6 +149,21 @@ class HostedActionsWorkflowHardeningTests(unittest.TestCase):
                 self.assertEqual(action, "actions/checkout@v4")
                 self.assertIn("checkout@v4", block)
 
+    def test_checkout_discovery_matches_repository_case_insensitively(self):
+        lines = [
+            "    steps:",
+            "      - name: Example checkout",
+            "        uses: Actions/Checkout@v4",
+            "      - run: echo done",
+        ]
+
+        blocks = complete_checkout_step_blocks(lines)
+
+        self.assertEqual(len(blocks), 1)
+        action, block = blocks[0]
+        self.assertEqual(action.lower(), "actions/checkout@v4")
+        self.assertIn("Actions/Checkout@v4", block)
+
     def test_indirect_checkout_action_via_yaml_alias_fails_closed(self):
         lines = [
             "checkout_action: &checkout_action actions/checkout@v4",
@@ -149,16 +180,34 @@ class HostedActionsWorkflowHardeningTests(unittest.TestCase):
         ):
             complete_checkout_step_blocks(lines)
 
+    def test_job_level_permissions_are_rejected(self):
+        lines = [
+            "permissions:",
+            "  contents: read",
+            "jobs:",
+            "  unittest:",
+            "    permissions: write-all",
+            "    steps:",
+            "      - run: echo done",
+        ]
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            "exactly one workflow-level permissions declaration",
+        ):
+            assert_workflow_permissions_are_read_only(lines)
+
     def test_every_hosted_checkout_is_pinned_and_disables_credential_persistence(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         lines = text.splitlines()
         blocks = complete_checkout_step_blocks(lines)
 
+        assert_workflow_permissions_are_read_only(lines)
         self.assertIn("permissions:\n  contents: read", text)
         self.assertNotIn("persist-credentials: true", text)
         self.assertGreaterEqual(len(blocks), 1)
         for action, block in blocks:
-            self.assertEqual(action, PINNED_CHECKOUT)
+            self.assertEqual(action.lower(), PINNED_CHECKOUT)
             self.assertIn("        with:\n          persist-credentials: false", block)
 
 
