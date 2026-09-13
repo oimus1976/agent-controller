@@ -2,17 +2,17 @@
 
 Issue: #196
 
-Status: **BLOCKED — audit/remediation in progress**
+Status: **BLOCKED — publication prerequisites remain**
 
-This document is the repository-local publication contract for changing `oimus1976/agent-controller` from private to public. It records what has been checked, what remains unresolved, and the human-final publication sequence. It does not itself authorize a visibility change.
+This document is the repository-local publication contract for changing `oimus1976/agent-controller` from private to public. It records completed audit evidence, remaining blockers, and the human-final publication sequence. It does not itself authorize a visibility change.
 
 ## Bound repository state
 
-The current implementation branch for this audit was created from `main` at:
+The current public-readiness branch was created from `main` at:
 
 `98d4bb9d9c8396c89c3be7b235a04dd4348e3a03`
 
-All publication evidence must be refreshed if `main` changes before the visibility gate. GitHub remains the source of truth for repository state.
+The completed history/surface audit below is bound to that baseline and the then-current GitHub repository surfaces. Re-run freshness checks if `main`, publication-reachable refs, retained artifacts, or Actions history materially changes before the visibility gate. GitHub remains the source of truth for repository state.
 
 ## Publication invariants
 
@@ -20,7 +20,7 @@ Public publication is allowed only after all required checks are satisfied and t
 
 Required invariants:
 
-1. no known secret, credential, private key, or sensitive unpublished data is exposed by current tree, reachable history, GitHub metadata, retained Actions logs/artifacts, Releases, or other repository surfaces;
+1. no known secret, credential, private key, or sensitive unpublished data is exposed by current tree, publication-reachable history, GitHub metadata, retained Actions logs/artifacts, Releases, or other repository surfaces;
 2. third-party redistribution and repository licensing are explicit;
 3. public GitHub Actions do not expose a trusted self-hosted runner to untrusted public/fork code;
 4. normal hosted CI uses least privilege and does not persist checkout credentials unnecessarily;
@@ -28,24 +28,18 @@ Required invariants:
 6. provider output, CI, review evidence, and human-final authority remain separate;
 7. post-public verification proves the expected hosted workflows actually run on GitHub-hosted runners.
 
-## Audit snapshot
+## Human publication decisions already recorded
 
-### Current tree
+On 2026-09-13 the human explicitly accepted publication of:
 
-Bounded current-tree screening found no tracked `.env`, `.pem`, `.pfx`, or `.key` path and no obvious GitHub token/private-key marker in default-branch code search.
+- already-recorded historical commit email metadata;
+- already-recorded non-secret infrastructure diagnostic metadata such as host identifiers, local SIDs/account identifiers, runner identifiers, nonces, and local paths.
 
-This is useful evidence but is not a substitute for the required full-history secret scan.
+These accepted items do not require history rewrite, Issue/PR scrubbing, Actions-run deletion, or destructive cleanup solely for their removal.
 
-### Historical identity and infrastructure metadata
+This acceptance does **not** extend to secrets, credentials, private keys, or unrelated personal data if discovered.
 
-Human publication decision on 2026-09-13:
-
-- already-recorded historical commit email metadata is accepted for this repository;
-- already-recorded non-secret infrastructure diagnostic metadata is accepted for this repository;
-- those accepted items do not require history rewrite, Issue/PR scrubbing, or Actions-run deletion solely for their removal;
-- this acceptance does **not** extend to secrets, credentials, private keys, or unrelated personal data if later discovered.
-
-### Forward evidence anonymization rule
+## Forward evidence anonymization rule
 
 New durable/public-facing evidence should avoid unnecessary real infrastructure identifiers.
 
@@ -61,62 +55,132 @@ Keep repository-verification facts concrete when they are material to auditabili
 
 If an exact machine-specific value is required to reproduce a security-sensitive failure, prefer retaining it in local/private operator evidence while publishing only the minimum normalized fact necessary.
 
-### GitHub Issues / PR metadata
+## Completed audit evidence
 
-Bounded searches of Issue/PR bodies and comments found no obvious `ghp_`, `github_pat_`, or private-key marker. References to environment-variable names or explicitly unset credentials are not credential values.
+### Current tree screening — COMPLETE
+
+Bounded current-tree screening found no tracked `.env`, `.pem`, `.pfx`, or `.key` path and no obvious GitHub token/private-key marker in default-branch code search.
+
+### Full publication-reachable history scan — COMPLETE
+
+Authenticated mirror verification against bound `main` `98d4bb9d9c8396c89c3be7b235a04dd4348e3a03` completed with:
+
+- mirror refresh exit: `0`;
+- `git fsck --full --strict` exit: `0`;
+- refs inventoried: `157`;
+- PR refs inventoried: `76`;
+- commits inventoried: `707`;
+- merge commits inventoried: `6`;
+- scanner: Gitleaks `8.30.1`;
+- findings: `5`, all rule `generic-api-key`.
+
+All five findings were individually reviewed and classified `FALSE_POSITIVE_PUBLIC_KEY`. They are Ed25519 **public verification fixture keys** used by the signed-approval PoC path; the associated implementation and tests explicitly use public-key verification and do not store the fixture private signing keys.
+
+Final secret disposition for the bound history:
+
+- unresolved secret findings: `0`;
+- history rewrite required: **no**.
+
+### Author and committer identity inventory — COMPLETE
+
+All `707` publication-reachable commits were covered on both author and committer sides. The observed identity groups were limited to the expected repository owner identity, GitHub platform identity, and Jules bot identity.
+
+The historical owner Gmail identity is covered by the explicit human publication decision above. No unexpected third-party identity was found.
+
+### Historical filename/path/blob audit — COMPLETE
+
+Historical path inventory found:
+
+- unique historical paths: `245`;
+- secret-like paths: `0`;
+- machine/infrastructure-identifier paths: `0`;
+- binary/archive/database-style paths: `0`.
+
+The largest historical blob was under 50 KB. The largest mapped objects were ordinary source/test text (`tests/test_reconciler.py`) and `CHANGELOG.md` revisions. No path-based history rewrite blocker was found.
+
+### GitHub Issues / PR metadata — REVIEWED
+
+Bounded searches of Issue/PR bodies and comments found no obvious actual `ghp_`, `github_pat_`, or private-key marker. References to environment-variable names or explicitly unset credentials are not credential values.
 
 Historical non-secret host diagnostics remain visible and are covered by the explicit human acceptance above.
 
-### Actions logs and artifacts
+### Retained Actions artifacts — COMPLETE FOR CURRENT INVENTORY
 
-At the audit snapshot the repository had 477 Actions runs. The audit therefore uses risk-tiered inspection rather than claiming that every line of every historical log was manually reviewed.
+A fresh repository-wide artifact inventory found exactly `8` retained artifacts:
 
-Representative higher-risk surfaces inspected include:
+- `7` named `cloudflare-reviewed-deploy-candidate`;
+- `1` named `package-lock.json`.
 
-- the trusted self-hosted exact-head pilot path, including run `34734397983`;
-- historical artifact-producing Cloudflare review workflows;
-- historical hosted Cloudflare PoC test workflows.
-
-Observed GitHub/checkout tokens were masked in the inspected logs. No actual credential value was found in those representative logs.
-
-Retained artifacts already inspected include:
+All eight retained artifacts were inspected. Known retained artifacts included:
 
 - artifact `9584489035`, digest `sha256:09b236ddd303eaaa5306a896cc534f9de5fbdf011780a1cb72e7a790636aca3f`;
 - artifact `9568053846`, package-lock digest `sha256:2183ac70c238c2d489b6d2530fa237bf7fe819086f123051d14314c4b42f2f72`.
 
-Bounded content review found no obvious credential material in those artifacts. This evidence does not replace the remaining retained-surface inventory requirement.
+The additional six review artifacts were compared by ZIP structure, per-file hashes, and changed-file content. Common files matched the already-audited candidate where expected; changed manifest/evidence/deploy files did not expose a credential/private-key blocker. Later deploy code referenced environment-provided public-key values rather than embedding private material.
 
-### Short-lived historical commits
+Current retained-artifact disposition:
 
-Selected reverted/short-lived commits that introduced dependency/design material were inspected directly. No secret material was found in those inspected changes. This sampling does not replace the full-history scan.
+`RETAINED_ACTIONS_ARTIFACT_SURFACE_REVIEWED`
 
-## Required work still blocking publication
+### Actions logs — COMPLETE FOR CURRENT INVENTORY
 
-### 1. Full-history secret scan — REQUIRED
+A complete Actions run inventory found:
 
-Run an authenticated full clone against the publication candidate and perform a full-history secret scan, including unreachable/reachable historical filenames and blobs as appropriate for the chosen scanner.
+- total workflow runs: `479`;
+- workflow files: `5`;
+- inventory retrieval: `479 / 479`.
 
-Minimum evidence to retain:
+Available log bodies were machine-scanned for private-key markers and common token/key/secret forms, including GitHub token prefixes, AWS access-key IDs, Slack token forms, OpenAI key forms, and named secret assignments.
 
-- exact audited `main` SHA;
-- scanner/tool version;
-- command/config used;
-- result summary;
-- disposition of every finding.
+Results:
 
-Do not classify publication ready from API sampling alone.
+- log bodies retrieved and scanned: `430`;
+- candidate runs: `0`;
+- candidate match groups: `0`.
 
-### 2. Author/committer metadata inventory — REQUIRED
+The remaining `49` runs returned no log body. Their job metadata showed `98` hosted jobs total:
 
-Confirm the complete publication-reachable author/committer identity set. The already-known historical email metadata is explicitly accepted, but unexpected third-party or sensitive identity data still requires disposition.
+- `49` `unittest` jobs;
+- `49` `windows-junction` jobs.
 
-### 3. Retained GitHub surface inventory — REQUIRED
+All `98` classified `NOT_EXECUTED_BEFORE_RUNNER`: no runner assignment and no workflow-step execution, so no job log body was generated.
 
-Complete the risk-tiered inventory of retained Actions logs/artifacts and other publication-visible GitHub surfaces. Representative sampling may prioritize likely secret-bearing workflows, but the final record must explain the coverage model and any residual uncertainty.
+The two self-hosted `workflow_dispatch` runs were separately reviewed in full:
 
-### 4. License — REQUIRED
+- run `34694491500`;
+- run `34734397983`.
 
-No open-source license has been selected for this repository. Do not inherit the license choice from another repository automatically.
+Observed GitHub token/checkout auth remained masked as `***`; one-time disposable-target password content was not emitted. Real runner/machine/SID/nonce/path metadata is non-secret historical infrastructure evidence covered by the explicit human publication decision.
+
+Both self-hosted runs failed at the one-time credential deletion boundary before target-process execution. The later run demonstrated the known `Remove-Item -Force` deletion failure tracked by #201; this is an implementation/lifecycle blocker, not a secret-exposure finding.
+
+Current Actions-log disposition:
+
+`ACTIONS_LOG_SURFACE_REVIEWED`
+
+## Repository change in PR #203
+
+### Hosted Actions checkout hardening — IMPLEMENTED IN DRAFT
+
+`.github/workflows/tests.yml` uses `contents: read` and `persist-credentials: false` on both hosted `actions/checkout` steps.
+
+A deterministic regression verifies checkout step boundaries and rejects any hosted checkout that persists credentials.
+
+Current PR #203 exact head at the last synchronized audit point:
+
+`d1651b1015f4c834ac2c4d30f549ecb9a9223fa6`
+
+Private hosted run `34740171485` did **not** prove CI PASS: both canonical hosted jobs failed before runner assignment/step execution because of private-plan capacity. This remains classified:
+
+`HOSTED_CI_NOT_EXECUTED / PRIVATE_CAPACITY_BLOCKED`
+
+Post-public closeout must prove the canonical hosted jobs actually receive GitHub-hosted runners and execute.
+
+## Remaining blockers before human visibility gate
+
+### 1. License — REQUIRED
+
+No open-source license has been selected for this repository.
 
 Before publication:
 
@@ -124,11 +188,9 @@ Before publication:
 - add the corresponding root `LICENSE` file;
 - ensure README/project metadata is consistent with that license.
 
-### 5. Hosted Actions checkout hardening — IN THIS CHANGE
+The default recommendation is MIT unless the human prefers Apache-2.0 for its explicit patent grant and more detailed terms.
 
-`.github/workflows/tests.yml` must keep `contents: read` and set `persist-credentials: false` on every `actions/checkout` step. A deterministic regression test protects this contract.
-
-### 6. Self-hosted exact-head fallback — BLOCKER
+### 2. Self-hosted exact-head fallback — BLOCKER
 
 A public repository must not expose an unsafe bare-metal self-hosted execution path.
 
@@ -139,11 +201,25 @@ Before publication, choose and verify one path:
 - **retire/disable** the self-hosted fallback for the public repository; or
 - **remediate and re-verify** it so public/fork code cannot obtain a route to the trusted host and trusted cleanup/revocation is fail-safe across success, failure, and cancellation.
 
-Do not weaken this requirement merely because GitHub-hosted Actions become available after publication.
+Because public GitHub-hosted Actions removes the original private-hosted-capacity motivation, the preferred publication posture is to retire/disable the bare-metal fallback unless a continuing operational need is demonstrated.
 
-### 7. Public `main` protection — REQUIRED IMMEDIATELY AFTER VISIBILITY CHANGE
+Do not disable it prematurely if doing so would interfere with the isolated private #201/#202/#193 verification workstream; coordinate the final lifecycle action near publication.
 
-On the current GitHub Free private repository, repository rulesets are unavailable. After the human changes visibility to public, configure and read back a GitHub-side rule for `main` before treating publication as complete.
+### 3. Repository-local audit record / changelog synchronization — REQUIRED BEFORE READY
+
+This readiness document must stay synchronized with the final publication-candidate evidence.
+
+Add a #196 public-readiness/safety-boundary entry to `CHANGELOG.md` before any Ready transition.
+
+### 4. Exact-head validation — REQUIRED BEFORE READY
+
+The current private hosted CI state is not a PASS because jobs fail before runner assignment. Before Ready/merge, retain exact-head local/independent validation appropriate to the changed files and clearly record the private hosted-CI limitation.
+
+After publication, hosted CI must be re-run/observed and actually execute on GitHub-hosted runners.
+
+### 5. Public `main` protection — REQUIRED IMMEDIATELY AFTER VISIBILITY CHANGE
+
+After the human changes visibility to public, configure and read back a GitHub-side rule for `main` before treating publication as complete.
 
 The intended baseline is:
 
@@ -167,14 +243,15 @@ Any self-hosted workflow retained in a public repository requires a separate exp
 
 The safe sequence is:
 
-1. merge only reviewed public-readiness changes through the normal human Ready/merge gate;
-2. refresh exact `main` and complete full-history/retained-surface/license/self-hosted gates against that state;
-3. record `READY_FOR_HUMAN_VISIBILITY_GATE` only when every blocker above is closed;
-4. human explicitly changes repository visibility from private to public;
-5. immediately configure and read back `main` protection/ruleset;
-6. trigger/observe canonical GitHub-hosted CI and prove jobs actually start on hosted runners rather than failing before assignment because of private-plan quota;
-7. verify repository metadata, README, license, Issues/PR visibility, Actions permissions, and self-hosted posture from the public side;
-8. record post-public closeout evidence in Issue #196; only then classify `PUBLISHED_VERIFIED`.
+1. complete the remaining license, self-hosted lifecycle, repository-local documentation/changelog, and exact-head validation gates;
+2. merge only reviewed public-readiness changes through the normal human Ready/merge gate;
+3. refresh exact `main`, publication-reachable history, retained artifacts, and Actions inventory immediately before visibility change if repository state materially changed;
+4. record `READY_FOR_HUMAN_VISIBILITY_GATE` only when every pre-public blocker is closed;
+5. human explicitly changes repository visibility from private to public;
+6. immediately configure and read back `main` protection/ruleset;
+7. trigger/observe canonical GitHub-hosted CI and prove jobs actually start on hosted runners;
+8. verify repository metadata, README, license, Issues/PR visibility, Actions permissions, and self-hosted posture from the public side;
+9. record post-public closeout evidence in Issue #196; only then classify `PUBLISHED_VERIFIED`.
 
 Ready, merge, visibility change, history rewrite, and destructive cleanup remain human-final unless separately and explicitly delegated.
 
@@ -182,12 +259,22 @@ Ready, merge, visibility change, history rewrite, and destructive cleanup remain
 
 `BLOCKED`
 
-Current blockers include at least:
+Completed publication-audit areas:
 
-- full-history secret scan;
-- complete publication-reachable identity/surface inventory;
-- license selection;
+- full-history secret scan and finding disposition;
+- author/committer identity inventory;
+- historical filename/path/blob audit;
+- retained Actions artifact inventory/content review;
+- Actions run inventory and available-log secret scan;
+- no-log run classification;
+- full self-hosted-run log review.
+
+Remaining blockers:
+
+- human license selection and root `LICENSE`;
 - self-hosted fallback retire/disable-or-remediate decision and verification;
-- post-public `main` protection, which cannot be completed until after the human visibility change.
+- `CHANGELOG.md` public-readiness/safety-boundary entry;
+- exact-head validation / independent review before Ready;
+- post-public `main` protection and hosted-CI execution verification after the human visibility change.
 
-This document should be updated from fresh GitHub evidence before any later readiness classification.
+This document must be refreshed from GitHub source-of-truth evidence if the publication candidate materially changes before the visibility gate.
