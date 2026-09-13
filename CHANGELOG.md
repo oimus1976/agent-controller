@@ -15,6 +15,41 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-13 — Public repository readiness audit / hosted CI hardening（Issue #196 / Draft PR #203）
+
+関連: Issue #196, Draft PR #203, Issue #201, Issue #202
+
+### Added / changed
+
+- private repository を public へ変更するための repository-local publication contract として `docs/PUBLIC_REPOSITORY_READINESS.md` を追加。
+- normal hosted CI の `actions/checkout` を pinned SHA のまま `persist-credentials: false` に固定し、`contents: read` を維持。全 hosted checkout block が credential persistence を無効化することを deterministic regression で保護。
+- README に project purpose、active development status、validation command、trust boundary、public-readiness document、license pending 状態を明示。
+- publication audit の bound main を `98d4bb9d9c8396c89c3be7b235a04dd4348e3a03` とし、authenticated mirror を `fetch=0` / `fsck=0` で確認。157 refs（うち76 PR refs）、707 commits を inventory。
+- Gitleaks 8.30.1 の full-history scan で5件の `generic-api-key` finding を検出したが、全件を Ed25519 public fixture key と個別確認し、unresolved secret finding 0、history rewrite 不要と判定。
+- author/committer identity inventory は707 commits 全件を対象とし、owner / GitHub / Jules bot の期待された identity のみを確認。historical owner Gmail metadata は明示的な human publication decision により受容。
+- historical filename/path/blob audit は245 unique paths、secret-like path 0、machine/infrastructure identifier path 0、binary/archive/database path 0 を確認。
+- retained Actions artifact は fresh inventory 8件（review artifact 7 + package-lock 1）を全件確認し、credential/private-key publication blocker 0。
+- Actions run inventory は479 runs / 5 workflow files を全件取得。430 runs の取得可能な log body を private-key marker / common token-key-secret pattern で走査し candidate run 0 / match group 0。残る49 runs は98 hosted jobs（49 `unittest` + 49 `windows-junction`）すべて runner assignment / workflow step execution 前に終了しており、log body 自体が生成されていないことを確認。
+- self-hosted `workflow_dispatch` 2 runs は full log を個別確認し、GitHub auth は masked、one-time password content は未出力。historical machine/runner/SID/nonce/path metadata の実値露出は既存 non-secret infrastructure diagnostics として human decision により受容。
+
+### Safety / authority boundary
+
+- historical non-secret identity/infrastructure metadata の受容は、secret、credential、private key、unrelated personal data の受容を意味しない。
+- 新たに durable/public-facing evidence を書く場合は、不要な実機値を `<HOST>` / `<CONTROL_SID>` / `<TARGET_SID>` / `<RUNNER>` / `<NONCE>` / `<WORKSPACE>` / `<CREDENTIAL_ROOT>` 等へ正規化する。commit SHA、Issue/PR/run ID、workflow name、result、failure boundary 等の audit fact は必要に応じて exact に保持する。
+- repository visibility change、Ready、merge、history rewrite、destructive cleanup はこの change では行わず、human-final authority を維持。
+- root `LICENSE` は未決定。license selection は human decision が必要。
+- public repository に bare-metal self-hosted runner を露出しないことを publication blocker として維持。fallback は publication 前に retire/disable するか、#201/#202 および failure/cancellation cleanup contract を含めて remediation + re-verification が必要。
+- private-plan capacity block により hosted exact-head CI が runner assignment 前に停止する場合、それを implementation PASS/FAIL とみなさない。public 化後に canonical hosted jobs が実際に GitHub-hosted runner 上で開始・完走することを post-public verification で証明する。
+- visibility change 後、`main` protection/ruleset を即時設定して read back するまで publication closeout としない。
+
+### Validation status
+
+- `docs/PUBLIC_REPOSITORY_READINESS.md` は full-history / identity / path / retained artifact / Actions log audit の completed evidence と残る blockers に同期済み。
+- prior docs-synchronized head `e0051b6fe638c94ef094d2f56763985cfaa8cc2c` に対する run `34745313182` は `unittest` / `windows-junction` とも `steps=null` で runner execution 前に failure。`HOSTED_CI_NOT_EXECUTED / PRIVATE_CAPACITY_BLOCKED` と分類し、implementation test failure / PASS のいずれにも数えない。
+- この項目は Draft PR #203 の未merge状態を記録する。最終 Ready gate は license/self-hosted posture の解決、current exact-head local validation、independent review、および human judgment を要求する。
+
+---
+
 ## 2026-08-30 — Codex request amplification observation（Issue #113 / Draft PR #114）
 
 関連: Issue #55, Issue #113, Draft PR #114
