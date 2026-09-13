@@ -309,7 +309,7 @@ jobs:
           }
           $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
           $credential = New-Object Management.Automation.PSCredential("$env:COMPUTERNAME\$targetName", $securePassword)
-          Remove-Item -LiteralPath $credentialFile -Force
+          Remove-Item -LiteralPath $credentialFile
           if (Test-Path -LiteralPath $credentialFile) { throw 'one-time credential file was not removed before target execution' }
           $password = $null
 
