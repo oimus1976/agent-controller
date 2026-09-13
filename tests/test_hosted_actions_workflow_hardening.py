@@ -72,15 +72,98 @@ def complete_checkout_step_blocks(lines):
     return blocks
 
 
+def yaml_mapping_entry(line):
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or ":" not in stripped:
+        return None
+
+    if "\t" in line:
+        raise AssertionError("tabs are not allowed in hosted workflow YAML")
+
+    indent = len(line) - len(line.lstrip(" "))
+    raw_key, raw_value = stripped.split(":", 1)
+
+    key = raw_key.strip()
+    if (
+        len(key) >= 2
+        and key[0] == key[-1]
+        and key[0] in ("'", '"')
+    ):
+        key = key[1:-1]
+
+    value = raw_value.strip()
+    if (
+        len(value) >= 2
+        and value[0] == value[-1]
+        and value[0] in ("'", '"')
+    ):
+        value = value[1:-1]
+
+    return indent, key.lower(), value.lower()
+
+
 def assert_workflow_permissions_are_read_only(lines):
-    declarations = [
-        line for line in lines
-        if line.lstrip().startswith("permissions:")
-    ]
-    if declarations != ["permissions:"]:
+    declarations = []
+
+    for index, line in enumerate(lines):
+        entry = yaml_mapping_entry(line)
+        if entry is None:
+            continue
+
+        indent, key, value = entry
+        if key == "permissions":
+            declarations.append((index, indent, value))
+
+    if len(declarations) != 1:
         raise AssertionError(
-            "hosted workflow must use exactly one workflow-level "
-            "permissions declaration"
+            "hosted workflow must use exactly one permissions declaration"
+        )
+
+    index, indent, value = declarations[0]
+
+    if indent != 0:
+        raise AssertionError(
+            "permissions declaration must be workflow-level"
+        )
+
+    if value:
+        raise AssertionError(
+            "workflow permissions must use an explicit mapping"
+        )
+
+    permission_entries = []
+
+    for line in lines[index + 1 :]:
+        stripped = line.strip()
+
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        entry = yaml_mapping_entry(line)
+
+        if entry is None:
+            child_indent = len(line) - len(line.lstrip(" "))
+            if child_indent == 0:
+                break
+            raise AssertionError(
+                "unsupported workflow permissions syntax"
+            )
+
+        child_indent, key, child_value = entry
+
+        if child_indent == 0:
+            break
+
+        if child_indent != 2:
+            raise AssertionError(
+                "workflow permissions must contain only direct mapping entries"
+            )
+
+        permission_entries.append((key, child_value))
+
+    if permission_entries != [("contents", "read")]:
+        raise AssertionError(
+            "workflow permissions must grant only contents: read"
         )
 
 
@@ -181,21 +264,96 @@ class HostedActionsWorkflowHardeningTests(unittest.TestCase):
             complete_checkout_step_blocks(lines)
 
     def test_job_level_permissions_are_rejected(self):
-        lines = [
-            "permissions:",
-            "  contents: read",
-            "jobs:",
-            "  unittest:",
-            "    permissions: write-all",
-            "    steps:",
-            "      - run: echo done",
-        ]
+        cases = (
+            (
+                "unquoted inline",
+                "    permissions: write-all",
+            ),
+            (
+                "single-quoted key",
+                "    'permissions': write-all",
+            ),
+            (
+                "double-quoted key",
+                '    "permissions": write-all',
+            ),
+        )
 
-        with self.assertRaisesRegex(
-            AssertionError,
-            "exactly one workflow-level permissions declaration",
-        ):
+        for label, job_permission in cases:
+            with self.subTest(label=label):
+                lines = [
+                    "permissions:",
+                    "  contents: read",
+                    "jobs:",
+                    "  unittest:",
+                    job_permission,
+                    "    steps:",
+                    "      - run: echo done",
+                ]
+
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    "exactly one permissions declaration",
+                ):
+                    assert_workflow_permissions_are_read_only(lines)
+
+    def test_workflow_permissions_are_exactly_contents_read(self):
+        valid_cases = (
+            [
+                "permissions:",
+                "  contents: read",
+                "jobs:",
+            ],
+            [
+                "'permissions':",
+                '  "contents": "read"',
+                "jobs:",
+            ],
+        )
+
+        for lines in valid_cases:
             assert_workflow_permissions_are_read_only(lines)
+
+        invalid_cases = (
+            (
+                "contents write",
+                [
+                    "permissions:",
+                    "  contents: write",
+                    "jobs:",
+                ],
+            ),
+            (
+                "additional write scope",
+                [
+                    "permissions:",
+                    "  contents: read",
+                    "  issues: write",
+                    "jobs:",
+                ],
+            ),
+            (
+                "quoted additional write scope",
+                [
+                    "permissions:",
+                    "  contents: read",
+                    '  "issues": "write"',
+                    "jobs:",
+                ],
+            ),
+            (
+                "inline write-all",
+                [
+                    "permissions: write-all",
+                    "jobs:",
+                ],
+            ),
+        )
+
+        for label, lines in invalid_cases:
+            with self.subTest(label=label):
+                with self.assertRaises(AssertionError):
+                    assert_workflow_permissions_are_read_only(lines)
 
     def test_every_hosted_checkout_is_pinned_and_disables_credential_persistence(self):
         text = WORKFLOW.read_text(encoding="utf-8")
