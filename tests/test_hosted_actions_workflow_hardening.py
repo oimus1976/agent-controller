@@ -3,13 +3,16 @@ import unittest
 
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "tests.yml"
-CHECKOUT = "uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
+CHECKOUT_PREFIX = "uses: actions/checkout@"
+PINNED_CHECKOUT = (
+    "uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
+)
 
 
 def checkout_step_blocks(lines):
     blocks = []
     for index, line in enumerate(lines):
-        if CHECKOUT not in line:
+        if CHECKOUT_PREFIX not in line:
             continue
 
         start = index
@@ -26,7 +29,20 @@ def checkout_step_blocks(lines):
 
 
 class HostedActionsWorkflowHardeningTests(unittest.TestCase):
-    def test_every_hosted_checkout_disables_credential_persistence(self):
+    def test_checkout_discovery_is_not_tied_to_current_pin(self):
+        lines = [
+            "    steps:",
+            "      - name: Example checkout",
+            "        uses: actions/checkout@v4",
+            "      - run: echo done",
+        ]
+
+        blocks = checkout_step_blocks(lines)
+
+        self.assertEqual(len(blocks), 1)
+        self.assertIn("uses: actions/checkout@v4", blocks[0])
+
+    def test_every_hosted_checkout_is_pinned_and_disables_credential_persistence(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         lines = text.splitlines()
         blocks = checkout_step_blocks(lines)
@@ -35,7 +51,7 @@ class HostedActionsWorkflowHardeningTests(unittest.TestCase):
         self.assertNotIn("persist-credentials: true", text)
         self.assertEqual(len(blocks), 2)
         for block in blocks:
-            self.assertIn(CHECKOUT, block)
+            self.assertIn(PINNED_CHECKOUT, block)
             self.assertIn("        with:\n          persist-credentials: false", block)
 
 
