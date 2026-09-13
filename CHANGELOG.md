@@ -42,6 +42,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - この項目はDraft PR #204の未merge状態を記録し、mainへの採用済み状態を意味しない。
 
 ---
+
 ## 2026-09-13 — Public repository readiness audit / hosted CI hardening（Issue #196 / Draft PR #203）
 
 関連: Issue #196, Draft PR #203, Issue #201, Issue #202
