@@ -48,6 +48,26 @@ def checkout_step_blocks(lines):
     return blocks
 
 
+def literal_checkout_lines(lines):
+    matches = []
+    for line in lines:
+        non_comment = line.split("#", 1)[0]
+        if CHECKOUT_PREFIX in non_comment:
+            matches.append(line)
+    return matches
+
+
+def complete_checkout_step_blocks(lines):
+    blocks = checkout_step_blocks(lines)
+    literal_lines = literal_checkout_lines(lines)
+    if len(blocks) != len(literal_lines):
+        raise AssertionError(
+            "checkout discovery is incomplete; unsupported YAML indirection "
+            "or spelling must fail closed"
+        )
+    return blocks
+
+
 class HostedActionsWorkflowHardeningTests(unittest.TestCase):
     def test_checkout_discovery_is_not_tied_to_current_pin_or_yaml_spelling(self):
         examples = (
@@ -106,21 +126,37 @@ class HostedActionsWorkflowHardeningTests(unittest.TestCase):
 
         for label, lines in examples:
             with self.subTest(label=label):
-                blocks = checkout_step_blocks(lines)
+                blocks = complete_checkout_step_blocks(lines)
 
                 self.assertEqual(len(blocks), 1)
                 action, block = blocks[0]
                 self.assertEqual(action, "actions/checkout@v4")
                 self.assertIn("checkout@v4", block)
 
+    def test_indirect_checkout_action_via_yaml_alias_fails_closed(self):
+        lines = [
+            "checkout_action: &checkout_action actions/checkout@v4",
+            "jobs:",
+            "  unittest:",
+            "    steps:",
+            "      - uses: *checkout_action",
+            "      - run: echo done",
+        ]
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            "checkout discovery is incomplete",
+        ):
+            complete_checkout_step_blocks(lines)
+
     def test_every_hosted_checkout_is_pinned_and_disables_credential_persistence(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         lines = text.splitlines()
-        blocks = checkout_step_blocks(lines)
+        blocks = complete_checkout_step_blocks(lines)
 
         self.assertIn("permissions:\n  contents: read", text)
         self.assertNotIn("persist-credentials: true", text)
-        self.assertEqual(len(blocks), 2)
+        self.assertGreaterEqual(len(blocks), 1)
         for action, block in blocks:
             self.assertEqual(action, PINNED_CHECKOUT)
             self.assertIn("        with:\n          persist-credentials: false", block)
