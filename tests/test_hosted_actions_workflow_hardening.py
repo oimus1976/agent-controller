@@ -9,6 +9,8 @@ PINNED_CHECKOUT = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
 
 def uses_value(line):
     stripped = line.strip()
+    if stripped.startswith("- "):
+        stripped = stripped[2:].lstrip()
     if not stripped.startswith("uses:"):
         return None
 
@@ -47,26 +49,69 @@ def checkout_step_blocks(lines):
 
 
 class HostedActionsWorkflowHardeningTests(unittest.TestCase):
-    def test_checkout_discovery_is_not_tied_to_current_pin_or_yaml_quoting(self):
-        for line in (
-            "        uses: actions/checkout@v4",
-            "        uses: 'actions/checkout@v4'",
-            '        uses: "actions/checkout@v4"',
-        ):
-            with self.subTest(line=line):
-                lines = [
+    def test_checkout_discovery_is_not_tied_to_current_pin_or_yaml_spelling(self):
+        examples = (
+            (
+                "named step, unquoted",
+                [
                     "    steps:",
                     "      - name: Example checkout",
-                    line,
+                    "        uses: actions/checkout@v4",
                     "      - run: echo done",
-                ]
+                ],
+            ),
+            (
+                "named step, single quoted",
+                [
+                    "    steps:",
+                    "      - name: Example checkout",
+                    "        uses: 'actions/checkout@v4'",
+                    "      - run: echo done",
+                ],
+            ),
+            (
+                "named step, double quoted",
+                [
+                    "    steps:",
+                    "      - name: Example checkout",
+                    '        uses: "actions/checkout@v4"',
+                    "      - run: echo done",
+                ],
+            ),
+            (
+                "list item, unquoted",
+                [
+                    "    steps:",
+                    "      - uses: actions/checkout@v4",
+                    "      - run: echo done",
+                ],
+            ),
+            (
+                "list item, single quoted",
+                [
+                    "    steps:",
+                    "      - uses: 'actions/checkout@v4'",
+                    "      - run: echo done",
+                ],
+            ),
+            (
+                "list item, double quoted",
+                [
+                    "    steps:",
+                    '      - uses: "actions/checkout@v4"',
+                    "      - run: echo done",
+                ],
+            ),
+        )
 
+        for label, lines in examples:
+            with self.subTest(label=label):
                 blocks = checkout_step_blocks(lines)
 
                 self.assertEqual(len(blocks), 1)
                 action, block = blocks[0]
                 self.assertEqual(action, "actions/checkout@v4")
-                self.assertIn(line, block)
+                self.assertIn("checkout@v4", block)
 
     def test_every_hosted_checkout_is_pinned_and_disables_credential_persistence(self):
         text = WORKFLOW.read_text(encoding="utf-8")
