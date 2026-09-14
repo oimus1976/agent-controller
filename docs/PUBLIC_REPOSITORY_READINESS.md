@@ -209,9 +209,17 @@ This retirement change must pass:
 
 Ready and merge remain human-final.
 
-### 4. Fresh publication inventory — REQUIRED AFTER MERGE
+### 4. Fresh publication inventory and self-hosted decommission read-back — REQUIRED AFTER MERGE
 
 After this retirement change merges, refresh the publication-reachable tree/history/surface inventory against the new exact `main`. Prior completed scans remain evidence, but material repository changes since the earlier baseline require freshness confirmation before the visibility gate.
+
+The same pre-visibility gate must also read back GitHub Actions runtime state and prove:
+
+- repository self-hosted runner registrations accessible to this repository are empty;
+- no queued or in-progress workflow run can still target the retired self-hosted path;
+- if such a run exists, it is cancelled and the runtime state is re-read until the retired path has no queued/in-progress execution authority.
+
+Workflow-file deletion alone does not satisfy this gate. Record the exact read-back evidence in Issue #196. `READY_FOR_HUMAN_VISIBILITY_GATE` is forbidden until both the refreshed publication inventory and this decommission read-back are complete.
 
 ### 5. Public `main` protection and hosted CI — REQUIRED IMMEDIATELY AFTER VISIBILITY CHANGE
 
@@ -240,12 +248,14 @@ The safe sequence is:
 1. complete the remaining self-hosted lifecycle and exact-head validation gates;
 2. merge only reviewed public-readiness changes through the normal human Ready/merge gate;
 3. refresh exact `main`, publication-reachable history, retained artifacts, and Actions inventory immediately before visibility change if repository state materially changed;
-4. record `READY_FOR_HUMAN_VISIBILITY_GATE` only when every pre-public blocker is closed;
-5. human explicitly changes repository visibility from private to public;
-6. immediately configure and read back `main` protection/ruleset;
-7. trigger/observe canonical GitHub-hosted CI and prove jobs actually start on hosted runners;
-8. verify repository metadata, README, license, Issues/PR visibility, Actions permissions, and self-hosted posture from the public side;
-9. record post-public closeout evidence in Issue #196; only then classify `PUBLISHED_VERIFIED`.
+4. read back repository self-hosted runner registrations and queued/in-progress workflow runs; require zero residual retired-path execution authority, cancelling and re-reading any residual run before proceeding;
+5. record the fresh inventory plus decommission read-back evidence in Issue #196;
+6. record `READY_FOR_HUMAN_VISIBILITY_GATE` only when every pre-public blocker is closed;
+7. human explicitly changes repository visibility from private to public;
+8. immediately configure and read back `main` protection/ruleset;
+9. trigger/observe canonical GitHub-hosted CI and prove jobs actually start on hosted runners;
+10. verify repository metadata, README, license, Issues/PR visibility, Actions permissions, and self-hosted posture from the public side;
+11. record post-public closeout evidence in Issue #196; only then classify `PUBLISHED_VERIFIED`.
 
 Ready, merge, visibility change, history rewrite, and destructive cleanup remain human-final unless separately and explicitly delegated.
 

@@ -48,7 +48,15 @@ A future proposal must independently justify the operational need, define the pu
 After the retirement change is merged:
 
 1. refresh Issue #196 publication inventory against exact `main`;
-2. reach the human visibility gate only if no new blocker exists;
-3. after publication, establish/read back `main` protection;
-4. prove canonical GitHub-hosted CI actually receives hosted runners and executes;
-5. record `PUBLISHED_VERIFIED` only after those checks pass.
+2. before the visibility gate, read back GitHub Actions runtime state and prove:
+   - repository self-hosted runner registrations accessible to this repository are empty;
+   - no queued or in-progress workflow run can still target the retired self-hosted path;
+   - any residual queued/in-progress retired-path run is cancelled and then re-read as absent before proceeding;
+3. record the exact pre-visibility read-back evidence in Issue #196;
+4. reach the human visibility gate only if the refreshed publication inventory and the self-hosted decommission read-back are both clear;
+5. after publication, establish/read back `main` protection;
+6. prove canonical GitHub-hosted CI actually receives hosted runners and executes;
+7. record `PUBLISHED_VERIFIED` only after those checks pass.
+
+Deleting the workflow file is not sufficient evidence of runtime decommissioning. The
+visibility gate remains blocked until the runner/run read-back above is complete.
