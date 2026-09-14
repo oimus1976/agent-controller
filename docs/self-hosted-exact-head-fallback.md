@@ -80,8 +80,10 @@ The credential is low-value and local to the disposable target identity, but it 
 - provision the exact `ac-runner` SID with **Read, Delete, Synchronize** on this file only. Read alone is insufficient. No Write, replacement, ChangePermissions, or TakeOwnership authority is allowed; do not grant directory write/delete-child rights to compensate for missing file Delete;
 - Everyone, Authenticated Users, BUILTIN Users, the target SID, and all other SIDs must not be granted access;
 - preflight requires the complete Read and Delete masks and rejects excess control rights, inherited/propagating ACEs, and deny ACEs rather than inferring effective access from partial Read bits;
-- `ac-runner` reads the password into a `PSCredential` and deletes the file before target code starts;
+- `ac-runner` reads the password into a `PSCredential` and deletes the file with plain `Remove-Item` before target code starts;
 - if the file remains or its ACL cannot be proven, the job fails closed.
+
+Issue #201 real-Windows characterization reproduced the pilot authority boundary with a fresh standard-user control SID: the parent directory had no delete-child authority and the credential file granted only Read, Delete, and Synchronize. Under that exact boundary, `Remove-Item -Force` failed with access denied while plain `Remove-Item` and `[IO.File]::Delete()` both removed the file. Protected-sibling delete/write/replace, parent-file creation, and target-SID read probes all remained blocked. The workflow therefore intentionally uses plain `Remove-Item`; do not reintroduce `-Force` or broaden the shared credential directory's write/delete-child authority to compensate.
 
 No GitHub PAT, SSH key, provider credential, browser session, Antigravity/Codex/Jules state, or owner credential is placed in either target state or the one-time credential file.
 

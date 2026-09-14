@@ -15,6 +15,34 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-13 — One-time credential deletion contract repair（Issue #201 / Draft PR #204）
+
+関連: Issue #201, Draft PR #204, Issue #202, Draft PR #193
+
+### Added / changed
+
+- real self-hosted pilotで、`ac-runner` が one-time target credential を読取後に `Remove-Item -Force` で削除しようとした箇所が access denied で停止した事象を、Issue #201の独立workstreamとして修正。
+- pilot相当の実機characterizationで、credential fileに `Read + Delete + Synchronize`、親directoryに delete-child権限なしという既存の最小authority境界を再現し、plain `Remove-Item` と `[IO.File]::Delete()` は成功、`Remove-Item -Force` のみ失敗する `FORCE_ONLY_FAILURE` を確認。
+- workflowのcredential削除を plain `Remove-Item -LiteralPath $credentialFile` に限定し、削除後の `Test-Path` absence checkを維持。削除失敗時はtarget launch前にfail closedする。
+- regression testでcredential削除commandのplain formを拘束し、`-Force`再導入と削除失敗時のlaunch到達を拒否。
+- runbookに実機characterization結果と、shared credential directoryのwrite/delete-child authorityを広げない方針を記録。
+
+### Safety / authority boundary
+
+- credential fileの既存authority（`Read + Delete + Synchronize`）を維持し、shared parent directoryへのwrite/delete-child権限は追加しない。
+- target SIDへのcredential accessは追加しない。characterizationではtarget read、protected sibling delete/write/replace、parent file createがすべてBLOCKされた。
+- PR #193の実装は変更しない。`-UseNewEnvironment` によるalternate-user launch問題はIssue #202へ分離。
+- Ready / mergeはADR #90に従いhuman-finalのまま。
+
+### Validation status
+
+- code/test/runbook head `eb652f7e2327a9868f22c65ca4697e42e82ff281` で、changed-file scope、focused workflow/ACL regressions、full deterministic suite、Windows junction regression、exact-HEAD保持、clean-tree postconditionがPASS。
+- 同headに対するCodex exact-head reviewはmajor issueなし、inline review thread 0。
+- このCHANGELOG追加はdoc-onlyの新commitになるため、新headに対するexact-head validationとCodex rereviewを完了するまで、上記prior-head evidenceを最終証拠として流用しない。
+- この項目はDraft PR #204の未merge状態を記録し、mainへの採用済み状態を意味しない。
+
+---
+
 ## 2026-09-13 — Public repository readiness audit / hosted CI hardening（Issue #196 / Draft PR #203）
 
 関連: Issue #196, Draft PR #203, Issue #201, Issue #202

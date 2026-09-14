@@ -156,8 +156,63 @@ class FallbackAclTests(unittest.TestCase):
 
     def test_credential_removal_precedes_target_launch(self):
         block = extract_run_blocks(WORKFLOW.read_text(encoding="utf-8"))[2]
-        self.assertLess(block.index('Remove-Item -LiteralPath $credentialFile -Force'), block.index('Start-Process'))
+        removal_lines = [
+            line.strip()
+            for line in block.splitlines()
+            if line.strip().startswith('Remove-Item') and '$credentialFile' in line
+        ]
+        self.assertEqual(removal_lines, ['Remove-Item -LiteralPath $credentialFile'])
+        removal = removal_lines[0]
+        self.assertLess(block.index(removal), block.index('Start-Process'))
         self.assertLess(block.index('if (Test-Path -LiteralPath $credentialFile)'), block.index('Start-Process'))
+
+    def test_credential_removal_survives_force_only_failure_model(self):
+        block = extract_run_blocks(WORKFLOW.read_text(encoding="utf-8"))[2]
+        removal = 'Remove-Item -LiteralPath $credentialFile'
+        start = block.index(removal)
+        end_marker = '$password = $null'
+        end = block.index(end_marker, start) + len(end_marker)
+        gate = block[start:end]
+        script = r"""
+        $ErrorActionPreference = 'Stop'
+        $credentialFile = 'credential'
+        $password = 'secret'
+        $script:exists = $true
+        function Remove-Item {
+            param([string]$LiteralPath, [switch]$Force)
+            if ($Force) { throw [UnauthorizedAccessException]::new('force-only regression') }
+            $script:exists = $false
+        }
+        function Test-Path {
+            param([string]$LiteralPath)
+            return $script:exists
+        }
+        """
+        script += "\ntry {\n" + gate + "\nif ($script:exists) { throw 'credential remains' }\n'ACCEPT'\n} catch { 'REJECT' }"
+        self.assertEqual(self.run_gate(script), "ACCEPT")
+
+    def test_credential_removal_failure_rejects_before_target_launch_boundary(self):
+        block = extract_run_blocks(WORKFLOW.read_text(encoding="utf-8"))[2]
+        removal = 'Remove-Item -LiteralPath $credentialFile'
+        start = block.index(removal)
+        end_marker = '$password = $null'
+        end = block.index(end_marker, start) + len(end_marker)
+        gate = block[start:end]
+        script = r"""
+        $ErrorActionPreference = 'Stop'
+        $credentialFile = 'credential'
+        $password = 'secret'
+        function Remove-Item {
+            param([string]$LiteralPath)
+            throw [UnauthorizedAccessException]::new('pilot deletion failure')
+        }
+        function Test-Path {
+            param([string]$LiteralPath)
+            return $true
+        }
+        """
+        script += "\ntry {\n" + gate + "\n'TARGET_LAUNCH_REACHED'\n} catch { 'REJECT' }"
+        self.assertEqual(self.run_gate(script), "REJECT")
 
     def test_native_nested_checkout_dacls_survive_parent_changes(self):
         block = extract_run_blocks(WORKFLOW.read_text(encoding="utf-8"))[1]
