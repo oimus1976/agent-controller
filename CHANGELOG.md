@@ -15,6 +15,24 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-14 — Public publication: retire self-hosted exact-head fallback
+
+Related: Issue #196
+
+### Changed
+
+- removed the private-era `self-hosted-exact-head` GitHub Actions workflow from the publication candidate;
+- retired the implementation-specific self-hosted workflow regression suite and replaced it with a publication regression that rejects any active `self-hosted` / `ac-ci-*` runner path;
+- converted the self-hosted runbook into a historical retirement record;
+- narrowed the remaining public-readiness path to exact-head validation/review, merge, refreshed publication inventory, the human visibility gate, and post-public protection/hosted-CI verification.
+
+### Boundary
+
+- PR #193 implementation remains isolated and is not modified by this change;
+- historical self-hosted design/evidence remains in Git history;
+- Ready, merge, repository visibility, history rewrite, and destructive cleanup remain human-final.
+
+---
 ## 2026-09-14 — Alternate-user launch environment repair（Issue #202 / Draft candidate）
 
 関連: Issue #202, PR #193, Issue #201

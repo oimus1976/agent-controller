@@ -2,7 +2,7 @@
 
 Issue: #196
 
-Status: **BLOCKED — publication prerequisites remain**
+Status: **BLOCKED — publication retirement change requires validation and merge**
 
 This document is the repository-local publication contract for changing `oimus1976/agent-controller` from private to public. It records completed audit evidence, remaining blockers, and the human-final publication sequence. It does not itself authorize a visibility change.
 
@@ -187,50 +187,43 @@ Post-public closeout must prove the canonical hosted jobs actually receive GitHu
 
 ## Remaining blockers before human visibility gate
 
-### 1. License — COMPLETE IN DRAFT
+### 1. License — COMPLETE
 
-The human selected the MIT License on 2026-09-13.
+MIT is present at the repository root and remains the selected publication license.
 
-- the root `LICENSE` contains the standard MIT License;
-- the copyright line is `Copyright (c) 2026 oimus1976`;
-- README/project metadata must remain consistent with MIT through publication.
+### 2. Self-hosted exact-head fallback — RETIRED IN PUBLICATION CANDIDATE
 
-This closes the license-selection blocker for PR #203. It does not authorize Ready, merge, or a repository visibility change.
+The private-era bare-metal self-hosted workflow has been removed from the publication candidate. Its implementation-specific active-workflow regressions are replaced by a publication regression that fails if an active workflow again targets `self-hosted` or the private `ac-ci-*` runner label family.
 
-### 2. Self-hosted exact-head fallback — BLOCKER
+The historical design and repair evidence remain in Git history and in the retired runbook. Reintroduction is a new security-sensitive decision and is not part of publication closeout.
 
-A public repository must not expose an unsafe bare-metal self-hosted execution path.
+### 3. Exact-head validation and independent review — REQUIRED BEFORE MERGE
 
-The current fallback has active remediation work tracked separately, including #201 and #202. Public-readiness also retains the stronger #196 requirement that failure/cancellation semantics must not leave trusted cleanup or access revocation dependent on an earlier step succeeding.
+This retirement change must pass:
 
-Before publication, choose and verify one path:
+- focused publication-surface regression;
+- full deterministic suite;
+- Windows junction regression;
+- exact HEAD / clean tree / remote-head binding;
+- independent exact-head adversarial review.
 
-- **retire/disable** the self-hosted fallback for the public repository; or
-- **remediate and re-verify** it so public/fork code cannot obtain a route to the trusted host and trusted cleanup/revocation is fail-safe across success, failure, and cancellation.
+Ready and merge remain human-final.
 
-Because public GitHub-hosted Actions removes the original private-hosted-capacity motivation, the preferred publication posture is to retire/disable the bare-metal fallback unless a continuing operational need is demonstrated.
+### 4. Fresh publication inventory — REQUIRED AFTER MERGE
 
-Do not disable it prematurely if doing so would interfere with the isolated private #201/#202/#193 verification workstream; coordinate the final lifecycle action near publication.
+After this retirement change merges, refresh the publication-reachable tree/history/surface inventory against the new exact `main`. Prior completed scans remain evidence, but material repository changes since the earlier baseline require freshness confirmation before the visibility gate.
 
-### 3. Exact-head validation — REQUIRED BEFORE READY
+### 5. Public `main` protection and hosted CI — REQUIRED IMMEDIATELY AFTER VISIBILITY CHANGE
 
-The current private hosted CI state is not a PASS because jobs fail before runner assignment. Before Ready/merge, retain exact-head local/independent validation appropriate to the changed files and clearly record the private hosted-CI limitation.
+After the human changes visibility to public:
 
-After publication, hosted CI must be re-run/observed and actually execute on GitHub-hosted runners.
+- configure/read back `main` protection;
+- block force push and deletion;
+- require pull requests and review-thread resolution where supported;
+- require canonical hosted CI checks;
+- prove the GitHub-hosted jobs actually receive runners and execute.
 
-### 4. Public `main` protection — REQUIRED IMMEDIATELY AFTER VISIBILITY CHANGE
-
-After the human changes visibility to public, configure and read back a GitHub-side rule for `main` before treating publication as complete.
-
-The intended baseline is:
-
-- block deletion and force push;
-- require pull requests to `main`;
-- require resolution of review threads where supported;
-- require the canonical hosted CI checks;
-- no automation bypass that would silently widen merge authority.
-
-Exact rule names/check identifiers must be read from the public repository state at that time, not guessed in advance.
+Do not record `PUBLISHED_VERIFIED` before those post-public checks pass.
 
 ## Public fork / Actions trust review
 
@@ -258,24 +251,8 @@ Ready, merge, visibility change, history rewrite, and destructive cleanup remain
 
 ## Current classification
 
-`BLOCKED`
+`BLOCKED_PENDING_RETIREMENT_VALIDATION_AND_MERGE`
 
-Completed publication-audit areas:
+The security/content/license audit remains complete for its recorded surfaces. The active publication blocker is now the bounded retirement change itself, followed by the fresh publication inventory. PR #193 is a separate Draft implementation workstream and is not a visibility prerequisite.
 
-- full-history secret scan and finding disposition;
-- author/committer identity inventory;
-- historical filename/path/blob audit;
-- retained Actions artifact inventory/content review;
-- Actions run inventory and available-log secret scan;
-- no-log run classification;
-- full self-hosted-run log review;
-- repository-local readiness/changelog synchronization;
-- human MIT license selection and root `LICENSE` addition.
-
-Remaining blockers:
-
-- self-hosted fallback retire/disable-or-remediate decision and verification;
-- exact-head local/independent validation before Ready;
-- post-public `main` protection and hosted-CI execution verification after the human visibility change.
-
-This document must be refreshed from GitHub source-of-truth evidence if the publication candidate materially changes before the visibility gate.
+After the retirement merge and fresh inventory, Issue #196 may advance to `READY_FOR_HUMAN_VISIBILITY_GATE` only from refreshed evidence.
