@@ -15,6 +15,31 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-14 — Alternate-user launch environment repair（Issue #202 / Draft candidate）
+
+関連: Issue #202, PR #193, Issue #201
+
+### Added / changed
+
+- fresh standard-user characterization on Windows PowerShell 5.1 confirmed that `Start-Process -Credential` with explicit `-WorkingDirectory` launches under the target SID with target-user `PATH` / `TEMP` / `TMP` / `USERPROFILE`, while synthetic parent `GITHUB_*`, `GH_TOKEN`, and GitHub command-file environment variables are absent.
+- the same alternate-credential launch with `-LoadUserProfile` remained successful and isolated.
+- adding `-UseNewEnvironment` caused exit `-65536` before target payload execution, with or without `-LoadUserProfile`.
+- self-hosted fallback target launch therefore removes only `-UseNewEnvironment`; `-Credential`, `-LoadUserProfile`, explicit workspace `-WorkingDirectory`, and target `-NoProfile` remain.
+- focused regression rejects any reintroduction of `-UseNewEnvironment` and keeps the target-side forbidden-environment and command-file negative checks.
+
+### Safety / authority boundary
+
+- no silent environment sanitization is added. The target still fails closed if `GITHUB_*` or `GH_TOKEN` appears, so a future launch-boundary regression cannot be hidden by cleanup.
+- runner command-file paths remain trusted-parent probe literals and target write access must still fail.
+- control/target SIDs, checkout ACL boundary, one-time credential deletion contract, human-final Ready/merge authority, and PR #193 implementation remain unchanged.
+- no new real PR #193 pilot is allowed until Issue #202 is merged and a fresh nonce/SID/ephemeral runner is provisioned.
+
+### Validation status
+
+- this entry describes a Draft candidate until exact-head local validation and independent review complete; it does not claim adoption on `main`.
+
+---
+
 ## 2026-09-13 — One-time credential deletion contract repair（Issue #201 / Draft PR #204）
 
 関連: Issue #201, Draft PR #204, Issue #202, Draft PR #193
