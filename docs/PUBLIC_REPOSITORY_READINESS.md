@@ -263,6 +263,6 @@ Ready, merge, visibility change, history rewrite, and destructive cleanup remain
 
 `BLOCKED_PENDING_RETIREMENT_VALIDATION_AND_MERGE`
 
-The security/content/license audit remains complete for its recorded surfaces. The active publication blocker is now the bounded retirement change itself, followed by the fresh publication inventory. PR #193 is a separate Draft implementation workstream and is not a visibility prerequisite.
+The security/content/license audit remains complete for its recorded surfaces. The active publication blocker is now the bounded retirement change itself, followed by both the fresh publication inventory and the pre-visibility self-hosted decommission read-back. PR #193 is a separate Draft implementation workstream and is not a visibility prerequisite.
 
-After the retirement merge and fresh inventory, Issue #196 may advance to `READY_FOR_HUMAN_VISIBILITY_GATE` only from refreshed evidence.
+After the retirement merge, Issue #196 may advance to `READY_FOR_HUMAN_VISIBILITY_GATE` only after refreshed evidence proves both: (1) the publication inventory is current and clear, and (2) repository self-hosted runner registrations plus queued/in-progress retired-path runs show zero residual execution authority.

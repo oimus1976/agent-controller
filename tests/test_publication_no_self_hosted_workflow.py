@@ -12,10 +12,12 @@ ALLOWED_HOSTED_RUNNERS = {"ubuntu-latest", "windows-latest"}
 def parse_local_job_runners(text):
     """Return every job and its literal runner; reject unsupported job shapes."""
     lines = text.splitlines()
-    try:
-        jobs_index = lines.index("jobs:")
-    except ValueError as exc:
-        raise ValueError("workflow must contain a top-level jobs mapping") from exc
+    jobs_indexes = [index for index, line in enumerate(lines) if line == "jobs:"]
+    if len(jobs_indexes) != 1:
+        raise ValueError(
+            "workflow must contain exactly one top-level jobs mapping"
+        )
+    jobs_index = jobs_indexes[0]
 
     jobs = []
     index = jobs_index + 1
@@ -72,8 +74,15 @@ def parse_local_job_runners(text):
                 f"job {job_name!r} must define exactly one local literal runs-on"
             )
 
-        raw_runner = runner_values[0]
-        normalized = raw_runner.strip().strip("\"'")
+        raw_runner = runner_values[0].strip()
+        if (
+            len(raw_runner) >= 2
+            and raw_runner[0] == raw_runner[-1]
+            and raw_runner[0] in ("'", '"')
+        ):
+            normalized = raw_runner[1:-1]
+        else:
+            normalized = raw_runner
         if normalized not in ALLOWED_HOSTED_RUNNERS:
             raise ValueError(
                 f"job {job_name!r} runner is not an allowed GitHub-hosted literal: "
@@ -138,6 +147,29 @@ class PublicationNoSelfHostedWorkflowTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     parse_local_job_runners(text)
 
+    def test_parser_rejects_nested_quoting_around_runner_literal(self):
+        for candidate in (
+            "\"'ubuntu-latest'\"",
+            "'\"windows-latest\"'",
+        ):
+            with self.subTest(candidate=candidate):
+                text = f"""jobs:
+  probe:
+    runs-on: {candidate}
+"""
+                with self.assertRaises(ValueError):
+                    parse_local_job_runners(text)
+
+    def test_parser_rejects_duplicate_top_level_jobs_mapping(self):
+        text = """jobs:
+  hosted:
+    runs-on: ubuntu-latest
+jobs:
+  trusted:
+    runs-on: self-hosted
+"""
+        with self.assertRaises(ValueError):
+            parse_local_job_runners(text)
     def test_parser_rejects_flow_style_job_syntax(self):
         for declaration in (
             "  probe: { runs-on: ubuntu-latest }",
