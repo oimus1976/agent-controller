@@ -15,21 +15,47 @@ class PublicationNoSelfHostedWorkflowTests(unittest.TestCase):
             "private-era self-hosted exact-head workflow must stay retired for publication",
         )
 
-    def test_no_active_workflow_targets_self_hosted_runner(self):
+    def _runner_values(self, text):
+        values = []
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            match = re.match(r"""^["']?runs-on["']?\s*:\s*(.+?)\s*$""", stripped, re.IGNORECASE)
+            if match:
+                values.append((line_number, match.group(1)))
+        return values
+
+    def test_all_active_workflow_runners_are_known_github_hosted_labels(self):
+        allowed = {"ubuntu-latest", "windows-latest"}
         offenders = []
         for workflow in sorted(WORKFLOW_DIR.glob("*.y*ml")):
             text = workflow.read_text(encoding="utf-8")
-            for line_number, line in enumerate(text.splitlines(), start=1):
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#"):
-                    continue
-                lower = stripped.lower()
-                if re.match(r"""^["']?runs-on["']?\s*:""", lower):
-                    if "self-hosted" in lower or "ac-ci-" in lower:
-                        offenders.append(
-                            f"{workflow.relative_to(REPO_ROOT)}:{line_number}:{stripped}"
-                        )
-        self.assertEqual(offenders, [], "active self-hosted runner surface reintroduced")
+            for line_number, value in self._runner_values(text):
+                normalized = value.strip().strip("\"'")
+                if normalized not in allowed:
+                    offenders.append(
+                        f"{workflow.relative_to(REPO_ROOT)}:{line_number}:{value}"
+                    )
+        self.assertEqual(
+            offenders,
+            [],
+            "publication workflows must use only explicitly allowed GitHub-hosted runners",
+        )
+
+    def test_runner_allowlist_rejects_indirection_and_self_hosted_labels(self):
+        allowed = {"ubuntu-latest", "windows-latest"}
+        for candidate in (
+            "${{ vars.RUNNER }}",
+            "self-hosted",
+            "[self-hosted, windows, x64]",
+            "ac-ci-deadbeefdeadbeef",
+        ):
+            with self.subTest(candidate=candidate):
+                values = self._runner_values(f"jobs:\n  probe:\n    runs-on: {candidate}\n")
+                self.assertEqual(len(values), 1)
+                normalized = values[0][1].strip().strip("\"'")
+                self.assertNotIn(normalized, allowed)
 
     def test_hosted_tests_workflow_keeps_read_only_checkout_contract(self):
         path = WORKFLOW_DIR / "tests.yml"
