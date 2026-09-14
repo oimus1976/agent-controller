@@ -29,7 +29,9 @@ def parse_local_job_runners(text):
             continue
 
         if not line.startswith("  "):
-            break
+            raise ValueError(
+                f"unsupported top-level content after jobs begins: {line!r}"
+            )
 
         if line.startswith("    "):
             raise ValueError(f"job content appeared before a job declaration: {line!r}")
@@ -167,6 +169,33 @@ class PublicationNoSelfHostedWorkflowTests(unittest.TestCase):
 jobs:
   trusted:
     runs-on: self-hosted
+"""
+        with self.assertRaises(ValueError):
+            parse_local_job_runners(text)
+    def test_parser_rejects_yaml_equivalent_duplicate_jobs_spellings(self):
+        duplicate_forms = (
+            "jobs :",
+            '"jobs":',
+            "jobs: # duplicate",
+        )
+        for duplicate in duplicate_forms:
+            with self.subTest(duplicate=duplicate):
+                text = f"""jobs:
+  hosted:
+    runs-on: ubuntu-latest
+{duplicate}
+  trusted:
+    runs-on: self-hosted
+"""
+                with self.assertRaises(ValueError):
+                    parse_local_job_runners(text)
+
+    def test_parser_rejects_unknown_top_level_content_after_jobs(self):
+        text = """jobs:
+  hosted:
+    runs-on: ubuntu-latest
+permissions:
+  contents: write
 """
         with self.assertRaises(ValueError):
             parse_local_job_runners(text)
