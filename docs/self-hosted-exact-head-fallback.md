@@ -46,7 +46,7 @@ The runner itself remains under `ac-runner`. The trusted workflow:
 2. checks out the exact immutable target SHA under `ac-runner` with checkout credentials not persisted;
 3. validates HEAD/cleanliness using fixed machine-wide Git and Python paths;
 4. protects checkout ACLs from inheritance, preserves full control for `ac-runner`, SYSTEM, and local Administrators, explicitly denies the disposable target SID write-class rights (including rights obtained through group membership), and grants that SID read/execute-only access;
-5. launches the full unittest suite and Windows junction regression through `Start-Process -Credential ... -UseNewEnvironment -LoadUserProfile` under `act-<nonce>`;
+5. launches the full unittest suite and Windows junction regression through `Start-Process -Credential ... -LoadUserProfile -WorkingDirectory <workspace>` under `act-<nonce>`;
 6. uses `-NoProfile` for both trusted and target PowerShell execution;
 7. verifies the target process did not inherit `GITHUB_*` or `GH_TOKEN` environment state and cannot open the runner command files (`GITHUB_STEP_SUMMARY`, `GITHUB_ENV`, `GITHUB_PATH`) or write to the `ac-runner` profile;
 8. removes the one-time target credential file **before** PR target code starts;
@@ -86,6 +86,12 @@ The credential is low-value and local to the disposable target identity, but it 
 Issue #201 real-Windows characterization reproduced the pilot authority boundary with a fresh standard-user control SID: the parent directory had no delete-child authority and the credential file granted only Read, Delete, and Synchronize. Under that exact boundary, `Remove-Item -Force` failed with access denied while plain `Remove-Item` and `[IO.File]::Delete()` both removed the file. Protected-sibling delete/write/replace, parent-file creation, and target-SID read probes all remained blocked. The workflow therefore intentionally uses plain `Remove-Item`; do not reintroduce `-Force` or broaden the shared credential directory's write/delete-child authority to compensate.
 
 No GitHub PAT, SSH key, provider credential, browser session, Antigravity/Codex/Jules state, or owner credential is placed in either target state or the one-time credential file.
+
+### Alternate-credential environment boundary
+
+Issue #202 real-Windows characterization on Windows PowerShell 5.1 used a fresh standard-user target SID and synthetic control-process `GITHUB_*`, `GH_TOKEN`, `GITHUB_ENV`, `GITHUB_PATH`, and `GITHUB_STEP_SUMMARY` values. With `Start-Process -Credential` plus an explicit `-WorkingDirectory`, both the baseline and `-LoadUserProfile` variants launched successfully under the target SID and observed zero forbidden GitHub/token variables. `PATH`, `TEMP`, `TMP`, and `USERPROFILE` resolved to the target-user environment. Adding `-UseNewEnvironment` instead failed before the child payload with exit `-65536`, with or without `-LoadUserProfile`.
+
+The workflow therefore intentionally does **not** use `-UseNewEnvironment` on this alternate-credential Windows PowerShell 5.1 path. It keeps `-Credential`, `-LoadUserProfile`, explicit workspace `-WorkingDirectory`, and target `-NoProfile`. The target payload still fails closed if any `GITHUB_*` or `GH_TOKEN` variable appears. Do not replace this detection with silent environment sanitization: the absence check is evidence of the launch boundary, while sanitization could hide a future regression. The trusted parent also passes runner command-file paths only as probe literals so the target must still prove it cannot write `GITHUB_STEP_SUMMARY`, `GITHUB_ENV`, or `GITHUB_PATH` even though those variable names are absent from the target environment.
 
 ## Disposable SID / cross-run reset contract
 
@@ -138,7 +144,7 @@ The GitHub runner remains:
 - exact local `ac-runner` SID and explicit non-admin membership checks;
 - exactly one fresh `act-<nonce>` account, no existing profile, and no pre-existing scheduled task for its SID;
 - `GITHUB_WORKSPACE` and every existing lexical ancestor are rejected if any is a reparse point before `actions/checkout(clean: true)` can mutate the workspace;
-- target test process executes with alternate credentials and `-UseNewEnvironment`;
+- target test process executes with alternate credentials, `-LoadUserProfile`, and explicit workspace `-WorkingDirectory`, without `-UseNewEnvironment`;
 - target environment cannot inherit GitHub command/token variables;
 - target cannot write GitHub command files or the control profile;
 - target checkout access is read/execute-only and is revoked after tests;

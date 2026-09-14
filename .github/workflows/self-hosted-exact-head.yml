@@ -371,7 +371,7 @@ jobs:
           $stderr = Join-Path $resultRoot 'target-stderr.log'
           $process = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
             -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', $command) `
-            -Credential $credential -LoadUserProfile -UseNewEnvironment -WorkingDirectory $env:GITHUB_WORKSPACE `
+            -Credential $credential -LoadUserProfile -WorkingDirectory $env:GITHUB_WORKSPACE `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -Wait
 
           if (Test-Path -LiteralPath $stdout) { Get-Content -LiteralPath $stdout | ForEach-Object { Write-Host $_ } }

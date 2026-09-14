@@ -204,7 +204,8 @@ class SelfHostedFallbackWorkflowTests(unittest.TestCase):
         required = (
             "Start-Process",
             "-Credential $credential",
-            "-LoadUserProfile -UseNewEnvironment",
+            "-LoadUserProfile",
+            "-WorkingDirectory $env:GITHUB_WORKSPACE",
             "-NoProfile",
             "GITHUB_*",
             "GH_TOKEN",
@@ -218,6 +219,7 @@ class SelfHostedFallbackWorkflowTests(unittest.TestCase):
         )
         for marker in required:
             self.assertIn(marker, target)
+        self.assertNotIn("-UseNewEnvironment", target)
         self.assertNotIn("GH_TOKEN:", target)
         self.assertNotIn(">> $env:GITHUB_STEP_SUMMARY", target)
 
