@@ -19,6 +19,38 @@ def parse_local_job_runners(text):
         )
     jobs_index = jobs_indexes[0]
 
+    # Validate the entire preamble, not just the selected jobs line. Support
+    # only the repository's simple metadata shapes: no quoted/multiline keys
+    # or values, flow mappings, aliases, tags, or document boundaries.
+    preamble_shapes = {
+        "name": r"name: [A-Za-z0-9_-]+\n",
+        "on": (
+            r"on:\n(?:  (?:push|pull_request):\n    branches:\n"
+            r"(?:      - [A-Za-z0-9_./-]+\n)+)+"
+        ),
+        "permissions": r"permissions:\n(?:  [a-z][a-z-]*: (?:read|none)\n)+",
+    }
+    preamble = [
+        line for line in lines[:jobs_index]
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    seen_preamble_keys = set()
+    preamble_index = 0
+    while preamble_index < len(preamble):
+        start = preamble_index
+        key = preamble[start].split(":", 1)[0]
+        preamble_index += 1
+        while preamble_index < len(preamble) and preamble[preamble_index].startswith(" "):
+            preamble_index += 1
+        section = "\n".join(preamble[start:preamble_index]) + "\n"
+        if (
+            key not in preamble_shapes
+            or key in seen_preamble_keys
+            or not re.fullmatch(preamble_shapes[key], section)
+        ):
+            raise ValueError(f"unsupported or ambiguous workflow preamble: {section!r}")
+        seen_preamble_keys.add(key)
+
     jobs = []
     index = jobs_index + 1
     while index < len(lines):
@@ -257,6 +289,75 @@ jobs:
 """
                 with self.assertRaises(ValueError):
                     parse_local_job_runners(text)
+
+    def test_parser_rejects_ambiguous_top_level_jobs_in_both_orders(self):
+        forms = (
+            "jobs:",
+            "jobs :",
+            '"jobs":',
+            "'jobs':",
+            "jobs: # comment",
+            r'"\u006aobs":',
+            r'"jo\x62s":',
+            "? jobs\n:",
+            "!!str jobs:",
+            "&hidden jobs:",
+            "jobs: &hidden",
+            "<<:",
+            "<<: *hidden",
+            "unknown:",
+            "jobs",
+            "jobs\t:",
+            "{jobs:",
+            "- jobs:",
+            "---\njobs :",
+            "...\njobs :",
+            "%YAML 1.2\n---\njobs :",
+        )
+        hosted = "jobs:\n  hosted:\n    runs-on: ubuntu-latest\n"
+        for form in forms:
+            for member in (
+                "runs-on: self-hosted",
+                "uses: owner/repo/.github/workflows/reusable.yml@main",
+            ):
+                hidden = f"{form}\n  trusted:\n    {member}\n"
+                for before in (True, False):
+                    with self.subTest(form=form, member=member, before=before):
+                        text = hidden + hosted if before else hosted + hidden
+                        with self.assertRaises(ValueError):
+                            parse_local_job_runners(text)
+
+    def test_parser_rejects_unsupported_preamble_containers_and_scalars(self):
+        for preamble in (
+            'name: "unterminated\n',
+            "name: 'unterminated\n",
+            "name: |\n  jobs:\n    trusted: unsafe\n",
+            "name: probe\n  continuation\n",
+            "name: probe\nname: duplicate\n",
+            "on: {push: null}\n",
+            "on: &events\n  push:\n    branches:\n      - main\n",
+            'on:\n  "unterminated:\n',
+            "permissions:\n  <<: *defaults\n",
+            "permissions:\n  contents: read\n  contents: |\n",
+            "  orphan: mapping\n",
+            "\tjobs:\n  trusted:\n    runs-on: self-hosted\n",
+        ):
+            with self.subTest(preamble=preamble):
+                with self.assertRaises(ValueError):
+                    parse_local_job_runners(
+                        preamble + "jobs:\n  hosted:\n    runs-on: ubuntu-latest\n"
+                    )
+
+    def test_parser_accepts_repository_workflow_preamble(self):
+        text = (
+            "# Workflow metadata\nname: deterministic-tests\n\n"
+            "on:\n  push:\n    branches:\n"
+            "      - phase-4c-pn1-provider-neutral-proof\n"
+            "  pull_request:\n    branches:\n      - main\n\n"
+            "permissions:\n  # Read-only publication checkout\n  contents: read\n\n"
+            "jobs:\n  hosted:\n    runs-on: ubuntu-latest\n"
+        )
+        self.assertEqual(parse_local_job_runners(text), [("hosted", "ubuntu-latest")])
 
     def test_parser_rejects_unknown_top_level_content_after_jobs(self):
         text = """jobs:
