@@ -39,6 +39,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - this entry describes a Draft candidate until exact-head local validation and independent review complete; it does not claim adoption on `main`.
 
 ---
+
 ## 2026-09-13 — One-time credential deletion contract repair（Issue #201 / Draft PR #204）
 
 関連: Issue #201, Draft PR #204, Issue #202, Draft PR #193
