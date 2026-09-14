@@ -56,16 +56,33 @@ def parse_local_job_runners(text):
 
         block = lines[start:index]
         runner_values = []
+        seen_keys = set()
+        allows_nested_content = False
         for block_line in block:
+            if not block_line.strip() or block_line.lstrip().startswith("#"):
+                continue
+            # Only containers and block scalars can own deeper content; a
+            # literal runner must never acquire a scalar continuation.
+            if block_line.startswith("     "):
+                indentation = block_line[:len(block_line) - len(block_line.lstrip())]
+                if not allows_nested_content or "\t" in indentation:
+                    raise ValueError(f"unsupported job value continuation: {block_line!r}")
+                continue
+            # Bounded keys exclude escapes, tags, anchors, explicit keys and
+            # merges. Unrecognized direct members must never be ignored.
             key_match = re.fullmatch(
-                r"    (?:(?:\"([^\"]+)\")|(?:'([^']+)')|([A-Za-z0-9_-]+)):\s*(.*?)\s*",
+                r"    (?:(?:\"([A-Za-z0-9_-]+)\")|(?:'([A-Za-z0-9_-]+)')|([A-Za-z0-9_-]+)):[ \t]*(.*?)[ \t]*",
                 block_line,
             )
             if not key_match:
-                continue
+                raise ValueError(f"unsupported job mapping member: {block_line!r}")
             key = next(group for group in key_match.groups()[:3] if group is not None)
             value = key_match.group(4)
             key_lower = key.lower()
+            if key_lower in seen_keys:
+                raise ValueError(f"duplicate job mapping key: {key!r}")
+            seen_keys.add(key_lower)
+            allows_nested_content = value in ("", "|", "|-", "|+", ">", ">-", ">+")
             if key_lower == "uses":
                 raise ValueError(f"reusable job is not allowed for publication: {job_name}")
             if key_lower == "runs-on":
@@ -122,6 +139,57 @@ class PublicationNoSelfHostedWorkflowTests(unittest.TestCase):
 """
         with self.assertRaises(ValueError):
             parse_local_job_runners(text)
+
+    def test_parser_rejects_ambiguous_job_mapping_members(self):
+        members = (
+            "runs-on : self-hosted",
+            '"runs-on" : self-hosted',
+            "'runs-on' : self-hosted",
+            '"runs-on": self-hosted',
+            "'runs-on': self-hosted",
+            "runs-on: ubuntu-latest",
+            "runs-on\t: self-hosted",
+            r'"runs-\u006fn": self-hosted',
+            r'"\x72uns-on": self-hosted',
+            "? runs-on\n    : self-hosted",
+            "!!str runs-on: self-hosted",
+            "&runner runs-on: self-hosted",
+            "<<: {runs-on: self-hosted}",
+            "<<: *runner_defaults",
+            "uses : owner/repo/.github/workflows/reusable.yml@main",
+            '"uses" : owner/repo/.github/workflows/reusable.yml@main',
+            r'"u\u0073es": owner/repo/.github/workflows/reusable.yml@main',
+            "{runs-on: self-hosted}",
+            "- runs-on: self-hosted",
+            "\truns-on: self-hosted",
+        )
+        for member in members:
+            for before in (True, False):
+                with self.subTest(member=member, before=before):
+                    hosted = "    runs-on: ubuntu-latest\n"
+                    unsupported = f"    {member}\n"
+                    body = unsupported + hosted if before else hosted + unsupported
+                    with self.assertRaises(ValueError):
+                        parse_local_job_runners("jobs:\n  probe:\n" + body)
+
+    def test_parser_rejects_runner_scalar_continuation(self):
+        for runner in ("ubuntu-latest", '"ubuntu-latest"', "'ubuntu-latest'"):
+            with self.subTest(runner=runner):
+                with self.assertRaises(ValueError):
+                    parse_local_job_runners(
+                        f"jobs:\n  probe:\n    runs-on: {runner}\n      self-hosted\n"
+                    )
+
+    def test_parser_accepts_bounded_keys_and_nested_step_content(self):
+        for key in ("runs-on", '"runs-on"', "'runs-on'"):
+            with self.subTest(key=key):
+                text = (
+                    f"jobs:\n  probe:\n    {key}: ubuntu-latest\n"
+                    "    # Job comment\n"
+                    "    steps:\n      - uses: actions/checkout@pinned\n"
+                    "      - run: |\n          runs-on : command-text\n"
+                )
+                self.assertEqual(parse_local_job_runners(text), [("probe", "ubuntu-latest")])
 
     def test_parser_rejects_missing_runner(self):
         text = """jobs:
