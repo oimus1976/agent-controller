@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import FrozenSet, Tuple
+from threading import Lock
+from typing import FrozenSet, Iterable, Tuple
 
 
 class PrivateCiTargetOs(str, Enum):
@@ -23,6 +24,31 @@ class PrivateCiPhaseStatus(str, Enum):
     UNCERTAIN = "UNCERTAIN"
 
 
+class PrivateCiNonceAuthority:
+    """Process-local linear model for one-time runner nonce reservation.
+
+    The later owner-machine bridge must replace or wrap this with durable
+    cross-process storage before live runner registration is allowed. The
+    contract slice nevertheless makes same-process concurrent replay fail
+    closed instead of relying on a stale snapshot of used nonces.
+    """
+
+    def __init__(self, used_nonces: Iterable[str] = ()) -> None:
+        self._used_nonces = set(used_nonces)
+        self._lock = Lock()
+
+    def reserve(self, nonce: str) -> bool:
+        with self._lock:
+            if nonce in self._used_nonces:
+                return False
+            self._used_nonces.add(nonce)
+            return True
+
+    def is_used(self, nonce: str) -> bool:
+        with self._lock:
+            return nonce in self._used_nonces
+
+
 @dataclass(frozen=True)
 class PrivateCiRequest:
     repository: str
@@ -34,6 +60,7 @@ class PrivateCiRequest:
     observed_head_sha: str
     workflow_identity: str
     target_os: PrivateCiTargetOs
+    runner_scope_repository: str
     runner_nonce: str
     runner_label: str
     environment_generation: str
@@ -55,6 +82,7 @@ class PrivateCiExecutionResult:
     exact_head_sha: str
     workflow_identity: str
     target_os: PrivateCiTargetOs
+    runner_scope_repository: str
     runner_nonce: str
     runner_label: str
     environment_generation: str
@@ -87,18 +115,20 @@ def _is_non_empty_string(value: str) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def validate_private_ci_request(
+def validate_and_reserve_private_ci_request(
     request: PrivateCiRequest,
     *,
     allowed_repositories: FrozenSet[str],
-    used_runner_nonces: FrozenSet[str],
+    allowed_workflow_identities: FrozenSet[str],
+    nonce_authority: PrivateCiNonceAuthority,
 ) -> PrivateCiRequestValidation:
-    """Validate one private-repository exact-head local-CI request.
+    """Validate and atomically reserve one exact-head private-CI request.
 
-    This is a pure contract check. It does not register a runner, dispatch a
-    workflow, mutate GitHub state, or inspect the host. Callers must populate
-    the request from independently re-read trusted facts immediately before
-    live execution.
+    This contract does not register a runner, dispatch a workflow, mutate
+    GitHub, or inspect the host. Callers must populate it from independently
+    re-read trusted facts immediately before live execution. A request that
+    passes every other precondition burns its nonce before returning ACCEPT,
+    so a failed later phase cannot reuse the same authority.
     """
 
     if not _is_non_empty_string(request.repository):
@@ -119,12 +149,14 @@ def validate_private_ci_request(
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "pull request head drifted")
     if not _is_non_empty_string(request.workflow_identity):
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "workflow identity is invalid")
+    if request.workflow_identity not in allowed_workflow_identities:
+        return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "workflow identity is not allowlisted")
     if not isinstance(request.target_os, PrivateCiTargetOs):
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "target OS is invalid")
+    if request.runner_scope_repository != request.repository:
+        return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "runner registration scope does not match repository")
     if not _is_non_empty_string(request.runner_nonce):
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "runner nonce is invalid")
-    if request.runner_nonce in used_runner_nonces:
-        return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "runner nonce was already used")
     if not _is_non_empty_string(request.runner_label):
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "runner label is invalid")
     if request.runner_nonce not in request.runner_label:
@@ -137,8 +169,12 @@ def validate_private_ci_request(
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "residual runner registration exists")
     if request.environment_reset_proven is not True:
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "execution environment reset is not proven")
+    if not isinstance(nonce_authority, PrivateCiNonceAuthority):
+        return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "nonce authority is invalid")
+    if not nonce_authority.reserve(request.runner_nonce):
+        return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "runner nonce was already used")
 
-    return PrivateCiRequestValidation(True, PrivateCiValidationResult.ACCEPT, "request is bound and fail-closed preconditions passed")
+    return PrivateCiRequestValidation(True, PrivateCiValidationResult.ACCEPT, "request is bound and nonce was reserved")
 
 
 def validate_private_ci_result(
@@ -153,6 +189,7 @@ def validate_private_ci_result(
         request.expected_head_sha,
         request.workflow_identity,
         request.target_os,
+        request.runner_scope_repository,
         request.runner_nonce,
         request.runner_label,
         request.environment_generation,
@@ -163,6 +200,7 @@ def validate_private_ci_result(
         result.exact_head_sha,
         result.workflow_identity,
         result.target_os,
+        result.runner_scope_repository,
         result.runner_nonce,
         result.runner_label,
         result.environment_generation,
