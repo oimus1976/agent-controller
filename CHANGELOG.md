@@ -15,6 +15,112 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-14 — Public publication: retire self-hosted exact-head fallback
+
+Related: Issue #196
+
+### Changed
+
+- removed the private-era `self-hosted-exact-head` GitHub Actions workflow from the publication candidate;
+- retired the implementation-specific self-hosted workflow regression suite and replaced it with a publication regression that rejects any active `self-hosted` / `ac-ci-*` runner path;
+- converted the self-hosted runbook into a historical retirement record;
+- narrowed the remaining public-readiness path to exact-head validation/review, merge, refreshed publication inventory, the human visibility gate, and post-public protection/hosted-CI verification.
+
+### Boundary
+
+- PR #193 implementation remains isolated and is not modified by this change;
+- historical self-hosted design/evidence remains in Git history;
+- Ready, merge, repository visibility, history rewrite, and destructive cleanup remain human-final.
+
+---
+## 2026-09-14 — Alternate-user launch environment repair（Issue #202 / Draft candidate）
+
+関連: Issue #202, PR #193, Issue #201
+
+### Added / changed
+
+- fresh standard-user characterization on Windows PowerShell 5.1 confirmed that `Start-Process -Credential` with explicit `-WorkingDirectory` launches under the target SID with target-user `PATH` / `TEMP` / `TMP` / `USERPROFILE`, while synthetic parent `GITHUB_*`, `GH_TOKEN`, and GitHub command-file environment variables are absent.
+- the same alternate-credential launch with `-LoadUserProfile` remained successful and isolated.
+- adding `-UseNewEnvironment` caused exit `-65536` before target payload execution, with or without `-LoadUserProfile`.
+- self-hosted fallback target launch therefore removes only `-UseNewEnvironment`; `-Credential`, `-LoadUserProfile`, explicit workspace `-WorkingDirectory`, and target `-NoProfile` remain.
+- focused regression rejects any reintroduction of `-UseNewEnvironment` and keeps the target-side forbidden-environment and command-file negative checks.
+
+### Safety / authority boundary
+
+- no silent environment sanitization is added. The target still fails closed if `GITHUB_*` or `GH_TOKEN` appears, so a future launch-boundary regression cannot be hidden by cleanup.
+- runner command-file paths remain trusted-parent probe literals and target write access must still fail.
+- control/target SIDs, checkout ACL boundary, one-time credential deletion contract, human-final Ready/merge authority, and PR #193 implementation remain unchanged.
+- no new real PR #193 pilot is allowed until Issue #202 is merged and a fresh nonce/SID/ephemeral runner is provisioned.
+
+### Validation status
+
+- this entry describes a Draft candidate until exact-head local validation and independent review complete; it does not claim adoption on `main`.
+
+---
+
+## 2026-09-13 — One-time credential deletion contract repair（Issue #201 / Draft PR #204）
+
+関連: Issue #201, Draft PR #204, Issue #202, Draft PR #193
+
+### Added / changed
+
+- real self-hosted pilotで、`ac-runner` が one-time target credential を読取後に `Remove-Item -Force` で削除しようとした箇所が access denied で停止した事象を、Issue #201の独立workstreamとして修正。
+- pilot相当の実機characterizationで、credential fileに `Read + Delete + Synchronize`、親directoryに delete-child権限なしという既存の最小authority境界を再現し、plain `Remove-Item` と `[IO.File]::Delete()` は成功、`Remove-Item -Force` のみ失敗する `FORCE_ONLY_FAILURE` を確認。
+- workflowのcredential削除を plain `Remove-Item -LiteralPath $credentialFile` に限定し、削除後の `Test-Path` absence checkを維持。削除失敗時はtarget launch前にfail closedする。
+- regression testでcredential削除commandのplain formを拘束し、`-Force`再導入と削除失敗時のlaunch到達を拒否。
+- runbookに実機characterization結果と、shared credential directoryのwrite/delete-child authorityを広げない方針を記録。
+
+### Safety / authority boundary
+
+- credential fileの既存authority（`Read + Delete + Synchronize`）を維持し、shared parent directoryへのwrite/delete-child権限は追加しない。
+- target SIDへのcredential accessは追加しない。characterizationではtarget read、protected sibling delete/write/replace、parent file createがすべてBLOCKされた。
+- PR #193の実装は変更しない。`-UseNewEnvironment` によるalternate-user launch問題はIssue #202へ分離。
+- Ready / mergeはADR #90に従いhuman-finalのまま。
+
+### Validation status
+
+- code/test/runbook head `eb652f7e2327a9868f22c65ca4697e42e82ff281` で、changed-file scope、focused workflow/ACL regressions、full deterministic suite、Windows junction regression、exact-HEAD保持、clean-tree postconditionがPASS。
+- 同headに対するCodex exact-head reviewはmajor issueなし、inline review thread 0。
+- このCHANGELOG追加はdoc-onlyの新commitになるため、新headに対するexact-head validationとCodex rereviewを完了するまで、上記prior-head evidenceを最終証拠として流用しない。
+- この項目はDraft PR #204の未merge状態を記録し、mainへの採用済み状態を意味しない。
+
+---
+
+## 2026-09-13 — Public repository readiness audit / hosted CI hardening（Issue #196 / Draft PR #203）
+
+関連: Issue #196, Draft PR #203, Issue #201, Issue #202
+
+### Added / changed
+
+- private repository を public へ変更するための repository-local publication contract として `docs/PUBLIC_REPOSITORY_READINESS.md` を追加。
+- normal hosted CI の `actions/checkout` を pinned SHA のまま `persist-credentials: false` に固定し、`contents: read` を維持。全 hosted checkout block が credential persistence を無効化することを deterministic regression で保護。
+- README に project purpose、active development status、validation command、trust boundary、public-readiness document、MIT License を明示。
+- publication audit の bound main を `98d4bb9d9c8396c89c3be7b235a04dd4348e3a03` とし、authenticated mirror を `fetch=0` / `fsck=0` で確認。157 refs（うち76 PR refs）、707 commits を inventory。
+- Gitleaks 8.30.1 の full-history scan で5件の `generic-api-key` finding を検出したが、全件を Ed25519 public fixture key と個別確認し、unresolved secret finding 0、history rewrite 不要と判定。
+- author/committer identity inventory は707 commits 全件を対象とし、owner / GitHub / Jules bot の期待された identity のみを確認。historical owner Gmail metadata は明示的な human publication decision により受容。
+- historical filename/path/blob audit は245 unique paths、secret-like path 0、machine/infrastructure identifier path 0、binary/archive/database path 0 を確認。
+- retained Actions artifact は fresh inventory 8件（review artifact 7 + package-lock 1）を全件確認し、credential/private-key publication blocker 0。
+- Actions run inventory は479 runs / 5 workflow files を全件取得。430 runs の取得可能な log body を private-key marker / common token-key-secret pattern で走査し candidate run 0 / match group 0。残る49 runs は98 hosted jobs（49 `unittest` + 49 `windows-junction`）すべて runner assignment / workflow step execution 前に終了しており、log body 自体が生成されていないことを確認。
+- self-hosted `workflow_dispatch` 2 runs は full log を個別確認し、GitHub auth は masked、one-time password content は未出力。historical machine/runner/SID/nonce/path metadata の実値露出は既存 non-secret infrastructure diagnostics として human decision により受容。
+
+### Safety / authority boundary
+
+- historical non-secret identity/infrastructure metadata の受容は、secret、credential、private key、unrelated personal data の受容を意味しない。
+- 新たに durable/public-facing evidence を書く場合は、不要な実機値を `<HOST>` / `<CONTROL_SID>` / `<TARGET_SID>` / `<RUNNER>` / `<NONCE>` / `<WORKSPACE>` / `<CREDENTIAL_ROOT>` 等へ正規化する。commit SHA、Issue/PR/run ID、workflow name、result、failure boundary 等の audit fact は必要に応じて exact に保持する。
+- repository visibility change、Ready、merge、history rewrite、destructive cleanup はこの change では行わず、human-final authority を維持。
+- human decision により MIT License を選択し、root `LICENSE` を追加。copyright holder は GitHub 公開アカウント名 `oimus1976` とした。
+- public repository に bare-metal self-hosted runner を露出しないことを publication blocker として維持。fallback は publication 前に retire/disable するか、#201/#202 および failure/cancellation cleanup contract を含めて remediation + re-verification が必要。
+- private-plan capacity block により hosted exact-head CI が runner assignment 前に停止する場合、それを implementation PASS/FAIL とみなさない。public 化後に canonical hosted jobs が実際に GitHub-hosted runner 上で開始・完走することを post-public verification で証明する。
+- visibility change 後、`main` protection/ruleset を即時設定して read back するまで publication closeout としない。
+
+### Validation status
+
+- `docs/PUBLIC_REPOSITORY_READINESS.md` は full-history / identity / path / retained artifact / Actions log audit の completed evidence と残る blockers に同期済み。
+- prior docs-synchronized head `e0051b6fe638c94ef094d2f56763985cfaa8cc2c` に対する run `34745313182` は `unittest` / `windows-junction` とも `steps=null` で runner execution 前に failure。`HOSTED_CI_NOT_EXECUTED / PRIVATE_CAPACITY_BLOCKED` と分類し、implementation test failure / PASS のいずれにも数えない。
+- この項目は Draft PR #203 の未merge状態を記録する。license gate は MIT 選択と root `LICENSE` 追加により完了。最終 Ready gate は self-hosted posture の解決、current exact-head local validation、independent review、および human judgment を要求する。
+
+---
+
 ## 2026-08-30 — Codex request amplification observation（Issue #113 / Draft PR #114）
 
 関連: Issue #55, Issue #113, Draft PR #114
