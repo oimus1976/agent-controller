@@ -80,20 +80,8 @@ def accepted(request=None, *, authority=None):
     return authority, decision.accepted_request
 
 
-def forged_proof(**overrides):
-    values = {
-        "repository": REPOSITORY,
-        "pull_request_number": 17,
-        "expected_head_sha": HEAD,
-        "workflow_identity": WORKFLOW,
-        "target_os": PrivateCiTargetOs.WINDOWS,
-        "runner_scope_repository": REPOSITORY,
-        "runner_nonce": NONCE,
-        "runner_label": LABEL,
-        "environment_generation": GENERATION,
-    }
-    values.update(overrides)
-    return PrivateCiAcceptedRequest(**values)
+def forged_proof():
+    return PrivateCiAcceptedRequest()
 
 
 class PrivateCiRequestValidationTests(unittest.TestCase):
@@ -113,14 +101,29 @@ class PrivateCiRequestValidationTests(unittest.TestCase):
         self.assertTrue(authority.is_used(NONCE))
         self.assertTrue(authority.owns(decision.accepted_request))
 
-    def test_acceptance_proof_is_immutable_snapshot(self):
+    def test_accepted_proof_carries_no_mutable_binding_and_cannot_retarget(self):
         authority, accepted_request = accepted()
-        self.assertEqual(accepted_request.repository, REPOSITORY)
-        self.assertEqual(accepted_request.pull_request_number, 17)
-        self.assertEqual(accepted_request.expected_head_sha, HEAD)
-        with self.assertRaises(Exception):
-            accepted_request.pull_request_number = 99
+        self.assertFalse(hasattr(accepted_request, "__dict__"))
+        self.assertFalse(hasattr(accepted_request, "pull_request_number"))
+        with self.assertRaises(AttributeError):
+            object.__setattr__(accepted_request, "pull_request_number", 99)
+        with self.assertRaises(AttributeError):
+            object.__setattr__(accepted_request, "expected_head_sha", "2" * 40)
+
+        retargeted = validate_private_ci_result(
+            accepted_request,
+            valid_result(pull_request_number=99, exact_head_sha="2" * 40),
+            nonce_authority=authority,
+        )
+        self.assertFalse(retargeted.valid)
         self.assertTrue(authority.owns(accepted_request))
+
+        original = validate_private_ci_result(
+            accepted_request,
+            valid_result(),
+            nonce_authority=authority,
+        )
+        self.assertTrue(original.valid)
 
     def test_rejects_request_subclass_before_snapshot(self):
         class MutableRequest(PrivateCiRequest):
@@ -215,7 +218,10 @@ class PrivateCiRequestValidationTests(unittest.TestCase):
             def owns(self, accepted_request):
                 return True
 
-            def _claim_accepted(self, accepted_request):
+            def _binding_for(self, accepted_request):
+                return object()
+
+            def _claim_accepted(self, accepted_request, expected_binding):
                 return True
 
         decision = self.validate(valid_request(), authority=SpoofingAuthority())
@@ -255,7 +261,10 @@ class PrivateCiResultValidationTests(unittest.TestCase):
             def owns(self, accepted_request):
                 return True
 
-            def _claim_accepted(self, accepted_request):
+            def _binding_for(self, accepted_request):
+                return object()
+
+            def _claim_accepted(self, accepted_request, expected_binding):
                 return True
 
         decision = validate_private_ci_result(
