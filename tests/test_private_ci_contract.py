@@ -1,11 +1,13 @@
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 from agent_controller.private_ci_contract import (
     PrivateCiExecutionResult,
+    PrivateCiNonceAuthority,
     PrivateCiPhaseStatus,
     PrivateCiRequest,
     PrivateCiTargetOs,
-    validate_private_ci_request,
+    validate_and_reserve_private_ci_request,
     validate_private_ci_result,
 )
 
@@ -29,6 +31,7 @@ def valid_request(**overrides):
         "observed_head_sha": HEAD,
         "workflow_identity": WORKFLOW,
         "target_os": PrivateCiTargetOs.WINDOWS,
+        "runner_scope_repository": REPOSITORY,
         "runner_nonce": NONCE,
         "runner_label": LABEL,
         "environment_generation": GENERATION,
@@ -46,6 +49,7 @@ def valid_result(**overrides):
         "exact_head_sha": HEAD,
         "workflow_identity": WORKFLOW,
         "target_os": PrivateCiTargetOs.WINDOWS,
+        "runner_scope_repository": REPOSITORY,
         "runner_nonce": NONCE,
         "runner_label": LABEL,
         "environment_generation": GENERATION,
@@ -62,20 +66,25 @@ def valid_result(**overrides):
 
 
 class PrivateCiRequestValidationTests(unittest.TestCase):
-    def validate(self, request, *, allowed=None, used=None):
-        return validate_private_ci_request(
+    def validate(self, request, *, allowed=None, workflows=None, authority=None):
+        return validate_and_reserve_private_ci_request(
             request,
             allowed_repositories=frozenset({REPOSITORY}) if allowed is None else frozenset(allowed),
-            used_runner_nonces=frozenset() if used is None else frozenset(used),
+            allowed_workflow_identities=frozenset({WORKFLOW}) if workflows is None else frozenset(workflows),
+            nonce_authority=PrivateCiNonceAuthority() if authority is None else authority,
         )
 
-    def test_accepts_exact_private_same_repo_request(self):
-        decision = self.validate(valid_request())
+    def test_accepts_exact_private_same_repo_request_and_burns_nonce(self):
+        authority = PrivateCiNonceAuthority()
+        decision = self.validate(valid_request(), authority=authority)
         self.assertTrue(decision.valid)
+        self.assertTrue(authority.is_used(NONCE))
 
-    def test_rejects_public_repository(self):
-        decision = self.validate(valid_request(repository_visibility="public"))
+    def test_rejects_public_repository_without_burning_nonce(self):
+        authority = PrivateCiNonceAuthority()
+        decision = self.validate(valid_request(repository_visibility="public"), authority=authority)
         self.assertFalse(decision.valid)
+        self.assertFalse(authority.is_used(NONCE))
 
     def test_rejects_repository_outside_allowlist(self):
         decision = self.validate(valid_request(), allowed={"oimus1976/other-private"})
@@ -97,9 +106,28 @@ class PrivateCiRequestValidationTests(unittest.TestCase):
         self.assertFalse(self.validate(valid_request(expected_head_sha="1" * 39)).valid)
         self.assertFalse(self.validate(valid_request(expected_head_sha="A" * 40, observed_head_sha="A" * 40)).valid)
 
-    def test_rejects_reused_nonce(self):
-        decision = self.validate(valid_request(), used={NONCE})
+    def test_rejects_unallowlisted_workflow_identity(self):
+        decision = self.validate(valid_request(), workflows={"another-trusted-workflow"})
         self.assertFalse(decision.valid)
+
+    def test_rejects_wrong_repository_runner_scope(self):
+        decision = self.validate(valid_request(runner_scope_repository="oimus1976/other-private"))
+        self.assertFalse(decision.valid)
+
+    def test_rejects_reused_nonce(self):
+        authority = PrivateCiNonceAuthority({NONCE})
+        decision = self.validate(valid_request(), authority=authority)
+        self.assertFalse(decision.valid)
+
+    def test_concurrent_same_nonce_allows_exactly_one_request(self):
+        authority = PrivateCiNonceAuthority()
+
+        def attempt():
+            return self.validate(valid_request(), authority=authority).valid
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(lambda _: attempt(), range(2)))
+        self.assertEqual(sorted(outcomes), [False, True])
 
     def test_rejects_runner_label_not_bound_to_nonce(self):
         decision = self.validate(valid_request(runner_label="ac-private-ci-other"))
@@ -127,6 +155,13 @@ class PrivateCiResultValidationTests(unittest.TestCase):
         decision = validate_private_ci_result(
             valid_request(),
             valid_result(repository="oimus1976/other-private"),
+        )
+        self.assertFalse(decision.valid)
+
+    def test_rejects_runner_scope_mixup(self):
+        decision = validate_private_ci_result(
+            valid_request(),
+            valid_result(runner_scope_repository="oimus1976/other-private"),
         )
         self.assertFalse(decision.valid)
 
