@@ -1,7 +1,9 @@
+import copy
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 
 from agent_controller.private_ci_contract import (
+    PrivateCiAcceptedRequest,
     PrivateCiExecutionResult,
     PrivateCiNonceAuthority,
     PrivateCiPhaseStatus,
@@ -65,6 +67,19 @@ def valid_result(**overrides):
     return PrivateCiExecutionResult(**values)
 
 
+def accepted(request=None, *, authority=None):
+    authority = PrivateCiNonceAuthority() if authority is None else authority
+    decision = validate_and_reserve_private_ci_request(
+        valid_request() if request is None else request,
+        allowed_repositories=frozenset({REPOSITORY}),
+        allowed_workflow_identities=frozenset({WORKFLOW}),
+        nonce_authority=authority,
+    )
+    if not decision.valid or decision.accepted_request is None:
+        raise AssertionError(f"expected accepted request, got {decision}")
+    return authority, decision.accepted_request
+
+
 class PrivateCiRequestValidationTests(unittest.TestCase):
     def validate(self, request, *, allowed=None, workflows=None, authority=None):
         return validate_and_reserve_private_ci_request(
@@ -78,12 +93,15 @@ class PrivateCiRequestValidationTests(unittest.TestCase):
         authority = PrivateCiNonceAuthority()
         decision = self.validate(valid_request(), authority=authority)
         self.assertTrue(decision.valid)
+        self.assertIsNotNone(decision.accepted_request)
         self.assertTrue(authority.is_used(NONCE))
+        self.assertTrue(authority.owns(decision.accepted_request))
 
     def test_rejects_public_repository_without_burning_nonce(self):
         authority = PrivateCiNonceAuthority()
         decision = self.validate(valid_request(repository_visibility="public"), authority=authority)
         self.assertFalse(decision.valid)
+        self.assertIsNone(decision.accepted_request)
         self.assertFalse(authority.is_used(NONCE))
 
     def test_rejects_repository_outside_allowlist(self):
@@ -129,9 +147,16 @@ class PrivateCiRequestValidationTests(unittest.TestCase):
             outcomes = list(executor.map(lambda _: attempt(), range(2)))
         self.assertEqual(sorted(outcomes), [False, True])
 
-    def test_rejects_runner_label_not_bound_to_nonce(self):
-        decision = self.validate(valid_request(runner_label="ac-private-ci-other"))
-        self.assertFalse(decision.valid)
+    def test_requires_canonical_nonce_label_not_substring_match(self):
+        self.assertFalse(self.validate(valid_request(runner_label="prefix-" + LABEL)).valid)
+        self.assertFalse(self.validate(valid_request(runner_nonce="pha", runner_label=LABEL)).valid)
+        self.assertTrue(
+            self.validate(valid_request(runner_nonce="pha", runner_label="ac-private-ci-pha")).valid
+        )
+
+    def test_rejects_malformed_nonce(self):
+        self.assertFalse(self.validate(valid_request(runner_nonce="has space", runner_label="ac-private-ci-has space")).valid)
+        self.assertFalse(self.validate(valid_request(runner_nonce="UPPER", runner_label="ac-private-ci-UPPER")).valid)
 
     def test_rejects_residual_runner_registration(self):
         decision = self.validate(valid_request(residual_runner_count=1))
@@ -148,33 +173,110 @@ class PrivateCiRequestValidationTests(unittest.TestCase):
 
 class PrivateCiResultValidationTests(unittest.TestCase):
     def test_accepts_complete_zero_residual_result(self):
-        decision = validate_private_ci_result(valid_request(), valid_result())
+        authority, accepted_request = accepted()
+        decision = validate_private_ci_result(
+            accepted_request,
+            valid_result(),
+            nonce_authority=authority,
+        )
         self.assertTrue(decision.valid)
 
+    def test_rejects_raw_or_forged_unaccepted_request_proof(self):
+        authority, accepted_request = accepted()
+        self.assertFalse(
+            validate_private_ci_result(
+                valid_request(),
+                valid_result(),
+                nonce_authority=authority,
+            ).valid
+        )
+        forged = PrivateCiAcceptedRequest(request=accepted_request.request)
+        self.assertFalse(
+            validate_private_ci_result(forged, valid_result(), nonce_authority=authority).valid
+        )
+        copied = copy.copy(accepted_request)
+        self.assertFalse(
+            validate_private_ci_result(copied, valid_result(), nonce_authority=authority).valid
+        )
+
+    def test_invalid_request_cannot_be_upgraded_by_matching_pass_result(self):
+        invalid_requests = (
+            valid_request(repository_visibility="public"),
+            valid_request(pull_request_head_repository="attacker/fork"),
+            valid_request(observed_head_sha="2" * 40),
+        )
+        for request in invalid_requests:
+            with self.subTest(request=request):
+                authority = PrivateCiNonceAuthority()
+                decision = validate_and_reserve_private_ci_request(
+                    request,
+                    allowed_repositories=frozenset({REPOSITORY}),
+                    allowed_workflow_identities=frozenset({WORKFLOW}),
+                    nonce_authority=authority,
+                )
+                self.assertFalse(decision.valid)
+                self.assertIsNone(decision.accepted_request)
+
     def test_rejects_cross_repository_result_mixup(self):
+        authority, accepted_request = accepted()
         decision = validate_private_ci_result(
-            valid_request(),
+            accepted_request,
             valid_result(repository="oimus1976/other-private"),
+            nonce_authority=authority,
         )
         self.assertFalse(decision.valid)
 
     def test_rejects_runner_scope_mixup(self):
+        authority, accepted_request = accepted()
         decision = validate_private_ci_result(
-            valid_request(),
+            accepted_request,
             valid_result(runner_scope_repository="oimus1976/other-private"),
+            nonce_authority=authority,
         )
         self.assertFalse(decision.valid)
 
     def test_rejects_stale_sha_result(self):
-        decision = validate_private_ci_result(valid_request(), valid_result(exact_head_sha="2" * 40))
+        authority, accepted_request = accepted()
+        decision = validate_private_ci_result(
+            accepted_request,
+            valid_result(exact_head_sha="2" * 40),
+            nonce_authority=authority,
+        )
         self.assertFalse(decision.valid)
 
     def test_rejects_nonce_or_environment_generation_mixup(self):
+        authority, accepted_request = accepted()
         self.assertFalse(
-            validate_private_ci_result(valid_request(), valid_result(runner_nonce="different-nonce")).valid
+            validate_private_ci_result(
+                accepted_request,
+                valid_result(runner_nonce="different-nonce", runner_label="ac-private-ci-different-nonce"),
+                nonce_authority=authority,
+            ).valid
         )
         self.assertFalse(
-            validate_private_ci_result(valid_request(), valid_result(environment_generation="different-generation")).valid
+            validate_private_ci_result(
+                accepted_request,
+                valid_result(environment_generation="different-generation"),
+                nonce_authority=authority,
+            ).valid
+        )
+
+    def test_rejects_type_confusable_result_bindings(self):
+        request = valid_request(pull_request_number=1)
+        authority, accepted_request = accepted(request)
+        self.assertFalse(
+            validate_private_ci_result(
+                accepted_request,
+                valid_result(pull_request_number=True),
+                nonce_authority=authority,
+            ).valid
+        )
+        self.assertFalse(
+            validate_private_ci_result(
+                accepted_request,
+                valid_result(pull_request_number=1, target_os="windows"),
+                nonce_authority=authority,
+            ).valid
         )
 
     def test_rejects_any_nonpass_required_phase(self):
@@ -186,18 +288,30 @@ class PrivateCiResultValidationTests(unittest.TestCase):
             "post_cleanup_readback",
         ):
             with self.subTest(field_name=field_name):
+                authority, accepted_request = accepted()
                 decision = validate_private_ci_result(
-                    valid_request(),
+                    accepted_request,
                     valid_result(**{field_name: PrivateCiPhaseStatus.UNCERTAIN}),
+                    nonce_authority=authority,
                 )
                 self.assertFalse(decision.valid)
 
     def test_rejects_residual_runner_after_cleanup(self):
-        decision = validate_private_ci_result(valid_request(), valid_result(residual_runner_count=1))
+        authority, accepted_request = accepted()
+        decision = validate_private_ci_result(
+            accepted_request,
+            valid_result(residual_runner_count=1),
+            nonce_authority=authority,
+        )
         self.assertFalse(decision.valid)
 
     def test_rejects_unproven_post_cleanup_reset(self):
-        decision = validate_private_ci_result(valid_request(), valid_result(environment_reset_proven=False))
+        authority, accepted_request = accepted()
+        decision = validate_private_ci_result(
+            accepted_request,
+            valid_result(environment_reset_proven=False),
+            nonce_authority=authority,
+        )
         self.assertFalse(decision.valid)
 
 
