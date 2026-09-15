@@ -209,7 +209,7 @@ class DurablePrivateCiAuthority:
             existing_schema_objects = {
                 (row[0], row[1])
                 for row in connection.execute(
-                    "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+                    "SELECT type, name FROM sqlite_master WHERE substr(name, 1, 7) != 'sqlite_'"
                 ).fetchall()
             }
             expected_schema_objects = {
