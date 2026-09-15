@@ -48,8 +48,9 @@ class PrivateCiAcceptedRequest:
     """Opaque process-local proof that a request passed validation and reservation.
 
     Callers may hold and pass this object, but result validation accepts it only
-    when the same nonce authority recorded this exact object identity while
-    atomically burning the request nonce.
+    when the same exact nonce-authority implementation recorded this exact
+    object identity while atomically burning the request nonce. Successful
+    result validation consumes the proof exactly once.
     """
 
     request: PrivateCiRequest
@@ -73,6 +74,15 @@ class PrivateCiNonceAuthority:
                 return False
             self._used_nonces.add(nonce)
             self._accepted_requests.add(accepted)
+            return True
+
+    def _claim_accepted(self, accepted: PrivateCiAcceptedRequest) -> bool:
+        """Atomically consume one authority-owned acceptance proof."""
+
+        with self._lock:
+            if accepted not in self._accepted_requests:
+                return False
+            self._accepted_requests.remove(accepted)
             return True
 
     def is_used(self, nonce: str) -> bool:
@@ -119,22 +129,22 @@ class PrivateCiResultValidation:
     reason: str
 
 
-def _is_full_sha(value: str) -> bool:
+def _is_plain_non_empty_string(value: object) -> bool:
+    return type(value) is str and bool(value.strip())
+
+
+def _is_full_sha(value: object) -> bool:
     return (
-        isinstance(value, str)
+        type(value) is str
         and len(value) == 40
         and value == value.lower()
         and all(character in "0123456789abcdef" for character in value)
     )
 
 
-def _is_non_empty_string(value: str) -> bool:
-    return isinstance(value, str) and bool(value.strip())
-
-
-def _is_runner_nonce(value: str) -> bool:
+def _is_runner_nonce(value: object) -> bool:
     return (
-        isinstance(value, str)
+        type(value) is str
         and 1 <= len(value) <= 64
         and all(character in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in value)
     )
@@ -160,35 +170,35 @@ def validate_and_reserve_private_ci_request(
     owned acceptance proof before returning ACCEPT.
     """
 
-    if not _is_non_empty_string(request.repository):
+    if not _is_plain_non_empty_string(request.repository):
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "repository is invalid")
     if request.repository not in allowed_repositories:
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "repository is not allowlisted")
-    if request.repository_visibility != "private":
+    if type(request.repository_visibility) is not str or request.repository_visibility != "private":
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "repository is not private")
     if not isinstance(request.pull_request_number, int) or isinstance(request.pull_request_number, bool) or request.pull_request_number <= 0:
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "pull request number is invalid")
-    if request.pull_request_state != "open":
+    if type(request.pull_request_state) is not str or request.pull_request_state != "open":
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "pull request is not open")
-    if request.pull_request_head_repository != request.repository:
+    if not _is_plain_non_empty_string(request.pull_request_head_repository) or request.pull_request_head_repository != request.repository:
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "fork or cross-repository pull request is not allowed")
     if not _is_full_sha(request.expected_head_sha) or not _is_full_sha(request.observed_head_sha):
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "head SHA is invalid")
     if request.expected_head_sha != request.observed_head_sha:
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "pull request head drifted")
-    if not _is_non_empty_string(request.workflow_identity):
+    if not _is_plain_non_empty_string(request.workflow_identity):
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "workflow identity is invalid")
     if request.workflow_identity not in allowed_workflow_identities:
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "workflow identity is not allowlisted")
     if not isinstance(request.target_os, PrivateCiTargetOs):
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "target OS is invalid")
-    if request.runner_scope_repository != request.repository:
+    if not _is_plain_non_empty_string(request.runner_scope_repository) or request.runner_scope_repository != request.repository:
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "runner registration scope does not match repository")
     if not _is_runner_nonce(request.runner_nonce):
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "runner nonce is invalid")
-    if request.runner_label != _canonical_runner_label(request.runner_nonce):
+    if type(request.runner_label) is not str or request.runner_label != _canonical_runner_label(request.runner_nonce):
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "runner label is not canonically bound to nonce")
-    if not _is_non_empty_string(request.environment_generation):
+    if not _is_plain_non_empty_string(request.environment_generation):
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "environment generation is invalid")
     if not isinstance(request.residual_runner_count, int) or isinstance(request.residual_runner_count, bool) or request.residual_runner_count < 0:
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "residual runner count is invalid")
@@ -196,7 +206,7 @@ def validate_and_reserve_private_ci_request(
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "residual runner registration exists")
     if request.environment_reset_proven is not True:
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "execution environment reset is not proven")
-    if not isinstance(nonce_authority, PrivateCiNonceAuthority):
+    if type(nonce_authority) is not PrivateCiNonceAuthority:
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "nonce authority is invalid")
 
     accepted = PrivateCiAcceptedRequest(request=request)
@@ -217,34 +227,34 @@ def validate_private_ci_result(
     *,
     nonce_authority: PrivateCiNonceAuthority,
 ) -> PrivateCiResultValidation:
-    """Validate fail-closed completion of one authority-accepted operation."""
+    """Validate and atomically consume one accepted private-CI result."""
 
-    if not isinstance(nonce_authority, PrivateCiNonceAuthority):
+    if type(nonce_authority) is not PrivateCiNonceAuthority:
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "nonce authority is invalid")
-    if not isinstance(accepted_request, PrivateCiAcceptedRequest):
+    if type(accepted_request) is not PrivateCiAcceptedRequest:
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "accepted request proof is invalid")
     if not nonce_authority.owns(accepted_request):
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "accepted request proof is not owned by nonce authority")
 
     request = accepted_request.request
 
-    if not _is_non_empty_string(result.repository):
+    if not _is_plain_non_empty_string(result.repository):
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result repository is invalid")
     if not isinstance(result.pull_request_number, int) or isinstance(result.pull_request_number, bool) or result.pull_request_number <= 0:
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result pull request number is invalid")
     if not _is_full_sha(result.exact_head_sha):
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result head SHA is invalid")
-    if not _is_non_empty_string(result.workflow_identity):
+    if not _is_plain_non_empty_string(result.workflow_identity):
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result workflow identity is invalid")
     if not isinstance(result.target_os, PrivateCiTargetOs):
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result target OS is invalid")
-    if not _is_non_empty_string(result.runner_scope_repository):
+    if not _is_plain_non_empty_string(result.runner_scope_repository):
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result runner scope is invalid")
     if not _is_runner_nonce(result.runner_nonce):
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result runner nonce is invalid")
-    if result.runner_label != _canonical_runner_label(result.runner_nonce):
+    if type(result.runner_label) is not str or result.runner_label != _canonical_runner_label(result.runner_nonce):
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result runner label is invalid")
-    if not _is_non_empty_string(result.environment_generation):
+    if not _is_plain_non_empty_string(result.environment_generation):
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result environment generation is invalid")
 
     expected_binding: Tuple[object, ...] = (
@@ -287,5 +297,7 @@ def validate_private_ci_result(
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "post-cleanup residual runner state is not zero")
     if result.environment_reset_proven is not True:
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "post-cleanup environment reset is not proven")
+    if not nonce_authority._claim_accepted(accepted_request):
+        return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "accepted request proof was already consumed")
 
-    return PrivateCiResultValidation(True, PrivateCiValidationResult.ACCEPT, "private CI operation completed with zero residual authority")
+    return PrivateCiResultValidation(True, PrivateCiValidationResult.ACCEPT, "private CI operation completed and acceptance proof was consumed")
