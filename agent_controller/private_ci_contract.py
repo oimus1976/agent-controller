@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from threading import Lock
-from typing import FrozenSet, Iterable, Tuple
+from typing import FrozenSet, Iterable, Optional, Tuple
 
 
 class PrivateCiTargetOs(str, Enum):
@@ -22,31 +22,6 @@ class PrivateCiPhaseStatus(str, Enum):
     BLOCKED = "BLOCKED"
     NOT_RUN = "NOT_RUN"
     UNCERTAIN = "UNCERTAIN"
-
-
-class PrivateCiNonceAuthority:
-    """Process-local linear model for one-time runner nonce reservation.
-
-    The later owner-machine bridge must replace or wrap this with durable
-    cross-process storage before live runner registration is allowed. The
-    contract slice nevertheless makes same-process concurrent replay fail
-    closed instead of relying on a stale snapshot of used nonces.
-    """
-
-    def __init__(self, used_nonces: Iterable[str] = ()) -> None:
-        self._used_nonces = set(used_nonces)
-        self._lock = Lock()
-
-    def reserve(self, nonce: str) -> bool:
-        with self._lock:
-            if nonce in self._used_nonces:
-                return False
-            self._used_nonces.add(nonce)
-            return True
-
-    def is_used(self, nonce: str) -> bool:
-        with self._lock:
-            return nonce in self._used_nonces
 
 
 @dataclass(frozen=True)
@@ -68,11 +43,53 @@ class PrivateCiRequest:
     environment_reset_proven: bool
 
 
+@dataclass(frozen=True, eq=False)
+class PrivateCiAcceptedRequest:
+    """Opaque process-local proof that a request passed validation and reservation.
+
+    Callers may hold and pass this object, but result validation accepts it only
+    when the same nonce authority recorded this exact object identity while
+    atomically burning the request nonce.
+    """
+
+    request: PrivateCiRequest
+
+
+class PrivateCiNonceAuthority:
+    """Process-local linear authority for nonce reservation and acceptance proof.
+
+    The later owner-machine bridge must replace or wrap this with durable
+    cross-process storage before live runner registration is allowed.
+    """
+
+    def __init__(self, used_nonces: Iterable[str] = ()) -> None:
+        self._used_nonces = set(used_nonces)
+        self._accepted_requests = set()
+        self._lock = Lock()
+
+    def _reserve_accepted(self, nonce: str, accepted: PrivateCiAcceptedRequest) -> bool:
+        with self._lock:
+            if nonce in self._used_nonces:
+                return False
+            self._used_nonces.add(nonce)
+            self._accepted_requests.add(accepted)
+            return True
+
+    def is_used(self, nonce: str) -> bool:
+        with self._lock:
+            return nonce in self._used_nonces
+
+    def owns(self, accepted: PrivateCiAcceptedRequest) -> bool:
+        with self._lock:
+            return accepted in self._accepted_requests
+
+
 @dataclass(frozen=True)
 class PrivateCiRequestValidation:
     valid: bool
     result: PrivateCiValidationResult
     reason: str
+    accepted_request: Optional[PrivateCiAcceptedRequest] = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +132,18 @@ def _is_non_empty_string(value: str) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _is_runner_nonce(value: str) -> bool:
+    return (
+        isinstance(value, str)
+        and 1 <= len(value) <= 64
+        and all(character in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in value)
+    )
+
+
+def _canonical_runner_label(nonce: str) -> str:
+    return f"ac-private-ci-{nonce}"
+
+
 def validate_and_reserve_private_ci_request(
     request: PrivateCiRequest,
     *,
@@ -127,8 +156,8 @@ def validate_and_reserve_private_ci_request(
     This contract does not register a runner, dispatch a workflow, mutate
     GitHub, or inspect the host. Callers must populate it from independently
     re-read trusted facts immediately before live execution. A request that
-    passes every other precondition burns its nonce before returning ACCEPT,
-    so a failed later phase cannot reuse the same authority.
+    passes every other precondition burns its nonce and receives an authority-
+    owned acceptance proof before returning ACCEPT.
     """
 
     if not _is_non_empty_string(request.repository):
@@ -155,12 +184,10 @@ def validate_and_reserve_private_ci_request(
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "target OS is invalid")
     if request.runner_scope_repository != request.repository:
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "runner registration scope does not match repository")
-    if not _is_non_empty_string(request.runner_nonce):
+    if not _is_runner_nonce(request.runner_nonce):
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "runner nonce is invalid")
-    if not _is_non_empty_string(request.runner_label):
-        return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "runner label is invalid")
-    if request.runner_nonce not in request.runner_label:
-        return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "runner label is not bound to nonce")
+    if request.runner_label != _canonical_runner_label(request.runner_nonce):
+        return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "runner label is not canonically bound to nonce")
     if not _is_non_empty_string(request.environment_generation):
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "environment generation is invalid")
     if not isinstance(request.residual_runner_count, int) or isinstance(request.residual_runner_count, bool) or request.residual_runner_count < 0:
@@ -171,17 +198,54 @@ def validate_and_reserve_private_ci_request(
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "execution environment reset is not proven")
     if not isinstance(nonce_authority, PrivateCiNonceAuthority):
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "nonce authority is invalid")
-    if not nonce_authority.reserve(request.runner_nonce):
+
+    accepted = PrivateCiAcceptedRequest(request=request)
+    if not nonce_authority._reserve_accepted(request.runner_nonce, accepted):
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "runner nonce was already used")
 
-    return PrivateCiRequestValidation(True, PrivateCiValidationResult.ACCEPT, "request is bound and nonce was reserved")
+    return PrivateCiRequestValidation(
+        True,
+        PrivateCiValidationResult.ACCEPT,
+        "request is bound, nonce was reserved, and acceptance proof was issued",
+        accepted,
+    )
 
 
 def validate_private_ci_result(
-    request: PrivateCiRequest,
+    accepted_request: PrivateCiAcceptedRequest,
     result: PrivateCiExecutionResult,
+    *,
+    nonce_authority: PrivateCiNonceAuthority,
 ) -> PrivateCiResultValidation:
-    """Validate fail-closed completion of one accepted private-CI operation."""
+    """Validate fail-closed completion of one authority-accepted operation."""
+
+    if not isinstance(nonce_authority, PrivateCiNonceAuthority):
+        return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "nonce authority is invalid")
+    if not isinstance(accepted_request, PrivateCiAcceptedRequest):
+        return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "accepted request proof is invalid")
+    if not nonce_authority.owns(accepted_request):
+        return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "accepted request proof is not owned by nonce authority")
+
+    request = accepted_request.request
+
+    if not _is_non_empty_string(result.repository):
+        return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result repository is invalid")
+    if not isinstance(result.pull_request_number, int) or isinstance(result.pull_request_number, bool) or result.pull_request_number <= 0:
+        return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result pull request number is invalid")
+    if not _is_full_sha(result.exact_head_sha):
+        return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result head SHA is invalid")
+    if not _is_non_empty_string(result.workflow_identity):
+        return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result workflow identity is invalid")
+    if not isinstance(result.target_os, PrivateCiTargetOs):
+        return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result target OS is invalid")
+    if not _is_non_empty_string(result.runner_scope_repository):
+        return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result runner scope is invalid")
+    if not _is_runner_nonce(result.runner_nonce):
+        return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result runner nonce is invalid")
+    if result.runner_label != _canonical_runner_label(result.runner_nonce):
+        return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result runner label is invalid")
+    if not _is_non_empty_string(result.environment_generation):
+        return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result environment generation is invalid")
 
     expected_binding: Tuple[object, ...] = (
         request.repository,
@@ -206,7 +270,7 @@ def validate_private_ci_result(
         result.environment_generation,
     )
     if observed_binding != expected_binding:
-        return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result binding does not match request")
+        return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result binding does not match accepted request")
 
     phase_statuses = (
         result.registration,
