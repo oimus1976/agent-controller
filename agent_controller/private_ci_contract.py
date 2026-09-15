@@ -43,18 +43,8 @@ class PrivateCiRequest:
     environment_reset_proven: bool
 
 
-@dataclass(frozen=True, eq=False)
-class PrivateCiAcceptedRequest:
-    """Opaque immutable snapshot proving one request passed reservation.
-
-    The proof stores only trusted snapshot values copied after validation. It
-    never retains the caller-owned request object, so later caller mutation
-    cannot retarget an accepted operation. Result validation accepts this proof
-    only when the same exact nonce-authority implementation recorded this exact
-    object identity while atomically burning the request nonce. Successful
-    result validation consumes the proof exactly once.
-    """
-
+@dataclass(frozen=True, slots=True)
+class _PrivateCiAcceptedBinding:
     repository: str
     pull_request_number: int
     expected_head_sha: str
@@ -66,8 +56,21 @@ class PrivateCiAcceptedRequest:
     environment_generation: str
 
 
+@dataclass(frozen=True, eq=False, slots=True)
+class PrivateCiAcceptedRequest:
+    """Opaque process-local capability proving one request passed reservation.
+
+    This caller-visible object deliberately carries no trusted binding fields.
+    The validated binding snapshot is retained only inside the nonce authority,
+    keyed by this exact token identity. Caller mutation therefore cannot retarget
+    an accepted operation. Successful result validation consumes the token once.
+    """
+
+    pass
+
+
 class PrivateCiNonceAuthority:
-    """Process-local linear authority for nonce reservation and acceptance proof.
+    """Process-local linear authority for nonce reservation and accepted bindings.
 
     The later owner-machine bridge must replace or wrap this with durable
     cross-process storage before live runner registration is allowed.
@@ -75,24 +78,38 @@ class PrivateCiNonceAuthority:
 
     def __init__(self, used_nonces: Iterable[str] = ()) -> None:
         self._used_nonces = set(used_nonces)
-        self._accepted_requests = set()
+        self._accepted_bindings = {}
         self._lock = Lock()
 
-    def _reserve_accepted(self, nonce: str, accepted: PrivateCiAcceptedRequest) -> bool:
+    def _reserve_accepted(
+        self,
+        nonce: str,
+        accepted: PrivateCiAcceptedRequest,
+        binding: _PrivateCiAcceptedBinding,
+    ) -> bool:
         with self._lock:
             if nonce in self._used_nonces:
                 return False
             self._used_nonces.add(nonce)
-            self._accepted_requests.add(accepted)
+            self._accepted_bindings[accepted] = binding
             return True
 
-    def _claim_accepted(self, accepted: PrivateCiAcceptedRequest) -> bool:
-        """Atomically consume one authority-owned acceptance proof."""
+    def _binding_for(self, accepted: PrivateCiAcceptedRequest) -> Optional[_PrivateCiAcceptedBinding]:
+        with self._lock:
+            return self._accepted_bindings.get(accepted)
+
+    def _claim_accepted(
+        self,
+        accepted: PrivateCiAcceptedRequest,
+        expected_binding: _PrivateCiAcceptedBinding,
+    ) -> bool:
+        """Atomically consume one token only if its authority binding is unchanged."""
 
         with self._lock:
-            if accepted not in self._accepted_requests:
+            current = self._accepted_bindings.get(accepted)
+            if current is not expected_binding:
                 return False
-            self._accepted_requests.remove(accepted)
+            del self._accepted_bindings[accepted]
             return True
 
     def is_used(self, nonce: str) -> bool:
@@ -101,7 +118,7 @@ class PrivateCiNonceAuthority:
 
     def owns(self, accepted: PrivateCiAcceptedRequest) -> bool:
         with self._lock:
-            return accepted in self._accepted_requests
+            return accepted in self._accepted_bindings
 
 
 @dataclass(frozen=True)
@@ -171,7 +188,7 @@ def validate_and_reserve_private_ci_request(
     allowed_workflow_identities: FrozenSet[str],
     nonce_authority: PrivateCiNonceAuthority,
 ) -> PrivateCiRequestValidation:
-    """Validate, snapshot, and atomically reserve one private-CI request."""
+    """Validate, snapshot inside authority, and atomically reserve one request."""
 
     if type(request) is not PrivateCiRequest:
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "request type is invalid")
@@ -214,7 +231,7 @@ def validate_and_reserve_private_ci_request(
     if type(nonce_authority) is not PrivateCiNonceAuthority:
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "nonce authority is invalid")
 
-    accepted = PrivateCiAcceptedRequest(
+    binding = _PrivateCiAcceptedBinding(
         repository=request.repository,
         pull_request_number=request.pull_request_number,
         expected_head_sha=request.expected_head_sha,
@@ -225,13 +242,14 @@ def validate_and_reserve_private_ci_request(
         runner_label=request.runner_label,
         environment_generation=request.environment_generation,
     )
-    if not nonce_authority._reserve_accepted(request.runner_nonce, accepted):
+    accepted = PrivateCiAcceptedRequest()
+    if not nonce_authority._reserve_accepted(request.runner_nonce, accepted, binding):
         return PrivateCiRequestValidation(False, PrivateCiValidationResult.BLOCKED, "runner nonce was already used")
 
     return PrivateCiRequestValidation(
         True,
         PrivateCiValidationResult.ACCEPT,
-        "request was validated, snapshotted, reserved, and acceptance proof was issued",
+        "request was validated, authority-snapshotted, reserved, and an opaque proof was issued",
         accepted,
     )
 
@@ -242,7 +260,7 @@ def validate_private_ci_result(
     *,
     nonce_authority: PrivateCiNonceAuthority,
 ) -> PrivateCiResultValidation:
-    """Validate and atomically consume one accepted private-CI result."""
+    """Validate against authority-owned binding and atomically consume one proof."""
 
     if type(nonce_authority) is not PrivateCiNonceAuthority:
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "nonce authority is invalid")
@@ -250,7 +268,9 @@ def validate_private_ci_result(
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "accepted request proof is invalid")
     if type(result) is not PrivateCiExecutionResult:
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result type is invalid")
-    if not nonce_authority.owns(accepted_request):
+
+    binding = nonce_authority._binding_for(accepted_request)
+    if binding is None:
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "accepted request proof is not owned by nonce authority")
 
     if not _is_plain_non_empty_string(result.repository):
@@ -273,15 +293,15 @@ def validate_private_ci_result(
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "result environment generation is invalid")
 
     expected_binding: Tuple[object, ...] = (
-        accepted_request.repository,
-        accepted_request.pull_request_number,
-        accepted_request.expected_head_sha,
-        accepted_request.workflow_identity,
-        accepted_request.target_os,
-        accepted_request.runner_scope_repository,
-        accepted_request.runner_nonce,
-        accepted_request.runner_label,
-        accepted_request.environment_generation,
+        binding.repository,
+        binding.pull_request_number,
+        binding.expected_head_sha,
+        binding.workflow_identity,
+        binding.target_os,
+        binding.runner_scope_repository,
+        binding.runner_nonce,
+        binding.runner_label,
+        binding.environment_generation,
     )
     observed_binding: Tuple[object, ...] = (
         result.repository,
@@ -312,7 +332,7 @@ def validate_private_ci_result(
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "post-cleanup residual runner state is not zero")
     if result.environment_reset_proven is not True:
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "post-cleanup environment reset is not proven")
-    if not nonce_authority._claim_accepted(accepted_request):
+    if not nonce_authority._claim_accepted(accepted_request, binding):
         return PrivateCiResultValidation(False, PrivateCiValidationResult.BLOCKED, "accepted request proof was already consumed")
 
     return PrivateCiResultValidation(True, PrivateCiValidationResult.ACCEPT, "private CI operation completed and acceptance proof was consumed")
