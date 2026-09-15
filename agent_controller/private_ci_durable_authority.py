@@ -68,7 +68,6 @@ class DurablePrivateCiAuthority:
     def reserve(self, binding: DurablePrivateCiBinding) -> Optional[DurablePrivateCiReservation]:
         self._validate_binding(binding)
         token = secrets.token_hex(32)
-
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -128,9 +127,7 @@ class DurablePrivateCiAuthority:
             if row is None:
                 return None
             binding, state = self._binding_from_row(row)
-            if state != _STATE_RESERVED:
-                return None
-            return binding
+            return binding if state == _STATE_RESERVED else None
         except DurablePrivateCiAuthorityError:
             raise
         except sqlite3.DatabaseError as exc:
@@ -138,14 +135,9 @@ class DurablePrivateCiAuthority:
         finally:
             connection.close()
 
-    def consume(
-        self,
-        reservation: DurablePrivateCiReservation,
-        expected_binding: DurablePrivateCiBinding,
-    ) -> bool:
+    def consume(self, reservation: DurablePrivateCiReservation, expected_binding: DurablePrivateCiBinding) -> bool:
         token = self._validated_token(reservation)
         self._validate_binding(expected_binding)
-
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -168,11 +160,7 @@ class DurablePrivateCiAuthority:
                 connection.rollback()
                 return False
             cursor = connection.execute(
-                """
-                UPDATE private_ci_authority
-                   SET state = ?
-                 WHERE token = ? AND state = ?
-                """,
+                "UPDATE private_ci_authority SET state = ? WHERE token = ? AND state = ?",
                 (_STATE_CONSUMED, token, _STATE_RESERVED),
             )
             if cursor.rowcount != 1:
@@ -190,16 +178,14 @@ class DurablePrivateCiAuthority:
             connection.close()
 
     def is_nonce_used(self, nonce: str) -> bool:
-        if type(nonce) is not str or not nonce:
-            raise DurablePrivateCiAuthorityStateError("nonce is invalid")
+        self._validate_nonce(nonce)
         connection = self._connect()
         try:
             self._validate_schema(connection)
-            row = connection.execute(
+            return connection.execute(
                 "SELECT 1 FROM private_ci_authority WHERE runner_nonce = ? LIMIT 1",
                 (nonce,),
-            ).fetchone()
-            return row is not None
+            ).fetchone() is not None
         except DurablePrivateCiAuthorityError:
             raise
         except sqlite3.DatabaseError as exc:
@@ -220,18 +206,12 @@ class DurablePrivateCiAuthority:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS authority_meta (schema_version INTEGER NOT NULL)"
-            )
+            connection.execute("CREATE TABLE IF NOT EXISTS authority_meta (schema_version INTEGER NOT NULL)")
             meta_count = connection.execute("SELECT COUNT(*) FROM authority_meta").fetchone()[0]
             if meta_count == 0:
-                connection.execute(
-                    "INSERT INTO authority_meta(schema_version) VALUES (?)",
-                    (_SCHEMA_VERSION,),
-                )
+                connection.execute("INSERT INTO authority_meta(schema_version) VALUES (?)", (_SCHEMA_VERSION,))
             elif meta_count != 1:
                 raise DurablePrivateCiAuthoritySchemaError("authority schema metadata is ambiguous")
-
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS private_ci_authority (
@@ -269,24 +249,35 @@ class DurablePrivateCiAuthority:
             raise DurablePrivateCiAuthoritySchemaError("authority schema version is incompatible")
 
         expected_columns = (
-            "token",
-            "repository",
-            "pull_request_number",
-            "expected_head_sha",
-            "workflow_identity",
-            "target_os",
-            "runner_scope_repository",
-            "runner_nonce",
-            "runner_label",
-            "environment_generation",
-            "state",
+            ("token", "TEXT", 1, 1),
+            ("repository", "TEXT", 1, 0),
+            ("pull_request_number", "INTEGER", 1, 0),
+            ("expected_head_sha", "TEXT", 1, 0),
+            ("workflow_identity", "TEXT", 1, 0),
+            ("target_os", "TEXT", 1, 0),
+            ("runner_scope_repository", "TEXT", 1, 0),
+            ("runner_nonce", "TEXT", 1, 0),
+            ("runner_label", "TEXT", 1, 0),
+            ("environment_generation", "TEXT", 1, 0),
+            ("state", "TEXT", 1, 0),
         )
-        columns = tuple(
-            row[1]
-            for row in connection.execute("PRAGMA table_info(private_ci_authority)").fetchall()
-        )
-        if columns != expected_columns:
+        table_info = connection.execute("PRAGMA table_info(private_ci_authority)").fetchall()
+        observed_columns = tuple((row[1], row[2].upper(), row[3], row[5]) for row in table_info)
+        if observed_columns != expected_columns:
             raise DurablePrivateCiAuthoritySchemaError("authority table shape is incompatible")
+
+        unique_column_sets = set()
+        for index_row in connection.execute("PRAGMA index_list(private_ci_authority)").fetchall():
+            if index_row[2] != 1:
+                continue
+            index_name = index_row[1]
+            columns = tuple(
+                row[2]
+                for row in connection.execute(f"PRAGMA index_info('{index_name}')").fetchall()
+            )
+            unique_column_sets.add(columns)
+        if ("runner_nonce",) not in unique_column_sets:
+            raise DurablePrivateCiAuthoritySchemaError("authority nonce uniqueness constraint is missing")
 
     @staticmethod
     def _validated_token(reservation: DurablePrivateCiReservation) -> str:
@@ -299,7 +290,16 @@ class DurablePrivateCiAuthority:
         return reservation.token
 
     @staticmethod
-    def _validate_binding(binding: DurablePrivateCiBinding) -> None:
+    def _validate_nonce(nonce: object) -> None:
+        if (
+            type(nonce) is not str
+            or not (1 <= len(nonce) <= 64)
+            or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in nonce)
+        ):
+            raise DurablePrivateCiAuthorityStateError("nonce is invalid")
+
+    @classmethod
+    def _validate_binding(cls, binding: DurablePrivateCiBinding) -> None:
         if type(binding) is not DurablePrivateCiBinding:
             raise DurablePrivateCiAuthorityStateError("binding type is invalid")
         string_fields = (
@@ -307,11 +307,10 @@ class DurablePrivateCiAuthority:
             binding.expected_head_sha,
             binding.workflow_identity,
             binding.runner_scope_repository,
-            binding.runner_nonce,
             binding.runner_label,
             binding.environment_generation,
         )
-        if any(type(value) is not str or not value for value in string_fields):
+        if any(type(value) is not str or not value.strip() for value in string_fields):
             raise DurablePrivateCiAuthorityStateError("binding contains invalid strings")
         if type(binding.pull_request_number) is not int or binding.pull_request_number <= 0:
             raise DurablePrivateCiAuthorityStateError("binding pull request number is invalid")
@@ -321,6 +320,7 @@ class DurablePrivateCiAuthority:
             raise DurablePrivateCiAuthorityStateError("binding head SHA is invalid")
         if type(binding.target_os) is not PrivateCiTargetOs:
             raise DurablePrivateCiAuthorityStateError("binding target OS is invalid")
+        cls._validate_nonce(binding.runner_nonce)
         if binding.runner_scope_repository != binding.repository:
             raise DurablePrivateCiAuthorityStateError("binding runner scope does not match repository")
         if binding.runner_label != f"ac-private-ci-{binding.runner_nonce}":
@@ -340,7 +340,6 @@ class DurablePrivateCiAuthority:
             raise DurablePrivateCiAuthorityStateError("authority target OS is invalid") from exc
         if state not in (_STATE_RESERVED, _STATE_CONSUMED):
             raise DurablePrivateCiAuthorityStateError("authority lifecycle state is invalid")
-
         binding = DurablePrivateCiBinding(
             repository=row[0],
             pull_request_number=row[1],
