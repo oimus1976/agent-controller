@@ -206,15 +206,25 @@ class DurablePrivateCiAuthority:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute("CREATE TABLE IF NOT EXISTS authority_meta (schema_version INTEGER NOT NULL)")
-            meta_count = connection.execute("SELECT COUNT(*) FROM authority_meta").fetchone()[0]
-            if meta_count == 0:
-                connection.execute("INSERT INTO authority_meta(schema_version) VALUES (?)", (_SCHEMA_VERSION,))
-            elif meta_count != 1:
-                raise DurablePrivateCiAuthoritySchemaError("authority schema metadata is ambiguous")
+            existing_tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchall()
+            }
+            expected_tables = {"authority_meta", "private_ci_authority"}
+            if existing_tables:
+                if existing_tables != expected_tables:
+                    raise DurablePrivateCiAuthoritySchemaError("authority schema is partially present")
+                self._validate_schema(connection)
+                connection.commit()
+                return
+
+            connection.execute("CREATE TABLE authority_meta (schema_version INTEGER NOT NULL)")
+            connection.execute("INSERT INTO authority_meta(schema_version) VALUES (?)", (_SCHEMA_VERSION,))
             connection.execute(
                 """
-                CREATE TABLE IF NOT EXISTS private_ci_authority (
+                CREATE TABLE private_ci_authority (
                     token TEXT PRIMARY KEY NOT NULL,
                     repository TEXT NOT NULL,
                     pull_request_number INTEGER NOT NULL,
@@ -241,6 +251,10 @@ class DurablePrivateCiAuthority:
             connection.close()
 
     def _validate_schema(self, connection: sqlite3.Connection) -> None:
+        meta_info = connection.execute("PRAGMA table_info(authority_meta)").fetchall()
+        observed_meta_columns = tuple((row[1], row[2].upper(), row[3], row[5]) for row in meta_info)
+        if observed_meta_columns != (("schema_version", "INTEGER", 1, 0),):
+            raise DurablePrivateCiAuthoritySchemaError("authority metadata table shape is incompatible")
         try:
             rows = connection.execute("SELECT schema_version FROM authority_meta").fetchall()
         except sqlite3.DatabaseError as exc:
@@ -266,18 +280,18 @@ class DurablePrivateCiAuthority:
         if observed_columns != expected_columns:
             raise DurablePrivateCiAuthoritySchemaError("authority table shape is incompatible")
 
-        unique_column_sets = set()
+        unconditional_unique_column_sets = set()
         for index_row in connection.execute("PRAGMA index_list(private_ci_authority)").fetchall():
-            if index_row[2] != 1:
+            if len(index_row) < 5 or index_row[2] != 1 or index_row[4] != 0:
                 continue
             index_name = index_row[1]
             columns = tuple(
                 row[2]
                 for row in connection.execute(f"PRAGMA index_info('{index_name}')").fetchall()
             )
-            unique_column_sets.add(columns)
-        if ("runner_nonce",) not in unique_column_sets:
-            raise DurablePrivateCiAuthoritySchemaError("authority nonce uniqueness constraint is missing")
+            unconditional_unique_column_sets.add(columns)
+        if ("runner_nonce",) not in unconditional_unique_column_sets:
+            raise DurablePrivateCiAuthoritySchemaError("authority nonce unconditional uniqueness constraint is missing")
 
     @staticmethod
     def _validated_token(reservation: DurablePrivateCiReservation) -> str:
