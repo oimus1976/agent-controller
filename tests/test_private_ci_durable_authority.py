@@ -204,6 +204,30 @@ class DurablePrivateCiAuthorityTests(unittest.TestCase):
         with self.assertRaises(DurablePrivateCiAuthoritySchemaError):
             self.authority()
 
+    def test_partial_schema_with_only_metadata_fails_closed_without_recreation(self):
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("CREATE TABLE authority_meta (schema_version INTEGER NOT NULL)")
+            connection.execute("INSERT INTO authority_meta(schema_version) VALUES (1)")
+            connection.commit()
+        finally:
+            connection.close()
+
+        with self.assertRaises(DurablePrivateCiAuthoritySchemaError):
+            self.authority()
+
+        connection = sqlite3.connect(self.database_path)
+        try:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchall()
+            }
+        finally:
+            connection.close()
+        self.assertEqual(tables, {"authority_meta"})
+
     def test_missing_nonce_unique_constraint_fails_closed(self):
         connection = sqlite3.connect(self.database_path)
         try:
@@ -225,6 +249,37 @@ class DurablePrivateCiAuthorityTests(unittest.TestCase):
                     state TEXT NOT NULL CHECK(state IN ('RESERVED', 'CONSUMED'))
                 )
                 """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(DurablePrivateCiAuthoritySchemaError):
+            self.authority()
+
+    def test_partial_nonce_unique_index_fails_closed(self):
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("CREATE TABLE authority_meta (schema_version INTEGER NOT NULL)")
+            connection.execute("INSERT INTO authority_meta(schema_version) VALUES (1)")
+            connection.execute(
+                """
+                CREATE TABLE private_ci_authority (
+                    token TEXT PRIMARY KEY NOT NULL,
+                    repository TEXT NOT NULL,
+                    pull_request_number INTEGER NOT NULL,
+                    expected_head_sha TEXT NOT NULL,
+                    workflow_identity TEXT NOT NULL,
+                    target_os TEXT NOT NULL,
+                    runner_scope_repository TEXT NOT NULL,
+                    runner_nonce TEXT NOT NULL,
+                    runner_label TEXT NOT NULL,
+                    environment_generation TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('RESERVED', 'CONSUMED'))
+                )
+                """
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX nonce_reserved_only ON private_ci_authority(runner_nonce) WHERE state = 'RESERVED'"
             )
             connection.commit()
         finally:
