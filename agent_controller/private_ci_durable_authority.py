@@ -206,15 +206,18 @@ class DurablePrivateCiAuthority:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            existing_tables = {
-                row[0]
+            existing_schema_objects = {
+                (row[0], row[1])
                 for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                    "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
                 ).fetchall()
             }
-            expected_tables = {"authority_meta", "private_ci_authority"}
-            if existing_tables:
-                if existing_tables != expected_tables:
+            expected_schema_objects = {
+                ("table", "authority_meta"),
+                ("table", "private_ci_authority"),
+            }
+            if existing_schema_objects:
+                if existing_schema_objects != expected_schema_objects:
                     raise DurablePrivateCiAuthoritySchemaError("authority schema is partially present")
                 self._validate_schema(connection)
                 connection.commit()
