@@ -170,9 +170,20 @@ class PrivateCiRequestValidationTests(unittest.TestCase):
         self.assertFalse(self.validate(valid_request(pull_request_number=True)).valid)
         self.assertFalse(self.validate(valid_request(residual_runner_count=False)).valid)
 
+    def test_rejects_nonce_authority_subclass(self):
+        class SpoofingAuthority(PrivateCiNonceAuthority):
+            def owns(self, accepted_request):
+                return True
+
+            def _claim_accepted(self, accepted_request):
+                return True
+
+        decision = self.validate(valid_request(), authority=SpoofingAuthority())
+        self.assertFalse(decision.valid)
+
 
 class PrivateCiResultValidationTests(unittest.TestCase):
-    def test_accepts_complete_zero_residual_result(self):
+    def test_accepts_complete_zero_residual_result_and_consumes_proof(self):
         authority, accepted_request = accepted()
         decision = validate_private_ci_result(
             accepted_request,
@@ -180,6 +191,7 @@ class PrivateCiResultValidationTests(unittest.TestCase):
             nonce_authority=authority,
         )
         self.assertTrue(decision.valid)
+        self.assertFalse(authority.owns(accepted_request))
 
     def test_rejects_raw_or_forged_unaccepted_request_proof(self):
         authority, accepted_request = accepted()
@@ -198,6 +210,51 @@ class PrivateCiResultValidationTests(unittest.TestCase):
         self.assertFalse(
             validate_private_ci_result(copied, valid_result(), nonce_authority=authority).valid
         )
+
+    def test_rejects_spoofed_nonce_authority_subclass(self):
+        class SpoofingAuthority(PrivateCiNonceAuthority):
+            def owns(self, accepted_request):
+                return True
+
+            def _claim_accepted(self, accepted_request):
+                return True
+
+        forged = PrivateCiAcceptedRequest(request=valid_request(repository_visibility="public"))
+        decision = validate_private_ci_result(
+            forged,
+            valid_result(),
+            nonce_authority=SpoofingAuthority(),
+        )
+        self.assertFalse(decision.valid)
+
+    def test_accepted_proof_is_single_use(self):
+        authority, accepted_request = accepted()
+        first = validate_private_ci_result(
+            accepted_request,
+            valid_result(),
+            nonce_authority=authority,
+        )
+        second = validate_private_ci_result(
+            accepted_request,
+            valid_result(),
+            nonce_authority=authority,
+        )
+        self.assertTrue(first.valid)
+        self.assertFalse(second.valid)
+
+    def test_concurrent_result_validation_accepts_exactly_once(self):
+        authority, accepted_request = accepted()
+
+        def attempt():
+            return validate_private_ci_result(
+                accepted_request,
+                valid_result(),
+                nonce_authority=authority,
+            ).valid
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(lambda _: attempt(), range(2)))
+        self.assertEqual(sorted(outcomes), [False, True])
 
     def test_invalid_request_cannot_be_upgraded_by_matching_pass_result(self):
         invalid_requests = (
@@ -278,6 +335,19 @@ class PrivateCiResultValidationTests(unittest.TestCase):
                 nonce_authority=authority,
             ).valid
         )
+
+    def test_rejects_non_string_runner_label_comparison_spoof(self):
+        class AlwaysEqual:
+            def __eq__(self, other):
+                return True
+
+        authority, accepted_request = accepted()
+        decision = validate_private_ci_result(
+            accepted_request,
+            valid_result(runner_label=AlwaysEqual()),
+            nonce_authority=authority,
+        )
+        self.assertFalse(decision.valid)
 
     def test_rejects_any_nonpass_required_phase(self):
         for field_name in (
