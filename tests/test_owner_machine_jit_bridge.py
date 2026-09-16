@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from dataclasses import fields, replace
 from pathlib import Path
+from unittest import mock
 
 import agent_controller.operator_step_gate as gate
 import agent_controller.owner_machine_jit_bridge as bridge
@@ -20,6 +21,7 @@ from agent_controller.owner_machine_jit_bridge import (
     CLEANUP_EFFECTS,
     CLEANUP_OPERATION_ID,
     CLEANUP_STEP_ID,
+    OBSERVATION_CHALLENGE_TTL_SECONDS,
     REGISTRATION_EFFECTS,
     REGISTRATION_OPERATION_ID,
     REGISTRATION_STEP_ID,
@@ -278,6 +280,24 @@ class OwnerMachineJitBridgeTests(unittest.TestCase):
                 challenge=challenge,
                 auth_tag=tag,
             )
+
+    def test_observation_authentication_challenge_expires_before_first_use(self):
+        observation = source_request()
+        issued_at = 1000.0
+        expired_at = issued_at + OBSERVATION_CHALLENGE_TTL_SECONDS + 0.001
+        with mock.patch.object(bridge.time, "monotonic", side_effect=[issued_at, expired_at]):
+            challenge = issue_owner_machine_observation_challenge()
+            tag = hmac.new(
+                OBSERVATION_KEY,
+                owner_machine_observation_auth_message(observation, challenge=challenge),
+                hashlib.sha256,
+            ).hexdigest()
+            with self.assertRaisesRegex(ValueError, "challenge expired"):
+                authenticate_owner_machine_observation(
+                    observation,
+                    challenge=challenge,
+                    auth_tag=tag,
+                )
 
     def test_fabricated_public_fork_head_or_stale_state_is_rejected_after_authentication(self):
         cases = (
