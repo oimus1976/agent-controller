@@ -1,34 +1,40 @@
 import hashlib
 import hmac
+import inspect
 import tempfile
 import unittest
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 
 import agent_controller.operator_step_gate as gate
+import agent_controller.owner_machine_jit_bridge as bridge
 from agent_controller.operator_step_gate import (
-    AUTHORITATIVE_EVIDENCE_ROOT,
-    PRIVATE_LOCAL_CI_WORKSTREAM,
     WINDOWS_POWERSHELL_51,
     WINDOWS_POWERSHELL_PARSER,
-    OperatorEffectClass,
-    OperatorStepSpec,
     PowerShellAstAttestation,
-    PriorEvidenceRequirement,
     ast_attestation_auth_message,
     authenticate_ast_attestation,
-    authenticate_prior_evidence,
     operator_step_spec_sha256,
-    prior_evidence_auth_message,
 )
 from agent_controller.owner_machine_jit_bridge import (
-    OWNER_MACHINE_HOST_ROLE,
+    CLEANUP_EFFECTS,
+    CLEANUP_OPERATION_ID,
+    CLEANUP_STEP_ID,
+    REGISTRATION_EFFECTS,
+    REGISTRATION_OPERATION_ID,
+    REGISTRATION_STEP_ID,
     TARGET_EXECUTION_IDENTITY,
     TRUSTED_BROKER_IDENTITY,
+    AuthenticatedOwnerMachineObservation,
     OwnerMachineBridgePhase,
     OwnerMachineBridgeRequest,
     OwnerMachineBridgeStatus,
+    authenticate_owner_machine_observation,
+    build_cleanup_plan_spec,
     build_owner_machine_jit_bridge_plan,
+    build_registration_plan_spec,
+    configure_owner_machine_observation_authority,
+    owner_machine_observation_auth_message,
 )
 from agent_controller.private_ci_contract import PrivateCiRequest, PrivateCiTargetOs
 from agent_controller.private_ci_durable_authority import (
@@ -46,8 +52,7 @@ RUNNER_LABEL = f"ac-private-ci-{NONCE}"
 ENVIRONMENT_GENERATION = "win-image-2026-09-16"
 AST_KEY = b"J" * 32
 EVIDENCE_KEY = b"K" * 32
-REGISTRATION_EVIDENCE = b"trusted registration preflight\n"
-CLEANUP_EVIDENCE = b"trusted cleanup preflight\n"
+OBSERVATION_KEY = b"O" * 32
 
 
 def source_request(**changes):
@@ -90,33 +95,13 @@ def candidate(name):
     return f"Write-Output '{name}'\n"
 
 
-def mutation_spec(operation_id, step_id, evidence_bytes, allowed_effects):
-    evidence_sha = hashlib.sha256(evidence_bytes).hexdigest()
-    return OperatorStepSpec(
-        operation_id=operation_id,
-        step_id=step_id,
-        workstream=PRIVATE_LOCAL_CI_WORKSTREAM,
-        repository=REPOSITORY,
-        pull_request_number=PR_NUMBER,
-        target_sha=TARGET_SHA,
-        target_host_role=OWNER_MACHINE_HOST_ROLE,
-        required_identity=TRUSTED_BROKER_IDENTITY,
-        shell_runtime=WINDOWS_POWERSHELL_51,
-        effect_class=OperatorEffectClass.BOUNDED_MUTATION,
-        evidence_root=AUTHORITATIVE_EVIDENCE_ROOT,
-        transcript_filename=f"issue213-{step_id}.log",
-        expected_success_marker=f"ISSUE213_{step_id.upper().replace('-', '_')}_PASS",
-        allowed_effect_families=allowed_effects,
-        prior_evidence_requirement=PriorEvidenceRequirement(
-            producer_operation_id=f"{operation_id}-preflight",
-            producer_step_id=f"{step_id}-preflight",
-            evidence_sha256=evidence_sha,
-        ),
-        require_parser_attestation=True,
-        require_heartbeat_or_progress=False,
-        require_child_exit_code=False,
-        require_fail_fast=False,
-    )
+def authenticate_observation(observation):
+    tag = hmac.new(
+        OBSERVATION_KEY,
+        owner_machine_observation_auth_message(observation),
+        hashlib.sha256,
+    ).hexdigest()
+    return authenticate_owner_machine_observation(observation, auth_tag=tag)
 
 
 def authenticate_ast(spec, candidate_text, effects):
@@ -148,30 +133,6 @@ def authenticate_ast(spec, candidate_text, effects):
     return authenticate_ast_attestation(report, auth_tag=tag)
 
 
-def authenticate_evidence(spec, evidence_bytes):
-    requirement = spec.prior_evidence_requirement
-    assert requirement is not None
-    digest = hashlib.sha256(evidence_bytes).hexdigest()
-    message = prior_evidence_auth_message(
-        repository=spec.repository,
-        pull_request_number=spec.pull_request_number,
-        target_sha=spec.target_sha,
-        producer_operation_id=requirement.producer_operation_id,
-        producer_step_id=requirement.producer_step_id,
-        evidence_sha256=digest,
-    )
-    tag = hmac.new(EVIDENCE_KEY, message, hashlib.sha256).hexdigest()
-    return authenticate_prior_evidence(
-        repository=spec.repository,
-        pull_request_number=spec.pull_request_number,
-        target_sha=spec.target_sha,
-        producer_operation_id=requirement.producer_operation_id,
-        producer_step_id=requirement.producer_step_id,
-        evidence_bytes=evidence_bytes,
-        auth_tag=tag,
-    )
-
-
 class OwnerMachineJitBridgeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -181,74 +142,62 @@ class OwnerMachineJitBridgeTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         gate._ACTIVE_CONTROLLER_AUTHORITY = None
+        bridge._ACTIVE_OBSERVATION_AUTHORITY = None
 
     def setUp(self):
+        bridge._ACTIVE_OBSERVATION_AUTHORITY = None
+        configure_owner_machine_observation_authority(
+            hmac_key=OBSERVATION_KEY,
+            allowed_repositories=frozenset({REPOSITORY}),
+            allowed_workflow_identities=frozenset({WORKFLOW}),
+        )
         self.tempdir = tempfile.TemporaryDirectory()
         self.database_path = Path(self.tempdir.name) / "authority.sqlite3"
         self.authority = DurablePrivateCiAuthority(self.database_path)
-        self.registration_spec = mutation_spec(
-            "issue213-registration",
-            "register-runner",
-            REGISTRATION_EVIDENCE,
-            ("RUNNER_REGISTRATION",),
+        self.registration_spec = build_registration_plan_spec(
+            repository=REPOSITORY,
+            pull_request_number=PR_NUMBER,
+            target_sha=TARGET_SHA,
         )
-        self.cleanup_spec = mutation_spec(
-            "issue213-cleanup",
-            "cleanup-reset",
-            CLEANUP_EVIDENCE,
-            ("RUNNER_REGISTRATION", "FILESYSTEM_DESTRUCTIVE_MUTATION"),
+        self.cleanup_spec = build_cleanup_plan_spec(
+            repository=REPOSITORY,
+            pull_request_number=PR_NUMBER,
+            target_sha=TARGET_SHA,
         )
         self.registration_candidate = candidate("registration plan")
         self.cleanup_candidate = candidate("cleanup plan")
 
     def tearDown(self):
         self.tempdir.cleanup()
+        bridge._ACTIVE_OBSERVATION_AUTHORITY = None
 
     def reserve(self, **changes):
         reservation = self.authority.reserve(durable_binding(**changes))
         self.assertIsNotNone(reservation)
         return reservation
 
-    def make_bridge_request(self, **changes):
+    def make_bridge_request(self, *, observation=None, reservation=None, **changes):
+        observed = source_request() if observation is None else observation
         request = OwnerMachineBridgeRequest(
-            reservation=self.reserve(),
-            source_request=source_request(),
-            owner_machine_host_role=OWNER_MACHINE_HOST_ROLE,
-            trusted_broker_identity=TRUSTED_BROKER_IDENTITY,
-            target_execution_identity=TARGET_EXECUTION_IDENTITY,
-            target_authority_exposure=(),
-            registration_spec=self.registration_spec,
+            reservation=self.reserve() if reservation is None else reservation,
+            observation=authenticate_observation(observed),
             registration_candidate=self.registration_candidate,
             registration_ast_attestation=authenticate_ast(
                 self.registration_spec,
                 self.registration_candidate,
-                ("RUNNER_REGISTRATION",),
+                REGISTRATION_EFFECTS,
             ),
-            registration_prior_evidence=authenticate_evidence(
-                self.registration_spec,
-                REGISTRATION_EVIDENCE,
-            ),
-            cleanup_spec=self.cleanup_spec,
             cleanup_candidate=self.cleanup_candidate,
             cleanup_ast_attestation=authenticate_ast(
                 self.cleanup_spec,
                 self.cleanup_candidate,
-                ("RUNNER_REGISTRATION", "FILESYSTEM_DESTRUCTIVE_MUTATION"),
-            ),
-            cleanup_prior_evidence=authenticate_evidence(
-                self.cleanup_spec,
-                CLEANUP_EVIDENCE,
+                CLEANUP_EFFECTS,
             ),
         )
         return replace(request, **changes)
 
     def build(self, request):
-        return build_owner_machine_jit_bridge_plan(
-            request,
-            durable_authority=self.authority,
-            allowed_repositories=frozenset({REPOSITORY}),
-            allowed_workflow_identities=frozenset({WORKFLOW}),
-        )
+        return build_owner_machine_jit_bridge_plan(request, durable_authority=self.authority)
 
     def test_complete_non_live_chain_reaches_ready_for_live_pilot(self):
         result = self.build(self.make_bridge_request())
@@ -259,98 +208,131 @@ class OwnerMachineJitBridgeTests(unittest.TestCase):
             phase for phase in result.phases if phase.phase is OwnerMachineBridgePhase.ONE_JOB_RUNNER
         )
         self.assertEqual(runner_phase.required_identity, TARGET_EXECUTION_IDENTITY)
+        self.assertFalse(runner_phase.trusted_authority_allowed)
         self.assertTrue(runner_phase.requires_heartbeat_or_progress)
         self.assertTrue(runner_phase.requires_child_exit_code)
         self.assertTrue(runner_phase.requires_fail_fast)
 
-    def test_public_repository_is_rejected_by_reused_private_ci_contract(self):
-        request = self.make_bridge_request(
-            source_request=source_request(repository_visibility="public")
-        )
-        result = self.build(request)
+    def test_caller_cannot_supply_allowlists_specs_or_identity_claims(self):
+        request_fields = {field.name for field in fields(OwnerMachineBridgeRequest)}
+        forbidden = {
+            "source_request",
+            "allowed_repositories",
+            "allowed_workflow_identities",
+            "registration_spec",
+            "cleanup_spec",
+            "trusted_broker_identity",
+            "target_execution_identity",
+            "target_authority_exposure",
+        }
+        self.assertTrue(forbidden.isdisjoint(request_fields))
+        signature = inspect.signature(build_owner_machine_jit_bridge_plan)
+        self.assertNotIn("allowed_repositories", signature.parameters)
+        self.assertNotIn("allowed_workflow_identities", signature.parameters)
+
+    def test_forged_observation_capability_cannot_reach_ready(self):
+        request = self.make_bridge_request()
+        forged = AuthenticatedOwnerMachineObservation(token="0" * 64)
+        result = self.build(replace(request, observation=forged))
         self.assertIs(result.status, OwnerMachineBridgeStatus.BLOCKED)
-        self.assertEqual(result.reason_codes, ("PRIVATE_CI_CONTRACT_REJECTED",))
+        self.assertEqual(result.reason_codes, ("TRUSTED_OBSERVATION_UNKNOWN_OR_CONSUMED",))
 
-    def test_fork_head_is_rejected_by_reused_private_ci_contract(self):
-        request = self.make_bridge_request(
-            source_request=source_request(pull_request_head_repository="fork/private-repo")
-        )
-        result = self.build(request)
-        self.assertEqual(result.reason_codes, ("PRIVATE_CI_CONTRACT_REJECTED",))
+    def test_observation_capability_is_single_use(self):
+        request = self.make_bridge_request()
+        first = self.build(request)
+        second = self.build(request)
+        self.assertTrue(first.ready_for_live_pilot)
+        self.assertEqual(second.reason_codes, ("TRUSTED_OBSERVATION_UNKNOWN_OR_CONSUMED",))
 
-    def test_head_drift_is_rejected_by_reused_private_ci_contract(self):
-        request = self.make_bridge_request(
-            source_request=source_request(observed_head_sha="b" * 40)
+    def test_fabricated_public_fork_head_or_stale_state_is_rejected_after_authentication(self):
+        cases = (
+            {"repository_visibility": "public"},
+            {"pull_request_state": "closed"},
+            {"pull_request_head_repository": "fork/private-repo"},
+            {"observed_head_sha": "b" * 40},
+            {"residual_runner_count": 1},
+            {"environment_reset_proven": False},
         )
-        result = self.build(request)
-        self.assertEqual(result.reason_codes, ("PRIVATE_CI_CONTRACT_REJECTED",))
+        for changes in cases:
+            with self.subTest(changes=changes):
+                request = self.make_bridge_request(observation=source_request(**changes))
+                result = self.build(request)
+                self.assertEqual(result.reason_codes, ("PRIVATE_CI_CONTRACT_REJECTED",))
 
-    def test_residual_runner_is_rejected_by_contract(self):
-        request = self.make_bridge_request(
-            source_request=source_request(residual_runner_count=1)
-        )
-        result = self.build(request)
-        self.assertEqual(result.reason_codes, ("PRIVATE_CI_CONTRACT_REJECTED",))
-
-    def test_uncertain_reset_is_rejected_by_contract(self):
-        request = self.make_bridge_request(
-            source_request=source_request(environment_reset_proven=False)
-        )
-        result = self.build(request)
-        self.assertEqual(result.reason_codes, ("PRIVATE_CI_CONTRACT_REJECTED",))
+    def test_controller_owned_allowlist_rejects_authenticated_unallowlisted_identity(self):
+        observation = source_request(workflow_identity="attacker.yml@v1")
+        tag = hmac.new(
+            OBSERVATION_KEY,
+            owner_machine_observation_auth_message(observation),
+            hashlib.sha256,
+        ).hexdigest()
+        with self.assertRaisesRegex(ValueError, "controller-owned private-CI allowlist"):
+            authenticate_owner_machine_observation(observation, auth_tag=tag)
 
     def test_durable_binding_mismatch_is_rejected(self):
-        request = self.make_bridge_request()
         other_authority = DurablePrivateCiAuthority(Path(self.tempdir.name) / "other.sqlite3")
         other_reservation = other_authority.reserve(durable_binding(expected_head_sha="b" * 40))
         self.assertIsNotNone(other_reservation)
-        request = replace(request, reservation=other_reservation)
+        request = self.make_bridge_request(reservation=other_reservation)
         result = build_owner_machine_jit_bridge_plan(
             request,
             durable_authority=other_authority,
-            allowed_repositories=frozenset({REPOSITORY}),
-            allowed_workflow_identities=frozenset({WORKFLOW}),
         )
-        self.assertIn("SOURCE_REQUEST_DURABLE_BINDING_MISMATCH", result.reason_codes)
+        self.assertEqual(result.reason_codes, ("SOURCE_REQUEST_DURABLE_BINDING_MISMATCH",))
 
-    def test_target_identity_cannot_receive_trusted_authority(self):
-        request = self.make_bridge_request(
-            target_authority_exposure=("GITHUB_AUTH", "AST_HMAC_KEY")
-        )
-        result = self.build(request)
-        self.assertIn("TARGET_AUTHORITY_EXPOSURE_FORBIDDEN", result.reason_codes)
+    def test_registration_and_cleanup_specs_are_fixed_bridge_policy(self):
+        registration = self.registration_spec
+        cleanup = self.cleanup_spec
+        self.assertEqual(registration.operation_id, REGISTRATION_OPERATION_ID)
+        self.assertEqual(registration.step_id, REGISTRATION_STEP_ID)
+        self.assertEqual(registration.allowed_effect_families, REGISTRATION_EFFECTS)
+        self.assertFalse(registration.require_child_exit_code)
+        self.assertFalse(registration.require_fail_fast)
+        self.assertEqual(cleanup.operation_id, CLEANUP_OPERATION_ID)
+        self.assertEqual(cleanup.step_id, CLEANUP_STEP_ID)
+        self.assertEqual(cleanup.allowed_effect_families, CLEANUP_EFFECTS)
+        self.assertFalse(cleanup.require_child_exit_code)
+        self.assertFalse(cleanup.require_fail_fast)
 
-    def test_trusted_and_target_identities_cannot_collapse(self):
-        request = self.make_bridge_request(target_execution_identity=TRUSTED_BROKER_IDENTITY)
-        result = self.build(request)
-        self.assertIn("TARGET_EXECUTION_IDENTITY_MISMATCH", result.reason_codes)
-        self.assertIn("TRUSTED_AND_TARGET_IDENTITIES_MUST_DIFFER", result.reason_codes)
-
-    def test_registration_spec_must_match_durable_binding(self):
-        bad_spec = replace(self.registration_spec, repository="owner/other-private-repo")
-        request = self.make_bridge_request(registration_spec=bad_spec)
-        result = self.build(request)
-        self.assertIn("REGISTRATION_SPEC_BINDING_MISMATCH", result.reason_codes)
-
-    def test_operator_gate_blocks_unallowlisted_registration_effect(self):
+    def test_registration_attestation_with_unallowlisted_effect_is_blocked(self):
         candidate_text = candidate("bad registration effect")
-        ast_capability = authenticate_ast(
+        bad_attestation = authenticate_ast(
             self.registration_spec,
             candidate_text,
             ("FILESYSTEM_DESTRUCTIVE_MUTATION",),
         )
         request = self.make_bridge_request(
             registration_candidate=candidate_text,
-            registration_ast_attestation=ast_capability,
+            registration_ast_attestation=bad_attestation,
         )
         result = self.build(request)
         self.assertIs(result.status, OwnerMachineBridgeStatus.BLOCKED)
         self.assertIn("REGISTRATION_GATE_AST_EFFECT_NOT_ALLOWED", result.reason_codes)
 
-    def test_every_phase_is_plan_only(self):
+    def test_failed_cleanup_plan_does_not_consume_any_execution_evidence(self):
+        self.assertNotIn("registration_prior_evidence", {field.name for field in fields(OwnerMachineBridgeRequest)})
+        self.assertNotIn("cleanup_prior_evidence", {field.name for field in fields(OwnerMachineBridgeRequest)})
+        bad_candidate = candidate("bad cleanup")
+        bad_attestation = authenticate_ast(
+            self.cleanup_spec,
+            bad_candidate,
+            ("HTTP_API_ACCESS",),
+        )
+        request = self.make_bridge_request(
+            cleanup_candidate=bad_candidate,
+            cleanup_ast_attestation=bad_attestation,
+        )
+        result = self.build(request)
+        self.assertIs(result.status, OwnerMachineBridgeStatus.BLOCKED)
+        self.assertIn("CLEANUP_GATE_AST_EFFECT_NOT_ALLOWED", result.reason_codes)
+
+    def test_every_phase_is_plan_only_and_target_never_gets_trusted_authority(self):
         result = self.build(self.make_bridge_request())
         self.assertTrue(result.ready_for_live_pilot)
         self.assertTrue(all(phase.live_effects_allowed is False for phase in result.phases))
+        target_phases = [phase for phase in result.phases if phase.required_identity == TARGET_EXECUTION_IDENTITY]
+        self.assertTrue(target_phases)
+        self.assertTrue(all(phase.trusted_authority_allowed is False for phase in target_phases))
 
 
 if __name__ == "__main__":
