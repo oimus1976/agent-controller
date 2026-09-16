@@ -8,6 +8,20 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-NormalizedVariableUserPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$UserPath
+    )
+
+    $NormalizedName = $UserPath
+    $ColonIndex = $NormalizedName.LastIndexOf(':')
+    if ($ColonIndex -ge 0) {
+        $NormalizedName = $NormalizedName.Substring($ColonIndex + 1)
+    }
+    return $NormalizedName.Trim('{}')
+}
+
 if (-not (Test-Path -LiteralPath $CandidatePath -PathType Leaf)) {
     throw "CandidatePath does not exist: $CandidatePath"
 }
@@ -73,15 +87,16 @@ foreach ($AssignmentAst in $AssignmentAsts) {
     }
 
     foreach ($VariableNode in $LeftVariables) {
-        $VariableName = $VariableNode.VariablePath.UserPath
+        $VariableName = Get-NormalizedVariableUserPath -UserPath $VariableNode.VariablePath.UserPath
         if ($BindingNames -notcontains $VariableName) {
             continue
         }
 
         $BindingCounts[$VariableName] = [int]$BindingCounts[$VariableName] + 1
         $IsPlainLeft = $AssignmentAst.Left -is [System.Management.Automation.Language.VariableExpressionAst]
+        $IsUnscopedLeft = $AssignmentAst.Left.VariablePath.UserPath.IndexOf(':') -lt 0
         $IsTopLevel = $RootStatements -contains $AssignmentAst
-        if (-not $IsPlainLeft -or -not $IsTopLevel) {
+        if (-not $IsPlainLeft -or -not $IsUnscopedLeft -or -not $IsTopLevel) {
             $Problem = "NONCANONICAL_BINDING:$VariableName"
             if (-not $BindingProblems.Contains($Problem)) {
                 $BindingProblems.Add($Problem)
@@ -122,7 +137,7 @@ $ParameterAsts = $Ast.FindAll({
     $Node -is [System.Management.Automation.Language.ParameterAst]
 }, $true)
 foreach ($ParameterAst in $ParameterAsts) {
-    $ParameterName = $ParameterAst.Name.VariablePath.UserPath
+    $ParameterName = Get-NormalizedVariableUserPath -UserPath $ParameterAst.Name.VariablePath.UserPath
     if ($BindingNames -contains $ParameterName) {
         $BindingCounts[$ParameterName] = [int]$BindingCounts[$ParameterName] + 1
         $Problem = "NONCANONICAL_BINDING:$ParameterName"
@@ -140,7 +155,7 @@ foreach ($ForEachAst in $ForEachAsts) {
     if ($null -eq $ForEachAst.Variable) {
         continue
     }
-    $ForEachVariableName = $ForEachAst.Variable.VariablePath.UserPath
+    $ForEachVariableName = Get-NormalizedVariableUserPath -UserPath $ForEachAst.Variable.VariablePath.UserPath
     if ($BindingNames -contains $ForEachVariableName) {
         $BindingCounts[$ForEachVariableName] = [int]$BindingCounts[$ForEachVariableName] + 1
         $Problem = "NONCANONICAL_BINDING:$ForEachVariableName"
@@ -180,12 +195,7 @@ foreach ($VariableAst in $VariableAsts) {
     if ([string]::IsNullOrWhiteSpace($UserPath)) {
         continue
     }
-    $NormalizedName = $UserPath
-    $ColonIndex = $NormalizedName.LastIndexOf(':')
-    if ($ColonIndex -ge 0) {
-        $NormalizedName = $NormalizedName.Substring($ColonIndex + 1)
-    }
-    $NormalizedName = $NormalizedName.Trim('{}').ToLowerInvariant()
+    $NormalizedName = (Get-NormalizedVariableUserPath -UserPath $UserPath).ToLowerInvariant()
     if ($AutomaticVariableNames -contains $NormalizedName) {
         if (-not $AutomaticVariableCollisions.Contains($NormalizedName)) {
             $AutomaticVariableCollisions.Add($NormalizedName)
@@ -264,6 +274,32 @@ $InvokeMemberAsts = $Ast.FindAll({
 }, $true)
 if ($InvokeMemberAsts.Count -gt 0 -and -not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
     $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+}
+
+foreach ($AssignmentAst in $AssignmentAsts) {
+    $LeftAst = $AssignmentAst.Left
+    if ($LeftAst -is [System.Management.Automation.Language.VariableExpressionAst]) {
+        $LeftUserPath = $LeftAst.VariablePath.UserPath
+        if ($LeftUserPath.IndexOf(':') -ge 0) {
+            if (-not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+                $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+            }
+        }
+    }
+    elseif ($LeftAst -is [System.Management.Automation.Language.MemberExpressionAst]) {
+        if (-not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+            $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+        }
+    }
+    else {
+        $MemberTargets = $LeftAst.FindAll({
+            param($Node)
+            $Node -is [System.Management.Automation.Language.MemberExpressionAst]
+        }, $true)
+        if ($MemberTargets.Count -gt 0 -and -not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+            $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+        }
+    }
 }
 
 $UnresolvedPlaceholders = New-Object System.Collections.Generic.List[string]
