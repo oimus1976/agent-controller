@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import FrozenSet
 
 from agent_controller.operator_step_gate import (
     AUTHORITATIVE_EVIDENCE_ROOT,
@@ -13,7 +14,13 @@ from agent_controller.operator_step_gate import (
     PriorEvidenceCapability,
     validate_operator_step,
 )
-from agent_controller.private_ci_contract import PrivateCiTargetOs
+from agent_controller.private_ci_contract import (
+    PrivateCiNonceAuthority,
+    PrivateCiRequest,
+    PrivateCiTargetOs,
+    PrivateCiValidationResult,
+    validate_and_reserve_private_ci_request,
+)
 from agent_controller.private_ci_durable_authority import (
     DurablePrivateCiAuthority,
     DurablePrivateCiAuthorityError,
@@ -57,13 +64,7 @@ class OwnerMachineBridgePhasePlan:
 @dataclass(frozen=True, slots=True)
 class OwnerMachineBridgeRequest:
     reservation: DurablePrivateCiReservation
-    observed_repository_visibility: str
-    observed_pull_request_state: str
-    observed_pull_request_head_repository: str
-    observed_head_sha: str
-    observed_workflow_identity: str
-    observed_residual_runner_count: int
-    environment_reset_proven: bool
+    source_request: PrivateCiRequest
     owner_machine_host_role: str
     trusted_broker_identity: str
     target_execution_identity: str
@@ -87,19 +88,6 @@ class OwnerMachineBridgeResult:
     @property
     def ready_for_live_pilot(self) -> bool:
         return self.status is OwnerMachineBridgeStatus.READY_FOR_LIVE_PILOT
-
-
-def _plain_non_empty(value: object) -> bool:
-    return type(value) is str and bool(value.strip())
-
-
-def _full_sha(value: object) -> bool:
-    return (
-        type(value) is str
-        and len(value) == 40
-        and value == value.lower()
-        and all(character in "0123456789abcdef" for character in value)
-    )
 
 
 def _phases() -> tuple[OwnerMachineBridgePhasePlan, ...]:
@@ -179,6 +167,20 @@ def _phases() -> tuple[OwnerMachineBridgePhasePlan, ...]:
     )
 
 
+def _source_request_matches_durable_binding(request: PrivateCiRequest, binding: object) -> bool:
+    return (
+        request.repository == binding.repository
+        and request.pull_request_number == binding.pull_request_number
+        and request.expected_head_sha == binding.expected_head_sha
+        and request.workflow_identity == binding.workflow_identity
+        and request.target_os is binding.target_os
+        and request.runner_scope_repository == binding.runner_scope_repository
+        and request.runner_nonce == binding.runner_nonce
+        and request.runner_label == binding.runner_label
+        and request.environment_generation == binding.environment_generation
+    )
+
+
 def _spec_matches_binding(
     spec: OperatorStepSpec,
     *,
@@ -206,13 +208,17 @@ def build_owner_machine_jit_bridge_plan(
     request: OwnerMachineBridgeRequest,
     *,
     durable_authority: DurablePrivateCiAuthority,
+    allowed_repositories: FrozenSet[str],
+    allowed_workflow_identities: FrozenSet[str],
 ) -> OwnerMachineBridgeResult:
-    """Build and validate the final non-live plan before the first live pilot.
+    """Build the final deterministic non-live plan before the first live pilot.
+
+    Source-of-truth observations are revalidated through the existing #208
+    private-CI contract. Durable binding comes from the #210 SQLite authority.
+    Mutation candidates are authorized only through the #212 operator gate.
 
     This function performs no GitHub, runner, account, ACL, service, task, or
-    target-code execution. It only reads durable authority state and invokes the
-    already-merged deterministic operator gate over supplied candidate text and
-    authenticated capabilities.
+    target-code execution.
     """
 
     phases = _phases()
@@ -228,6 +234,25 @@ def build_owner_machine_jit_bridge_plan(
         return OwnerMachineBridgeResult(
             OwnerMachineBridgeStatus.BLOCKED,
             ("DURABLE_AUTHORITY_TYPE_INVALID",),
+            phases,
+        )
+    if type(allowed_repositories) is not frozenset or type(allowed_workflow_identities) is not frozenset:
+        return OwnerMachineBridgeResult(
+            OwnerMachineBridgeStatus.BLOCKED,
+            ("TRUSTED_ALLOWLIST_TYPE_INVALID",),
+            phases,
+        )
+
+    contract_result = validate_and_reserve_private_ci_request(
+        request.source_request,
+        allowed_repositories=allowed_repositories,
+        allowed_workflow_identities=allowed_workflow_identities,
+        nonce_authority=PrivateCiNonceAuthority(),
+    )
+    if contract_result.result is not PrivateCiValidationResult.ACCEPT:
+        return OwnerMachineBridgeResult(
+            OwnerMachineBridgeStatus.BLOCKED,
+            ("PRIVATE_CI_CONTRACT_REJECTED",),
             phases,
         )
 
@@ -246,22 +271,10 @@ def build_owner_machine_jit_bridge_plan(
             phases,
         )
 
-    if type(binding.target_os) is not PrivateCiTargetOs or binding.target_os is not PrivateCiTargetOs.WINDOWS:
+    if not _source_request_matches_durable_binding(request.source_request, binding):
+        reasons.append("SOURCE_REQUEST_DURABLE_BINDING_MISMATCH")
+    if binding.target_os is not PrivateCiTargetOs.WINDOWS:
         reasons.append("WINDOWS_LIVE_PILOT_REQUIRED")
-    if request.observed_repository_visibility != "private":
-        reasons.append("REPOSITORY_NOT_PRIVATE")
-    if request.observed_pull_request_state != "open":
-        reasons.append("PULL_REQUEST_NOT_OPEN")
-    if request.observed_pull_request_head_repository != binding.repository:
-        reasons.append("FORK_OR_CROSS_REPOSITORY_HEAD")
-    if not _full_sha(request.observed_head_sha) or request.observed_head_sha != binding.expected_head_sha:
-        reasons.append("HEAD_SHA_DRIFT")
-    if request.observed_workflow_identity != binding.workflow_identity:
-        reasons.append("WORKFLOW_IDENTITY_DRIFT")
-    if type(request.observed_residual_runner_count) is not int or request.observed_residual_runner_count != 0:
-        reasons.append("RESIDUAL_RUNNER_PRESENT")
-    if request.environment_reset_proven is not True:
-        reasons.append("ENVIRONMENT_RESET_UNPROVEN")
 
     if request.owner_machine_host_role != OWNER_MACHINE_HOST_ROLE:
         reasons.append("OWNER_MACHINE_HOST_ROLE_MISMATCH")
