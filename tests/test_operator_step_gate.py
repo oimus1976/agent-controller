@@ -59,6 +59,7 @@ def make_candidate(extra=""):
 
 
 def make_attestation(spec, candidate, **changes):
+    """Build a fixture representing trusted Windows PowerShell AST output."""
     attestation = PowerShellAstAttestation(
         runtime=WINDOWS_POWERSHELL_51,
         parser=WINDOWS_POWERSHELL_PARSER,
