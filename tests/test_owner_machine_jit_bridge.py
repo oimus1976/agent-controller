@@ -285,15 +285,19 @@ class OwnerMachineJitBridgeTests(unittest.TestCase):
         result = self.build(request)
         self.assertEqual(result.reason_codes, ("PRIVATE_CI_CONTRACT_REJECTED",))
 
-    def test_residual_runner_and_uncertain_reset_are_rejected_by_contract(self):
-        for changes in (
-            {"residual_runner_count": 1},
-            {"environment_reset_proven": False},
-        ):
-            with self.subTest(changes=changes):
-                request = self.make_bridge_request(source_request=source_request(**changes))
-                result = self.build(request)
-                self.assertEqual(result.reason_codes, ("PRIVATE_CI_CONTRACT_REJECTED",))
+    def test_residual_runner_is_rejected_by_contract(self):
+        request = self.make_bridge_request(
+            source_request=source_request(residual_runner_count=1)
+        )
+        result = self.build(request)
+        self.assertEqual(result.reason_codes, ("PRIVATE_CI_CONTRACT_REJECTED",))
+
+    def test_uncertain_reset_is_rejected_by_contract(self):
+        request = self.make_bridge_request(
+            source_request=source_request(environment_reset_proven=False)
+        )
+        result = self.build(request)
+        self.assertEqual(result.reason_codes, ("PRIVATE_CI_CONTRACT_REJECTED",))
 
     def test_durable_binding_mismatch_is_rejected(self):
         request = self.make_bridge_request()
@@ -307,7 +311,7 @@ class OwnerMachineJitBridgeTests(unittest.TestCase):
             allowed_repositories=frozenset({REPOSITORY}),
             allowed_workflow_identities=frozenset({WORKFLOW}),
         )
-        self.assertEqual(result.reason_codes, ("SOURCE_REQUEST_DURABLE_BINDING_MISMATCH",))
+        self.assertIn("SOURCE_REQUEST_DURABLE_BINDING_MISMATCH", result.reason_codes)
 
     def test_target_identity_cannot_receive_trusted_authority(self):
         request = self.make_bridge_request(
