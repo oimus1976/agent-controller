@@ -152,8 +152,8 @@ class OwnerMachineJitBridgeTests(unittest.TestCase):
             allowed_workflow_identities=frozenset({WORKFLOW}),
         )
         self.tempdir = tempfile.TemporaryDirectory()
-        self.database_path = Path(self.tempdir.name) / "authority.sqlite3"
-        self.authority = DurablePrivateCiAuthority(self.database_path)
+        self._authority_generation = 0
+        self.authority = self._new_authority()
         self.registration_spec = build_registration_plan_spec(
             repository=REPOSITORY,
             pull_request_number=PR_NUMBER,
@@ -171,6 +171,11 @@ class OwnerMachineJitBridgeTests(unittest.TestCase):
         self.tempdir.cleanup()
         bridge._ACTIVE_OBSERVATION_AUTHORITY = None
 
+    def _new_authority(self):
+        self._authority_generation += 1
+        database_path = Path(self.tempdir.name) / f"authority-{self._authority_generation}.sqlite3"
+        return DurablePrivateCiAuthority(database_path)
+
     def reserve(self, **changes):
         reservation = self.authority.reserve(durable_binding(**changes))
         self.assertIsNotNone(reservation)
@@ -178,8 +183,11 @@ class OwnerMachineJitBridgeTests(unittest.TestCase):
 
     def make_bridge_request(self, *, observation=None, reservation=None, **changes):
         observed = source_request() if observation is None else observation
+        if reservation is None:
+            self.authority = self._new_authority()
+            reservation = self.reserve()
         request = OwnerMachineBridgeRequest(
-            reservation=self.reserve() if reservation is None else reservation,
+            reservation=reservation,
             observation=authenticate_observation(observed),
             registration_candidate=self.registration_candidate,
             registration_ast_attestation=authenticate_ast(
