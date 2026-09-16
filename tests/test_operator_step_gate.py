@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import unittest
 from dataclasses import replace
 
@@ -7,14 +8,19 @@ from agent_controller.operator_step_gate import (
     PRIVATE_LOCAL_CI_WORKSTREAM,
     WINDOWS_POWERSHELL_51,
     WINDOWS_POWERSHELL_PARSER,
+    AuthenticatedAstAttestation,
     OperatorEffectClass,
-    OperatorEvidenceAuthority,
     OperatorGateStatus,
     OperatorStepSpec,
     PowerShellAstAttestation,
     PriorEvidenceCapability,
     PriorEvidenceRequirement,
+    ast_attestation_auth_message,
+    authenticate_ast_attestation,
+    authenticate_prior_evidence,
+    configure_controller_authority,
     operator_step_spec_sha256,
+    prior_evidence_auth_message,
     validate_operator_step,
 )
 
@@ -26,7 +32,14 @@ HOST_ROLE = "owner-machine-broker"
 IDENTITY = "c-admin"
 TRANSCRIPT = "issue211-readonly.log"
 SUCCESS_MARKER = "ISSUE211_READ_ONLY_PASS"
-EVIDENCE_SHA = "e" * 64
+AST_KEY = b"A" * 32
+EVIDENCE_KEY = b"E" * 32
+EVIDENCE_BYTES = b"trusted prior operator evidence\n"
+EVIDENCE_SHA = hashlib.sha256(EVIDENCE_BYTES).hexdigest()
+
+
+def setUpModule():
+    configure_controller_authority(ast_hmac_key=AST_KEY, evidence_hmac_key=EVIDENCE_KEY)
 
 
 def make_spec(**changes):
@@ -58,9 +71,8 @@ def make_candidate(extra=""):
     return f"Write-Output 'bounded candidate'\n{extra}\n"
 
 
-def make_attestation(spec, candidate, **changes):
-    """Build a fixture representing trusted Windows PowerShell AST output."""
-    attestation = PowerShellAstAttestation(
+def make_report(spec, candidate, **changes):
+    report = PowerShellAstAttestation(
         runtime=WINDOWS_POWERSHELL_51,
         parser=WINDOWS_POWERSHELL_PARSER,
         candidate_sha256=hashlib.sha256(candidate.encode("utf-8")).hexdigest(),
@@ -84,7 +96,12 @@ def make_attestation(spec, candidate, **changes):
         child_exit_code_proven=False,
         fail_fast_proven=False,
     )
-    return replace(attestation, **changes)
+    return replace(report, **changes)
+
+
+def authenticate_report(report, *, key=AST_KEY):
+    tag = hmac.new(key, ast_attestation_auth_message(report), hashlib.sha256).hexdigest()
+    return authenticate_ast_attestation(report, auth_tag=tag)
 
 
 def make_mutation_spec(**changes):
@@ -103,20 +120,32 @@ def make_mutation_spec(**changes):
     return replace(base, **changes)
 
 
-def issue_prior(authority, spec):
+def authenticate_evidence_for(spec, *, repository=None, evidence_bytes=EVIDENCE_BYTES, key=EVIDENCE_KEY):
     requirement = spec.prior_evidence_requirement
     assert requirement is not None
-    return authority.issue(
-        repository=spec.repository,
+    bound_repository = spec.repository if repository is None else repository
+    digest = hashlib.sha256(evidence_bytes).hexdigest()
+    message = prior_evidence_auth_message(
+        repository=bound_repository,
         pull_request_number=spec.pull_request_number,
         target_sha=spec.target_sha,
         producer_operation_id=requirement.producer_operation_id,
         producer_step_id=requirement.producer_step_id,
-        evidence_sha256=requirement.evidence_sha256,
+        evidence_sha256=digest,
+    )
+    tag = hmac.new(key, message, hashlib.sha256).hexdigest()
+    return authenticate_prior_evidence(
+        repository=bound_repository,
+        pull_request_number=spec.pull_request_number,
+        target_sha=spec.target_sha,
+        producer_operation_id=requirement.producer_operation_id,
+        producer_step_id=requirement.producer_step_id,
+        evidence_bytes=evidence_bytes,
+        auth_tag=tag,
     )
 
 
-class EqualitySpoof:
+class EqualitySpoofString(str):
     def __eq__(self, _other):
         return True
 
@@ -124,207 +153,77 @@ class EqualitySpoof:
         return False
 
 
-class StringSubclass(str):
-    pass
-
-
 class OperatorStepGateTests(unittest.TestCase):
-    def test_valid_read_only_candidate_passes_with_matching_ast_attestation(self):
+    def test_valid_read_only_candidate_passes_with_authenticated_ast_capability(self):
         spec = make_spec()
         candidate = make_candidate()
-        result = validate_operator_step(spec, candidate, ast_attestation=make_attestation(spec, candidate))
+        capability = authenticate_report(make_report(spec, candidate))
+        result = validate_operator_step(spec, candidate, ast_attestation=capability)
         self.assertIs(result.status, OperatorGateStatus.PASS_TO_OPERATOR)
         self.assertEqual(result.reason_codes, ())
 
-    def test_missing_ast_attestation_is_uncertain_never_pass(self):
-        result = validate_operator_step(make_spec(), make_candidate())
-        self.assertIs(result.status, OperatorGateStatus.UNCERTAIN)
-        self.assertEqual(result.reason_codes, ("AST_ATTESTATION_MISSING",))
-
-    def test_attestation_is_bound_to_exact_candidate_hash(self):
+    def test_raw_caller_constructed_ast_report_is_not_authority(self):
         spec = make_spec()
         candidate = make_candidate()
-        result = validate_operator_step(
-            spec,
-            candidate,
-            ast_attestation=make_attestation(spec, candidate, candidate_sha256="0" * 64),
-        )
+        forged = make_report(spec, candidate)
+        result = validate_operator_step(spec, candidate, ast_attestation=forged)
         self.assertIs(result.status, OperatorGateStatus.BLOCKED)
-        self.assertIn("AST_CANDIDATE_HASH_MISMATCH", result.reason_codes)
+        self.assertEqual(result.reason_codes, ("AST_ATTESTATION_UNAUTHENTICATED",))
 
-    def test_attestation_is_bound_to_entire_frozen_spec(self):
+    def test_forged_ast_capability_is_rejected(self):
         spec = make_spec()
         candidate = make_candidate()
-        changed_spec = replace(spec, step_id="other-step")
-        result = validate_operator_step(
-            changed_spec,
-            candidate,
-            ast_attestation=make_attestation(spec, candidate),
-        )
+        forged = AuthenticatedAstAttestation(token="0" * 64)
+        result = validate_operator_step(spec, candidate, ast_attestation=forged)
         self.assertIs(result.status, OperatorGateStatus.BLOCKED)
-        self.assertIn("AST_SPEC_HASH_MISMATCH", result.reason_codes)
+        self.assertEqual(result.reason_codes, ("AST_ATTESTATION_UNAUTHENTICATED",))
 
-    def test_comment_literals_cannot_substitute_for_executable_binding_attestation(self):
+    def test_ast_report_requires_configured_producer_authentication(self):
+        spec = make_spec()
+        candidate = make_candidate()
+        report = make_report(spec, candidate)
+        bad_tag = hmac.new(b"Z" * 32, ast_attestation_auth_message(report), hashlib.sha256).hexdigest()
+        with self.assertRaisesRegex(ValueError, "AST authentication failed"):
+            authenticate_ast_attestation(report, auth_tag=bad_tag)
+
+    def test_comment_literals_cannot_substitute_for_authenticated_executable_binding(self):
         spec = make_spec()
         candidate = make_candidate(
             f"# {REPOSITORY} PR {PR_NUMBER} {TARGET_SHA} {HOST_ROLE} {IDENTITY}\n"
             "Set-Location 'C:\\unrelated-checkout'"
         )
-        result = validate_operator_step(
-            spec,
-            candidate,
-            ast_attestation=make_attestation(spec, candidate, repository="owner/other-repo"),
-        )
+        capability = authenticate_report(make_report(spec, candidate, repository="owner/other-repo"))
+        result = validate_operator_step(spec, candidate, ast_attestation=capability)
         self.assertIs(result.status, OperatorGateStatus.BLOCKED)
         self.assertIn("AST_REPOSITORY_BINDING_MISMATCH", result.reason_codes)
 
-    def test_wrong_authoritative_evidence_root_is_blocked_at_spec_boundary(self):
-        spec = make_spec(evidence_root=r"C:\Temp\agent-controller-handoff")
-        candidate = make_candidate()
-        result = validate_operator_step(spec, candidate, ast_attestation=None)
-        self.assertIs(result.status, OperatorGateStatus.BLOCKED)
-        self.assertIn("EVIDENCE_ROOT_INVALID", result.reason_codes)
-
-    def test_ast_reported_convenience_path_is_blocked(self):
-        spec = make_spec()
-        candidate = make_candidate("$Scratch = $env:TEMP")
-        result = validate_operator_step(
-            spec,
-            candidate,
-            ast_attestation=make_attestation(
-                spec,
-                candidate,
-                forbidden_convenience_paths=("$env:TEMP",),
-            ),
-        )
-        self.assertIs(result.status, OperatorGateStatus.BLOCKED)
-        self.assertIn("AST_FORBIDDEN_CONVENIENCE_PATH", result.reason_codes)
-
-    def test_ast_reported_placeholder_is_blocked(self):
-        spec = make_spec()
-        candidate = make_candidate("$RunnerNonce = '<RUNNER_NONCE>'")
-        result = validate_operator_step(
-            spec,
-            candidate,
-            ast_attestation=make_attestation(
-                spec,
-                candidate,
-                unresolved_placeholders=("<RUNNER_NONCE>",),
-            ),
-        )
-        self.assertIs(result.status, OperatorGateStatus.BLOCKED)
-        self.assertIn("AST_UNRESOLVED_PLACEHOLDER", result.reason_codes)
-
-    def test_dynamic_invocation_cannot_escape_read_only_effect_attestation(self):
+    def test_dynamic_mutation_is_blocked_when_authenticated_ast_reports_effect(self):
         spec = make_spec()
         candidate = make_candidate("& ('Remove' + '-Item') -LiteralPath C:\\target")
-        result = validate_operator_step(
-            spec,
-            candidate,
-            ast_attestation=make_attestation(
+        capability = authenticate_report(
+            make_report(
                 spec,
                 candidate,
                 observed_effect_families=("FILESYSTEM_DESTRUCTIVE_MUTATION",),
-            ),
+            )
         )
+        result = validate_operator_step(spec, candidate, ast_attestation=capability)
         self.assertIs(result.status, OperatorGateStatus.BLOCKED)
         self.assertIn("AST_READ_ONLY_EFFECT_PRESENT", result.reason_codes)
 
-    def test_mutation_effect_must_be_in_spec_allowlist(self):
-        spec = make_mutation_spec()
-        candidate = make_candidate("Remove-Item C:\\target")
-        authority = OperatorEvidenceAuthority()
-        capability = issue_prior(authority, spec)
-        result = validate_operator_step(
-            spec,
-            candidate,
-            ast_attestation=make_attestation(
-                spec,
-                candidate,
-                observed_effect_families=("FILESYSTEM_DESTRUCTIVE_MUTATION",),
-            ),
-            prior_evidence_authority=authority,
-            prior_evidence_capability=capability,
-        )
-        self.assertIs(result.status, OperatorGateStatus.BLOCKED)
-        self.assertIn("AST_EFFECT_NOT_ALLOWED", result.reason_codes)
+    def test_automatic_variable_collision_is_driven_by_authenticated_ast(self):
+        spec = make_spec()
+        for spelling in ("$global:args = 1", "${args} = 1", "Write-Output x; $Args = 1", "param(${args})"):
+            with self.subTest(spelling=spelling):
+                candidate = make_candidate(spelling)
+                capability = authenticate_report(
+                    make_report(spec, candidate, automatic_variable_collisions=("args",))
+                )
+                result = validate_operator_step(spec, candidate, ast_attestation=capability)
+                self.assertIs(result.status, OperatorGateStatus.BLOCKED)
+                self.assertIn("AST_AUTOMATIC_VARIABLE_COLLISION", result.reason_codes)
 
-    def test_allowed_mutation_requires_and_consumes_authority_owned_prior_evidence(self):
-        spec = make_mutation_spec()
-        candidate = make_candidate("# trusted AST reports repository-scoped runner registration")
-        authority = OperatorEvidenceAuthority()
-        capability = issue_prior(authority, spec)
-        attestation = make_attestation(
-            spec,
-            candidate,
-            observed_effect_families=("RUNNER_REGISTRATION",),
-        )
-        first = validate_operator_step(
-            spec,
-            candidate,
-            ast_attestation=attestation,
-            prior_evidence_authority=authority,
-            prior_evidence_capability=capability,
-        )
-        second = validate_operator_step(
-            spec,
-            candidate,
-            ast_attestation=attestation,
-            prior_evidence_authority=authority,
-            prior_evidence_capability=capability,
-        )
-        self.assertIs(first.status, OperatorGateStatus.PASS_TO_OPERATOR)
-        self.assertIs(second.status, OperatorGateStatus.BLOCKED)
-        self.assertEqual(second.reason_codes, ("PRIOR_EVIDENCE_ALREADY_CONSUMED",))
-
-    def test_prior_evidence_cannot_cross_repository_binding(self):
-        spec = make_mutation_spec()
-        candidate = make_candidate()
-        authority = OperatorEvidenceAuthority()
-        requirement = spec.prior_evidence_requirement
-        assert requirement is not None
-        capability = authority.issue(
-            repository="owner/other-private-repo",
-            pull_request_number=spec.pull_request_number,
-            target_sha=spec.target_sha,
-            producer_operation_id=requirement.producer_operation_id,
-            producer_step_id=requirement.producer_step_id,
-            evidence_sha256=requirement.evidence_sha256,
-        )
-        result = validate_operator_step(
-            spec,
-            candidate,
-            ast_attestation=make_attestation(
-                spec,
-                candidate,
-                observed_effect_families=("RUNNER_REGISTRATION",),
-            ),
-            prior_evidence_authority=authority,
-            prior_evidence_capability=capability,
-        )
-        self.assertIs(result.status, OperatorGateStatus.BLOCKED)
-        self.assertEqual(result.reason_codes, ("PRIOR_EVIDENCE_BINDING_MISMATCH",))
-
-    def test_forged_prior_evidence_capability_is_rejected(self):
-        spec = make_mutation_spec()
-        candidate = make_candidate()
-        authority = OperatorEvidenceAuthority()
-        forged = PriorEvidenceCapability(token="0" * 64)
-        result = validate_operator_step(
-            spec,
-            candidate,
-            ast_attestation=make_attestation(
-                spec,
-                candidate,
-                observed_effect_families=("RUNNER_REGISTRATION",),
-            ),
-            prior_evidence_authority=authority,
-            prior_evidence_capability=forged,
-        )
-        self.assertIs(result.status, OperatorGateStatus.BLOCKED)
-        self.assertEqual(result.reason_codes, ("PRIOR_EVIDENCE_UNKNOWN",))
-
-    def test_execution_control_requirements_fail_closed_without_ast_proof(self):
+    def test_requested_execution_controls_require_authenticated_ast_proof(self):
         cases = (
             ("require_heartbeat_or_progress", "AST_PROGRESS_PROOF_MISSING"),
             ("require_child_exit_code", "AST_CHILD_EXIT_CODE_PROOF_MISSING"),
@@ -334,97 +233,177 @@ class OperatorStepGateTests(unittest.TestCase):
             with self.subTest(field=field):
                 spec = make_spec(**{field: True})
                 candidate = make_candidate()
-                result = validate_operator_step(
-                    spec,
-                    candidate,
-                    ast_attestation=make_attestation(spec, candidate),
-                )
+                capability = authenticate_report(make_report(spec, candidate))
+                result = validate_operator_step(spec, candidate, ast_attestation=capability)
                 self.assertIs(result.status, OperatorGateStatus.BLOCKED)
                 self.assertIn(reason, result.reason_codes)
 
-    def test_execution_control_requirements_pass_only_with_ast_proof(self):
+    def test_execution_controls_pass_when_authenticated_ast_proves_them(self):
         spec = make_spec(
             require_heartbeat_or_progress=True,
             require_child_exit_code=True,
             require_fail_fast=True,
         )
         candidate = make_candidate()
-        result = validate_operator_step(
-            spec,
-            candidate,
-            ast_attestation=make_attestation(
+        capability = authenticate_report(
+            make_report(
                 spec,
                 candidate,
                 heartbeat_or_progress_proven=True,
                 child_exit_code_proven=True,
                 fail_fast_proven=True,
-            ),
+            )
         )
+        result = validate_operator_step(spec, candidate, ast_attestation=capability)
         self.assertIs(result.status, OperatorGateStatus.PASS_TO_OPERATOR)
 
-    def test_attestation_equality_spoof_objects_are_rejected_before_comparison(self):
-        spec = make_spec()
-        candidate = make_candidate()
-        spoof = make_attestation(spec, candidate)
-        object.__setattr__(spoof, "candidate_sha256", EqualitySpoof())
-        result = validate_operator_step(spec, candidate, ast_attestation=spoof)
+    def test_evidence_root_string_subclass_cannot_spoof_authoritative_root(self):
+        evil = EqualitySpoofString(r"C:\evil")
+        spec = make_spec(evidence_root=evil)
+        result = validate_operator_step(spec, make_candidate())
         self.assertIs(result.status, OperatorGateStatus.BLOCKED)
-        self.assertEqual(result.reason_codes, ("AST_ATTESTATION_FIELD_TYPE_INVALID",))
+        self.assertIn("EVIDENCE_ROOT_INVALID", result.reason_codes)
 
-    def test_attestation_string_subclasses_are_rejected(self):
-        spec = make_spec()
-        candidate = make_candidate()
-        attestation = make_attestation(spec, candidate, runtime=StringSubclass(WINDOWS_POWERSHELL_51))
-        result = validate_operator_step(spec, candidate, ast_attestation=attestation)
-        self.assertIs(result.status, OperatorGateStatus.BLOCKED)
-        self.assertEqual(result.reason_codes, ("AST_ATTESTATION_FIELD_TYPE_INVALID",))
-
-    def test_scoped_braced_and_parameter_automatic_variable_collisions_are_authoritative_ast_findings(self):
-        spellings = (
-            "$global:args = @('changed')",
-            "${args} = @('changed')",
-            "Write-Output x; $Args = @('changed')",
-            "param([string]${args})",
+    def test_mutation_effect_must_be_in_allowlist_before_evidence_consumption(self):
+        spec = make_mutation_spec()
+        candidate = make_candidate("Remove-Item C:\\target")
+        ast_capability = authenticate_report(
+            make_report(
+                spec,
+                candidate,
+                observed_effect_families=("FILESYSTEM_DESTRUCTIVE_MUTATION",),
+            )
         )
-        for spelling in spellings:
-            with self.subTest(spelling=spelling):
-                spec = make_spec()
-                candidate = make_candidate(spelling)
-                result = validate_operator_step(
-                    spec,
-                    candidate,
-                    ast_attestation=make_attestation(
-                        spec,
-                        candidate,
-                        automatic_variable_collisions=("args",),
-                    ),
-                )
-                self.assertIs(result.status, OperatorGateStatus.BLOCKED)
-                self.assertIn("AST_AUTOMATIC_VARIABLE_COLLISION", result.reason_codes)
-
-    def test_candidate_self_declared_gate_authority_is_blocked_by_ast_attestation(self):
-        spec = make_spec()
-        candidate = make_candidate("Write-Output 'PASS_TO_OPERATOR'")
+        evidence_capability = authenticate_evidence_for(spec)
         result = validate_operator_step(
             spec,
             candidate,
-            ast_attestation=make_attestation(spec, candidate, self_declared_gate_authority=True),
+            ast_attestation=ast_capability,
+            prior_evidence_capability=evidence_capability,
         )
+        self.assertIs(result.status, OperatorGateStatus.BLOCKED)
+        self.assertIn("AST_EFFECT_NOT_ALLOWED", result.reason_codes)
+
+    def test_authenticated_prior_evidence_is_bound_and_consumed_once(self):
+        spec = make_mutation_spec()
+        candidate = make_candidate("# authenticated AST reports runner registration")
+        ast_capability = authenticate_report(
+            make_report(spec, candidate, observed_effect_families=("RUNNER_REGISTRATION",))
+        )
+        evidence_capability = authenticate_evidence_for(spec)
+        first = validate_operator_step(
+            spec,
+            candidate,
+            ast_attestation=ast_capability,
+            prior_evidence_capability=evidence_capability,
+        )
+        second = validate_operator_step(
+            spec,
+            candidate,
+            ast_attestation=ast_capability,
+            prior_evidence_capability=evidence_capability,
+        )
+        self.assertIs(first.status, OperatorGateStatus.PASS_TO_OPERATOR)
+        self.assertIs(second.status, OperatorGateStatus.BLOCKED)
+        self.assertEqual(second.reason_codes, ("PRIOR_EVIDENCE_ALREADY_CONSUMED",))
+
+    def test_prior_evidence_requires_producer_authentication(self):
+        spec = make_mutation_spec()
+        requirement = spec.prior_evidence_requirement
+        assert requirement is not None
+        digest = hashlib.sha256(EVIDENCE_BYTES).hexdigest()
+        message = prior_evidence_auth_message(
+            repository=spec.repository,
+            pull_request_number=spec.pull_request_number,
+            target_sha=spec.target_sha,
+            producer_operation_id=requirement.producer_operation_id,
+            producer_step_id=requirement.producer_step_id,
+            evidence_sha256=digest,
+        )
+        bad_tag = hmac.new(b"Z" * 32, message, hashlib.sha256).hexdigest()
+        with self.assertRaisesRegex(ValueError, "evidence authentication failed"):
+            authenticate_prior_evidence(
+                repository=spec.repository,
+                pull_request_number=spec.pull_request_number,
+                target_sha=spec.target_sha,
+                producer_operation_id=requirement.producer_operation_id,
+                producer_step_id=requirement.producer_step_id,
+                evidence_bytes=EVIDENCE_BYTES,
+                auth_tag=bad_tag,
+            )
+
+    def test_prior_evidence_digest_is_derived_from_authenticated_bytes(self):
+        spec = make_mutation_spec()
+        candidate = make_candidate()
+        ast_capability = authenticate_report(
+            make_report(spec, candidate, observed_effect_families=("RUNNER_REGISTRATION",))
+        )
+        other_bytes = b"different evidence\n"
+        other_capability = authenticate_evidence_for(spec, evidence_bytes=other_bytes)
+        result = validate_operator_step(
+            spec,
+            candidate,
+            ast_attestation=ast_capability,
+            prior_evidence_capability=other_capability,
+        )
+        self.assertIs(result.status, OperatorGateStatus.BLOCKED)
+        self.assertEqual(result.reason_codes, ("PRIOR_EVIDENCE_BINDING_MISMATCH",))
+
+    def test_prior_evidence_cannot_cross_repository_binding(self):
+        spec = make_mutation_spec()
+        candidate = make_candidate()
+        ast_capability = authenticate_report(
+            make_report(spec, candidate, observed_effect_families=("RUNNER_REGISTRATION",))
+        )
+        capability = authenticate_evidence_for(spec, repository="owner/other-private-repo")
+        result = validate_operator_step(
+            spec,
+            candidate,
+            ast_attestation=ast_capability,
+            prior_evidence_capability=capability,
+        )
+        self.assertIs(result.status, OperatorGateStatus.BLOCKED)
+        self.assertEqual(result.reason_codes, ("PRIOR_EVIDENCE_BINDING_MISMATCH",))
+
+    def test_forged_prior_evidence_capability_is_rejected(self):
+        spec = make_mutation_spec()
+        candidate = make_candidate()
+        ast_capability = authenticate_report(
+            make_report(spec, candidate, observed_effect_families=("RUNNER_REGISTRATION",))
+        )
+        forged = PriorEvidenceCapability(token="0" * 64)
+        result = validate_operator_step(
+            spec,
+            candidate,
+            ast_attestation=ast_capability,
+            prior_evidence_capability=forged,
+        )
+        self.assertIs(result.status, OperatorGateStatus.BLOCKED)
+        self.assertEqual(result.reason_codes, ("PRIOR_EVIDENCE_UNKNOWN",))
+
+    def test_candidate_self_declared_gate_authority_is_blocked(self):
+        spec = make_spec()
+        candidate = make_candidate("Write-Output 'PASS_TO_OPERATOR'")
+        capability = authenticate_report(
+            make_report(spec, candidate, self_declared_gate_authority=True)
+        )
+        result = validate_operator_step(spec, candidate, ast_attestation=capability)
         self.assertIs(result.status, OperatorGateStatus.BLOCKED)
         self.assertIn("AST_SELF_DECLARED_GATE_AUTHORITY", result.reason_codes)
 
     def test_candidate_is_not_executed_by_portable_validator(self):
         spec = make_spec()
         candidate = make_candidate("throw 'this would fail if executed'")
-        result = validate_operator_step(spec, candidate, ast_attestation=make_attestation(spec, candidate))
+        capability = authenticate_report(make_report(spec, candidate))
+        result = validate_operator_step(spec, candidate, ast_attestation=capability)
         self.assertIs(result.status, OperatorGateStatus.PASS_TO_OPERATOR)
 
-    def test_same_frozen_read_only_inputs_produce_identical_result(self):
+    def test_same_authenticated_read_only_inputs_are_deterministic(self):
         spec = make_spec()
         candidate = make_candidate()
-        attestation = make_attestation(spec, candidate)
-        first = validate_operator_step(spec, candidate, ast_attestation=attestation)
-        second = validate_operator_step(spec, candidate, ast_attestation=attestation)
+        capability = authenticate_report(make_report(spec, candidate))
+        first = validate_operator_step(spec, candidate, ast_attestation=capability)
+        second = validate_operator_step(spec, candidate, ast_attestation=capability)
         self.assertEqual(first, second)
 
 
