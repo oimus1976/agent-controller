@@ -98,20 +98,22 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
                 )
 
     def test_foreach_rebinding_of_canonical_field_fails_closed(self):
-        report, _ = self.run_producer(
-            self.bound_candidate(
-                "foreach ($BridgeRepository in 'attacker/repo') { config.cmd --version }"
-            )
+        cases = (
+            "foreach ($BridgeRepository in 'attacker/repo') { config.cmd --version }",
+            "foreach ($script:BridgeRepository in 'attacker/repo') { config.cmd --version }",
         )
-        self.assertFalse(report["parsed"])
-        self.assertIn(
-            "NONCANONICAL_BINDING:BridgeRepository",
-            report["unresolved_placeholders"],
-        )
-        self.assertIn(
-            "BINDING_COUNT_INVALID:BridgeRepository",
-            report["unresolved_placeholders"],
-        )
+        for expression in cases:
+            with self.subTest(expression=expression):
+                report, _ = self.run_producer(self.bound_candidate(expression))
+                self.assertFalse(report["parsed"])
+                self.assertIn(
+                    "NONCANONICAL_BINDING:BridgeRepository",
+                    report["unresolved_placeholders"],
+                )
+                self.assertIn(
+                    "BINDING_COUNT_INVALID:BridgeRepository",
+                    report["unresolved_placeholders"],
+                )
 
     def test_automatic_variable_binding_forms_are_reported(self):
         cases = (
@@ -171,6 +173,20 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
         cases = (
             "Write-Output x > C:\\victim",
             "[System.IO.File]::Delete('C:\\victim')",
+        )
+        for expression in cases:
+            with self.subTest(expression=expression):
+                report, _ = self.run_producer(self.bound_candidate(expression))
+                self.assertIn(
+                    "DYNAMIC_OR_UNKNOWN_COMMAND",
+                    report["observed_effect_families"],
+                )
+
+    def test_effectful_assignment_targets_fail_closed_as_unknown(self):
+        cases = (
+            "$env:PATH = 'C:\\attacker'",
+            "$script:HelperPath = 'C:\\attacker'",
+            "$Object = [pscustomobject]@{ Value = 0 }; $Object.Value = 1",
         )
         for expression in cases:
             with self.subTest(expression=expression):
