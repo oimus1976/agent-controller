@@ -34,6 +34,7 @@ from agent_controller.owner_machine_jit_bridge import (
     build_owner_machine_jit_bridge_plan,
     build_registration_plan_spec,
     configure_owner_machine_observation_authority,
+    issue_owner_machine_observation_challenge,
     owner_machine_observation_auth_message,
 )
 from agent_controller.private_ci_contract import PrivateCiRequest, PrivateCiTargetOs
@@ -96,12 +97,17 @@ def candidate(name):
 
 
 def authenticate_observation(observation):
+    challenge = issue_owner_machine_observation_challenge()
     tag = hmac.new(
         OBSERVATION_KEY,
-        owner_machine_observation_auth_message(observation),
+        owner_machine_observation_auth_message(observation, challenge=challenge),
         hashlib.sha256,
     ).hexdigest()
-    return authenticate_owner_machine_observation(observation, auth_tag=tag)
+    return authenticate_owner_machine_observation(
+        observation,
+        challenge=challenge,
+        auth_tag=tag,
+    )
 
 
 def authenticate_ast(spec, candidate_text, effects):
@@ -252,6 +258,27 @@ class OwnerMachineJitBridgeTests(unittest.TestCase):
         self.assertTrue(first.ready_for_live_pilot)
         self.assertEqual(second.reason_codes, ("TRUSTED_OBSERVATION_UNKNOWN_OR_CONSUMED",))
 
+    def test_observation_authentication_challenge_prevents_tag_replay(self):
+        observation = source_request()
+        challenge = issue_owner_machine_observation_challenge()
+        tag = hmac.new(
+            OBSERVATION_KEY,
+            owner_machine_observation_auth_message(observation, challenge=challenge),
+            hashlib.sha256,
+        ).hexdigest()
+        first = authenticate_owner_machine_observation(
+            observation,
+            challenge=challenge,
+            auth_tag=tag,
+        )
+        self.assertIs(type(first), AuthenticatedOwnerMachineObservation)
+        with self.assertRaisesRegex(ValueError, "challenge unknown or consumed"):
+            authenticate_owner_machine_observation(
+                observation,
+                challenge=challenge,
+                auth_tag=tag,
+            )
+
     def test_fabricated_public_fork_head_or_stale_state_is_rejected_after_authentication(self):
         cases = (
             {"repository_visibility": "public"},
@@ -269,13 +296,18 @@ class OwnerMachineJitBridgeTests(unittest.TestCase):
 
     def test_controller_owned_allowlist_rejects_authenticated_unallowlisted_identity(self):
         observation = source_request(workflow_identity="attacker.yml@v1")
+        challenge = issue_owner_machine_observation_challenge()
         tag = hmac.new(
             OBSERVATION_KEY,
-            owner_machine_observation_auth_message(observation),
+            owner_machine_observation_auth_message(observation, challenge=challenge),
             hashlib.sha256,
         ).hexdigest()
         with self.assertRaisesRegex(ValueError, "controller-owned private-CI allowlist"):
-            authenticate_owner_machine_observation(observation, auth_tag=tag)
+            authenticate_owner_machine_observation(
+                observation,
+                challenge=challenge,
+                auth_tag=tag,
+            )
 
     def test_durable_binding_mismatch_is_rejected(self):
         other_authority = DurablePrivateCiAuthority(Path(self.tempdir.name) / "other.sqlite3")
