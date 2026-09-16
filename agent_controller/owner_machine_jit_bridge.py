@@ -1,18 +1,26 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+import secrets
+import threading
 from dataclasses import dataclass
 from enum import Enum
-from typing import FrozenSet
+from typing import Optional
 
 from agent_controller.operator_step_gate import (
     AUTHORITATIVE_EVIDENCE_ROOT,
     PRIVATE_LOCAL_CI_WORKSTREAM,
+    WINDOWS_POWERSHELL_51,
     AuthenticatedAstAttestation,
     OperatorEffectClass,
     OperatorGateStatus,
     OperatorStepSpec,
-    PriorEvidenceCapability,
-    validate_operator_step,
+    PriorEvidenceRequirement,
+    _attestation_reason_codes,
+    _candidate_sha256,
+    _spec_reason_codes,
 )
 from agent_controller.private_ci_contract import (
     PrivateCiNonceAuthority,
@@ -31,6 +39,17 @@ from agent_controller.private_ci_durable_authority import (
 OWNER_MACHINE_HOST_ROLE = "private-ci-owner-machine"
 TRUSTED_BROKER_IDENTITY = "c-admin"
 TARGET_EXECUTION_IDENTITY = "ac-runner"
+PLANNING_EVIDENCE_SHA256 = "0" * 64
+REGISTRATION_OPERATION_ID = "issue213-registration-plan"
+REGISTRATION_STEP_ID = "register-runner-plan"
+REGISTRATION_TRANSCRIPT = "issue213-register-runner-plan.log"
+REGISTRATION_SUCCESS_MARKER = "ISSUE213_REGISTER_RUNNER_PLAN_PASS"
+REGISTRATION_EFFECTS = ("RUNNER_REGISTRATION",)
+CLEANUP_OPERATION_ID = "issue213-cleanup-plan"
+CLEANUP_STEP_ID = "cleanup-reset-plan"
+CLEANUP_TRANSCRIPT = "issue213-cleanup-reset-plan.log"
+CLEANUP_SUCCESS_MARKER = "ISSUE213_CLEANUP_RESET_PLAN_PASS"
+CLEANUP_EFFECTS = ("FILESYSTEM_DESTRUCTIVE_MUTATION", "RUNNER_REGISTRATION")
 
 
 class OwnerMachineBridgeStatus(str, Enum):
@@ -56,27 +75,25 @@ class OwnerMachineBridgePhasePlan:
     phase: OwnerMachineBridgePhase
     live_effects_allowed: bool
     required_identity: str
+    trusted_authority_allowed: bool
     requires_heartbeat_or_progress: bool
     requires_child_exit_code: bool
     requires_fail_fast: bool
 
 
+@dataclass(frozen=True, eq=False, slots=True)
+class AuthenticatedOwnerMachineObservation:
+    token: str
+
+
 @dataclass(frozen=True, slots=True)
 class OwnerMachineBridgeRequest:
     reservation: DurablePrivateCiReservation
-    source_request: PrivateCiRequest
-    owner_machine_host_role: str
-    trusted_broker_identity: str
-    target_execution_identity: str
-    target_authority_exposure: tuple[str, ...]
-    registration_spec: OperatorStepSpec
+    observation: AuthenticatedOwnerMachineObservation
     registration_candidate: str
     registration_ast_attestation: AuthenticatedAstAttestation
-    registration_prior_evidence: PriorEvidenceCapability
-    cleanup_spec: OperatorStepSpec
     cleanup_candidate: str
     cleanup_ast_attestation: AuthenticatedAstAttestation
-    cleanup_prior_evidence: PriorEvidenceCapability
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,80 +107,231 @@ class OwnerMachineBridgeResult:
         return self.status is OwnerMachineBridgeStatus.READY_FOR_LIVE_PILOT
 
 
+class _ObservationAuthority:
+    def __init__(
+        self,
+        *,
+        hmac_key: bytes,
+        allowed_repositories: frozenset[str],
+        allowed_workflow_identities: frozenset[str],
+    ) -> None:
+        self._hmac_key = hmac_key
+        self._allowed_repositories = allowed_repositories
+        self._allowed_workflow_identities = allowed_workflow_identities
+        self._observations: dict[str, PrivateCiRequest] = {}
+        self._lock = threading.Lock()
+
+    @property
+    def allowed_repositories(self) -> frozenset[str]:
+        return self._allowed_repositories
+
+    @property
+    def allowed_workflow_identities(self) -> frozenset[str]:
+        return self._allowed_workflow_identities
+
+    def authenticate(
+        self,
+        observation: PrivateCiRequest,
+        *,
+        auth_tag: str,
+    ) -> AuthenticatedOwnerMachineObservation:
+        _validate_private_ci_request_shape(observation)
+        if not _valid_digest(auth_tag):
+            raise ValueError("invalid owner-machine observation authentication tag")
+        expected = hmac.new(
+            self._hmac_key,
+            owner_machine_observation_auth_message(observation),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(auth_tag, expected):
+            raise ValueError("owner-machine observation authentication failed")
+        if observation.repository not in self._allowed_repositories:
+            raise ValueError("repository is not in controller-owned private-CI allowlist")
+        if observation.workflow_identity not in self._allowed_workflow_identities:
+            raise ValueError("workflow identity is not in controller-owned private-CI allowlist")
+        token = secrets.token_hex(32)
+        with self._lock:
+            self._observations[token] = observation
+        return AuthenticatedOwnerMachineObservation(token=token)
+
+    def claim(self, capability: object) -> Optional[PrivateCiRequest]:
+        if type(capability) is not AuthenticatedOwnerMachineObservation:
+            return None
+        if not _valid_digest(capability.token):
+            return None
+        with self._lock:
+            return self._observations.pop(capability.token, None)
+
+
+_ACTIVE_OBSERVATION_AUTHORITY: Optional[_ObservationAuthority] = None
+_OBSERVATION_CONFIG_LOCK = threading.Lock()
+
+
+def configure_owner_machine_observation_authority(
+    *,
+    hmac_key: bytes,
+    allowed_repositories: frozenset[str],
+    allowed_workflow_identities: frozenset[str],
+) -> None:
+    global _ACTIVE_OBSERVATION_AUTHORITY
+    if type(hmac_key) is not bytes or len(hmac_key) < 32:
+        raise ValueError("observation HMAC key must be at least 32 bytes")
+    if type(allowed_repositories) is not frozenset or not allowed_repositories:
+        raise ValueError("allowed_repositories must be a non-empty exact frozenset")
+    if type(allowed_workflow_identities) is not frozenset or not allowed_workflow_identities:
+        raise ValueError("allowed_workflow_identities must be a non-empty exact frozenset")
+    if not all(type(item) is str and bool(item.strip()) for item in allowed_repositories):
+        raise ValueError("allowed repository entries must be plain non-empty strings")
+    if not all(type(item) is str and bool(item.strip()) for item in allowed_workflow_identities):
+        raise ValueError("allowed workflow entries must be plain non-empty strings")
+    with _OBSERVATION_CONFIG_LOCK:
+        if _ACTIVE_OBSERVATION_AUTHORITY is not None:
+            raise RuntimeError("owner-machine observation authority already configured")
+        _ACTIVE_OBSERVATION_AUTHORITY = _ObservationAuthority(
+            hmac_key=hmac_key,
+            allowed_repositories=allowed_repositories,
+            allowed_workflow_identities=allowed_workflow_identities,
+        )
+
+
+def _active_observation_authority() -> Optional[_ObservationAuthority]:
+    return _ACTIVE_OBSERVATION_AUTHORITY
+
+
+def _valid_digest(value: object) -> bool:
+    return type(value) is str and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def _private_ci_request_payload(request: PrivateCiRequest) -> dict[str, object]:
+    return {
+        "repository": request.repository,
+        "repository_visibility": request.repository_visibility,
+        "pull_request_number": request.pull_request_number,
+        "pull_request_state": request.pull_request_state,
+        "pull_request_head_repository": request.pull_request_head_repository,
+        "expected_head_sha": request.expected_head_sha,
+        "observed_head_sha": request.observed_head_sha,
+        "workflow_identity": request.workflow_identity,
+        "target_os": request.target_os.value,
+        "runner_scope_repository": request.runner_scope_repository,
+        "runner_nonce": request.runner_nonce,
+        "runner_label": request.runner_label,
+        "environment_generation": request.environment_generation,
+        "residual_runner_count": request.residual_runner_count,
+        "environment_reset_proven": request.environment_reset_proven,
+    }
+
+
+def _validate_private_ci_request_shape(request: object) -> None:
+    if type(request) is not PrivateCiRequest:
+        raise ValueError("owner-machine observation must be exact PrivateCiRequest")
+    payload = _private_ci_request_payload(request)
+    for key, value in payload.items():
+        if key in {"pull_request_number", "residual_runner_count"}:
+            if type(value) is not int:
+                raise ValueError("owner-machine observation integer field type invalid")
+        elif key == "environment_reset_proven":
+            if type(value) is not bool:
+                raise ValueError("owner-machine observation bool field type invalid")
+        elif key == "target_os":
+            if type(value) is not str:
+                raise ValueError("owner-machine observation target_os invalid")
+        elif type(value) is not str:
+            raise ValueError("owner-machine observation string field type invalid")
+
+
+def owner_machine_observation_auth_message(request: PrivateCiRequest) -> bytes:
+    _validate_private_ci_request_shape(request)
+    return json.dumps(
+        _private_ci_request_payload(request),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+
+
+def authenticate_owner_machine_observation(
+    request: PrivateCiRequest,
+    *,
+    auth_tag: str,
+) -> AuthenticatedOwnerMachineObservation:
+    authority = _active_observation_authority()
+    if authority is None:
+        raise RuntimeError("owner-machine observation authority is not configured")
+    return authority.authenticate(request, auth_tag=auth_tag)
+
+
+def build_registration_plan_spec(
+    *, repository: str, pull_request_number: int, target_sha: str
+) -> OperatorStepSpec:
+    return OperatorStepSpec(
+        operation_id=REGISTRATION_OPERATION_ID,
+        step_id=REGISTRATION_STEP_ID,
+        workstream=PRIVATE_LOCAL_CI_WORKSTREAM,
+        repository=repository,
+        pull_request_number=pull_request_number,
+        target_sha=target_sha,
+        target_host_role=OWNER_MACHINE_HOST_ROLE,
+        required_identity=TRUSTED_BROKER_IDENTITY,
+        shell_runtime=WINDOWS_POWERSHELL_51,
+        effect_class=OperatorEffectClass.BOUNDED_MUTATION,
+        evidence_root=AUTHORITATIVE_EVIDENCE_ROOT,
+        transcript_filename=REGISTRATION_TRANSCRIPT,
+        expected_success_marker=REGISTRATION_SUCCESS_MARKER,
+        allowed_effect_families=REGISTRATION_EFFECTS,
+        prior_evidence_requirement=PriorEvidenceRequirement(
+            producer_operation_id="issue213-registration-preflight",
+            producer_step_id="registration-preflight",
+            evidence_sha256=PLANNING_EVIDENCE_SHA256,
+        ),
+        require_parser_attestation=True,
+        require_heartbeat_or_progress=False,
+        require_child_exit_code=False,
+        require_fail_fast=False,
+    )
+
+
+def build_cleanup_plan_spec(
+    *, repository: str, pull_request_number: int, target_sha: str
+) -> OperatorStepSpec:
+    return OperatorStepSpec(
+        operation_id=CLEANUP_OPERATION_ID,
+        step_id=CLEANUP_STEP_ID,
+        workstream=PRIVATE_LOCAL_CI_WORKSTREAM,
+        repository=repository,
+        pull_request_number=pull_request_number,
+        target_sha=target_sha,
+        target_host_role=OWNER_MACHINE_HOST_ROLE,
+        required_identity=TRUSTED_BROKER_IDENTITY,
+        shell_runtime=WINDOWS_POWERSHELL_51,
+        effect_class=OperatorEffectClass.BOUNDED_MUTATION,
+        evidence_root=AUTHORITATIVE_EVIDENCE_ROOT,
+        transcript_filename=CLEANUP_TRANSCRIPT,
+        expected_success_marker=CLEANUP_SUCCESS_MARKER,
+        allowed_effect_families=CLEANUP_EFFECTS,
+        prior_evidence_requirement=PriorEvidenceRequirement(
+            producer_operation_id="issue213-cleanup-preflight",
+            producer_step_id="cleanup-preflight",
+            evidence_sha256=PLANNING_EVIDENCE_SHA256,
+        ),
+        require_parser_attestation=True,
+        require_heartbeat_or_progress=False,
+        require_child_exit_code=False,
+        require_fail_fast=False,
+    )
+
+
 def _phases() -> tuple[OwnerMachineBridgePhasePlan, ...]:
     return (
-        OwnerMachineBridgePhasePlan(
-            OwnerMachineBridgePhase.GITHUB_PREFLIGHT,
-            False,
-            TRUSTED_BROKER_IDENTITY,
-            False,
-            False,
-            True,
-        ),
-        OwnerMachineBridgePhasePlan(
-            OwnerMachineBridgePhase.OWNER_MACHINE_PREFLIGHT,
-            False,
-            TRUSTED_BROKER_IDENTITY,
-            False,
-            False,
-            True,
-        ),
-        OwnerMachineBridgePhasePlan(
-            OwnerMachineBridgePhase.AST_ATTESTATION,
-            False,
-            TRUSTED_BROKER_IDENTITY,
-            False,
-            False,
-            True,
-        ),
-        OwnerMachineBridgePhasePlan(
-            OwnerMachineBridgePhase.OPERATOR_GATE,
-            False,
-            TRUSTED_BROKER_IDENTITY,
-            False,
-            False,
-            True,
-        ),
-        OwnerMachineBridgePhasePlan(
-            OwnerMachineBridgePhase.JIT_REGISTRATION,
-            False,
-            TRUSTED_BROKER_IDENTITY,
-            False,
-            True,
-            True,
-        ),
-        OwnerMachineBridgePhasePlan(
-            OwnerMachineBridgePhase.TARGET_ENVIRONMENT,
-            False,
-            TRUSTED_BROKER_IDENTITY,
-            False,
-            True,
-            True,
-        ),
-        OwnerMachineBridgePhasePlan(
-            OwnerMachineBridgePhase.ONE_JOB_RUNNER,
-            False,
-            TARGET_EXECUTION_IDENTITY,
-            True,
-            True,
-            True,
-        ),
-        OwnerMachineBridgePhasePlan(
-            OwnerMachineBridgePhase.CLEANUP_RESET,
-            False,
-            TRUSTED_BROKER_IDENTITY,
-            True,
-            True,
-            True,
-        ),
-        OwnerMachineBridgePhasePlan(
-            OwnerMachineBridgePhase.ZERO_RESIDUAL_READBACK,
-            False,
-            TRUSTED_BROKER_IDENTITY,
-            False,
-            False,
-            True,
-        ),
+        OwnerMachineBridgePhasePlan(OwnerMachineBridgePhase.GITHUB_PREFLIGHT, False, TRUSTED_BROKER_IDENTITY, True, False, False, True),
+        OwnerMachineBridgePhasePlan(OwnerMachineBridgePhase.OWNER_MACHINE_PREFLIGHT, False, TRUSTED_BROKER_IDENTITY, True, False, False, True),
+        OwnerMachineBridgePhasePlan(OwnerMachineBridgePhase.AST_ATTESTATION, False, TRUSTED_BROKER_IDENTITY, True, False, False, True),
+        OwnerMachineBridgePhasePlan(OwnerMachineBridgePhase.OPERATOR_GATE, False, TRUSTED_BROKER_IDENTITY, True, False, False, True),
+        OwnerMachineBridgePhasePlan(OwnerMachineBridgePhase.JIT_REGISTRATION, False, TRUSTED_BROKER_IDENTITY, True, False, False, False),
+        OwnerMachineBridgePhasePlan(OwnerMachineBridgePhase.TARGET_ENVIRONMENT, False, TRUSTED_BROKER_IDENTITY, True, False, False, False),
+        OwnerMachineBridgePhasePlan(OwnerMachineBridgePhase.ONE_JOB_RUNNER, False, TARGET_EXECUTION_IDENTITY, False, True, True, True),
+        OwnerMachineBridgePhasePlan(OwnerMachineBridgePhase.CLEANUP_RESET, False, TRUSTED_BROKER_IDENTITY, True, False, False, False),
+        OwnerMachineBridgePhasePlan(OwnerMachineBridgePhase.ZERO_RESIDUAL_READBACK, False, TRUSTED_BROKER_IDENTITY, True, False, False, True),
     )
 
 
@@ -181,177 +349,107 @@ def _source_request_matches_durable_binding(request: PrivateCiRequest, binding: 
     )
 
 
-def _spec_matches_binding(
+def _validate_planning_candidate(
     spec: OperatorStepSpec,
-    *,
-    repository: str,
-    pull_request_number: int,
-    target_sha: str,
-    host_role: str,
-    required_identity: str,
-) -> bool:
-    return (
-        type(spec) is OperatorStepSpec
-        and spec.workstream == PRIVATE_LOCAL_CI_WORKSTREAM
-        and spec.repository == repository
-        and spec.pull_request_number == pull_request_number
-        and spec.target_sha == target_sha
-        and spec.target_host_role == host_role
-        and spec.required_identity == required_identity
-        and spec.evidence_root == AUTHORITATIVE_EVIDENCE_ROOT
-        and spec.effect_class is OperatorEffectClass.BOUNDED_MUTATION
-        and spec.require_parser_attestation is True
-    )
+    candidate: str,
+    attestation: AuthenticatedAstAttestation,
+) -> tuple[OperatorGateStatus, tuple[str, ...]]:
+    spec_reasons = _spec_reason_codes(spec)
+    if spec_reasons:
+        return OperatorGateStatus.BLOCKED, spec_reasons
+    if type(candidate) is not str or not candidate.strip():
+        return OperatorGateStatus.BLOCKED, ("CANDIDATE_INVALID",)
+    return _attestation_reason_codes(spec, _candidate_sha256(candidate), attestation)
 
 
 def build_owner_machine_jit_bridge_plan(
     request: OwnerMachineBridgeRequest,
     *,
     durable_authority: DurablePrivateCiAuthority,
-    allowed_repositories: FrozenSet[str],
-    allowed_workflow_identities: FrozenSet[str],
 ) -> OwnerMachineBridgeResult:
-    """Build the final deterministic non-live plan before the first live pilot.
+    """Validate the final non-live bridge without consuming live execution authority.
 
-    Source-of-truth observations are revalidated through the existing #208
-    private-CI contract. Durable binding comes from the #210 SQLite authority.
-    Mutation candidates are authorized only through the #212 operator gate.
-
-    This function performs no GitHub, runner, account, ACL, service, task, or
-    target-code execution.
+    The trusted observation is authenticated and one-time. Repository/workflow
+    allowlists are controller-owned process configuration rather than per-call
+    inputs. Registration/cleanup specs are reconstructed from fixed bridge
+    policy. Planning checks authenticated AST/effect evidence only and does not
+    consume execution prior-evidence capabilities. No live effect occurs here.
     """
 
     phases = _phases()
-    reasons: list[str] = []
-
     if type(request) is not OwnerMachineBridgeRequest:
-        return OwnerMachineBridgeResult(
-            OwnerMachineBridgeStatus.BLOCKED,
-            ("BRIDGE_REQUEST_TYPE_INVALID",),
-            phases,
-        )
+        return OwnerMachineBridgeResult(OwnerMachineBridgeStatus.BLOCKED, ("BRIDGE_REQUEST_TYPE_INVALID",), phases)
     if type(durable_authority) is not DurablePrivateCiAuthority:
-        return OwnerMachineBridgeResult(
-            OwnerMachineBridgeStatus.BLOCKED,
-            ("DURABLE_AUTHORITY_TYPE_INVALID",),
-            phases,
-        )
-    if type(allowed_repositories) is not frozenset or type(allowed_workflow_identities) is not frozenset:
-        return OwnerMachineBridgeResult(
-            OwnerMachineBridgeStatus.BLOCKED,
-            ("TRUSTED_ALLOWLIST_TYPE_INVALID",),
-            phases,
-        )
+        return OwnerMachineBridgeResult(OwnerMachineBridgeStatus.BLOCKED, ("DURABLE_AUTHORITY_TYPE_INVALID",), phases)
+
+    observation_authority = _active_observation_authority()
+    if observation_authority is None:
+        return OwnerMachineBridgeResult(OwnerMachineBridgeStatus.UNCERTAIN, ("OBSERVATION_AUTHORITY_NOT_CONFIGURED",), phases)
+    source_request = observation_authority.claim(request.observation)
+    if source_request is None:
+        return OwnerMachineBridgeResult(OwnerMachineBridgeStatus.BLOCKED, ("TRUSTED_OBSERVATION_UNKNOWN_OR_CONSUMED",), phases)
 
     contract_result = validate_and_reserve_private_ci_request(
-        request.source_request,
-        allowed_repositories=allowed_repositories,
-        allowed_workflow_identities=allowed_workflow_identities,
+        source_request,
+        allowed_repositories=observation_authority.allowed_repositories,
+        allowed_workflow_identities=observation_authority.allowed_workflow_identities,
         nonce_authority=PrivateCiNonceAuthority(),
     )
     if contract_result.result is not PrivateCiValidationResult.ACCEPT:
-        return OwnerMachineBridgeResult(
-            OwnerMachineBridgeStatus.BLOCKED,
-            ("PRIVATE_CI_CONTRACT_REJECTED",),
-            phases,
-        )
+        return OwnerMachineBridgeResult(OwnerMachineBridgeStatus.BLOCKED, ("PRIVATE_CI_CONTRACT_REJECTED",), phases)
 
     try:
         binding = durable_authority.binding_for(request.reservation)
     except DurablePrivateCiAuthorityError:
-        return OwnerMachineBridgeResult(
-            OwnerMachineBridgeStatus.UNCERTAIN,
-            ("DURABLE_AUTHORITY_READ_FAILED",),
-            phases,
-        )
+        return OwnerMachineBridgeResult(OwnerMachineBridgeStatus.UNCERTAIN, ("DURABLE_AUTHORITY_READ_FAILED",), phases)
     if binding is None:
-        return OwnerMachineBridgeResult(
-            OwnerMachineBridgeStatus.BLOCKED,
-            ("DURABLE_RESERVATION_UNKNOWN_OR_CONSUMED",),
-            phases,
-        )
+        return OwnerMachineBridgeResult(OwnerMachineBridgeStatus.BLOCKED, ("DURABLE_RESERVATION_UNKNOWN_OR_CONSUMED",), phases)
 
-    if not _source_request_matches_durable_binding(request.source_request, binding):
+    reasons: list[str] = []
+    if not _source_request_matches_durable_binding(source_request, binding):
         reasons.append("SOURCE_REQUEST_DURABLE_BINDING_MISMATCH")
     if binding.target_os is not PrivateCiTargetOs.WINDOWS:
         reasons.append("WINDOWS_LIVE_PILOT_REQUIRED")
 
-    if request.owner_machine_host_role != OWNER_MACHINE_HOST_ROLE:
-        reasons.append("OWNER_MACHINE_HOST_ROLE_MISMATCH")
-    if request.trusted_broker_identity != TRUSTED_BROKER_IDENTITY:
-        reasons.append("TRUSTED_BROKER_IDENTITY_MISMATCH")
-    if request.target_execution_identity != TARGET_EXECUTION_IDENTITY:
-        reasons.append("TARGET_EXECUTION_IDENTITY_MISMATCH")
-    if request.trusted_broker_identity == request.target_execution_identity:
-        reasons.append("TRUSTED_AND_TARGET_IDENTITIES_MUST_DIFFER")
-    if type(request.target_authority_exposure) is not tuple:
-        reasons.append("TARGET_AUTHORITY_EXPOSURE_TYPE_INVALID")
-    elif request.target_authority_exposure:
-        reasons.append("TARGET_AUTHORITY_EXPOSURE_FORBIDDEN")
-
-    if not _spec_matches_binding(
-        request.registration_spec,
+    registration_spec = build_registration_plan_spec(
         repository=binding.repository,
         pull_request_number=binding.pull_request_number,
         target_sha=binding.expected_head_sha,
-        host_role=OWNER_MACHINE_HOST_ROLE,
-        required_identity=TRUSTED_BROKER_IDENTITY,
-    ):
-        reasons.append("REGISTRATION_SPEC_BINDING_MISMATCH")
-    if not _spec_matches_binding(
-        request.cleanup_spec,
+    )
+    cleanup_spec = build_cleanup_plan_spec(
         repository=binding.repository,
         pull_request_number=binding.pull_request_number,
         target_sha=binding.expected_head_sha,
-        host_role=OWNER_MACHINE_HOST_ROLE,
-        required_identity=TRUSTED_BROKER_IDENTITY,
-    ):
-        reasons.append("CLEANUP_SPEC_BINDING_MISMATCH")
+    )
 
     if reasons:
-        return OwnerMachineBridgeResult(
-            OwnerMachineBridgeStatus.BLOCKED,
-            tuple(reasons),
-            phases,
-        )
+        return OwnerMachineBridgeResult(OwnerMachineBridgeStatus.BLOCKED, tuple(reasons), phases)
 
-    registration_gate = validate_operator_step(
-        request.registration_spec,
+    registration_status, registration_reasons = _validate_planning_candidate(
+        registration_spec,
         request.registration_candidate,
-        ast_attestation=request.registration_ast_attestation,
-        prior_evidence_capability=request.registration_prior_evidence,
+        request.registration_ast_attestation,
     )
-    if registration_gate.status is not OperatorGateStatus.PASS_TO_OPERATOR:
+    if registration_status is not OperatorGateStatus.PASS_TO_OPERATOR:
         return OwnerMachineBridgeResult(
             OwnerMachineBridgeStatus.BLOCKED,
-            tuple(f"REGISTRATION_GATE_{reason}" for reason in registration_gate.reason_codes)
-            or ("REGISTRATION_GATE_NOT_PASS",),
+            tuple(f"REGISTRATION_GATE_{reason}" for reason in registration_reasons) or ("REGISTRATION_GATE_NOT_PASS",),
             phases,
         )
 
-    cleanup_gate = validate_operator_step(
-        request.cleanup_spec,
+    cleanup_status, cleanup_reasons = _validate_planning_candidate(
+        cleanup_spec,
         request.cleanup_candidate,
-        ast_attestation=request.cleanup_ast_attestation,
-        prior_evidence_capability=request.cleanup_prior_evidence,
+        request.cleanup_ast_attestation,
     )
-    if cleanup_gate.status is not OperatorGateStatus.PASS_TO_OPERATOR:
+    if cleanup_status is not OperatorGateStatus.PASS_TO_OPERATOR:
         return OwnerMachineBridgeResult(
             OwnerMachineBridgeStatus.BLOCKED,
-            tuple(f"CLEANUP_GATE_{reason}" for reason in cleanup_gate.reason_codes)
-            or ("CLEANUP_GATE_NOT_PASS",),
+            tuple(f"CLEANUP_GATE_{reason}" for reason in cleanup_reasons) or ("CLEANUP_GATE_NOT_PASS",),
             phases,
         )
 
     if any(phase.live_effects_allowed for phase in phases):
-        return OwnerMachineBridgeResult(
-            OwnerMachineBridgeStatus.BLOCKED,
-            ("NON_LIVE_BOUNDARY_VIOLATED",),
-            phases,
-        )
+        return OwnerMachineBridgeResult(OwnerMachineBridgeStatus.BLOCKED, ("NON_LIVE_BOUNDARY_VIOLATED",), phases)
 
-    return OwnerMachineBridgeResult(
-        OwnerMachineBridgeStatus.READY_FOR_LIVE_PILOT,
-        (),
-        phases,
-    )
+    return OwnerMachineBridgeResult(OwnerMachineBridgeStatus.READY_FOR_LIVE_PILOT, (), phases)
