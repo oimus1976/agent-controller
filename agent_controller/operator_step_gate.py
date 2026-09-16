@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -121,6 +122,7 @@ class _ControllerAuthority:
         "_ast_reports",
         "_evidence_bindings",
         "_consumed_evidence",
+        "_evidence_lock",
     )
 
     def __init__(self, *, ast_hmac_key: bytes, evidence_hmac_key: bytes) -> None:
@@ -129,6 +131,7 @@ class _ControllerAuthority:
         self._ast_reports: dict[str, PowerShellAstAttestation] = {}
         self._evidence_bindings: dict[str, _EvidenceBinding] = {}
         self._consumed_evidence: set[str] = set()
+        self._evidence_lock = threading.Lock()
 
     def authenticate_ast(
         self,
@@ -214,12 +217,6 @@ class _ControllerAuthority:
             return False, "PRIOR_EVIDENCE_CAPABILITY_TYPE_INVALID"
         if not _valid_digest(capability.token):
             return False, "PRIOR_EVIDENCE_CAPABILITY_INVALID"
-        token = capability.token
-        if token in self._consumed_evidence:
-            return False, "PRIOR_EVIDENCE_ALREADY_CONSUMED"
-        binding = self._evidence_bindings.get(token)
-        if binding is None:
-            return False, "PRIOR_EVIDENCE_UNKNOWN"
         requirement = spec.prior_evidence_requirement
         if type(requirement) is not PriorEvidenceRequirement:
             return False, "PRIOR_EVIDENCE_REQUIREMENT_INVALID"
@@ -231,13 +228,21 @@ class _ControllerAuthority:
             producer_step_id=requirement.producer_step_id,
             evidence_sha256=requirement.evidence_sha256,
         )
-        if binding != expected:
-            return False, "PRIOR_EVIDENCE_BINDING_MISMATCH"
-        self._consumed_evidence.add(token)
+        token = capability.token
+        with self._evidence_lock:
+            if token in self._consumed_evidence:
+                return False, "PRIOR_EVIDENCE_ALREADY_CONSUMED"
+            binding = self._evidence_bindings.get(token)
+            if binding is None:
+                return False, "PRIOR_EVIDENCE_UNKNOWN"
+            if binding != expected:
+                return False, "PRIOR_EVIDENCE_BINDING_MISMATCH"
+            self._consumed_evidence.add(token)
         return True, ""
 
 
 _ACTIVE_CONTROLLER_AUTHORITY: Optional[_ControllerAuthority] = None
+_AUTHORITY_CONFIG_LOCK = threading.Lock()
 
 
 def configure_controller_authority(*, ast_hmac_key: bytes, evidence_hmac_key: bytes) -> None:
@@ -248,16 +253,17 @@ def configure_controller_authority(*, ast_hmac_key: bytes, evidence_hmac_key: by
     """
 
     global _ACTIVE_CONTROLLER_AUTHORITY
-    if _ACTIVE_CONTROLLER_AUTHORITY is not None:
-        raise RuntimeError("controller authority already configured")
     if type(ast_hmac_key) is not bytes or len(ast_hmac_key) < 32:
         raise ValueError("AST HMAC key must be at least 32 bytes")
     if type(evidence_hmac_key) is not bytes or len(evidence_hmac_key) < 32:
         raise ValueError("evidence HMAC key must be at least 32 bytes")
-    _ACTIVE_CONTROLLER_AUTHORITY = _ControllerAuthority(
-        ast_hmac_key=ast_hmac_key,
-        evidence_hmac_key=evidence_hmac_key,
-    )
+    with _AUTHORITY_CONFIG_LOCK:
+        if _ACTIVE_CONTROLLER_AUTHORITY is not None:
+            raise RuntimeError("controller authority already configured")
+        _ACTIVE_CONTROLLER_AUTHORITY = _ControllerAuthority(
+            ast_hmac_key=ast_hmac_key,
+            evidence_hmac_key=evidence_hmac_key,
+        )
 
 
 def _active_authority() -> Optional[_ControllerAuthority]:
