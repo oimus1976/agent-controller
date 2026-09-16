@@ -132,6 +132,24 @@ foreach ($ParameterAst in $ParameterAsts) {
     }
 }
 
+$ForEachAsts = $Ast.FindAll({
+    param($Node)
+    $Node -is [System.Management.Automation.Language.ForEachStatementAst]
+}, $true)
+foreach ($ForEachAst in $ForEachAsts) {
+    if ($null -eq $ForEachAst.Variable) {
+        continue
+    }
+    $ForEachVariableName = $ForEachAst.Variable.VariablePath.UserPath
+    if ($BindingNames -contains $ForEachVariableName) {
+        $BindingCounts[$ForEachVariableName] = [int]$BindingCounts[$ForEachVariableName] + 1
+        $Problem = "NONCANONICAL_BINDING:$ForEachVariableName"
+        if (-not $BindingProblems.Contains($Problem)) {
+            $BindingProblems.Add($Problem)
+        }
+    }
+}
+
 foreach ($BindingName in $BindingNames) {
     if ([int]$BindingCounts[$BindingName] -ne 1) {
         $Problem = "BINDING_COUNT_INVALID:$BindingName"
@@ -230,6 +248,22 @@ foreach ($CommandAst in $CommandAsts) {
             $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
         }
     }
+}
+
+$RedirectionAsts = $Ast.FindAll({
+    param($Node)
+    $Node -is [System.Management.Automation.Language.RedirectionAst]
+}, $true)
+if ($RedirectionAsts.Count -gt 0 -and -not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+    $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+}
+
+$InvokeMemberAsts = $Ast.FindAll({
+    param($Node)
+    $Node -is [System.Management.Automation.Language.InvokeMemberExpressionAst]
+}, $true)
+if ($InvokeMemberAsts.Count -gt 0 -and -not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+    $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
 }
 
 $UnresolvedPlaceholders = New-Object System.Collections.Generic.List[string]
