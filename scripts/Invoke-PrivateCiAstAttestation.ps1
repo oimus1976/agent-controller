@@ -78,7 +78,9 @@ foreach ($AssignmentAst in $AssignmentAsts) {
         $IsPlainLeft = $AssignmentAst.Left -is [System.Management.Automation.Language.VariableExpressionAst]
         $IsTopLevel = (
             $AssignmentAst.Parent -is [System.Management.Automation.Language.StatementBlockAst] -and
-            $AssignmentAst.Parent.Parent -is [System.Management.Automation.Language.ScriptBlockAst]
+            $AssignmentAst.Parent.Parent -is [System.Management.Automation.Language.NamedBlockAst] -and
+            $AssignmentAst.Parent.Parent.Parent -is [System.Management.Automation.Language.ScriptBlockAst] -and
+            $null -eq $AssignmentAst.Parent.Parent.Parent.Parent
         )
         if (-not $IsPlainLeft -or -not $IsTopLevel) {
             $Problem = "NONCANONICAL_BINDING:$VariableName"
@@ -196,7 +198,7 @@ foreach ($CommandAst in $CommandAsts) {
     }
 
     $LowerName = $CommandName.ToLowerInvariant()
-    $LastSlash = $LowerName.LastIndexOf('\\')
+    $LastSlash = $LowerName.LastIndexOf('\')
     if ($LastSlash -ge 0) {
         $LowerName = $LowerName.Substring($LastSlash + 1)
     }
@@ -219,7 +221,7 @@ foreach ($CommandAst in $CommandAsts) {
             $ObservedEffects.Add('HTTP_API_ACCESS')
         }
     }
-    elseif ($LowerName -in @('config.cmd', '.\config.cmd')) {
+    elseif ($LowerName -in @('config.cmd')) {
         if (-not $ObservedEffects.Contains('RUNNER_REGISTRATION')) {
             $ObservedEffects.Add('RUNNER_REGISTRATION')
         }
