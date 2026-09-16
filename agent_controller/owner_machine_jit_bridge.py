@@ -5,6 +5,7 @@ import hmac
 import json
 import secrets
 import threading
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -50,6 +51,7 @@ CLEANUP_STEP_ID = "cleanup-reset-plan"
 CLEANUP_TRANSCRIPT = "issue213-cleanup-reset-plan.log"
 CLEANUP_SUCCESS_MARKER = "ISSUE213_CLEANUP_RESET_PLAN_PASS"
 CLEANUP_EFFECTS = ("FILESYSTEM_DESTRUCTIVE_MUTATION", "RUNNER_REGISTRATION")
+OBSERVATION_CHALLENGE_TTL_SECONDS = 30.0
 
 
 class OwnerMachineBridgeStatus(str, Enum):
@@ -119,7 +121,7 @@ class _ObservationAuthority:
         self._allowed_repositories = allowed_repositories
         self._allowed_workflow_identities = allowed_workflow_identities
         self._observations: dict[str, PrivateCiRequest] = {}
-        self._challenges: set[str] = set()
+        self._challenges: dict[str, float] = {}
         self._lock = threading.Lock()
 
     @property
@@ -132,8 +134,9 @@ class _ObservationAuthority:
 
     def issue_challenge(self) -> str:
         challenge = secrets.token_hex(32)
+        issued_at = time.monotonic()
         with self._lock:
-            self._challenges.add(challenge)
+            self._challenges[challenge] = issued_at
         return challenge
 
     def authenticate(
@@ -159,10 +162,14 @@ class _ObservationAuthority:
             raise ValueError("repository is not in controller-owned private-CI allowlist")
         if observation.workflow_identity not in self._allowed_workflow_identities:
             raise ValueError("workflow identity is not in controller-owned private-CI allowlist")
+        now = time.monotonic()
         with self._lock:
-            if challenge not in self._challenges:
+            issued_at = self._challenges.pop(challenge, None)
+            if issued_at is None:
                 raise ValueError("owner-machine observation challenge unknown or consumed")
-            self._challenges.remove(challenge)
+            age_seconds = now - issued_at
+            if age_seconds < 0 or age_seconds > OBSERVATION_CHALLENGE_TTL_SECONDS:
+                raise ValueError("owner-machine observation challenge expired")
             token = secrets.token_hex(32)
             self._observations[token] = observation
         return AuthenticatedOwnerMachineObservation(token=token)
@@ -398,12 +405,12 @@ def build_owner_machine_jit_bridge_plan(
 ) -> OwnerMachineBridgeResult:
     """Validate the final non-live bridge without consuming live execution authority.
 
-    The trusted observation is authenticated with a controller-issued one-time
-    challenge and then represented by a one-time opaque capability. Repository
-    and workflow allowlists are controller-owned configuration. Registration
-    and cleanup specs are reconstructed from fixed bridge policy. Planning
-    checks authenticated AST/effect evidence only and does not consume live
-    execution prior-evidence capabilities. No live effect occurs here.
+    The trusted observation is authenticated with a controller-issued one-time,
+    short-lived challenge and then represented by a one-time opaque capability.
+    Repository and workflow allowlists are controller-owned configuration.
+    Registration and cleanup specs are reconstructed from fixed bridge policy.
+    Planning checks authenticated AST/effect evidence only and does not consume
+    live execution prior-evidence capabilities. No live effect occurs here.
     """
 
     phases = _phases()
