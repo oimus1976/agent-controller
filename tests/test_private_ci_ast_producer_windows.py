@@ -97,6 +97,22 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
                     )
                 )
 
+    def test_foreach_rebinding_of_canonical_field_fails_closed(self):
+        report, _ = self.run_producer(
+            self.bound_candidate(
+                "foreach ($BridgeRepository in 'attacker/repo') { config.cmd --version }"
+            )
+        )
+        self.assertFalse(report["parsed"])
+        self.assertIn(
+            "NONCANONICAL_BINDING:BridgeRepository",
+            report["unresolved_placeholders"],
+        )
+        self.assertIn(
+            "BINDING_COUNT_INVALID:BridgeRepository",
+            report["unresolved_placeholders"],
+        )
+
     def test_automatic_variable_binding_forms_are_reported(self):
         cases = (
             ("$global:args = 1", "args"),
@@ -150,6 +166,19 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
             self.bound_candidate("Remove-Item -LiteralPath C:\\target")
         )
         self.assertIn("FILESYSTEM_DESTRUCTIVE_MUTATION", report["observed_effect_families"])
+
+    def test_redirection_and_member_invocation_fail_closed_as_unknown_effects(self):
+        cases = (
+            "Write-Output x > C:\\victim",
+            "[System.IO.File]::Delete('C:\\victim')",
+        )
+        for expression in cases:
+            with self.subTest(expression=expression):
+                report, _ = self.run_producer(self.bound_candidate(expression))
+                self.assertIn(
+                    "DYNAMIC_OR_UNKNOWN_COMMAND",
+                    report["observed_effect_families"],
+                )
 
     def test_execution_control_proofs_remain_false_even_with_matching_comments_or_code(self):
         candidate = self.bound_candidate(
