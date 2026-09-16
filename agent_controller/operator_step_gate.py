@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import secrets
 from dataclasses import dataclass
@@ -31,11 +32,6 @@ class PriorEvidenceRequirement:
     producer_operation_id: str
     producer_step_id: str
     evidence_sha256: str
-
-
-@dataclass(frozen=True, slots=True)
-class PriorEvidenceCapability:
-    token: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +84,16 @@ class PowerShellAstAttestation:
 
 
 @dataclass(frozen=True, slots=True)
+class AuthenticatedAstAttestation:
+    token: str
+
+
+@dataclass(frozen=True, slots=True)
+class PriorEvidenceCapability:
+    token: str
+
+
+@dataclass(frozen=True, slots=True)
 class OperatorGateResult:
     status: OperatorGateStatus
     reason_codes: tuple[str, ...]
@@ -108,20 +114,50 @@ class _EvidenceBinding:
     evidence_sha256: str
 
 
-class OperatorEvidenceAuthority:
-    """Process-local one-time prior-evidence authority for this non-live slice.
+class _ControllerAuthority:
+    __slots__ = (
+        "_ast_hmac_key",
+        "_evidence_hmac_key",
+        "_ast_reports",
+        "_evidence_bindings",
+        "_consumed_evidence",
+    )
 
-    A later owner-machine bridge may replace this with durable authority. Callers
-    only receive opaque capabilities; trusted bindings remain authority-owned.
-    """
+    def __init__(self, *, ast_hmac_key: bytes, evidence_hmac_key: bytes) -> None:
+        self._ast_hmac_key = ast_hmac_key
+        self._evidence_hmac_key = evidence_hmac_key
+        self._ast_reports: dict[str, PowerShellAstAttestation] = {}
+        self._evidence_bindings: dict[str, _EvidenceBinding] = {}
+        self._consumed_evidence: set[str] = set()
 
-    __slots__ = ("_bindings", "_consumed")
+    def authenticate_ast(
+        self,
+        report: PowerShellAstAttestation,
+        *,
+        auth_tag: str,
+    ) -> AuthenticatedAstAttestation:
+        _validate_attestation_shape(report)
+        if not _valid_digest(auth_tag):
+            raise ValueError("invalid AST authentication tag")
+        expected_tag = hmac.new(
+            self._ast_hmac_key,
+            ast_attestation_auth_message(report),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(auth_tag, expected_tag):
+            raise ValueError("AST authentication failed")
+        token = secrets.token_hex(32)
+        self._ast_reports[token] = report
+        return AuthenticatedAstAttestation(token=token)
 
-    def __init__(self) -> None:
-        self._bindings: dict[str, _EvidenceBinding] = {}
-        self._consumed: set[str] = set()
+    def ast_report_for(self, capability: object) -> Optional[PowerShellAstAttestation]:
+        if type(capability) is not AuthenticatedAstAttestation:
+            return None
+        if not _valid_digest(capability.token):
+            return None
+        return self._ast_reports.get(capability.token)
 
-    def issue(
+    def authenticate_evidence(
         self,
         *,
         repository: str,
@@ -129,23 +165,36 @@ class OperatorEvidenceAuthority:
         target_sha: str,
         producer_operation_id: str,
         producer_step_id: str,
-        evidence_sha256: str,
+        evidence_bytes: bytes,
+        auth_tag: str,
     ) -> PriorEvidenceCapability:
-        values = (
-            repository,
-            target_sha,
-            producer_operation_id,
-            producer_step_id,
-            evidence_sha256,
-        )
+        values = (repository, target_sha, producer_operation_id, producer_step_id)
         if not all(_valid_nonempty_string(value) for value in values):
             raise ValueError("invalid evidence binding")
         if type(pull_request_number) is not int or pull_request_number <= 0:
             raise ValueError("invalid evidence PR number")
-        if not _valid_sha(target_sha) or not _valid_digest(evidence_sha256):
-            raise ValueError("invalid evidence digest binding")
+        if not _valid_sha(target_sha):
+            raise ValueError("invalid evidence target SHA")
+        if type(evidence_bytes) is not bytes:
+            raise ValueError("evidence bytes must be exact bytes")
+        if not _valid_digest(auth_tag):
+            raise ValueError("invalid evidence authentication tag")
+
+        evidence_sha256 = hashlib.sha256(evidence_bytes).hexdigest()
+        message = prior_evidence_auth_message(
+            repository=repository,
+            pull_request_number=pull_request_number,
+            target_sha=target_sha,
+            producer_operation_id=producer_operation_id,
+            producer_step_id=producer_step_id,
+            evidence_sha256=evidence_sha256,
+        )
+        expected_tag = hmac.new(self._evidence_hmac_key, message, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(auth_tag, expected_tag):
+            raise ValueError("evidence authentication failed")
+
         token = secrets.token_hex(32)
-        self._bindings[token] = _EvidenceBinding(
+        self._evidence_bindings[token] = _EvidenceBinding(
             repository=repository,
             pull_request_number=pull_request_number,
             target_sha=target_sha,
@@ -155,7 +204,7 @@ class OperatorEvidenceAuthority:
         )
         return PriorEvidenceCapability(token=token)
 
-    def claim(
+    def claim_evidence(
         self,
         capability: object,
         *,
@@ -163,12 +212,12 @@ class OperatorEvidenceAuthority:
     ) -> tuple[bool, str]:
         if type(capability) is not PriorEvidenceCapability:
             return False, "PRIOR_EVIDENCE_CAPABILITY_TYPE_INVALID"
-        if type(capability.token) is not str or not _valid_digest(capability.token):
+        if not _valid_digest(capability.token):
             return False, "PRIOR_EVIDENCE_CAPABILITY_INVALID"
         token = capability.token
-        if token in self._consumed:
+        if token in self._consumed_evidence:
             return False, "PRIOR_EVIDENCE_ALREADY_CONSUMED"
-        binding = self._bindings.get(token)
+        binding = self._evidence_bindings.get(token)
         if binding is None:
             return False, "PRIOR_EVIDENCE_UNKNOWN"
         requirement = spec.prior_evidence_requirement
@@ -184,8 +233,70 @@ class OperatorEvidenceAuthority:
         )
         if binding != expected:
             return False, "PRIOR_EVIDENCE_BINDING_MISMATCH"
-        self._consumed.add(token)
+        self._consumed_evidence.add(token)
         return True, ""
+
+
+_ACTIVE_CONTROLLER_AUTHORITY: Optional[_ControllerAuthority] = None
+
+
+def configure_controller_authority(*, ast_hmac_key: bytes, evidence_hmac_key: bytes) -> None:
+    """Configure the trusted controller authority exactly once per process.
+
+    Keys come from trusted controller bootstrap, never candidate text or target
+    repository code. The validator does not accept caller-supplied authorities.
+    """
+
+    global _ACTIVE_CONTROLLER_AUTHORITY
+    if _ACTIVE_CONTROLLER_AUTHORITY is not None:
+        raise RuntimeError("controller authority already configured")
+    if type(ast_hmac_key) is not bytes or len(ast_hmac_key) < 32:
+        raise ValueError("AST HMAC key must be at least 32 bytes")
+    if type(evidence_hmac_key) is not bytes or len(evidence_hmac_key) < 32:
+        raise ValueError("evidence HMAC key must be at least 32 bytes")
+    _ACTIVE_CONTROLLER_AUTHORITY = _ControllerAuthority(
+        ast_hmac_key=ast_hmac_key,
+        evidence_hmac_key=evidence_hmac_key,
+    )
+
+
+def _active_authority() -> Optional[_ControllerAuthority]:
+    return _ACTIVE_CONTROLLER_AUTHORITY
+
+
+def authenticate_ast_attestation(
+    report: PowerShellAstAttestation,
+    *,
+    auth_tag: str,
+) -> AuthenticatedAstAttestation:
+    authority = _active_authority()
+    if authority is None:
+        raise RuntimeError("controller authority is not configured")
+    return authority.authenticate_ast(report, auth_tag=auth_tag)
+
+
+def authenticate_prior_evidence(
+    *,
+    repository: str,
+    pull_request_number: int,
+    target_sha: str,
+    producer_operation_id: str,
+    producer_step_id: str,
+    evidence_bytes: bytes,
+    auth_tag: str,
+) -> PriorEvidenceCapability:
+    authority = _active_authority()
+    if authority is None:
+        raise RuntimeError("controller authority is not configured")
+    return authority.authenticate_evidence(
+        repository=repository,
+        pull_request_number=pull_request_number,
+        target_sha=target_sha,
+        producer_operation_id=producer_operation_id,
+        producer_step_id=producer_step_id,
+        evidence_bytes=evidence_bytes,
+        auth_tag=auth_tag,
+    )
 
 
 def _candidate_sha256(candidate: str) -> str:
@@ -213,6 +324,10 @@ def _valid_filename(value: object) -> bool:
 
 def _valid_plain_string_tuple(value: object) -> bool:
     return type(value) is tuple and all(_valid_nonempty_string(item) for item in value)
+
+
+def _canonical_bytes(payload: dict[str, object]) -> bytes:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
 
 def _spec_payload(spec: OperatorStepSpec) -> dict[str, object]:
@@ -248,8 +363,102 @@ def _spec_payload(spec: OperatorStepSpec) -> dict[str, object]:
 
 
 def operator_step_spec_sha256(spec: OperatorStepSpec) -> str:
-    payload = json.dumps(_spec_payload(spec), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return hashlib.sha256(_canonical_bytes(_spec_payload(spec))).hexdigest()
+
+
+def _attestation_payload(report: PowerShellAstAttestation) -> dict[str, object]:
+    return {
+        "runtime": report.runtime,
+        "parser": report.parser,
+        "candidate_sha256": report.candidate_sha256,
+        "spec_sha256": report.spec_sha256,
+        "parsed": report.parsed,
+        "error_count": report.error_count,
+        "repository": report.repository,
+        "pull_request_number": report.pull_request_number,
+        "target_sha": report.target_sha,
+        "target_host_role": report.target_host_role,
+        "required_identity": report.required_identity,
+        "evidence_root": report.evidence_root,
+        "transcript_filename": report.transcript_filename,
+        "expected_success_marker": report.expected_success_marker,
+        "observed_effect_families": list(report.observed_effect_families),
+        "automatic_variable_collisions": list(report.automatic_variable_collisions),
+        "unresolved_placeholders": list(report.unresolved_placeholders),
+        "forbidden_convenience_paths": list(report.forbidden_convenience_paths),
+        "self_declared_gate_authority": report.self_declared_gate_authority,
+        "heartbeat_or_progress_proven": report.heartbeat_or_progress_proven,
+        "child_exit_code_proven": report.child_exit_code_proven,
+        "fail_fast_proven": report.fail_fast_proven,
+    }
+
+
+def ast_attestation_auth_message(report: PowerShellAstAttestation) -> bytes:
+    _validate_attestation_shape(report)
+    return _canonical_bytes(_attestation_payload(report))
+
+
+def prior_evidence_auth_message(
+    *,
+    repository: str,
+    pull_request_number: int,
+    target_sha: str,
+    producer_operation_id: str,
+    producer_step_id: str,
+    evidence_sha256: str,
+) -> bytes:
+    return _canonical_bytes(
+        {
+            "repository": repository,
+            "pull_request_number": pull_request_number,
+            "target_sha": target_sha,
+            "producer_operation_id": producer_operation_id,
+            "producer_step_id": producer_step_id,
+            "evidence_sha256": evidence_sha256,
+        }
+    )
+
+
+def _validate_attestation_shape(report: object) -> None:
+    if type(report) is not PowerShellAstAttestation:
+        raise ValueError("invalid AST attestation type")
+    string_fields = (
+        report.runtime,
+        report.parser,
+        report.candidate_sha256,
+        report.spec_sha256,
+        report.repository,
+        report.target_sha,
+        report.target_host_role,
+        report.required_identity,
+        report.evidence_root,
+        report.transcript_filename,
+        report.expected_success_marker,
+    )
+    if not all(type(value) is str for value in string_fields):
+        raise ValueError("invalid AST attestation string field")
+    if not _valid_digest(report.candidate_sha256) or not _valid_digest(report.spec_sha256):
+        raise ValueError("invalid AST attestation digest")
+    if type(report.pull_request_number) is not int or report.pull_request_number <= 0:
+        raise ValueError("invalid AST attestation PR")
+    if type(report.parsed) is not bool or type(report.error_count) is not int:
+        raise ValueError("invalid AST parse field")
+    tuple_fields = (
+        report.observed_effect_families,
+        report.automatic_variable_collisions,
+        report.unresolved_placeholders,
+        report.forbidden_convenience_paths,
+    )
+    if not all(_valid_plain_string_tuple(value) for value in tuple_fields):
+        raise ValueError("invalid AST attestation collection")
+    bool_fields = (
+        report.self_declared_gate_authority,
+        report.heartbeat_or_progress_proven,
+        report.child_exit_code_proven,
+        report.fail_fast_proven,
+    )
+    if not all(type(value) is bool for value in bool_fields):
+        raise ValueError("invalid AST attestation bool")
 
 
 def _spec_reason_codes(spec: object) -> tuple[str, ...]:
@@ -277,7 +486,7 @@ def _spec_reason_codes(spec: object) -> tuple[str, ...]:
         reasons.append("TARGET_SHA_INVALID")
     if type(spec.effect_class) is not OperatorEffectClass:
         reasons.append("EFFECT_CLASS_INVALID")
-    if spec.evidence_root != AUTHORITATIVE_EVIDENCE_ROOT:
+    if type(spec.evidence_root) is not str or spec.evidence_root != AUTHORITATIVE_EVIDENCE_ROOT:
         reasons.append("EVIDENCE_ROOT_INVALID")
     if not _valid_filename(spec.transcript_filename):
         reasons.append("TRANSCRIPT_FILENAME_INVALID")
@@ -316,80 +525,46 @@ def _spec_reason_codes(spec: object) -> tuple[str, ...]:
 def _attestation_reason_codes(
     spec: OperatorStepSpec,
     candidate_sha256: str,
-    attestation: object,
+    capability: object,
 ) -> tuple[OperatorGateStatus, tuple[str, ...]]:
     if not spec.require_parser_attestation:
         return OperatorGateStatus.UNCERTAIN, ("AST_ATTESTATION_REQUIRED_BY_POLICY",)
-    if attestation is None:
+    authority = _active_authority()
+    if authority is None:
+        return OperatorGateStatus.UNCERTAIN, ("CONTROLLER_AUTHORITY_NOT_CONFIGURED",)
+    if capability is None:
         return OperatorGateStatus.UNCERTAIN, ("AST_ATTESTATION_MISSING",)
-    if type(attestation) is not PowerShellAstAttestation:
-        return OperatorGateStatus.BLOCKED, ("AST_ATTESTATION_TYPE_INVALID",)
-
-    string_fields = (
-        attestation.runtime,
-        attestation.parser,
-        attestation.candidate_sha256,
-        attestation.spec_sha256,
-        attestation.repository,
-        attestation.target_sha,
-        attestation.target_host_role,
-        attestation.required_identity,
-        attestation.evidence_root,
-        attestation.transcript_filename,
-        attestation.expected_success_marker,
-    )
-    if not all(type(value) is str for value in string_fields):
-        return OperatorGateStatus.BLOCKED, ("AST_ATTESTATION_FIELD_TYPE_INVALID",)
-    if not _valid_digest(attestation.candidate_sha256) or not _valid_digest(attestation.spec_sha256):
-        return OperatorGateStatus.BLOCKED, ("AST_ATTESTATION_DIGEST_INVALID",)
-    if type(attestation.pull_request_number) is not int or attestation.pull_request_number <= 0:
-        return OperatorGateStatus.BLOCKED, ("AST_ATTESTATION_PR_INVALID",)
-    if type(attestation.parsed) is not bool or type(attestation.error_count) is not int:
-        return OperatorGateStatus.BLOCKED, ("AST_ATTESTATION_PARSE_FIELD_INVALID",)
-    tuple_fields = (
-        attestation.observed_effect_families,
-        attestation.automatic_variable_collisions,
-        attestation.unresolved_placeholders,
-        attestation.forbidden_convenience_paths,
-    )
-    if not all(_valid_plain_string_tuple(value) for value in tuple_fields):
-        return OperatorGateStatus.BLOCKED, ("AST_ATTESTATION_COLLECTION_INVALID",)
-    bool_fields = (
-        attestation.self_declared_gate_authority,
-        attestation.heartbeat_or_progress_proven,
-        attestation.child_exit_code_proven,
-        attestation.fail_fast_proven,
-    )
-    if not all(type(value) is bool for value in bool_fields):
-        return OperatorGateStatus.BLOCKED, ("AST_ATTESTATION_BOOL_INVALID",)
+    report = authority.ast_report_for(capability)
+    if report is None:
+        return OperatorGateStatus.BLOCKED, ("AST_ATTESTATION_UNAUTHENTICATED",)
 
     reasons: list[str] = []
-    if attestation.runtime != WINDOWS_POWERSHELL_51:
+    if report.runtime != WINDOWS_POWERSHELL_51:
         reasons.append("AST_RUNTIME_MISMATCH")
-    if attestation.parser != WINDOWS_POWERSHELL_PARSER:
+    if report.parser != WINDOWS_POWERSHELL_PARSER:
         reasons.append("AST_PARSER_IDENTITY_MISMATCH")
-    if attestation.candidate_sha256 != candidate_sha256:
+    if report.candidate_sha256 != candidate_sha256:
         reasons.append("AST_CANDIDATE_HASH_MISMATCH")
-    if attestation.spec_sha256 != operator_step_spec_sha256(spec):
+    if report.spec_sha256 != operator_step_spec_sha256(spec):
         reasons.append("AST_SPEC_HASH_MISMATCH")
-    if not attestation.parsed or attestation.error_count != 0:
+    if not report.parsed or report.error_count != 0:
         reasons.append("AST_PARSE_FAILED")
 
     bindings = (
-        ("AST_REPOSITORY_BINDING_MISMATCH", attestation.repository, spec.repository),
-        ("AST_PR_BINDING_MISMATCH", attestation.pull_request_number, spec.pull_request_number),
-        ("AST_SHA_BINDING_MISMATCH", attestation.target_sha, spec.target_sha),
-        ("AST_HOST_ROLE_BINDING_MISMATCH", attestation.target_host_role, spec.target_host_role),
-        ("AST_IDENTITY_BINDING_MISMATCH", attestation.required_identity, spec.required_identity),
-        ("AST_EVIDENCE_ROOT_BINDING_MISMATCH", attestation.evidence_root, spec.evidence_root),
-        ("AST_TRANSCRIPT_BINDING_MISMATCH", attestation.transcript_filename, spec.transcript_filename),
-        ("AST_SUCCESS_MARKER_BINDING_MISMATCH", attestation.expected_success_marker, spec.expected_success_marker),
+        ("AST_REPOSITORY_BINDING_MISMATCH", report.repository, spec.repository),
+        ("AST_PR_BINDING_MISMATCH", report.pull_request_number, spec.pull_request_number),
+        ("AST_SHA_BINDING_MISMATCH", report.target_sha, spec.target_sha),
+        ("AST_HOST_ROLE_BINDING_MISMATCH", report.target_host_role, spec.target_host_role),
+        ("AST_IDENTITY_BINDING_MISMATCH", report.required_identity, spec.required_identity),
+        ("AST_EVIDENCE_ROOT_BINDING_MISMATCH", report.evidence_root, spec.evidence_root),
+        ("AST_TRANSCRIPT_BINDING_MISMATCH", report.transcript_filename, spec.transcript_filename),
+        ("AST_SUCCESS_MARKER_BINDING_MISMATCH", report.expected_success_marker, spec.expected_success_marker),
     )
     for reason, observed, expected in bindings:
         if observed != expected:
             reasons.append(reason)
 
-    observed_effects = set(attestation.observed_effect_families)
+    observed_effects = set(report.observed_effect_families)
     allowed_effects = set(spec.allowed_effect_families)
     if spec.effect_class is OperatorEffectClass.READ_ONLY:
         if observed_effects:
@@ -397,19 +572,19 @@ def _attestation_reason_codes(
     elif not observed_effects.issubset(allowed_effects):
         reasons.append("AST_EFFECT_NOT_ALLOWED")
 
-    if attestation.automatic_variable_collisions:
+    if report.automatic_variable_collisions:
         reasons.append("AST_AUTOMATIC_VARIABLE_COLLISION")
-    if attestation.unresolved_placeholders:
+    if report.unresolved_placeholders:
         reasons.append("AST_UNRESOLVED_PLACEHOLDER")
-    if attestation.forbidden_convenience_paths:
+    if report.forbidden_convenience_paths:
         reasons.append("AST_FORBIDDEN_CONVENIENCE_PATH")
-    if attestation.self_declared_gate_authority:
+    if report.self_declared_gate_authority:
         reasons.append("AST_SELF_DECLARED_GATE_AUTHORITY")
-    if spec.require_heartbeat_or_progress and not attestation.heartbeat_or_progress_proven:
+    if spec.require_heartbeat_or_progress and not report.heartbeat_or_progress_proven:
         reasons.append("AST_PROGRESS_PROOF_MISSING")
-    if spec.require_child_exit_code and not attestation.child_exit_code_proven:
+    if spec.require_child_exit_code and not report.child_exit_code_proven:
         reasons.append("AST_CHILD_EXIT_CODE_PROOF_MISSING")
-    if spec.require_fail_fast and not attestation.fail_fast_proven:
+    if spec.require_fail_fast and not report.fail_fast_proven:
         reasons.append("AST_FAIL_FAST_PROOF_MISSING")
 
     if reasons:
@@ -421,16 +596,15 @@ def validate_operator_step(
     spec: OperatorStepSpec,
     candidate: str,
     *,
-    ast_attestation: Optional[PowerShellAstAttestation] = None,
-    prior_evidence_authority: Optional[OperatorEvidenceAuthority] = None,
+    ast_attestation: Optional[AuthenticatedAstAttestation] = None,
     prior_evidence_capability: Optional[PriorEvidenceCapability] = None,
 ) -> OperatorGateResult:
-    """Validate an operator candidate without executing it.
+    """Validate a candidate without executing it or parsing PowerShell portably.
 
-    The portable validator never claims to parse PowerShell. PASS requires a
-    trusted Windows PowerShell AST/effect attestation bound to the exact
-    candidate and frozen spec. Mutating steps additionally consume a one-time
-    authority-owned prior-evidence capability.
+    PASS requires an AST/effect report authenticated by the configured trusted
+    controller authority. Mutation steps also consume authenticated evidence
+    produced for the required prior operation. No caller-supplied authority is
+    accepted by this API.
     """
 
     candidate_sha256 = _candidate_sha256(candidate if type(candidate) is str else "")
@@ -446,13 +620,14 @@ def validate_operator_step(
         return OperatorGateResult(status, reasons, candidate_sha256)
 
     if spec.effect_class is not OperatorEffectClass.READ_ONLY:
-        if type(prior_evidence_authority) is not OperatorEvidenceAuthority:
+        authority = _active_authority()
+        if authority is None:
             return OperatorGateResult(
-                OperatorGateStatus.BLOCKED,
-                ("PRIOR_EVIDENCE_AUTHORITY_INVALID",),
+                OperatorGateStatus.UNCERTAIN,
+                ("CONTROLLER_AUTHORITY_NOT_CONFIGURED",),
                 candidate_sha256,
             )
-        claimed, reason = prior_evidence_authority.claim(prior_evidence_capability, spec=spec)
+        claimed, reason = authority.claim_evidence(prior_evidence_capability, spec=spec)
         if not claimed:
             return OperatorGateResult(OperatorGateStatus.BLOCKED, (reason,), candidate_sha256)
 
