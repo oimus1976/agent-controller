@@ -18,7 +18,8 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
     def run_producer(self, candidate_text):
         with tempfile.TemporaryDirectory() as temporary_directory:
             candidate_path = Path(temporary_directory) / "candidate.ps1"
-            candidate_path.write_text(candidate_text, encoding="utf-8")
+            candidate_bytes = candidate_text.encode("utf-8")
+            candidate_path.write_bytes(candidate_bytes)
             completed = subprocess.run(
                 [
                     "powershell.exe",
@@ -38,7 +39,7 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            return json.loads(completed.stdout.strip()), candidate_text
+            return json.loads(completed.stdout.strip()), candidate_bytes
 
     @staticmethod
     def bound_candidate(extra=""):
@@ -56,7 +57,7 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
 
     def test_real_powershell_parser_extracts_structured_bindings_without_execution(self):
         candidate = self.bound_candidate("throw 'must not execute'")
-        report, original = self.run_producer(candidate)
+        report, candidate_bytes = self.run_producer(candidate)
         self.assertTrue(report["parsed"])
         self.assertEqual(report["error_count"], 0)
         self.assertEqual(report["runtime"], "Windows PowerShell 5.1")
@@ -68,7 +69,7 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
         self.assertEqual(report["spec_sha256"], self.spec_sha)
         self.assertEqual(
             report["candidate_sha256"],
-            hashlib.sha256(original.encode("utf-8")).hexdigest(),
+            hashlib.sha256(candidate_bytes).hexdigest(),
         )
 
     def test_parser_error_is_reported_fail_closed(self):
