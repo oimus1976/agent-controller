@@ -48,6 +48,10 @@ $BindingProblems = New-Object System.Collections.Generic.List[string]
 foreach ($BindingName in $BindingNames) {
     $BindingCounts[$BindingName] = 0
 }
+$RootStatements = @()
+if ($null -ne $Ast.EndBlock) {
+    $RootStatements = @($Ast.EndBlock.Statements)
+}
 
 $AssignmentAsts = $Ast.FindAll({
     param($Node)
@@ -76,12 +80,7 @@ foreach ($AssignmentAst in $AssignmentAsts) {
 
         $BindingCounts[$VariableName] = [int]$BindingCounts[$VariableName] + 1
         $IsPlainLeft = $AssignmentAst.Left -is [System.Management.Automation.Language.VariableExpressionAst]
-        $IsTopLevel = (
-            $AssignmentAst.Parent -is [System.Management.Automation.Language.StatementBlockAst] -and
-            $AssignmentAst.Parent.Parent -is [System.Management.Automation.Language.NamedBlockAst] -and
-            $AssignmentAst.Parent.Parent.Parent -is [System.Management.Automation.Language.ScriptBlockAst] -and
-            $null -eq $AssignmentAst.Parent.Parent.Parent.Parent
-        )
+        $IsTopLevel = $RootStatements -contains $AssignmentAst
         if (-not $IsPlainLeft -or -not $IsTopLevel) {
             $Problem = "NONCANONICAL_BINDING:$VariableName"
             if (-not $BindingProblems.Contains($Problem)) {
