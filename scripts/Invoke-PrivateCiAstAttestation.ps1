@@ -43,6 +43,11 @@ $BindingNames = @(
     'BridgeExpectedSuccessMarker'
 )
 $Bindings = @{}
+$BindingCounts = @{}
+$BindingProblems = New-Object System.Collections.Generic.List[string]
+foreach ($BindingName in $BindingNames) {
+    $BindingCounts[$BindingName] = 0
+}
 
 $AssignmentAsts = $Ast.FindAll({
     param($Node)
@@ -50,31 +55,94 @@ $AssignmentAsts = $Ast.FindAll({
 }, $true)
 
 foreach ($AssignmentAst in $AssignmentAsts) {
-    if ($AssignmentAst.Left -isnot [System.Management.Automation.Language.VariableExpressionAst]) {
-        continue
+    $LeftVariables = New-Object System.Collections.Generic.List[object]
+    if ($AssignmentAst.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
+        $LeftVariables.Add($AssignmentAst.Left)
     }
-    $VariableName = $AssignmentAst.Left.VariablePath.UserPath
-    if ($BindingNames -notcontains $VariableName) {
-        continue
-    }
-
-    $RightAst = $AssignmentAst.Right
-    $Value = $null
-    if ($RightAst -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
-        $Value = $RightAst.Value
-    }
-    elseif ($RightAst -is [System.Management.Automation.Language.ConstantExpressionAst]) {
-        $Value = $RightAst.Value
-    }
-    elseif (
-        $RightAst -is [System.Management.Automation.Language.CommandExpressionAst] -and
-        $RightAst.Expression -is [System.Management.Automation.Language.ConstantExpressionAst]
-    ) {
-        $Value = $RightAst.Expression.Value
+    else {
+        foreach ($VariableNode in $AssignmentAst.Left.FindAll({
+            param($Node)
+            $Node -is [System.Management.Automation.Language.VariableExpressionAst]
+        }, $true)) {
+            $LeftVariables.Add($VariableNode)
+        }
     }
 
-    if ($null -ne $Value) {
-        $Bindings[$VariableName] = $Value
+    foreach ($VariableNode in $LeftVariables) {
+        $VariableName = $VariableNode.VariablePath.UserPath
+        if ($BindingNames -notcontains $VariableName) {
+            continue
+        }
+
+        $BindingCounts[$VariableName] = [int]$BindingCounts[$VariableName] + 1
+        $IsPlainLeft = $AssignmentAst.Left -is [System.Management.Automation.Language.VariableExpressionAst]
+        $IsTopLevel = (
+            $AssignmentAst.Parent -is [System.Management.Automation.Language.StatementBlockAst] -and
+            $AssignmentAst.Parent.Parent -is [System.Management.Automation.Language.ScriptBlockAst]
+        )
+        if (-not $IsPlainLeft -or -not $IsTopLevel) {
+            $Problem = "NONCANONICAL_BINDING:$VariableName"
+            if (-not $BindingProblems.Contains($Problem)) {
+                $BindingProblems.Add($Problem)
+            }
+            continue
+        }
+
+        $RightAst = $AssignmentAst.Right
+        $Value = $null
+        if ($RightAst -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
+            $Value = $RightAst.Value
+        }
+        elseif ($RightAst -is [System.Management.Automation.Language.ConstantExpressionAst]) {
+            $Value = $RightAst.Value
+        }
+        elseif (
+            $RightAst -is [System.Management.Automation.Language.CommandExpressionAst] -and
+            $RightAst.Expression -is [System.Management.Automation.Language.ConstantExpressionAst]
+        ) {
+            $Value = $RightAst.Expression.Value
+        }
+
+        if ($null -eq $Value) {
+            $Problem = "NONLITERAL_BINDING:$VariableName"
+            if (-not $BindingProblems.Contains($Problem)) {
+                $BindingProblems.Add($Problem)
+            }
+            continue
+        }
+        if (-not $Bindings.ContainsKey($VariableName)) {
+            $Bindings[$VariableName] = $Value
+        }
+    }
+}
+
+$ParameterAsts = $Ast.FindAll({
+    param($Node)
+    $Node -is [System.Management.Automation.Language.ParameterAst]
+}, $true)
+foreach ($ParameterAst in $ParameterAsts) {
+    $ParameterName = $ParameterAst.Name.VariablePath.UserPath
+    if ($BindingNames -contains $ParameterName) {
+        $BindingCounts[$ParameterName] = [int]$BindingCounts[$ParameterName] + 1
+        $Problem = "NONCANONICAL_BINDING:$ParameterName"
+        if (-not $BindingProblems.Contains($Problem)) {
+            $BindingProblems.Add($Problem)
+        }
+    }
+}
+
+foreach ($BindingName in $BindingNames) {
+    if ([int]$BindingCounts[$BindingName] -ne 1) {
+        $Problem = "BINDING_COUNT_INVALID:$BindingName"
+        if (-not $BindingProblems.Contains($Problem)) {
+            $BindingProblems.Add($Problem)
+        }
+    }
+    if (-not $Bindings.ContainsKey($BindingName)) {
+        $Problem = "BINDING_VALUE_MISSING:$BindingName"
+        if (-not $BindingProblems.Contains($Problem)) {
+            $BindingProblems.Add($Problem)
+        }
     }
 }
 
@@ -84,7 +152,6 @@ $AutomaticVariableNames = @(
     'myinvocation', 'psboundparameters', 'pwd', 'host', 'executioncontext'
 )
 $AutomaticVariableCollisions = New-Object System.Collections.Generic.List[string]
-
 $VariableAsts = $Ast.FindAll({
     param($Node)
     $Node -is [System.Management.Automation.Language.VariableExpressionAst]
@@ -100,17 +167,10 @@ foreach ($VariableAst in $VariableAsts) {
         $NormalizedName = $NormalizedName.Substring($ColonIndex + 1)
     }
     $NormalizedName = $NormalizedName.Trim('{}').ToLowerInvariant()
-    if ($AutomaticVariableNames -notcontains $NormalizedName) {
-        continue
-    }
-
-    $Parent = $VariableAst.Parent
-    $IsCollision = (
-        $Parent -is [System.Management.Automation.Language.AssignmentStatementAst] -or
-        $Parent -is [System.Management.Automation.Language.ParameterAst]
-    )
-    if ($IsCollision -and -not $AutomaticVariableCollisions.Contains($NormalizedName)) {
-        $AutomaticVariableCollisions.Add($NormalizedName)
+    if ($AutomaticVariableNames -contains $NormalizedName) {
+        if (-not $AutomaticVariableCollisions.Contains($NormalizedName)) {
+            $AutomaticVariableCollisions.Add($NormalizedName)
+        }
     }
 }
 
@@ -120,6 +180,13 @@ $CommandAsts = $Ast.FindAll({
     $Node -is [System.Management.Automation.Language.CommandAst]
 }, $true)
 foreach ($CommandAst in $CommandAsts) {
+    if ($CommandAst.InvocationOperator -ne [System.Management.Automation.Language.TokenKind]::Unknown) {
+        if (-not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+            $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+        }
+        continue
+    }
+
     $CommandName = $CommandAst.GetCommandName()
     if ([string]::IsNullOrWhiteSpace($CommandName)) {
         if (-not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
@@ -129,7 +196,15 @@ foreach ($CommandAst in $CommandAsts) {
     }
 
     $LowerName = $CommandName.ToLowerInvariant()
-    if ($LowerName -in @('remove-item', 'del', 'erase', 'rd', 'rmdir')) {
+    $LastSlash = $LowerName.LastIndexOf('\\')
+    if ($LastSlash -ge 0) {
+        $LowerName = $LowerName.Substring($LastSlash + 1)
+    }
+
+    if ($LowerName -in @('write-output', 'write-host')) {
+        continue
+    }
+    elseif ($LowerName -in @('remove-item', 'del', 'erase', 'rd', 'rmdir')) {
         if (-not $ObservedEffects.Contains('FILESYSTEM_DESTRUCTIVE_MUTATION')) {
             $ObservedEffects.Add('FILESYSTEM_DESTRUCTIVE_MUTATION')
         }
@@ -149,9 +224,17 @@ foreach ($CommandAst in $CommandAsts) {
             $ObservedEffects.Add('RUNNER_REGISTRATION')
         }
     }
+    else {
+        if (-not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+            $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+        }
+    }
 }
 
 $UnresolvedPlaceholders = New-Object System.Collections.Generic.List[string]
+foreach ($BindingProblem in $BindingProblems) {
+    $UnresolvedPlaceholders.Add($BindingProblem)
+}
 $CandidateText = [System.IO.File]::ReadAllText($CandidatePath)
 foreach ($Pattern in @('<[^>]+>', '\{\{[^}]+\}\}', '__[A-Z0-9_]+__')) {
     foreach ($Match in [System.Text.RegularExpressions.Regex]::Matches($CandidateText, $Pattern)) {
@@ -168,13 +251,14 @@ foreach ($ForbiddenText in @('%TEMP%', '$env:TEMP', '$pwd', 'Get-Location')) {
     }
 }
 
+$StructuralErrorCount = [int]$ParseErrors.Count + [int]$BindingProblems.Count
 $Result = [ordered]@{
     runtime = 'Windows PowerShell 5.1'
     parser = 'System.Management.Automation.Language.Parser'
     candidate_sha256 = $CandidateSha256
     spec_sha256 = $SpecSha256
-    parsed = ($ParseErrors.Count -eq 0)
-    error_count = [int]$ParseErrors.Count
+    parsed = ($StructuralErrorCount -eq 0)
+    error_count = $StructuralErrorCount
     repository = [string]$Bindings['BridgeRepository']
     pull_request_number = [int]$Bindings['BridgePullRequestNumber']
     target_sha = [string]$Bindings['BridgeTargetSha']
@@ -189,11 +273,8 @@ $Result = [ordered]@{
     forbidden_convenience_paths = @($ForbiddenConveniencePaths)
     self_declared_gate_authority = ($CandidateText -match '(?im)^\s*(Write-Output|Write-Host)\s+["'']?PASS_TO_OPERATOR["'']?\s*$')
     heartbeat_or_progress_proven = $false
-    child_exit_code_proven = ($CandidateText -match '\$ChildExitCode\s*=\s*\$LASTEXITCODE')
-    fail_fast_proven = (
-        $CandidateText -match '\$ErrorActionPreference\s*=\s*["'']Stop["'']' -and
-        $CandidateText -match 'if\s*\(\s*\$ChildExitCode\s*-ne\s*0\s*\)\s*\{[^}]*throw'
-    )
+    child_exit_code_proven = $false
+    fail_fast_proven = $false
 }
 
 $Result | ConvertTo-Json -Depth 5 -Compress
