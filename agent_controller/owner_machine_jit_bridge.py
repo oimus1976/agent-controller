@@ -119,6 +119,7 @@ class _ObservationAuthority:
         self._allowed_repositories = allowed_repositories
         self._allowed_workflow_identities = allowed_workflow_identities
         self._observations: dict[str, PrivateCiRequest] = {}
+        self._challenges: set[str] = set()
         self._lock = threading.Lock()
 
     @property
@@ -129,18 +130,27 @@ class _ObservationAuthority:
     def allowed_workflow_identities(self) -> frozenset[str]:
         return self._allowed_workflow_identities
 
+    def issue_challenge(self) -> str:
+        challenge = secrets.token_hex(32)
+        with self._lock:
+            self._challenges.add(challenge)
+        return challenge
+
     def authenticate(
         self,
         observation: PrivateCiRequest,
         *,
+        challenge: str,
         auth_tag: str,
     ) -> AuthenticatedOwnerMachineObservation:
         _validate_private_ci_request_shape(observation)
+        if not _valid_digest(challenge):
+            raise ValueError("invalid owner-machine observation challenge")
         if not _valid_digest(auth_tag):
             raise ValueError("invalid owner-machine observation authentication tag")
         expected = hmac.new(
             self._hmac_key,
-            owner_machine_observation_auth_message(observation),
+            owner_machine_observation_auth_message(observation, challenge=challenge),
             hashlib.sha256,
         ).hexdigest()
         if not hmac.compare_digest(auth_tag, expected):
@@ -149,8 +159,11 @@ class _ObservationAuthority:
             raise ValueError("repository is not in controller-owned private-CI allowlist")
         if observation.workflow_identity not in self._allowed_workflow_identities:
             raise ValueError("workflow identity is not in controller-owned private-CI allowlist")
-        token = secrets.token_hex(32)
         with self._lock:
+            if challenge not in self._challenges:
+                raise ValueError("owner-machine observation challenge unknown or consumed")
+            self._challenges.remove(challenge)
+            token = secrets.token_hex(32)
             self._observations[token] = observation
         return AuthenticatedOwnerMachineObservation(token=token)
 
@@ -198,6 +211,13 @@ def _active_observation_authority() -> Optional[_ObservationAuthority]:
     return _ACTIVE_OBSERVATION_AUTHORITY
 
 
+def issue_owner_machine_observation_challenge() -> str:
+    authority = _active_observation_authority()
+    if authority is None:
+        raise RuntimeError("owner-machine observation authority is not configured")
+    return authority.issue_challenge()
+
+
 def _valid_digest(value: object) -> bool:
     return type(value) is str and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
@@ -240,10 +260,18 @@ def _validate_private_ci_request_shape(request: object) -> None:
             raise ValueError("owner-machine observation string field type invalid")
 
 
-def owner_machine_observation_auth_message(request: PrivateCiRequest) -> bytes:
+def owner_machine_observation_auth_message(
+    request: PrivateCiRequest,
+    *,
+    challenge: str,
+) -> bytes:
     _validate_private_ci_request_shape(request)
+    if not _valid_digest(challenge):
+        raise ValueError("invalid owner-machine observation challenge")
+    payload = _private_ci_request_payload(request)
+    payload["authority_challenge"] = challenge
     return json.dumps(
-        _private_ci_request_payload(request),
+        payload,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
@@ -253,12 +281,13 @@ def owner_machine_observation_auth_message(request: PrivateCiRequest) -> bytes:
 def authenticate_owner_machine_observation(
     request: PrivateCiRequest,
     *,
+    challenge: str,
     auth_tag: str,
 ) -> AuthenticatedOwnerMachineObservation:
     authority = _active_observation_authority()
     if authority is None:
         raise RuntimeError("owner-machine observation authority is not configured")
-    return authority.authenticate(request, auth_tag=auth_tag)
+    return authority.authenticate(request, challenge=challenge, auth_tag=auth_tag)
 
 
 def build_registration_plan_spec(
@@ -369,11 +398,12 @@ def build_owner_machine_jit_bridge_plan(
 ) -> OwnerMachineBridgeResult:
     """Validate the final non-live bridge without consuming live execution authority.
 
-    The trusted observation is authenticated and one-time. Repository/workflow
-    allowlists are controller-owned process configuration rather than per-call
-    inputs. Registration/cleanup specs are reconstructed from fixed bridge
-    policy. Planning checks authenticated AST/effect evidence only and does not
-    consume execution prior-evidence capabilities. No live effect occurs here.
+    The trusted observation is authenticated with a controller-issued one-time
+    challenge and then represented by a one-time opaque capability. Repository
+    and workflow allowlists are controller-owned configuration. Registration
+    and cleanup specs are reconstructed from fixed bridge policy. Planning
+    checks authenticated AST/effect evidence only and does not consume live
+    execution prior-evidence capabilities. No live effect occurs here.
     """
 
     phases = _phases()
