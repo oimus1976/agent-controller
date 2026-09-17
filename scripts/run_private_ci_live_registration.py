@@ -186,19 +186,32 @@ $Principal = New-Object -TypeName Security.Principal.WindowsPrincipal -ArgumentL
         raise RuntimeError("live apply must run non-elevated after separate UAC approval")
 
 
+_ATOMIC_MUTATING_FILE_SYSTEM_RIGHTS = (
+    "WriteData",  # Also CreateFiles for directories (the same .NET bit).
+    "AppendData",  # Also CreateDirectories for directories (the same .NET bit).
+    "WriteAttributes",
+    "WriteExtendedAttributes",
+    "Delete",
+    "DeleteSubdirectoriesAndFiles",
+    "ChangePermissions",
+    "TakeOwnership",
+)
+
+
 def _approval_acl_state(path: Path) -> object:
     quoted_path = str(path).replace("'", "''")
+    mutation_mask = " -bor\n    ".join(
+        f"[Security.AccessControl.FileSystemRights]::{right}"
+        for right in _ATOMIC_MUTATING_FILE_SYSTEM_RIGHTS
+    )
     script = rf"""
 $Acl = Get-Acl -LiteralPath '{quoted_path}'
 $OwnerAccount = New-Object -TypeName Security.Principal.NTAccount -ArgumentList $Acl.Owner
 $OwnerSid = $OwnerAccount.Translate([Security.Principal.SecurityIdentifier]).Value
+# Use only atomic mutation bits. Composite aliases such as Write, Modify, and
+# FullControl overlap ordinary read/execute access and must not be used here.
 $MutationMask = [int](
-    [Security.AccessControl.FileSystemRights]::Write -bor
-    [Security.AccessControl.FileSystemRights]::Modify -bor
-    [Security.AccessControl.FileSystemRights]::FullControl -bor
-    [Security.AccessControl.FileSystemRights]::Delete -bor
-    [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-    [Security.AccessControl.FileSystemRights]::TakeOwnership
+    {mutation_mask}
 )
 $Rules = @($Acl.Access | ForEach-Object {{
     $Sid = $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value

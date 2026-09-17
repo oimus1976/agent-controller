@@ -32,6 +32,10 @@ $SystemSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
 $AdministratorsSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
 $UsersSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')
 $TrustedMutatingSids = @($SystemSid.Value, $AdministratorsSid.Value)
+# Use only atomic mutation bits. WriteData/CreateFiles and
+# AppendData/CreateDirectories are aliases for the same two .NET bits. Do not
+# add composite Write, Modify, or FullControl values: they overlap ordinary
+# ReadAndExecute access and would classify the intended Users ACE as mutating.
 $MutationMask = (
     [Security.AccessControl.FileSystemRights]::WriteData -bor
     [Security.AccessControl.FileSystemRights]::AppendData -bor
@@ -40,9 +44,7 @@ $MutationMask = (
     [Security.AccessControl.FileSystemRights]::Delete -bor
     [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
     [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-    [Security.AccessControl.FileSystemRights]::TakeOwnership -bor
-    [Security.AccessControl.FileSystemRights]::Modify -bor
-    [Security.AccessControl.FileSystemRights]::FullControl
+    [Security.AccessControl.FileSystemRights]::TakeOwnership
 )
 
 function Assert-NotReparsePoint {
