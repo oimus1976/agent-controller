@@ -25,6 +25,18 @@ def completed(command, *, returncode=0, stdout="", stderr=""):
     return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr=stderr)
 
 
+def safe_local_probe():
+    return json.dumps(
+        {
+            "target_identity_enabled": True,
+            "target_identity_admin": False,
+            "runner_process_count": 0,
+            "runner_service_count": 0,
+            "runner_task_count": 0,
+        }
+    )
+
+
 def make_runner_zip_bytes(*, traversal=False):
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w") as archive:
@@ -55,6 +67,8 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
                 calls.append((command, kwargs))
                 if command == ("whoami.exe",):
                     return completed(command, stdout="WOBBUFFET\\c-admin\n")
+                if command[0] == "powershell.exe":
+                    return completed(command, stdout=safe_local_probe())
                 if command[0:2] == ("gh.exe", "api"):
                     return completed(command, stdout=json.dumps({"runners": []}))
                 raise AssertionError(command)
@@ -90,6 +104,8 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             def command_runner(*command, **kwargs):
                 if command == ("whoami.exe",):
                     return completed(command, stdout="WOBBUFFET\\c-admin\n")
+                if command[0] == "powershell.exe":
+                    return completed(command, stdout=safe_local_probe())
                 if command[0:2] == ("gh.exe", "api"):
                     return completed(
                         command,
