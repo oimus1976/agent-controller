@@ -69,7 +69,9 @@ class MutationTimeLocalPreflightTests(unittest.TestCase):
                 }
                 return Completed(stdout=json.dumps(payload))
             if command[0:2] == ("gh.exe", "api"):
-                return Completed(stdout=json.dumps({"runners": []}))
+                return Completed(
+                    stdout=json.dumps({"total_count": 0, "runners": []})
+                )
             raise AssertionError(command)
 
         runtime = WindowsEphemeralRegistrationRuntime(
@@ -141,16 +143,20 @@ class MutationTimeLocalPreflightTests(unittest.TestCase):
                     endpoints.append(endpoint)
                     if "page=2" in endpoint:
                         payload = {
+                            "total_count": 101,
                             "runners": [
                                 runner(
                                     101,
                                     name=binding.runner_name,
                                     labels=(binding.runner_label,),
                                 )
-                            ]
+                            ],
                         }
                     else:
-                        payload = {"runners": [runner(index) for index in range(1, 101)]}
+                        payload = {
+                            "total_count": 101,
+                            "runners": [runner(index) for index in range(1, 101)],
+                        }
                     return Completed(stdout=json.dumps(payload))
                 raise AssertionError(command)
 
