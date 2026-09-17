@@ -42,6 +42,7 @@ from agent_controller.private_ci_phase0_evidence import (
     Phase0Evidence,
     validate_phase0_evidence_bytes,
 )
+from agent_controller.private_ci_runner_readback import read_all_runner_items
 
 PHASE0_FILENAME = "issue216-phase0-canonical.json"
 CANDIDATE_FILENAME = "issue217-live-registration-candidate.ps1"
@@ -124,11 +125,35 @@ def _require_repo_matches_phase0(evidence: Phase0Evidence) -> None:
         raise RuntimeError("controller GitHub main drift")
 
 
+def _require_exact_phase0_host(evidence: Phase0Evidence) -> None:
+    host = _completed("hostname.exe")
+    if host.returncode != 0:
+        raise RuntimeError("host readback failed")
+    if host.stdout.strip().casefold() != evidence.host.casefold():
+        raise RuntimeError("Phase 0 host mismatch")
+
+    identity = _completed("whoami.exe")
+    if identity.returncode != 0:
+        raise RuntimeError("broker identity readback failed")
+    if identity.stdout.strip().casefold() != evidence.broker_identity.casefold():
+        raise RuntimeError("Phase 0 broker identity mismatch")
+
+
 def _gh_json(*arguments: str) -> object:
     completed = _completed("gh.exe", "api", *arguments)
     if completed.returncode != 0:
         raise RuntimeError("GitHub readback failed")
     return json.loads(completed.stdout)
+
+
+def _github_runner_items(repository: str) -> tuple[dict[str, object], ...]:
+    base = f"repos/{repository}/actions/runners?per_page=100"
+
+    def fetch_page(page: int) -> object:
+        endpoint = base if page == 1 else f"{base}&page={page}"
+        return _gh_json(endpoint)
+
+    return read_all_runner_items(fetch_page)
 
 
 def _require_frozen_target_still_exact(evidence: Phase0Evidence) -> None:
@@ -159,12 +184,9 @@ def _require_frozen_target_still_exact(evidence: Phase0Evidence) -> None:
     if branch["commit"].get("sha") != evidence.workflow_sha:
         raise RuntimeError("trusted workflow SHA drift")
 
-    runners = _gh_json(f"repos/{evidence.repository}/actions/runners?per_page=100")
-    if type(runners) is not dict or type(runners.get("runners")) is not list:
-        raise RuntimeError("runner readback invalid")
     matching = []
-    for runner in runners["runners"]:
-        if type(runner) is not dict or type(runner.get("labels")) is not list:
+    for runner in _github_runner_items(evidence.repository):
+        if type(runner.get("labels")) is not list:
             raise RuntimeError("runner readback item invalid")
         labels = {
             item.get("name")
@@ -367,6 +389,7 @@ def command_apply(expected_plan_sha256: str) -> int:
     reasons = validate_frozen_plan(plan, phase0_evidence_bytes=phase0_bytes)
     if reasons:
         raise RuntimeError("live plan drift: " + ",".join(reasons))
+    _require_exact_phase0_host(evidence)
     _require_repo_matches_phase0(evidence)
     _require_frozen_target_still_exact(evidence)
     _require_live_outputs_absent(actual_plan_sha)
