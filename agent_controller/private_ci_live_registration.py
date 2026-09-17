@@ -403,14 +403,32 @@ def execute_live_registration(
             None,
         )
     if execution.exit_code != 0:
+        reasons = ["REGISTRATION_CHILD_EXIT_NONZERO"]
+        observed_runner_id: Optional[int] = None
+        try:
+            failure_runners = read_runners(binding.repository)
+        except Exception:
+            reasons.append("RUNNER_READBACK_UNCERTAIN_AFTER_CHILD_FAILURE")
+        else:
+            failure_runner, failure_readback_reasons = _eligible_runner_readback(
+                binding,
+                failure_runners,
+            )
+            if failure_runner is not None and not failure_readback_reasons:
+                observed_runner_id = failure_runner.runner_id
+                reasons.append("REGISTRATION_MUTATION_OBSERVED_AFTER_CHILD_FAILURE")
+            elif failure_runners and failure_readback_reasons:
+                reasons.append("RUNNER_READBACK_UNCERTAIN_AFTER_CHILD_FAILURE")
+        if not handoff_cleared:
+            reasons.append("REGISTRATION_TOKEN_HANDOFF_NOT_CLEARED")
         return LiveRegistrationResult(
             LiveRegistrationStatus.FAILED,
-            ("REGISTRATION_CHILD_EXIT_NONZERO",),
+            tuple(reasons),
             gate.candidate_sha256,
             execution.exit_code,
             stdout,
             stderr,
-            None,
+            observed_runner_id,
         )
     if not handoff_cleared:
         return LiveRegistrationResult(
