@@ -99,9 +99,7 @@ def phase0_reason_codes(evidence: object) -> tuple[str, ...]:
     expected = {
         "schema": PHASE0_EVIDENCE_SCHEMA,
         "status": "PHASE0_PASS",
-        "controller_main_sha": EXPECTED_CONTROLLER_MAIN,
         "controller_tree": EXPECTED_CONTROLLER_TREE,
-        "controller_tree_head_sha": EXPECTED_CONTROLLER_MAIN,
         "controller_tree_clean": True,
         "host": EXPECTED_HOST,
         "broker_identity": EXPECTED_BROKER_IDENTITY,
@@ -132,6 +130,14 @@ def phase0_reason_codes(evidence: object) -> tuple[str, ...]:
     for field, required in expected.items():
         if getattr(evidence, field) != required:
             reasons.append(f"PHASE0_{field.upper()}_MISMATCH")
+    if not (
+        type(evidence.controller_main_sha) is str
+        and len(evidence.controller_main_sha) == 40
+        and all(character in "0123456789abcdef" for character in evidence.controller_main_sha)
+    ):
+        reasons.append("PHASE0_CONTROLLER_MAIN_SHA_INVALID")
+    elif evidence.controller_tree_head_sha != evidence.controller_main_sha:
+        reasons.append("PHASE0_CONTROLLER_TREE_HEAD_SHA_MISMATCH")
     if type(evidence.collected_at) is not str or not evidence.collected_at.strip():
         reasons.append("PHASE0_COLLECTED_AT_INVALID")
     if not (
