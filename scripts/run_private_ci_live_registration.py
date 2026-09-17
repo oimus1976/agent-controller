@@ -48,7 +48,7 @@ CANDIDATE_FILENAME = "issue217-live-registration-candidate.ps1"
 PLAN_FILENAME = "issue217-live-registration-plan.json"
 RESULT_FILENAME = "issue217-live-registration-result.json"
 TRANSCRIPT_FILENAME = "issue217-live-registration.log"
-HUMAN_AUTHORIZATION_LITERAL = "issue216-first-live-registration"
+HUMAN_AUTHORIZATION_METHOD = "interactive-exact-plan-sha256-confirmation"
 CONSUMED_SCHEMA = "agent-controller.private-ci-live-registration-consumed.v1"
 
 TUPLE_FIELDS = (
@@ -281,6 +281,28 @@ def _require_live_outputs_absent(plan_sha: str) -> None:
             raise RuntimeError(f"live registration output already exists: {path.name}")
 
 
+def _require_interactive_human_authorization(
+    expected_plan_sha256: str,
+    *,
+    stdin=None,
+    stdout=None,
+) -> None:
+    input_stream = sys.stdin if stdin is None else stdin
+    output_stream = sys.stdout if stdout is None else stdout
+    if not input_stream.isatty() or not output_stream.isatty():
+        raise RuntimeError("human authorization requires an interactive controlling terminal")
+    output_stream.write("\n#216 LIVE REGISTRATION HUMAN AUTHORIZATION\n")
+    output_stream.write("Review the exact plan SHA-256 below before authorizing:\n")
+    output_stream.write(expected_plan_sha256 + "\n")
+    output_stream.write("To authorize this exact plan, type the exact plan SHA-256 and press Enter:\n> ")
+    output_stream.flush()
+    confirmation = input_stream.readline()
+    if confirmation == "":
+        raise RuntimeError("human authorization confirmation unavailable")
+    if confirmation.rstrip("\r\n") != expected_plan_sha256:
+        raise RuntimeError("human authorization confirmation mismatch")
+
+
 def command_plan() -> int:
     phase0_bytes = _phase0_path().read_bytes()
     evidence = validate_phase0_evidence_bytes(phase0_bytes)
@@ -322,9 +344,7 @@ def command_plan() -> int:
     return 0
 
 
-def command_apply(expected_plan_sha256: str, human_authorization: str) -> int:
-    if human_authorization != HUMAN_AUTHORIZATION_LITERAL:
-        raise RuntimeError("explicit #216 human authorization literal missing")
+def command_apply(expected_plan_sha256: str) -> int:
     if (
         len(expected_plan_sha256) != 64
         or any(character not in "0123456789abcdef" for character in expected_plan_sha256)
@@ -336,6 +356,8 @@ def command_apply(expected_plan_sha256: str, human_authorization: str) -> int:
     if actual_plan_sha != expected_plan_sha256:
         raise RuntimeError("human-authorized plan SHA-256 mismatch")
     plan = parse_plan_bytes(plan_raw)
+
+    _require_interactive_human_authorization(actual_plan_sha)
 
     phase0_bytes = _phase0_path().read_bytes()
     evidence = validate_phase0_evidence_bytes(phase0_bytes)
@@ -384,7 +406,7 @@ def command_apply(expected_plan_sha256: str, human_authorization: str) -> int:
     )
     payload["started_at"] = started_at
     payload["ended_at"] = ended_at
-    payload["human_authorization"] = HUMAN_AUTHORIZATION_LITERAL
+    payload["human_authorization"] = HUMAN_AUTHORIZATION_METHOD
     payload["registration_token_recorded"] = False
     result_bytes = canonical_json_bytes(payload)
     _write_exclusive(_result_path(), result_bytes)
@@ -399,6 +421,7 @@ def command_apply(expected_plan_sha256: str, human_authorization: str) -> int:
         f"reason_codes={','.join(result.reason_codes)}\n"
         f"child_exit_code={result.child_exit_code}\n"
         f"runner_id={result.runner_id}\n"
+        f"human_authorization={HUMAN_AUTHORIZATION_METHOD}\n"
         "registration_token_recorded=false\n"
         "--- child stdout (redacted) ---\n"
         f"{result.stdout}\n"
@@ -423,17 +446,13 @@ def main() -> int:
     subparsers.add_parser("plan")
     apply_parser = subparsers.add_parser("apply")
     apply_parser.add_argument("--expected-plan-sha256", required=True)
-    apply_parser.add_argument("--human-authorization", required=True)
     options = parser.parse_args()
 
     try:
         if options.command == "plan":
             return command_plan()
         if options.command == "apply":
-            return command_apply(
-                options.expected_plan_sha256,
-                options.human_authorization,
-            )
+            return command_apply(options.expected_plan_sha256)
         raise RuntimeError("unsupported command")
     except Exception as error:
         print(f"BLOCKED: {error}", file=sys.stderr)
