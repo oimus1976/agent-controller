@@ -13,10 +13,7 @@ RUNNER_PAGE_SIZE = 100
 MAX_RUNNER_PAGES = 1000
 
 
-def read_all_runner_items(fetch_page: RunnerPageFetcher) -> tuple[dict[str, object], ...]:
-    if not callable(fetch_page):
-        raise ValueError("runner page fetcher invalid")
-
+def _read_runner_sweep(fetch_page: RunnerPageFetcher) -> tuple[dict[str, object], ...]:
     items: list[dict[str, object]] = []
     seen_ids: set[int] = set()
     expected_total: int | None = None
@@ -48,17 +45,17 @@ def read_all_runner_items(fetch_page: RunnerPageFetcher) -> tuple[dict[str, obje
             if runner_id in seen_ids:
                 raise RuntimeError("GitHub runner pagination duplicate id")
 
-            if raw.get("name") == FROZEN_RUNNER_NAME:
-                labels = raw.get("labels")
-                if type(labels) is not list:
-                    raise RuntimeError("GitHub runner labels shape invalid")
-                label_names = {
-                    item.get("name")
-                    for item in labels
-                    if type(item) is dict and type(item.get("name")) is str
-                }
-                if FROZEN_RUNNER_LABEL not in label_names:
-                    raise RuntimeError("stale eligible runner name/label collision")
+            name = raw.get("name")
+            labels = raw.get("labels")
+            if type(name) is not str or type(labels) is not list:
+                raise RuntimeError("GitHub runner identity shape invalid")
+            label_names = {
+                item.get("name")
+                for item in labels
+                if type(item) is dict and type(item.get("name")) is str
+            }
+            if name == FROZEN_RUNNER_NAME and FROZEN_RUNNER_LABEL not in label_names:
+                raise RuntimeError("stale eligible runner name/label collision")
 
             seen_ids.add(runner_id)
             items.append(raw)
@@ -73,3 +70,35 @@ def read_all_runner_items(fetch_page: RunnerPageFetcher) -> tuple[dict[str, obje
         page += 1
 
     raise RuntimeError("GitHub runner pagination exceeded safety bound")
+
+
+def _runner_set_fingerprint(
+    items: tuple[dict[str, object], ...],
+) -> tuple[tuple[int, str, tuple[str, ...]], ...]:
+    fingerprint: list[tuple[int, str, tuple[str, ...]]] = []
+    for raw in items:
+        runner_id = raw.get("id")
+        name = raw.get("name")
+        labels = raw.get("labels")
+        if type(runner_id) is not int or type(name) is not str or type(labels) is not list:
+            raise RuntimeError("GitHub runner stable-set shape invalid")
+        label_names = tuple(
+            sorted(
+                item["name"]
+                for item in labels
+                if type(item) is dict and type(item.get("name")) is str
+            )
+        )
+        fingerprint.append((runner_id, name, label_names))
+    return tuple(sorted(fingerprint))
+
+
+def read_all_runner_items(fetch_page: RunnerPageFetcher) -> tuple[dict[str, object], ...]:
+    if not callable(fetch_page):
+        raise ValueError("runner page fetcher invalid")
+
+    first = _read_runner_sweep(fetch_page)
+    second = _read_runner_sweep(fetch_page)
+    if _runner_set_fingerprint(first) != _runner_set_fingerprint(second):
+        raise RuntimeError("GitHub runner set changed across sweeps")
+    return second
