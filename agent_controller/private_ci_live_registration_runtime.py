@@ -338,7 +338,7 @@ $RunnerTasks = @(
                 for item in labels
                 if type(item) is dict and type(item.get("name")) is str
             )
-            if self.binding.runner_label in label_names:
+            if self.binding.runner_label in label_names or raw.get("name") == self.binding.runner_name:
                 count += 1
         return count
 
