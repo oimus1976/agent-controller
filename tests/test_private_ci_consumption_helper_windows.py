@@ -43,7 +43,24 @@ class PrivateCiConsumptionHelperWindowsTests(unittest.TestCase):
         self.assertIsNone(re.search(r"(?im)^\s*\$\{args\}\s*=", source))
         self.assertIn("CreateNew", source)
         self.assertIn("SetAccessRuleProtection($true, $false)", source)
+        self.assertIn("DeleteSubdirectoriesAndFiles", source)
         self.assertIn("private-ci-authority", source)
+
+    def test_consumption_helper_rejects_reparse_paths_before_protected_writes(self):
+        source = self.helper.read_text(encoding="utf-8")
+        self.assertIn("function Assert-NotReparsePoint", source)
+        self.assertIn("[IO.FileAttributes]::ReparsePoint", source)
+        self.assertIn("Assert-NotReparsePoint -LiteralPath $RequiredPath", source)
+        self.assertIn("Assert-NotReparsePoint -LiteralPath $Parent", source)
+        self.assertIn("Assert-NotReparsePoint -LiteralPath $MarkerPath", source)
+
+        authority_function = source.split("function New-ProtectedAuthorityDirectory", 1)[1].split(
+            "$Principal =", 1
+        )[0]
+        self.assertLess(
+            authority_function.index("Assert-NotReparsePoint -LiteralPath $LiteralPath"),
+            authority_function.index("Test-ProtectedAcl -LiteralPath $LiteralPath"),
+        )
 
 
 if __name__ == "__main__":
