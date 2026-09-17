@@ -15,6 +15,31 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-18 — Mutation-time live-registration harness（Issue #217 / Draft PR #218）
+
+関連: Issue #217, Draft PR #218, Issue #216, ADR #90
+
+### Added / changed
+
+- first #216 private-CI pilot向けに、exact canonical planへ結び付いたelevated human approval artifactと、administrator-protectedなone-time consumption markerを導入。
+- live mutation境界でexact host / broker / frozen targetを再検証し、非injectableなfrozen-target revalidationをrunner準備前とregistration token取得直前の双方で実施。
+- GitHub runner readbackを、2回のcomplete sweepが同一runner setを返すことを要求するstable snapshotに変更し、frozen runner nameまたはscheduler labelのどちらか一方でもcollisionとしてfail closed。
+- registration child完了後のmutation reconciliationをboundedに行い、child failure、観測済みremote mutation、readback uncertaintyを区別してauthoritative evidenceへ記録。
+- one-time registration tokenをargv・transcript・durable evidenceへ残さないsecrecy boundaryを維持し、runner packageをversionとSHA-256でpinしたfresh ephemeral runner preparationに限定。
+
+### Safety / authority boundary
+
+- このentryおよびPR #218はDraft / 未mergeであり、それ自体ではreal runner registrationもfirst #216 pilotも実行しない。
+- harnessはworkflow dispatchとtarget repository code executionを行わない。real credential acquisition、runner registration、pilot executionはこの変更の境界外。
+- Ready / mergeの判断はADR #90に従いhuman-finalのまま。
+
+### Validation status
+
+- prior implementation head `932d0e890a1111c60233309b81ee30d1ac6e7daa` でdeterministic-tests #581はSUCCESSし、同exact headに対するclean Codex rereviewでmaterial issueなし。
+- このCHANGELOG追加はdoc-onlyの新commitになるため、新しいexact headに対するfresh CIとfinal Codex rereviewを完了するまでhuman Ready judgmentへ進まない。
+
+---
+
 ## 2026-09-14 — Public publication: retire self-hosted exact-head fallback
 
 Related: Issue #196
