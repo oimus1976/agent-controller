@@ -45,6 +45,21 @@ $MutationMask = (
     [Security.AccessControl.FileSystemRights]::FullControl
 )
 
+function Assert-NotReparsePoint {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LiteralPath
+    )
+
+    if (-not (Test-Path -LiteralPath $LiteralPath)) {
+        throw "Path is missing before reparse validation: $LiteralPath"
+    }
+    $Item = Get-Item -LiteralPath $LiteralPath -Force
+    if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Reparse point is not allowed at protected consumption boundary: $LiteralPath"
+    }
+}
+
 function Test-ProtectedAcl {
     param(
         [Parameter(Mandatory = $true)]
@@ -94,6 +109,7 @@ function New-ProtectedAuthorityDirectory {
     )
 
     if (Test-Path -LiteralPath $LiteralPath) {
+        Assert-NotReparsePoint -LiteralPath $LiteralPath
         if (-not (Test-Path -LiteralPath $LiteralPath -PathType Container)) {
             throw "Authority path exists but is not a directory: $LiteralPath"
         }
@@ -105,6 +121,7 @@ function New-ProtectedAuthorityDirectory {
     if (-not (Test-Path -LiteralPath $Parent -PathType Container)) {
         throw "Authority parent is missing: $Parent"
     }
+    Assert-NotReparsePoint -LiteralPath $Parent
 
     $DirectoryAcl = New-Object Security.AccessControl.DirectorySecurity
     $DirectoryAcl.SetAccessRuleProtection($true, $false)
@@ -137,6 +154,7 @@ function New-ProtectedAuthorityDirectory {
     )))
 
     New-Item -ItemType Directory -Path $LiteralPath | Out-Null
+    Assert-NotReparsePoint -LiteralPath $LiteralPath
     Set-Acl -LiteralPath $LiteralPath -AclObject $DirectoryAcl
     Test-ProtectedAcl -LiteralPath $LiteralPath
 }
@@ -159,6 +177,7 @@ foreach ($RequiredPath in @($PlanPath, $Phase0Path, $ApprovalPath)) {
     if (-not (Test-Path -LiteralPath $RequiredPath -PathType Leaf)) {
         throw "Required authority artifact is missing: $RequiredPath"
     }
+    Assert-NotReparsePoint -LiteralPath $RequiredPath
 }
 
 $ObservedPlanSha = (Get-FileHash -LiteralPath $PlanPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -225,6 +244,7 @@ finally {
     $Stream.Dispose()
 }
 
+Assert-NotReparsePoint -LiteralPath $MarkerPath
 $FileAcl = New-Object Security.AccessControl.FileSecurity
 $FileAcl.SetAccessRuleProtection($true, $false)
 $FileAcl.SetOwner($AdministratorsSid)
