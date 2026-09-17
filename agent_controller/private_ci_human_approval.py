@@ -49,6 +49,19 @@ def approval_sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _canonical_approval_bytes(payload: dict[str, object]) -> bytes:
+    ordered = {
+        "schema": payload["schema"],
+        "plan_sha256": payload["plan_sha256"],
+        "host": payload["host"],
+        "approver_identity": payload["approver_identity"],
+        "approved_at": payload["approved_at"],
+    }
+    return (
+        json.dumps(ordered, separators=(",", ":"), ensure_ascii=True) + "\n"
+    ).encode("utf-8")
+
+
 def parse_approval_bytes(
     raw: bytes,
     *,
@@ -71,6 +84,8 @@ def parse_approval_bytes(
     }
     if type(payload) is not dict or set(payload) != required:
         raise ValueError("approval artifact shape invalid")
+    if raw != _canonical_approval_bytes(payload):
+        raise ValueError("approval artifact is not canonical")
     if payload.get("schema") != APPROVAL_SCHEMA:
         raise ValueError("approval artifact schema invalid")
     if payload.get("plan_sha256") != expected_plan_sha256:
