@@ -17,7 +17,8 @@ $PlanPath = Join-Path $EvidenceRoot 'issue217-live-registration-plan.json'
 $ApprovalPath = Join-Path $EvidenceRoot ("issue216-live-registration-approval-{0}.json" -f $ExpectedPlanSha256)
 $ApprovalSchema = 'agent-controller.private-ci-human-approval.v1'
 
-$Principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+$CurrentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$Principal = New-Object -TypeName Security.Principal.WindowsPrincipal -ArgumentList $CurrentIdentity
 if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Human approval issuer must run elevated through the Windows UAC boundary.'
 }
@@ -71,7 +72,7 @@ $Payload = [ordered]@{
     approved_at = (Get-Date).ToUniversalTime().ToString('o')
 }
 $Json = ($Payload | ConvertTo-Json -Compress) + "`n"
-$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$Utf8NoBom = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false
 $Bytes = $Utf8NoBom.GetBytes($Json)
 
 $Stream = [System.IO.File]::Open(
@@ -88,41 +89,52 @@ finally {
     $Stream.Dispose()
 }
 
-$SystemSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
-$AdministratorsSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
-$UsersSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')
-$Acl = New-Object Security.AccessControl.FileSecurity
+$SystemSid = New-Object -TypeName Security.Principal.SecurityIdentifier -ArgumentList 'S-1-5-18'
+$AdministratorsSid = New-Object -TypeName Security.Principal.SecurityIdentifier -ArgumentList 'S-1-5-32-544'
+$UsersSid = New-Object -TypeName Security.Principal.SecurityIdentifier -ArgumentList 'S-1-5-32-545'
+$Acl = New-Object -TypeName Security.AccessControl.FileSecurity
 $Acl.SetAccessRuleProtection($true, $false)
 $Acl.SetOwner($AdministratorsSid)
 $NoneInheritance = [Security.AccessControl.InheritanceFlags]::None
 $NonePropagation = [Security.AccessControl.PropagationFlags]::None
 $Allow = [Security.AccessControl.AccessControlType]::Allow
-$Acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+$SystemRule = New-Object -TypeName Security.AccessControl.FileSystemAccessRule -ArgumentList @(
     $SystemSid,
     [Security.AccessControl.FileSystemRights]::FullControl,
     $NoneInheritance,
     $NonePropagation,
     $Allow
-)))
-$Acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+)
+$AdministratorsRule = New-Object -TypeName Security.AccessControl.FileSystemAccessRule -ArgumentList @(
     $AdministratorsSid,
     [Security.AccessControl.FileSystemRights]::FullControl,
     $NoneInheritance,
     $NonePropagation,
     $Allow
-)))
-$Acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+)
+$UsersRule = New-Object -TypeName Security.AccessControl.FileSystemAccessRule -ArgumentList @(
     $UsersSid,
     [Security.AccessControl.FileSystemRights]::ReadAndExecute,
     $NoneInheritance,
     $NonePropagation,
     $Allow
-)))
+)
+$Acl.AddAccessRule($SystemRule)
+$Acl.AddAccessRule($AdministratorsRule)
+$Acl.AddAccessRule($UsersRule)
 Set-Acl -LiteralPath $ApprovalPath -AclObject $Acl
 
 $Persisted = [System.IO.File]::ReadAllBytes($ApprovalPath)
-$ExpectedHash = [BitConverter]::ToString((New-Object Security.Cryptography.SHA256Managed).ComputeHash($Bytes)).Replace('-', '').ToLowerInvariant()
-$PersistedHash = [BitConverter]::ToString((New-Object Security.Cryptography.SHA256Managed).ComputeHash($Persisted)).Replace('-', '').ToLowerInvariant()
+$ExpectedHasher = New-Object -TypeName Security.Cryptography.SHA256Managed
+$PersistedHasher = New-Object -TypeName Security.Cryptography.SHA256Managed
+try {
+    $ExpectedHash = [BitConverter]::ToString($ExpectedHasher.ComputeHash($Bytes)).Replace('-', '').ToLowerInvariant()
+    $PersistedHash = [BitConverter]::ToString($PersistedHasher.ComputeHash($Persisted)).Replace('-', '').ToLowerInvariant()
+}
+finally {
+    $ExpectedHasher.Dispose()
+    $PersistedHasher.Dispose()
+}
 if ($PersistedHash -cne $ExpectedHash) {
     throw 'Approval artifact changed during protected publication.'
 }
