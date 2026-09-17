@@ -9,7 +9,7 @@ from agent_controller.private_ci_human_approval import validate_approval_acl_sta
 
 
 CONSUMPTION_SCHEMA = "agent-controller.private-ci-live-registration-consumed.v2"
-CONSUMPTION_ROOT = Path(r"C:\ProgramData\agent-controller\private-ci-authority")
+CONSUMPTION_ROOT = Path(r"C:\ProgramData\agent-controller-private-ci-authority")
 CONSUMPTION_FILENAME_PREFIX = "issue217-live-registration-"
 
 
