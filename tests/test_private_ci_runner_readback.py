@@ -64,6 +64,48 @@ class RunnerReadbackTests(unittest.TestCase):
                 }
             )
 
+    def test_malformed_or_duplicate_runner_labels_are_blocked(self):
+        malformed_labels = (
+            [FROZEN_RUNNER_LABEL],
+            [{}],
+            [{"name": ""}],
+            [{"name": FROZEN_RUNNER_LABEL}, {"name": FROZEN_RUNNER_LABEL}],
+        )
+        for labels in malformed_labels:
+            with self.subTest(labels=labels):
+                with self.assertRaisesRegex(RuntimeError, "label"):
+                    read_all_runner_items(
+                        lambda page, labels=labels: {
+                            "total_count": 1,
+                            "runners": [
+                                {
+                                    "id": 7,
+                                    "name": "other-runner",
+                                    "status": "offline",
+                                    "busy": False,
+                                    "labels": labels,
+                                }
+                            ],
+                        }
+                    )
+
+    def test_empty_runner_name_is_blocked(self):
+        with self.assertRaisesRegex(RuntimeError, "runner name"):
+            read_all_runner_items(
+                lambda page: {
+                    "total_count": 1,
+                    "runners": [
+                        {
+                            "id": 7,
+                            "name": "",
+                            "status": "offline",
+                            "busy": False,
+                            "labels": [],
+                        }
+                    ],
+                }
+            )
+
     def test_bool_total_count_is_blocked(self):
         with self.assertRaisesRegex(RuntimeError, "total_count invalid"):
             read_all_runner_items(lambda page: {"total_count": True, "runners": []})
