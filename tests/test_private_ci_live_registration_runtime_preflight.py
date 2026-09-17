@@ -32,13 +32,23 @@ def binding_for(root):
 
 
 class MutationTimeLocalPreflightTests(unittest.TestCase):
-    def _runtime(self, temporary_directory, *, target_admin=False, runner_process_count=0):
+    def _runtime(
+        self,
+        temporary_directory,
+        *,
+        host="WOBBUFFET",
+        broker_identity="WOBBUFFET\\c-admin",
+        target_admin=False,
+        runner_process_count=0,
+    ):
         binding = binding_for(temporary_directory)
         downloaded = []
 
         def command_runner(*command, **kwargs):
+            if command == ("hostname.exe",):
+                return Completed(stdout=host + "\n")
             if command == ("whoami.exe",):
-                return Completed(stdout="WOBBUFFET\\c-admin\n")
+                return Completed(stdout=broker_identity + "\n")
             if command[0] == "powershell.exe":
                 payload = {
                     "target_identity_enabled": True,
@@ -58,6 +68,18 @@ class MutationTimeLocalPreflightTests(unittest.TestCase):
             downloader=lambda url, path: downloaded.append((url, path)),
         )
         return binding, runtime, downloaded
+
+    def test_wrong_host_with_same_broker_name_blocks_before_filesystem_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding, runtime, downloaded = self._runtime(
+                temporary_directory,
+                host="OTHERHOST",
+                broker_identity="OTHERHOST\\c-admin",
+            )
+            with self.assertRaisesRegex(RuntimeError, "host mismatch"):
+                runtime.prepare_runner(binding)
+            self.assertEqual(downloaded, [])
+            self.assertFalse(Path(binding.runner_root).parent.exists())
 
     def test_target_admin_drift_blocks_before_filesystem_mutation(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
