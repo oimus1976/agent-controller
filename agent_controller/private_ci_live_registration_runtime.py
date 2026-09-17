@@ -28,6 +28,11 @@ from agent_controller.private_ci_live_registration import (
     plan_live_registration,
     render_live_registration_candidate,
 )
+from agent_controller.private_ci_phase0_evidence import (
+    EXPECTED_BROKER_IDENTITY,
+    EXPECTED_HOST,
+)
+from agent_controller.private_ci_runner_readback import read_all_runner_items
 
 RUNNER_VERSION = "2.337.0"
 RUNNER_PACKAGE_URL = (
@@ -223,11 +228,18 @@ class WindowsEphemeralRegistrationRuntime:
         )
 
     def _require_broker_identity(self) -> None:
-        completed = self._run_text("whoami.exe")
-        if completed.returncode != 0:
+        host = self._run_text("hostname.exe")
+        if host.returncode != 0:
+            raise RuntimeError("host readback failed")
+        observed_host = host.stdout.strip()
+        if observed_host.casefold() != EXPECTED_HOST.casefold():
+            raise RuntimeError("host mismatch")
+
+        identity = self._run_text("whoami.exe")
+        if identity.returncode != 0:
             raise RuntimeError("broker identity readback failed")
-        observed = completed.stdout.strip().lower()
-        if not observed.endswith("\\c-admin"):
+        observed_identity = identity.stdout.strip()
+        if observed_identity.casefold() != EXPECTED_BROKER_IDENTITY.casefold():
             raise RuntimeError("broker identity mismatch")
 
     def _require_local_safety_baseline(self) -> None:
@@ -300,25 +312,24 @@ $RunnerTasks = @(
         if payload.get("runner_task_count") != 0:
             raise RuntimeError("runner task drift detected")
 
-    def _github_runners_payload(self, repository: str) -> dict[str, object]:
-        completed = self._run_text(
-            self.gh_executable,
-            "api",
-            f"repos/{repository}/actions/runners?per_page=100",
-        )
-        if completed.returncode != 0:
-            raise RuntimeError("GitHub runner readback failed")
-        payload = json.loads(completed.stdout)
-        if type(payload) is not dict or type(payload.get("runners")) is not list:
-            raise RuntimeError("GitHub runner readback shape invalid")
-        return payload
+    def _github_runner_items(self, repository: str) -> tuple[dict[str, object], ...]:
+        base = f"repos/{repository}/actions/runners?per_page=100"
+
+        def fetch_page(page: int) -> object:
+            endpoint = base if page == 1 else f"{base}&page={page}"
+            completed = self._run_text(self.gh_executable, "api", endpoint)
+            if completed.returncode != 0:
+                raise RuntimeError("GitHub runner readback failed")
+            try:
+                return json.loads(completed.stdout)
+            except json.JSONDecodeError as error:
+                raise RuntimeError("GitHub runner readback invalid JSON") from error
+
+        return read_all_runner_items(fetch_page)
 
     def _eligible_count(self, repository: str) -> int:
-        payload = self._github_runners_payload(repository)
         count = 0
-        for raw in payload["runners"]:
-            if type(raw) is not dict:
-                raise RuntimeError("GitHub runner item shape invalid")
+        for raw in self._github_runner_items(repository):
             labels = raw.get("labels")
             if type(labels) is not list:
                 raise RuntimeError("GitHub runner labels shape invalid")
@@ -485,11 +496,8 @@ $RunnerTasks = @(
         if repository != self.binding.repository:
             raise RuntimeError("runner readback repository mismatch")
         self._local_runner_settings()
-        payload = self._github_runners_payload(repository)
         result: list[RunnerReadback] = []
-        for raw in payload["runners"]:
-            if type(raw) is not dict:
-                raise RuntimeError("GitHub runner item shape invalid")
+        for raw in self._github_runner_items(repository):
             labels = raw.get("labels")
             if type(labels) is not list:
                 raise RuntimeError("GitHub runner labels shape invalid")
