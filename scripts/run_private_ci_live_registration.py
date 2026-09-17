@@ -20,6 +20,14 @@ from agent_controller.operator_step_gate import (
     configure_controller_authority,
     prior_evidence_auth_message,
 )
+from agent_controller.private_ci_consumption_marker import (
+    CONSUMPTION_ROOT,
+    CONSUMPTION_SCHEMA,
+    consumption_marker_path,
+    parse_consumption_marker_bytes,
+    validate_consumption_acl_state,
+    validate_consumption_container_acl_state,
+)
 from agent_controller.private_ci_human_approval import (
     approval_filename,
     approval_sha256,
@@ -56,7 +64,7 @@ PLAN_FILENAME = "issue217-live-registration-plan.json"
 RESULT_FILENAME = "issue217-live-registration-result.json"
 TRANSCRIPT_FILENAME = "issue217-live-registration.log"
 HUMAN_AUTHORIZATION_METHOD = "uac-elevated-acl-protected-approval-v1"
-CONSUMED_SCHEMA = "agent-controller.private-ci-live-registration-consumed.v1"
+CONSUMED_SCHEMA = CONSUMPTION_SCHEMA
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
 TUPLE_FIELDS = (
@@ -217,24 +225,28 @@ $Rules = @($Acl.Access | ForEach-Object {{
         script,
     )
     if completed.returncode != 0:
-        raise RuntimeError("approval ACL readback failed")
+        raise RuntimeError("ACL readback failed")
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as error:
-        raise RuntimeError("approval ACL readback invalid") from error
+        raise RuntimeError("ACL readback invalid") from error
+
+
+def _require_regular_nonreparse_file(path: Path, description: str) -> None:
+    if not path.is_file() or path.is_symlink():
+        raise RuntimeError(f"{description} missing or not a regular file")
+    try:
+        stat_result = path.lstat()
+    except OSError as error:
+        raise RuntimeError(f"{description} stat failed") from error
+    if getattr(stat_result, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+        raise RuntimeError(f"{description} reparse point blocked")
 
 
 def _require_human_approval(expected_plan_sha256: str) -> str:
     _require_non_elevated_broker()
     path = _approval_path(expected_plan_sha256)
-    if not path.is_file() or path.is_symlink():
-        raise RuntimeError("human approval artifact missing or not a regular file")
-    try:
-        stat_result = path.lstat()
-    except OSError as error:
-        raise RuntimeError("human approval artifact stat failed") from error
-    if getattr(stat_result, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
-        raise RuntimeError("human approval artifact reparse point blocked")
+    _require_regular_nonreparse_file(path, "human approval artifact")
 
     raw = path.read_bytes()
     parse_approval_bytes(raw, expected_plan_sha256=expected_plan_sha256)
@@ -387,7 +399,36 @@ def _write_exclusive(path: Path, content: bytes) -> None:
 
 
 def _consumed_marker_path(plan_sha: str) -> Path:
-    return authoritative_path(f"issue217-live-registration-{plan_sha}.consumed.json")
+    return consumption_marker_path(plan_sha)
+
+
+def _validate_protected_consumption_marker(
+    plan_sha: str,
+    phase0_sha: str,
+    approval_sha: str,
+) -> None:
+    marker_path = _consumed_marker_path(plan_sha)
+    _require_regular_nonreparse_file(marker_path, "protected consumption marker")
+    if not CONSUMPTION_ROOT.is_dir() or CONSUMPTION_ROOT.is_symlink():
+        raise RuntimeError("protected consumption authority container missing or invalid")
+    try:
+        root_stat = CONSUMPTION_ROOT.lstat()
+    except OSError as error:
+        raise RuntimeError("protected consumption authority container stat failed") from error
+    if getattr(root_stat, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+        raise RuntimeError("protected consumption authority container reparse point blocked")
+
+    raw = marker_path.read_bytes()
+    parse_consumption_marker_bytes(
+        raw,
+        expected_plan_sha256=plan_sha,
+        expected_phase0_evidence_sha256=phase0_sha,
+        expected_human_approval_sha256=approval_sha,
+    )
+    validate_consumption_container_acl_state(_approval_acl_state(CONSUMPTION_ROOT))
+    validate_consumption_acl_state(_approval_acl_state(marker_path))
+    if marker_path.read_bytes() != raw:
+        raise RuntimeError("protected consumption marker changed during validation")
 
 
 def _acquire_apply_ownership(
@@ -395,17 +436,27 @@ def _acquire_apply_ownership(
     phase0_sha: str,
     approval_sha: str,
 ) -> None:
-    payload = {
-        "schema": CONSUMED_SCHEMA,
-        "plan_sha256": plan_sha,
-        "phase0_evidence_sha256": phase0_sha,
-        "human_approval_sha256": approval_sha,
-        "consumed_at": datetime.now(timezone.utc).isoformat(),
-    }
-    try:
-        _write_exclusive(_consumed_marker_path(plan_sha), canonical_json_bytes(payload))
-    except FileExistsError as error:
-        raise RuntimeError("live apply ownership already claimed") from error
+    helper = _controller_repo_root() / "scripts" / "Consume-PrivateCiLiveRegistrationApproval.ps1"
+    if not helper.is_file():
+        raise RuntimeError("protected consumption helper missing")
+    quoted_helper = str(helper).replace("'", "''")
+    command = (
+        "$Child = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru "
+        "-ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',"
+        f"'{quoted_helper}','-PlanSha256','{plan_sha}','-Phase0Sha256','{phase0_sha}',"
+        f"'-ApprovalSha256','{approval_sha}'); exit $Child.ExitCode"
+    )
+    completed = _completed(
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        command,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("protected live apply ownership acquisition failed")
+    _validate_protected_consumption_marker(plan_sha, phase0_sha, approval_sha)
 
 
 def _require_live_outputs_absent(plan_sha: str) -> None:
@@ -503,6 +554,11 @@ def command_apply(expected_plan_sha256: str) -> int:
         human_approval_sha,
     )
 
+    _validate_protected_consumption_marker(
+        actual_plan_sha,
+        plan.phase0_evidence_sha256,
+        human_approval_sha,
+    )
     if _require_human_approval(actual_plan_sha) != human_approval_sha:
         raise RuntimeError("human approval artifact changed after apply ownership")
 
