@@ -65,6 +65,8 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
 
             def command_runner(*command, **kwargs):
                 calls.append((command, kwargs))
+                if command == ("hostname.exe",):
+                    return completed(command, stdout="WOBBUFFET\n")
                 if command == ("whoami.exe",):
                     return completed(command, stdout="WOBBUFFET\\c-admin\n")
                 if command[0] == "powershell.exe":
@@ -102,6 +104,8 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             downloaded = []
 
             def command_runner(*command, **kwargs):
+                if command == ("hostname.exe",):
+                    return completed(command, stdout="WOBBUFFET\n")
                 if command == ("whoami.exe",):
                     return completed(command, stdout="WOBBUFFET\\c-admin\n")
                 if command[0] == "powershell.exe":
