@@ -20,20 +20,26 @@ class ApplyOwnershipTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             marker = Path(temporary_directory) / "apply.consumed.json"
             with mock.patch.object(MODULE, "_consumed_marker_path", return_value=marker):
-                MODULE._acquire_apply_ownership("a" * 64, "b" * 64)
+                MODULE._acquire_apply_ownership("a" * 64, "b" * 64, "c" * 64)
                 original = marker.read_bytes()
                 with self.assertRaisesRegex(RuntimeError, "apply ownership already claimed"):
-                    MODULE._acquire_apply_ownership("a" * 64, "b" * 64)
+                    MODULE._acquire_apply_ownership("a" * 64, "b" * 64, "c" * 64)
                 self.assertEqual(marker.read_bytes(), original)
+                payload = marker.read_text(encoding="utf-8")
+                self.assertIn('"human_approval_sha256":"' + "c" * 64 + '"', payload)
 
-    def test_host_revalidation_precedes_apply_ownership_and_live_execution(self):
+    def test_approval_and_host_revalidation_precede_apply_ownership_and_live_execution(self):
         source = inspect.getsource(MODULE.command_apply)
+        approval_index = source.index("_require_human_approval(")
         host_index = source.index("_require_exact_phase0_host(")
         claim_index = source.index("_acquire_apply_ownership(")
         execute_index = source.index("execute_live_registration(")
+        self.assertLess(approval_index, host_index)
         self.assertLess(host_index, claim_index)
         self.assertLess(claim_index, execute_index)
         self.assertNotIn("prepare_with_durable_consumption", source)
+        self.assertNotIn("isatty", source)
+        self.assertNotIn("readline", source)
 
     def test_losing_apply_cannot_execute_or_publish_shared_evidence(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -66,7 +72,7 @@ class ApplyOwnershipTests(unittest.TestCase):
                 mock.patch.object(MODULE, "_phase0_path", return_value=phase0_path),
                 mock.patch.object(MODULE, "_candidate_path", return_value=candidate_path),
                 mock.patch.object(MODULE, "parse_plan_bytes", return_value=plan),
-                mock.patch.object(MODULE, "_require_interactive_human_authorization"),
+                mock.patch.object(MODULE, "_require_human_approval", return_value="d" * 64),
                 mock.patch.object(MODULE, "validate_phase0_evidence_bytes", return_value=evidence),
                 mock.patch.object(MODULE, "validate_frozen_plan", return_value=()),
                 mock.patch.object(MODULE, "_require_exact_phase0_host"),
