@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Callable
 
+from agent_controller.private_ci_live_registration import (
+    FROZEN_RUNNER_LABEL,
+    FROZEN_RUNNER_NAME,
+)
+
 
 RunnerPageFetcher = Callable[[int], object]
 RUNNER_PAGE_SIZE = 100
@@ -42,6 +47,19 @@ def read_all_runner_items(fetch_page: RunnerPageFetcher) -> tuple[dict[str, obje
                 raise RuntimeError("GitHub runner id invalid")
             if runner_id in seen_ids:
                 raise RuntimeError("GitHub runner pagination duplicate id")
+
+            if raw.get("name") == FROZEN_RUNNER_NAME:
+                labels = raw.get("labels")
+                if type(labels) is not list:
+                    raise RuntimeError("GitHub runner labels shape invalid")
+                label_names = {
+                    item.get("name")
+                    for item in labels
+                    if type(item) is dict and type(item.get("name")) is str
+                }
+                if FROZEN_RUNNER_LABEL not in label_names:
+                    raise RuntimeError("stale eligible runner name/label collision")
+
             seen_ids.add(runner_id)
             items.append(raw)
 
