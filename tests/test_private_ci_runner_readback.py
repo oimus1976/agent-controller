@@ -18,7 +18,7 @@ def runner(runner_id, *, name=None, labels=()):
 
 
 class RunnerReadbackTests(unittest.TestCase):
-    def test_reads_later_pages(self):
+    def test_reads_later_pages_twice_before_accepting(self):
         calls = []
 
         def fetch_page(page):
@@ -35,7 +35,7 @@ class RunnerReadbackTests(unittest.TestCase):
         items = read_all_runner_items(fetch_page)
         self.assertEqual(len(items), 101)
         self.assertEqual(items[-1]["id"], 101)
-        self.assertEqual(calls, [1, 2])
+        self.assertEqual(calls, [1, 2, 1, 2])
 
     def test_duplicate_id_across_pages_is_blocked(self):
         def fetch_page(page):
@@ -52,7 +52,16 @@ class RunnerReadbackTests(unittest.TestCase):
     def test_invalid_runner_id_is_blocked(self):
         with self.assertRaisesRegex(RuntimeError, "runner id"):
             read_all_runner_items(
-                lambda page: {"total_count": 1, "runners": [{"id": True}]}
+                lambda page: {
+                    "total_count": 1,
+                    "runners": [
+                        {
+                            "id": True,
+                            "name": "bad",
+                            "labels": [],
+                        }
+                    ],
+                }
             )
 
     def test_bool_total_count_is_blocked(self):
@@ -112,6 +121,45 @@ class RunnerReadbackTests(unittest.TestCase):
             }
         )
         self.assertEqual(len(items), 1)
+
+    def test_same_total_count_but_shifted_runner_set_between_sweeps_is_blocked(self):
+        calls = []
+
+        def fetch_page(page):
+            calls.append(page)
+            sweep = 1 if len(calls) <= 2 else 2
+            if page == 1:
+                if sweep == 1:
+                    ids = range(1, 101)
+                else:
+                    ids = range(2, 102)
+                return {
+                    "total_count": 101,
+                    "runners": [runner(index) for index in ids],
+                }
+            if page == 2:
+                last_id = 101 if sweep == 1 else 102
+                return {"total_count": 101, "runners": [runner(last_id)]}
+            raise AssertionError(page)
+
+        with self.assertRaisesRegex(RuntimeError, "changed across sweeps"):
+            read_all_runner_items(fetch_page)
+
+    def test_order_only_change_between_sweeps_is_accepted(self):
+        call_count = 0
+
+        def fetch_page(page):
+            nonlocal call_count
+            self.assertEqual(page, 1)
+            call_count += 1
+            items = [runner(1), runner(2)]
+            if call_count == 2:
+                items.reverse()
+            return {"total_count": 2, "runners": items}
+
+        items = read_all_runner_items(fetch_page)
+        self.assertEqual({item["id"] for item in items}, {1, 2})
+        self.assertEqual(call_count, 2)
 
 
 if __name__ == "__main__":
