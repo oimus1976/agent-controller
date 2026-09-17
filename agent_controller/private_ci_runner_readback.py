@@ -13,6 +13,22 @@ RUNNER_PAGE_SIZE = 100
 MAX_RUNNER_PAGES = 1000
 
 
+def _validated_label_names(labels: object) -> tuple[str, ...]:
+    if type(labels) is not list:
+        raise RuntimeError("GitHub runner labels shape invalid")
+    names: list[str] = []
+    for item in labels:
+        if type(item) is not dict:
+            raise RuntimeError("GitHub runner label item shape invalid")
+        name = item.get("name")
+        if type(name) is not str or not name:
+            raise RuntimeError("GitHub runner label name invalid")
+        names.append(name)
+    if len(set(names)) != len(names):
+        raise RuntimeError("GitHub runner duplicate label name")
+    return tuple(names)
+
+
 def _read_runner_sweep(fetch_page: RunnerPageFetcher) -> tuple[dict[str, object], ...]:
     items: list[dict[str, object]] = []
     seen_ids: set[int] = set()
@@ -46,14 +62,9 @@ def _read_runner_sweep(fetch_page: RunnerPageFetcher) -> tuple[dict[str, object]
                 raise RuntimeError("GitHub runner pagination duplicate id")
 
             name = raw.get("name")
-            labels = raw.get("labels")
-            if type(name) is not str or type(labels) is not list:
-                raise RuntimeError("GitHub runner identity shape invalid")
-            label_names = {
-                item.get("name")
-                for item in labels
-                if type(item) is dict and type(item.get("name")) is str
-            }
+            if type(name) is not str or not name:
+                raise RuntimeError("GitHub runner name invalid")
+            label_names = _validated_label_names(raw.get("labels"))
             if name == FROZEN_RUNNER_NAME and FROZEN_RUNNER_LABEL not in label_names:
                 raise RuntimeError("stale eligible runner name/label collision")
 
@@ -79,16 +90,9 @@ def _runner_set_fingerprint(
     for raw in items:
         runner_id = raw.get("id")
         name = raw.get("name")
-        labels = raw.get("labels")
-        if type(runner_id) is not int or type(name) is not str or type(labels) is not list:
+        if type(runner_id) is not int or type(name) is not str:
             raise RuntimeError("GitHub runner stable-set shape invalid")
-        label_names = tuple(
-            sorted(
-                item["name"]
-                for item in labels
-                if type(item) is dict and type(item.get("name")) is str
-            )
-        )
+        label_names = tuple(sorted(_validated_label_names(raw.get("labels"))))
         fingerprint.append((runner_id, name, label_names))
     return tuple(sorted(fingerprint))
 
