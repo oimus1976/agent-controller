@@ -20,6 +20,12 @@ from agent_controller.operator_step_gate import (
     configure_controller_authority,
     prior_evidence_auth_message,
 )
+from agent_controller.private_ci_human_approval import (
+    approval_filename,
+    approval_sha256,
+    parse_approval_bytes,
+    validate_approval_acl_state,
+)
 from agent_controller.private_ci_live_registration import (
     PHASE0_OPERATION_ID,
     PHASE0_STEP_ID,
@@ -49,8 +55,9 @@ CANDIDATE_FILENAME = "issue217-live-registration-candidate.ps1"
 PLAN_FILENAME = "issue217-live-registration-plan.json"
 RESULT_FILENAME = "issue217-live-registration-result.json"
 TRANSCRIPT_FILENAME = "issue217-live-registration.log"
-HUMAN_AUTHORIZATION_METHOD = "interactive-exact-plan-sha256-confirmation"
+HUMAN_AUTHORIZATION_METHOD = "uac-elevated-acl-protected-approval-v1"
 CONSUMED_SCHEMA = "agent-controller.private-ci-live-registration-consumed.v1"
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
 TUPLE_FIELDS = (
     "observed_effect_families",
@@ -95,6 +102,10 @@ def _transcript_path() -> Path:
     return authoritative_path(TRANSCRIPT_FILENAME)
 
 
+def _approval_path(plan_sha256: str) -> Path:
+    return authoritative_path(approval_filename(plan_sha256))
+
+
 def _require_repo_matches_phase0(evidence: Phase0Evidence) -> None:
     repo = _controller_repo_root()
     if str(repo).lower() != evidence.controller_tree.lower():
@@ -137,6 +148,102 @@ def _require_exact_phase0_host(evidence: Phase0Evidence) -> None:
         raise RuntimeError("broker identity readback failed")
     if identity.stdout.strip().casefold() != evidence.broker_identity.casefold():
         raise RuntimeError("Phase 0 broker identity mismatch")
+
+
+def _require_non_elevated_broker() -> None:
+    script = r"""
+$Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$Principal = New-Object -TypeName Security.Principal.WindowsPrincipal -ArgumentList $Identity
+[ordered]@{
+    elevated = [bool]$Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+} | ConvertTo-Json -Compress
+""".strip()
+    completed = _completed(
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("broker elevation readback failed")
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("broker elevation readback invalid") from error
+    if type(payload) is not dict or type(payload.get("elevated")) is not bool:
+        raise RuntimeError("broker elevation readback shape invalid")
+    if payload["elevated"]:
+        raise RuntimeError("live apply must run non-elevated after separate UAC approval")
+
+
+def _approval_acl_state(path: Path) -> object:
+    quoted_path = str(path).replace("'", "''")
+    script = rf"""
+$Acl = Get-Acl -LiteralPath '{quoted_path}'
+$OwnerAccount = New-Object -TypeName Security.Principal.NTAccount -ArgumentList $Acl.Owner
+$OwnerSid = $OwnerAccount.Translate([Security.Principal.SecurityIdentifier]).Value
+$MutationMask = [int](
+    [Security.AccessControl.FileSystemRights]::Write -bor
+    [Security.AccessControl.FileSystemRights]::Modify -bor
+    [Security.AccessControl.FileSystemRights]::FullControl -bor
+    [Security.AccessControl.FileSystemRights]::Delete -bor
+    [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+    [Security.AccessControl.FileSystemRights]::TakeOwnership
+)
+$Rules = @($Acl.Access | ForEach-Object {{
+    $Sid = $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+    $Rights = [int]$_.FileSystemRights
+    [ordered]@{{
+        sid = $Sid
+        access_type = [string]$_.AccessControlType
+        inherited = [bool]$_.IsInherited
+        can_mutate = [bool](($Rights -band $MutationMask) -ne 0)
+    }}
+}})
+[ordered]@{{
+    protected = [bool]$Acl.AreAccessRulesProtected
+    owner_sid = $OwnerSid
+    rules = $Rules
+}} | ConvertTo-Json -Depth 5 -Compress
+""".strip()
+    completed = _completed(
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("approval ACL readback failed")
+    try:
+        return json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("approval ACL readback invalid") from error
+
+
+def _require_human_approval(expected_plan_sha256: str) -> str:
+    _require_non_elevated_broker()
+    path = _approval_path(expected_plan_sha256)
+    if not path.is_file() or path.is_symlink():
+        raise RuntimeError("human approval artifact missing or not a regular file")
+    try:
+        stat_result = path.lstat()
+    except OSError as error:
+        raise RuntimeError("human approval artifact stat failed") from error
+    if getattr(stat_result, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+        raise RuntimeError("human approval artifact reparse point blocked")
+
+    raw = path.read_bytes()
+    parse_approval_bytes(raw, expected_plan_sha256=expected_plan_sha256)
+    validate_approval_acl_state(_approval_acl_state(path))
+
+    reread = path.read_bytes()
+    if reread != raw:
+        raise RuntimeError("human approval artifact changed during validation")
+    return approval_sha256(raw)
 
 
 def _gh_json(*arguments: str) -> object:
@@ -283,11 +390,16 @@ def _consumed_marker_path(plan_sha: str) -> Path:
     return authoritative_path(f"issue217-live-registration-{plan_sha}.consumed.json")
 
 
-def _acquire_apply_ownership(plan_sha: str, phase0_sha: str) -> None:
+def _acquire_apply_ownership(
+    plan_sha: str,
+    phase0_sha: str,
+    approval_sha: str,
+) -> None:
     payload = {
         "schema": CONSUMED_SCHEMA,
         "plan_sha256": plan_sha,
         "phase0_evidence_sha256": phase0_sha,
+        "human_approval_sha256": approval_sha,
         "consumed_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
@@ -304,28 +416,6 @@ def _require_live_outputs_absent(plan_sha: str) -> None:
     ):
         if path.exists():
             raise RuntimeError(f"live registration output already exists: {path.name}")
-
-
-def _require_interactive_human_authorization(
-    expected_plan_sha256: str,
-    *,
-    stdin=None,
-    stdout=None,
-) -> None:
-    input_stream = sys.stdin if stdin is None else stdin
-    output_stream = sys.stdout if stdout is None else stdout
-    if not input_stream.isatty() or not output_stream.isatty():
-        raise RuntimeError("human authorization requires an interactive controlling terminal")
-    output_stream.write("\n#216 LIVE REGISTRATION HUMAN AUTHORIZATION\n")
-    output_stream.write("Review the exact plan SHA-256 below before authorizing:\n")
-    output_stream.write(expected_plan_sha256 + "\n")
-    output_stream.write("To authorize this exact plan, type the exact plan SHA-256 and press Enter:\n> ")
-    output_stream.flush()
-    confirmation = input_stream.readline()
-    if confirmation == "":
-        raise RuntimeError("human authorization confirmation unavailable")
-    if confirmation.rstrip("\r\n") != expected_plan_sha256:
-        raise RuntimeError("human authorization confirmation mismatch")
 
 
 def command_plan() -> int:
@@ -365,6 +455,10 @@ def command_plan() -> int:
     print(f"plan_sha256={digest}")
     print(f"candidate_sha256={plan.candidate_sha256}")
     print(f"phase0_evidence_sha256={plan.phase0_evidence_sha256}")
+    print(
+        "approval_issuer="
+        + str(_controller_repo_root() / "scripts" / "Approve-PrivateCiLiveRegistration.ps1")
+    )
     print("NO_LIVE_PILOT_EFFECT_PERFORMED")
     return 0
 
@@ -382,7 +476,7 @@ def command_apply(expected_plan_sha256: str) -> int:
         raise RuntimeError("human-authorized plan SHA-256 mismatch")
     plan = parse_plan_bytes(plan_raw)
 
-    _require_interactive_human_authorization(actual_plan_sha)
+    human_approval_sha = _require_human_approval(actual_plan_sha)
 
     phase0_bytes = _phase0_path().read_bytes()
     evidence = validate_phase0_evidence_bytes(phase0_bytes)
@@ -406,7 +500,11 @@ def command_apply(expected_plan_sha256: str) -> int:
     _acquire_apply_ownership(
         actual_plan_sha,
         plan.phase0_evidence_sha256,
+        human_approval_sha,
     )
+
+    if _require_human_approval(actual_plan_sha) != human_approval_sha:
+        raise RuntimeError("human approval artifact changed after apply ownership")
 
     started_at = datetime.now(timezone.utc).isoformat()
     result = execute_live_registration(
@@ -431,6 +529,7 @@ def command_apply(expected_plan_sha256: str) -> int:
     payload["started_at"] = started_at
     payload["ended_at"] = ended_at
     payload["human_authorization"] = HUMAN_AUTHORIZATION_METHOD
+    payload["human_approval_sha256"] = human_approval_sha
     payload["registration_token_recorded"] = False
     result_bytes = canonical_json_bytes(payload)
     _write_exclusive(_result_path(), result_bytes)
@@ -440,6 +539,7 @@ def command_apply(expected_plan_sha256: str) -> int:
         f"ended_at={ended_at}\n"
         f"plan_sha256={actual_plan_sha}\n"
         f"phase0_evidence_sha256={plan.phase0_evidence_sha256}\n"
+        f"human_approval_sha256={human_approval_sha}\n"
         f"candidate_sha256={result.candidate_sha256}\n"
         f"status={result.status.value}\n"
         f"reason_codes={','.join(result.reason_codes)}\n"
