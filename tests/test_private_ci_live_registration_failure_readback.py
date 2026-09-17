@@ -24,15 +24,13 @@ class PostFailureReadbackTests(unittest.TestCase):
         with (
             mock.patch.object(live, "plan_live_registration", return_value=passed),
             mock.patch.object(live, "validate_operator_step", return_value=passed),
+            mock.patch.object(live, "_require_frozen_target_still_exact"),
         ):
             return execute_live_registration(
                 binding,
                 phase0_evidence_bytes=b"phase0\n",
                 candidate="candidate",
                 ast_attestation=object(),
-                revalidate_mutation_target=live._bind_trusted_mutation_target_revalidator(
-                    lambda binding: None
-                ),
                 prior_evidence_capability=object(),
                 prepare_runner=lambda observed: None,
                 acquire_registration_token=lambda repository: "one-time-token",

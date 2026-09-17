@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
@@ -249,40 +251,81 @@ AcquireRegistrationToken = Callable[[str], str]
 RunRegistration = Callable[[LiveRegistrationBinding, str], RegistrationExecution]
 CredentialHandoffCleared = Callable[[LiveRegistrationBinding, str], bool]
 ReadRunners = Callable[[str], tuple[RunnerReadback, ...]]
-_TRUSTED_REVALIDATOR_CONSTRUCTION_KEY = object()
 
 
-class _TrustedMutationTargetRevalidator:
-    """Non-public execution capability for the CLI's authoritative target read."""
-
-    __slots__ = ("_revalidate",)
-
-    def __init__(
-        self,
-        construction_key: object,
-        revalidate: Callable[[LiveRegistrationBinding], None],
-    ):
-        if construction_key is not _TRUSTED_REVALIDATOR_CONSTRUCTION_KEY:
-            raise TypeError("trusted mutation-target revalidators must be bound internally")
-        if not callable(revalidate):
-            raise TypeError("mutation-target revalidator must be callable")
-        self._revalidate = revalidate
-
-    def revalidate(self, binding: LiveRegistrationBinding) -> None:
-        self._revalidate(binding)
-
-
-def _bind_trusted_mutation_target_revalidator(
-    revalidate: Callable[[LiveRegistrationBinding], None],
-) -> _TrustedMutationTargetRevalidator:
-    """Bind the trusted CLI read path; callers cannot satisfy this with a digest echo."""
-
-    return _TrustedMutationTargetRevalidator(
-        _TRUSTED_REVALIDATOR_CONSTRUCTION_KEY, revalidate
+def _gh_json(*arguments: str) -> object:
+    completed = subprocess.run(
+        ("gh.exe", "api", *arguments),
+        check=False,
+        capture_output=True,
+        text=True,
     )
+    if completed.returncode != 0:
+        raise RuntimeError("GitHub readback failed")
+    return json.loads(completed.stdout)
 
 
-RevalidateMutationTarget = _TrustedMutationTargetRevalidator
+def _github_runner_items(repository: str) -> tuple[dict[str, object], ...]:
+    from agent_controller.private_ci_runner_readback import read_all_runner_items
+
+    base = f"repos/{repository}/actions/runners?per_page=100"
+
+    def fetch_page(page: int) -> object:
+        endpoint = base if page == 1 else f"{base}&page={page}"
+        return _gh_json(endpoint)
+
+    return read_all_runner_items(fetch_page)
+
+
+def _require_frozen_target_still_exact(phase0_evidence_bytes: bytes) -> None:
+    """Perform the concrete authoritative read used by the live executor.
+
+    This operation is deliberately not supplied by an execution caller: accepting
+    behavior here would let that caller replace the live read with a no-op.
+    """
+
+    # Imported lazily because the evidence schema freezes constants from this
+    # module and therefore intentionally depends on it.
+    from agent_controller.private_ci_phase0_evidence import validate_phase0_evidence_bytes
+
+    evidence = validate_phase0_evidence_bytes(phase0_evidence_bytes)
+    repo = _gh_json(f"repos/{evidence.repository}")
+    if type(repo) is not dict:
+        raise RuntimeError("repository readback invalid")
+    if repo.get("visibility") != "private" or repo.get("default_branch") != "main":
+        raise RuntimeError("repository visibility/default branch drift")
+
+    pr = _gh_json(f"repos/{evidence.repository}/pulls/{evidence.pull_request_number}")
+    if type(pr) is not dict:
+        raise RuntimeError("PR readback invalid")
+    if pr.get("state") != "open" or pr.get("draft") is not True:
+        raise RuntimeError("PR state drift")
+    head = pr.get("head")
+    base = pr.get("base")
+    if type(head) is not dict or type(base) is not dict:
+        raise RuntimeError("PR ref readback invalid")
+    head_repo = head.get("repo")
+    if type(head_repo) is not dict or head_repo.get("full_name") != evidence.repository:
+        raise RuntimeError("PR head repository drift")
+    if head.get("sha") != evidence.pull_request_head_sha or base.get("ref") != "main":
+        raise RuntimeError("PR exact-head/base drift")
+
+    branch = _gh_json(f"repos/{evidence.repository}/branches/main")
+    if type(branch) is not dict or type(branch.get("commit")) is not dict:
+        raise RuntimeError("trusted workflow branch readback invalid")
+    if branch["commit"].get("sha") != evidence.workflow_sha:
+        raise RuntimeError("trusted workflow SHA drift")
+
+    for runner in _github_runner_items(evidence.repository):
+        if type(runner.get("labels")) is not list:
+            raise RuntimeError("runner readback item invalid")
+        labels = {
+            item.get("name")
+            for item in runner["labels"]
+            if type(item) is dict and type(item.get("name")) is str
+        }
+        if evidence.runner_label in labels or runner.get("name") == evidence.runner_name:
+            raise RuntimeError("pilot runner already registered before live authorization")
 
 
 def _redact_secret(text: str, secret: str) -> tuple[str, bool]:
@@ -317,7 +360,6 @@ def execute_live_registration(
     candidate: str,
     ast_attestation: AuthenticatedAstAttestation,
     prior_evidence_capability: PriorEvidenceCapability,
-    revalidate_mutation_target: RevalidateMutationTarget,
     prepare_runner: PrepareRunner,
     acquire_registration_token: AcquireRegistrationToken,
     run_registration: RunRegistration,
@@ -361,10 +403,8 @@ def execute_live_registration(
         )
 
     def mutation_target_is_revalidated() -> bool:
-        if type(revalidate_mutation_target) is not _TrustedMutationTargetRevalidator:
-            return False
         try:
-            revalidate_mutation_target.revalidate(binding)
+            _require_frozen_target_still_exact(phase0_evidence_bytes)
         except Exception:
             return False
         return True
