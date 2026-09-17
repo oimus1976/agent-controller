@@ -199,6 +199,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             phase0_evidence_bytes=PHASE0_EVIDENCE,
             candidate=self.candidate,
             ast_attestation=self.ast,
+            revalidate_mutation_target=lambda binding: called.append("revalidate"),
             prior_evidence_capability=None,
             prepare_runner=lambda binding: called.append("prepare"),
             acquire_registration_token=lambda repo: called.append("token") or REGISTRATION_TOKEN,
@@ -228,6 +229,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             phase0_evidence_bytes=PHASE0_EVIDENCE,
             candidate=self.candidate,
             ast_attestation=self.ast,
+            revalidate_mutation_target=lambda binding: called.append("revalidate"),
             prior_evidence_capability=evidence,
             prepare_runner=lambda binding: called.append("prepare"),
             acquire_registration_token=lambda repo: called.append("token") or REGISTRATION_TOKEN,
@@ -236,7 +238,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             read_runners=lambda repo: called.append("readback") or runners,
         )
         self.assertTrue(first.registered)
-        self.assertEqual(called, ["prepare", "token", "run", "clear", "readback"])
+        self.assertEqual(called, ["revalidate", "prepare", "token", "run", "clear", "readback"])
 
         called.clear()
         second = execute_live_registration(
@@ -244,6 +246,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             phase0_evidence_bytes=PHASE0_EVIDENCE,
             candidate=self.candidate,
             ast_attestation=self.ast,
+            revalidate_mutation_target=lambda binding: None,
             prior_evidence_capability=evidence,
             prepare_runner=lambda binding: called.append("prepare"),
             acquire_registration_token=lambda repo: called.append("token") or REGISTRATION_TOKEN,
@@ -255,6 +258,50 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
         self.assertIn("LIVE_GATE_PRIOR_EVIDENCE_ALREADY_CONSUMED", second.reason_codes)
         self.assertEqual(called, [])
 
+    def test_mutation_time_target_drift_blocks_before_first_mutation(self):
+        evidence = authenticated_phase0_evidence(self.binding)
+        called = []
+
+        def reject_drift(binding):
+            called.append("revalidate")
+            raise RuntimeError("target drift")
+
+        result = execute_live_registration(
+            self.binding,
+            phase0_evidence_bytes=PHASE0_EVIDENCE,
+            candidate=self.candidate,
+            ast_attestation=self.ast,
+            prior_evidence_capability=evidence,
+            revalidate_mutation_target=reject_drift,
+            prepare_runner=lambda binding: called.append("prepare"),
+            acquire_registration_token=lambda repo: called.append("token") or REGISTRATION_TOKEN,
+            run_registration=lambda binding, token: called.append("run") or RegistrationExecution(0, "ok", ""),
+            credential_handoff_cleared=lambda binding, token: True,
+            read_runners=lambda repo: called.append("readback") or (),
+        )
+
+        self.assertEqual(result.status, LiveRegistrationStatus.FAILED)
+        self.assertEqual(result.reason_codes, ("MUTATION_TIME_TARGET_REVALIDATION_FAILED",))
+        self.assertEqual(called, ["revalidate"])
+
+        called.clear()
+        retry = execute_live_registration(
+            self.binding,
+            phase0_evidence_bytes=PHASE0_EVIDENCE,
+            candidate=self.candidate,
+            ast_attestation=self.ast,
+            prior_evidence_capability=evidence,
+            revalidate_mutation_target=lambda binding: called.append("revalidate"),
+            prepare_runner=lambda binding: called.append("prepare"),
+            acquire_registration_token=lambda repo: called.append("token") or REGISTRATION_TOKEN,
+            run_registration=lambda binding, token: RegistrationExecution(0, "ok", ""),
+            credential_handoff_cleared=lambda binding, token: True,
+            read_runners=lambda repo: (),
+        )
+        self.assertEqual(retry.status, LiveRegistrationStatus.BLOCKED)
+        self.assertIn("LIVE_GATE_PRIOR_EVIDENCE_ALREADY_CONSUMED", retry.reason_codes)
+        self.assertEqual(called, [])
+
     def test_nonzero_child_exit_performs_bounded_failure_readback(self):
         evidence = authenticated_phase0_evidence(self.binding)
         readback_called = []
@@ -263,6 +310,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             phase0_evidence_bytes=PHASE0_EVIDENCE,
             candidate=self.candidate,
             ast_attestation=self.ast,
+            revalidate_mutation_target=lambda binding: None,
             prior_evidence_capability=evidence,
             prepare_runner=lambda binding: None,
             acquire_registration_token=lambda repo: REGISTRATION_TOKEN,
@@ -283,6 +331,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             phase0_evidence_bytes=PHASE0_EVIDENCE,
             candidate=self.candidate,
             ast_attestation=self.ast,
+            revalidate_mutation_target=lambda binding: None,
             prior_evidence_capability=evidence,
             prepare_runner=lambda binding: None,
             acquire_registration_token=lambda repo: REGISTRATION_TOKEN,
@@ -301,6 +350,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             phase0_evidence_bytes=PHASE0_EVIDENCE,
             candidate=self.candidate,
             ast_attestation=self.ast,
+            revalidate_mutation_target=lambda binding: None,
             prior_evidence_capability=evidence,
             prepare_runner=lambda binding: None,
             acquire_registration_token=lambda repo: REGISTRATION_TOKEN,
@@ -341,6 +391,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
                     phase0_evidence_bytes=PHASE0_EVIDENCE,
                     candidate=self.candidate,
                     ast_attestation=ast,
+                    revalidate_mutation_target=lambda binding: None,
                     prior_evidence_capability=evidence,
                     prepare_runner=lambda binding: None,
                     acquire_registration_token=lambda repo: REGISTRATION_TOKEN,

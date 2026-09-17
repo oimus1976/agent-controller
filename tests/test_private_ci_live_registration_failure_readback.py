@@ -30,6 +30,7 @@ class PostFailureReadbackTests(unittest.TestCase):
                 phase0_evidence_bytes=b"phase0\n",
                 candidate="candidate",
                 ast_attestation=object(),
+                revalidate_mutation_target=lambda binding: None,
                 prior_evidence_capability=object(),
                 prepare_runner=lambda observed: None,
                 acquire_registration_token=lambda repository: "one-time-token",

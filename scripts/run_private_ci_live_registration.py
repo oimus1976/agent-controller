@@ -563,12 +563,17 @@ def command_apply(expected_plan_sha256: str) -> int:
         raise RuntimeError("human approval artifact changed after apply ownership")
 
     started_at = datetime.now(timezone.utc).isoformat()
+
+    def revalidate_mutation_target(_binding: object) -> None:
+        _require_frozen_target_still_exact(evidence)
+
     result = execute_live_registration(
         plan.binding,
         phase0_evidence_bytes=phase0_bytes,
         candidate=plan.candidate,
         ast_attestation=ast,
         prior_evidence_capability=prior,
+        revalidate_mutation_target=revalidate_mutation_target,
         prepare_runner=runtime.prepare_runner,
         acquire_registration_token=runtime.acquire_registration_token,
         run_registration=runtime.run_registration,

@@ -249,6 +249,7 @@ AcquireRegistrationToken = Callable[[str], str]
 RunRegistration = Callable[[LiveRegistrationBinding, str], RegistrationExecution]
 CredentialHandoffCleared = Callable[[LiveRegistrationBinding, str], bool]
 ReadRunners = Callable[[str], tuple[RunnerReadback, ...]]
+RevalidateMutationTarget = Callable[[LiveRegistrationBinding], None]
 
 
 def _redact_secret(text: str, secret: str) -> tuple[str, bool]:
@@ -283,6 +284,7 @@ def execute_live_registration(
     candidate: str,
     ast_attestation: AuthenticatedAstAttestation,
     prior_evidence_capability: PriorEvidenceCapability,
+    revalidate_mutation_target: RevalidateMutationTarget,
     prepare_runner: PrepareRunner,
     acquire_registration_token: AcquireRegistrationToken,
     run_registration: RunRegistration,
@@ -318,6 +320,19 @@ def execute_live_registration(
         return LiveRegistrationResult(
             LiveRegistrationStatus.BLOCKED,
             tuple(f"LIVE_GATE_{reason}" for reason in gate.reason_codes) or ("LIVE_GATE_NOT_PASS",),
+            gate.candidate_sha256,
+            None,
+            "",
+            "",
+            None,
+        )
+
+    try:
+        revalidate_mutation_target(binding)
+    except Exception:
+        return LiveRegistrationResult(
+            LiveRegistrationStatus.FAILED,
+            ("MUTATION_TIME_TARGET_REVALIDATION_FAILED",),
             gate.candidate_sha256,
             None,
             "",
