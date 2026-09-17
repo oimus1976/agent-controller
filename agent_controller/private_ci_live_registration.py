@@ -249,7 +249,40 @@ AcquireRegistrationToken = Callable[[str], str]
 RunRegistration = Callable[[LiveRegistrationBinding, str], RegistrationExecution]
 CredentialHandoffCleared = Callable[[LiveRegistrationBinding, str], bool]
 ReadRunners = Callable[[str], tuple[RunnerReadback, ...]]
-RevalidateMutationTarget = Callable[[LiveRegistrationBinding], str]
+_TRUSTED_REVALIDATOR_CONSTRUCTION_KEY = object()
+
+
+class _TrustedMutationTargetRevalidator:
+    """Non-public execution capability for the CLI's authoritative target read."""
+
+    __slots__ = ("_revalidate",)
+
+    def __init__(
+        self,
+        construction_key: object,
+        revalidate: Callable[[LiveRegistrationBinding], None],
+    ):
+        if construction_key is not _TRUSTED_REVALIDATOR_CONSTRUCTION_KEY:
+            raise TypeError("trusted mutation-target revalidators must be bound internally")
+        if not callable(revalidate):
+            raise TypeError("mutation-target revalidator must be callable")
+        self._revalidate = revalidate
+
+    def revalidate(self, binding: LiveRegistrationBinding) -> None:
+        self._revalidate(binding)
+
+
+def _bind_trusted_mutation_target_revalidator(
+    revalidate: Callable[[LiveRegistrationBinding], None],
+) -> _TrustedMutationTargetRevalidator:
+    """Bind the trusted CLI read path; callers cannot satisfy this with a digest echo."""
+
+    return _TrustedMutationTargetRevalidator(
+        _TRUSTED_REVALIDATOR_CONSTRUCTION_KEY, revalidate
+    )
+
+
+RevalidateMutationTarget = _TrustedMutationTargetRevalidator
 
 
 def _redact_secret(text: str, secret: str) -> tuple[str, bool]:
@@ -328,14 +361,13 @@ def execute_live_registration(
         )
 
     def mutation_target_is_revalidated() -> bool:
+        if type(revalidate_mutation_target) is not _TrustedMutationTargetRevalidator:
+            return False
         try:
-            authenticated_evidence_sha256 = revalidate_mutation_target(binding)
+            revalidate_mutation_target.revalidate(binding)
         except Exception:
             return False
-        return (
-            type(authenticated_evidence_sha256) is str
-            and authenticated_evidence_sha256 == evidence_sha256
-        )
+        return True
 
     if not mutation_target_is_revalidated():
         return LiveRegistrationResult(

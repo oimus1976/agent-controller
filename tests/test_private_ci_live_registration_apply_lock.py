@@ -58,7 +58,10 @@ class ApplyOwnershipTests(unittest.TestCase):
         self.assertLess(marker_index, callback_index)
         self.assertLess(marker_index, execute_index)
         self.assertIn("_require_frozen_target_still_exact(evidence)", source[callback_index:execute_index])
-        self.assertIn("revalidate_mutation_target=revalidate_mutation_target", source[execute_index:])
+        self.assertIn(
+            "revalidate_mutation_target=trusted_mutation_target_revalidator",
+            source[execute_index:],
+        )
         self.assertNotIn("prepare_with_durable_consumption", source)
         self.assertNotIn("isatty", source)
         self.assertNotIn("readline", source)

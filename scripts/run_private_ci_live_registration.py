@@ -40,6 +40,7 @@ from agent_controller.private_ci_live_registration import (
     execute_live_registration,
     frozen_live_registration_binding,
     phase0_evidence_sha256,
+    _bind_trusted_mutation_target_revalidator,
     render_live_registration_candidate,
 )
 from agent_controller.private_ci_live_registration_runtime import (
@@ -564,9 +565,12 @@ def command_apply(expected_plan_sha256: str) -> int:
 
     started_at = datetime.now(timezone.utc).isoformat()
 
-    def revalidate_mutation_target(_binding: object) -> str:
+    def revalidate_mutation_target(_binding: object) -> None:
         _require_frozen_target_still_exact(evidence)
-        return evidence_sha
+
+    trusted_mutation_target_revalidator = _bind_trusted_mutation_target_revalidator(
+        revalidate_mutation_target
+    )
 
     result = execute_live_registration(
         plan.binding,
@@ -574,7 +578,7 @@ def command_apply(expected_plan_sha256: str) -> int:
         candidate=plan.candidate,
         ast_attestation=ast,
         prior_evidence_capability=prior,
-        revalidate_mutation_target=revalidate_mutation_target,
+        revalidate_mutation_target=trusted_mutation_target_revalidator,
         prepare_runner=runtime.prepare_runner,
         acquire_registration_token=runtime.acquire_registration_token,
         run_registration=runtime.run_registration,
