@@ -16,27 +16,45 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ApplyOwnershipTests(unittest.TestCase):
-    def test_only_first_process_can_claim_apply_ownership(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            marker = Path(temporary_directory) / "apply.consumed.json"
-            with mock.patch.object(MODULE, "_consumed_marker_path", return_value=marker):
-                MODULE._acquire_apply_ownership("a" * 64, "b" * 64, "c" * 64)
-                original = marker.read_bytes()
-                with self.assertRaisesRegex(RuntimeError, "apply ownership already claimed"):
-                    MODULE._acquire_apply_ownership("a" * 64, "b" * 64, "c" * 64)
-                self.assertEqual(marker.read_bytes(), original)
-                payload = marker.read_text(encoding="utf-8")
-                self.assertIn('"human_approval_sha256":"' + "c" * 64 + '"', payload)
+    def test_apply_ownership_uses_elevated_helper_then_validates_protected_marker(self):
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with (
+            mock.patch.object(MODULE, "_completed", return_value=completed) as runner,
+            mock.patch.object(MODULE, "_validate_protected_consumption_marker") as validate,
+        ):
+            MODULE._acquire_apply_ownership("a" * 64, "b" * 64, "c" * 64)
 
-    def test_approval_and_host_revalidation_precede_apply_ownership_and_live_execution(self):
+        command = runner.call_args.args
+        rendered = " ".join(command)
+        self.assertIn("Start-Process", rendered)
+        self.assertIn("-Verb RunAs", rendered)
+        self.assertIn("Consume-PrivateCiLiveRegistrationApproval.ps1", rendered)
+        self.assertIn("a" * 64, rendered)
+        self.assertIn("b" * 64, rendered)
+        self.assertIn("c" * 64, rendered)
+        validate.assert_called_once_with("a" * 64, "b" * 64, "c" * 64)
+
+    def test_failed_elevated_consumption_never_accepts_ownership(self):
+        completed = SimpleNamespace(returncode=7, stdout="", stderr="")
+        with (
+            mock.patch.object(MODULE, "_completed", return_value=completed),
+            mock.patch.object(MODULE, "_validate_protected_consumption_marker") as validate,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "ownership acquisition failed"):
+                MODULE._acquire_apply_ownership("a" * 64, "b" * 64, "c" * 64)
+        validate.assert_not_called()
+
+    def test_approval_host_claim_and_protected_marker_revalidation_precede_live_execution(self):
         source = inspect.getsource(MODULE.command_apply)
         approval_index = source.index("_require_human_approval(")
         host_index = source.index("_require_exact_phase0_host(")
         claim_index = source.index("_acquire_apply_ownership(")
+        marker_index = source.index("_validate_protected_consumption_marker(")
         execute_index = source.index("execute_live_registration(")
         self.assertLess(approval_index, host_index)
         self.assertLess(host_index, claim_index)
-        self.assertLess(claim_index, execute_index)
+        self.assertLess(claim_index, marker_index)
+        self.assertLess(marker_index, execute_index)
         self.assertNotIn("prepare_with_durable_consumption", source)
         self.assertNotIn("isatty", source)
         self.assertNotIn("readline", source)
@@ -88,6 +106,7 @@ class ApplyOwnershipTests(unittest.TestCase):
                     "_acquire_apply_ownership",
                     side_effect=RuntimeError("live apply ownership already claimed"),
                 ),
+                mock.patch.object(MODULE, "_validate_protected_consumption_marker"),
                 mock.patch.object(MODULE, "execute_live_registration") as execute,
                 mock.patch.object(MODULE, "_write_exclusive") as publish,
             ):
