@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Stop'
 $ExpectedHost = 'WOBBUFFET'
 $ExpectedIdentity = 'WOBBUFFET\c-admin'
 $EvidenceRoot = 'C:\Users\Public\Documents\agent-controller-handoff'
-$AuthorityRoot = 'C:\ProgramData\agent-controller\private-ci-authority'
+$AuthorityRoot = 'C:\ProgramData\agent-controller-private-ci-authority'
 $PlanPath = Join-Path $EvidenceRoot 'issue217-live-registration-plan.json'
 $Phase0Path = Join-Path $EvidenceRoot 'issue216-phase0-canonical.json'
 $ApprovalPath = Join-Path $EvidenceRoot ("issue216-live-registration-approval-{0}.json" -f $PlanSha256)
@@ -103,7 +103,7 @@ function New-ProtectedAuthorityDirectory {
 
     $Parent = Split-Path -Parent $LiteralPath
     if (-not (Test-Path -LiteralPath $Parent -PathType Container)) {
-        New-Item -ItemType Directory -Path $Parent -Force | Out-Null
+        throw "Authority parent is missing: $Parent"
     }
 
     $DirectoryAcl = New-Object Security.AccessControl.DirectorySecurity
