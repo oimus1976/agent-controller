@@ -396,6 +396,8 @@ $RunnerTasks = @(
     def acquire_registration_token(self, repository: str) -> str:
         if repository != self.binding.repository:
             raise RuntimeError("registration token repository mismatch")
+        if self._eligible_count(repository) != 0:
+            raise RuntimeError("stale eligible runner exists before registration")
         completed = self._run_text(
             self.gh_executable,
             "api",
