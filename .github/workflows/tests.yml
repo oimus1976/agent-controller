@@ -21,7 +21,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        uses: actions/setup-python@a26af69be951213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'
       - name: Run deterministic suite
@@ -45,3 +45,5 @@ jobs:
         run: python -m unittest discover -s tests -p "test_private_ci_ast_producer_windows.py" -v
       - name: Run real Windows PowerShell 5.1 approval issuer regressions
         run: python -m unittest discover -s tests -p "test_private_ci_approval_issuer_windows.py" -v
+      - name: Run real Windows PowerShell 5.1 consumption helper regressions
+        run: python -m unittest discover -s tests -p "test_private_ci_consumption_helper_windows.py" -v
