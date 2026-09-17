@@ -20,9 +20,12 @@ class RunnerReadbackTests(unittest.TestCase):
         def fetch_page(page):
             calls.append(page)
             if page == 1:
-                return {"runners": [runner(index) for index in range(1, 101)]}
+                return {
+                    "total_count": 101,
+                    "runners": [runner(index) for index in range(1, 101)],
+                }
             if page == 2:
-                return {"runners": [runner(101)]}
+                return {"total_count": 101, "runners": [runner(101)]}
             raise AssertionError(page)
 
         items = read_all_runner_items(fetch_page)
@@ -33,15 +36,54 @@ class RunnerReadbackTests(unittest.TestCase):
     def test_duplicate_id_across_pages_is_blocked(self):
         def fetch_page(page):
             if page == 1:
-                return {"runners": [runner(index) for index in range(1, 101)]}
-            return {"runners": [runner(100)]}
+                return {
+                    "total_count": 101,
+                    "runners": [runner(index) for index in range(1, 101)],
+                }
+            return {"total_count": 101, "runners": [runner(100)]}
 
         with self.assertRaisesRegex(RuntimeError, "duplicate id"):
             read_all_runner_items(fetch_page)
 
     def test_invalid_runner_id_is_blocked(self):
         with self.assertRaisesRegex(RuntimeError, "runner id"):
-            read_all_runner_items(lambda page: {"runners": [{"id": True}]})
+            read_all_runner_items(
+                lambda page: {"total_count": 1, "runners": [{"id": True}]}
+            )
+
+    def test_bool_total_count_is_blocked(self):
+        with self.assertRaisesRegex(RuntimeError, "total_count invalid"):
+            read_all_runner_items(lambda page: {"total_count": True, "runners": []})
+
+    def test_short_page_with_larger_total_count_is_blocked(self):
+        with self.assertRaisesRegex(RuntimeError, "incomplete for total_count"):
+            read_all_runner_items(
+                lambda page: {
+                    "total_count": 2,
+                    "runners": [runner(1)],
+                }
+            )
+
+    def test_total_count_change_across_pages_is_blocked(self):
+        def fetch_page(page):
+            if page == 1:
+                return {
+                    "total_count": 101,
+                    "runners": [runner(index) for index in range(1, 101)],
+                }
+            return {"total_count": 102, "runners": [runner(101)]}
+
+        with self.assertRaisesRegex(RuntimeError, "changed across pages"):
+            read_all_runner_items(fetch_page)
+
+    def test_accumulated_count_cannot_exceed_total_count(self):
+        with self.assertRaisesRegex(RuntimeError, "exceeds total_count"):
+            read_all_runner_items(
+                lambda page: {
+                    "total_count": 1,
+                    "runners": [runner(1), runner(2)],
+                }
+            )
 
 
 if __name__ == "__main__":
