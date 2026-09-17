@@ -24,10 +24,12 @@ class ApplyOwnershipTests(unittest.TestCase):
                     MODULE._acquire_apply_ownership("a" * 64, "b" * 64)
                 self.assertEqual(marker.read_bytes(), original)
 
-    def test_apply_ownership_is_claimed_before_live_execution(self):
+    def test_host_revalidation_precedes_apply_ownership_and_live_execution(self):
         source = inspect.getsource(MODULE.command_apply)
+        host_index = source.index("_require_exact_phase0_host(")
         claim_index = source.index("_acquire_apply_ownership(")
         execute_index = source.index("execute_live_registration(")
+        self.assertLess(host_index, claim_index)
         self.assertLess(claim_index, execute_index)
         self.assertNotIn("prepare_with_durable_consumption", source)
 
