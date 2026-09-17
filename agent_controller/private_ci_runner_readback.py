@@ -14,12 +14,22 @@ def read_all_runner_items(fetch_page: RunnerPageFetcher) -> tuple[dict[str, obje
 
     items: list[dict[str, object]] = []
     seen_ids: set[int] = set()
+    expected_total: int | None = None
     page = 1
 
     while page <= MAX_RUNNER_PAGES:
         payload = fetch_page(page)
         if type(payload) is not dict or type(payload.get("runners")) is not list:
             raise RuntimeError("GitHub runner readback shape invalid")
+
+        total_count = payload.get("total_count")
+        if type(total_count) is not int or total_count < 0:
+            raise RuntimeError("GitHub runner total_count invalid")
+        if expected_total is None:
+            expected_total = total_count
+        elif total_count != expected_total:
+            raise RuntimeError("GitHub runner total_count changed across pages")
+
         raw_items = payload["runners"]
         if len(raw_items) > RUNNER_PAGE_SIZE:
             raise RuntimeError("GitHub runner page exceeds requested page size")
@@ -35,8 +45,13 @@ def read_all_runner_items(fetch_page: RunnerPageFetcher) -> tuple[dict[str, obje
             seen_ids.add(runner_id)
             items.append(raw)
 
-        if len(raw_items) < RUNNER_PAGE_SIZE:
+        if len(items) > expected_total:
+            raise RuntimeError("GitHub runner pagination exceeds total_count")
+        if len(items) == expected_total:
             return tuple(items)
+        if len(raw_items) < RUNNER_PAGE_SIZE:
+            raise RuntimeError("GitHub runner pagination incomplete for total_count")
+
         page += 1
 
     raise RuntimeError("GitHub runner pagination exceeded safety bound")
