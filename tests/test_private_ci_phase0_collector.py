@@ -72,7 +72,12 @@ class FakeRunner:
             "api",
             f"repos/{FROZEN_REPOSITORY}/actions/runners?per_page=100",
         ):
-            return subprocess.CompletedProcess(command, 0, json.dumps({"runners": []}), "")
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps({"total_count": 0, "runners": []}),
+                "",
+            )
         raise AssertionError(f"unexpected command: {command!r}")
 
 
