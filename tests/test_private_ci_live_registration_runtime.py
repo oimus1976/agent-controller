@@ -202,6 +202,11 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
                     "POST",
                 ):
                     return completed(command, stdout=json.dumps({"token": TOKEN}))
+                if command[0:2] == ("gh.exe", "api"):
+                    return completed(
+                        command,
+                        stdout=json.dumps({"total_count": 0, "runners": []}),
+                    )
                 if command[0] == "cmd.exe":
                     env = kwargs["env"]
                     self.assertEqual(env[REGISTRATION_TOKEN_ENVIRONMENT_NAME], TOKEN)
@@ -215,18 +220,32 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             execution = runtime.run_registration(binding, token)
             self.assertEqual(execution.exit_code, 0)
 
-            token_call = seen[0][0]
+            runner_reads = [
+                command
+                for command, _ in seen
+                if command[0:2] == ("gh.exe", "api") and "actions/runners?" in command[-1]
+            ]
+            self.assertEqual(len(runner_reads), 2)
+            token_calls = [
+                command
+                for command, _ in seen
+                if command[0:4] == ("gh.exe", "api", "--method", "POST")
+            ]
             self.assertEqual(
-                token_call,
-                (
-                    "gh.exe",
-                    "api",
-                    "--method",
-                    "POST",
-                    f"repos/{binding.repository}/actions/runners/registration-token",
-                ),
+                token_calls,
+                [
+                    (
+                        "gh.exe",
+                        "api",
+                        "--method",
+                        "POST",
+                        f"repos/{binding.repository}/actions/runners/registration-token",
+                    )
+                ],
             )
-            config_call = seen[1][0]
+            config_calls = [command for command, _ in seen if command[0] == "cmd.exe"]
+            self.assertEqual(len(config_calls), 1)
+            config_call = config_calls[0]
             self.assertIn("--ephemeral", config_call)
             self.assertIn("--no-default-labels", config_call)
             self.assertIn("--disableupdate", config_call)
