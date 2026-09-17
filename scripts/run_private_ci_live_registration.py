@@ -261,14 +261,17 @@ def _consumed_marker_path(plan_sha: str) -> Path:
     return authoritative_path(f"issue217-live-registration-{plan_sha}.consumed.json")
 
 
-def _consume_durable_live_authority(plan_sha: str, phase0_sha: str) -> None:
+def _acquire_apply_ownership(plan_sha: str, phase0_sha: str) -> None:
     payload = {
         "schema": CONSUMED_SCHEMA,
         "plan_sha256": plan_sha,
         "phase0_evidence_sha256": phase0_sha,
         "consumed_at": datetime.now(timezone.utc).isoformat(),
     }
-    _write_exclusive(_consumed_marker_path(plan_sha), canonical_json_bytes(payload))
+    try:
+        _write_exclusive(_consumed_marker_path(plan_sha), canonical_json_bytes(payload))
+    except FileExistsError as error:
+        raise RuntimeError("live apply ownership already claimed") from error
 
 
 def _require_live_outputs_absent(plan_sha: str) -> None:
@@ -377,12 +380,10 @@ def command_apply(expected_plan_sha256: str) -> int:
     prior = _authenticate_phase0(evidence, phase0_bytes, evidence_key)
     runtime = WindowsEphemeralRegistrationRuntime(plan.binding)
 
-    def prepare_with_durable_consumption(binding):
-        _consume_durable_live_authority(
-            actual_plan_sha,
-            plan.phase0_evidence_sha256,
-        )
-        runtime.prepare_runner(binding)
+    _acquire_apply_ownership(
+        actual_plan_sha,
+        plan.phase0_evidence_sha256,
+    )
 
     started_at = datetime.now(timezone.utc).isoformat()
     result = execute_live_registration(
@@ -391,7 +392,7 @@ def command_apply(expected_plan_sha256: str) -> int:
         candidate=plan.candidate,
         ast_attestation=ast,
         prior_evidence_capability=prior,
-        prepare_runner=prepare_with_durable_consumption,
+        prepare_runner=runtime.prepare_runner,
         acquire_registration_token=runtime.acquire_registration_token,
         run_registration=runtime.run_registration,
         credential_handoff_cleared=runtime.credential_handoff_cleared,
