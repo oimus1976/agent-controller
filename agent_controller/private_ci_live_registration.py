@@ -249,7 +249,7 @@ AcquireRegistrationToken = Callable[[str], str]
 RunRegistration = Callable[[LiveRegistrationBinding, str], RegistrationExecution]
 CredentialHandoffCleared = Callable[[LiveRegistrationBinding, str], bool]
 ReadRunners = Callable[[str], tuple[RunnerReadback, ...]]
-RevalidateMutationTarget = Callable[[LiveRegistrationBinding], None]
+RevalidateMutationTarget = Callable[[LiveRegistrationBinding], str]
 
 
 def _redact_secret(text: str, secret: str) -> tuple[str, bool]:
@@ -327,9 +327,17 @@ def execute_live_registration(
             None,
         )
 
-    try:
-        revalidate_mutation_target(binding)
-    except Exception:
+    def mutation_target_is_revalidated() -> bool:
+        try:
+            authenticated_evidence_sha256 = revalidate_mutation_target(binding)
+        except Exception:
+            return False
+        return (
+            type(authenticated_evidence_sha256) is str
+            and authenticated_evidence_sha256 == evidence_sha256
+        )
+
+    if not mutation_target_is_revalidated():
         return LiveRegistrationResult(
             LiveRegistrationStatus.FAILED,
             ("MUTATION_TIME_TARGET_REVALIDATION_FAILED",),
@@ -346,6 +354,20 @@ def execute_live_registration(
         return LiveRegistrationResult(
             LiveRegistrationStatus.FAILED,
             ("RUNNER_PREPARATION_FAILED",),
+            gate.candidate_sha256,
+            None,
+            "",
+            "",
+            None,
+        )
+
+    # Preparation can take long enough for any of the frozen target facts to
+    # drift.  Repeat the complete evidence-bound check at the token boundary;
+    # the runtime's narrower runner-collision check remains defense in depth.
+    if not mutation_target_is_revalidated():
+        return LiveRegistrationResult(
+            LiveRegistrationStatus.FAILED,
+            ("MUTATION_TIME_TARGET_REVALIDATION_FAILED",),
             gate.candidate_sha256,
             None,
             "",

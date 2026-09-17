@@ -564,8 +564,9 @@ def command_apply(expected_plan_sha256: str) -> int:
 
     started_at = datetime.now(timezone.utc).isoformat()
 
-    def revalidate_mutation_target(_binding: object) -> None:
+    def revalidate_mutation_target(_binding: object) -> str:
         _require_frozen_target_still_exact(evidence)
+        return evidence_sha
 
     result = execute_live_registration(
         plan.binding,

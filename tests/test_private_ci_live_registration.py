@@ -199,7 +199,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             phase0_evidence_bytes=PHASE0_EVIDENCE,
             candidate=self.candidate,
             ast_attestation=self.ast,
-            revalidate_mutation_target=lambda binding: called.append("revalidate"),
+            revalidate_mutation_target=lambda binding: (called.append("revalidate"), phase0_evidence_sha256(PHASE0_EVIDENCE))[1],
             prior_evidence_capability=None,
             prepare_runner=lambda binding: called.append("prepare"),
             acquire_registration_token=lambda repo: called.append("token") or REGISTRATION_TOKEN,
@@ -229,7 +229,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             phase0_evidence_bytes=PHASE0_EVIDENCE,
             candidate=self.candidate,
             ast_attestation=self.ast,
-            revalidate_mutation_target=lambda binding: called.append("revalidate"),
+            revalidate_mutation_target=lambda binding: (called.append("revalidate"), phase0_evidence_sha256(PHASE0_EVIDENCE))[1],
             prior_evidence_capability=evidence,
             prepare_runner=lambda binding: called.append("prepare"),
             acquire_registration_token=lambda repo: called.append("token") or REGISTRATION_TOKEN,
@@ -238,7 +238,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             read_runners=lambda repo: called.append("readback") or runners,
         )
         self.assertTrue(first.registered)
-        self.assertEqual(called, ["revalidate", "prepare", "token", "run", "clear", "readback"])
+        self.assertEqual(called, ["revalidate", "prepare", "revalidate", "token", "run", "clear", "readback"])
 
         called.clear()
         second = execute_live_registration(
@@ -246,7 +246,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             phase0_evidence_bytes=PHASE0_EVIDENCE,
             candidate=self.candidate,
             ast_attestation=self.ast,
-            revalidate_mutation_target=lambda binding: None,
+            revalidate_mutation_target=lambda binding: phase0_evidence_sha256(PHASE0_EVIDENCE),
             prior_evidence_capability=evidence,
             prepare_runner=lambda binding: called.append("prepare"),
             acquire_registration_token=lambda repo: called.append("token") or REGISTRATION_TOKEN,
@@ -291,7 +291,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             candidate=self.candidate,
             ast_attestation=self.ast,
             prior_evidence_capability=evidence,
-            revalidate_mutation_target=lambda binding: called.append("revalidate"),
+            revalidate_mutation_target=lambda binding: (called.append("revalidate"), phase0_evidence_sha256(PHASE0_EVIDENCE))[1],
             prepare_runner=lambda binding: called.append("prepare"),
             acquire_registration_token=lambda repo: called.append("token") or REGISTRATION_TOKEN,
             run_registration=lambda binding, token: RegistrationExecution(0, "ok", ""),
@@ -302,6 +302,84 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
         self.assertIn("LIVE_GATE_PRIOR_EVIDENCE_ALREADY_CONSUMED", retry.reason_codes)
         self.assertEqual(called, [])
 
+    def test_noop_and_wrong_digest_revalidation_consume_but_block_mutation(self):
+        invalid_results = (None, "0" * 64)
+        for invalid_result in invalid_results:
+            with self.subTest(invalid_result=invalid_result):
+                gate._ACTIVE_CONTROLLER_AUTHORITY = None
+                configure_controller_authority(
+                    ast_hmac_key=AST_KEY, evidence_hmac_key=EVIDENCE_KEY
+                )
+                ast = authenticated_ast(self.binding, self.candidate)
+                evidence = authenticated_phase0_evidence(self.binding)
+                called = []
+                result = execute_live_registration(
+                    self.binding,
+                    phase0_evidence_bytes=PHASE0_EVIDENCE,
+                    candidate=self.candidate,
+                    ast_attestation=ast,
+                    prior_evidence_capability=evidence,
+                    revalidate_mutation_target=lambda binding, value=invalid_result: value,
+                    prepare_runner=lambda binding: called.append("prepare"),
+                    acquire_registration_token=lambda repo: called.append("token") or REGISTRATION_TOKEN,
+                    run_registration=lambda binding, token: RegistrationExecution(0, "ok", ""),
+                    credential_handoff_cleared=lambda binding, token: True,
+                    read_runners=lambda repo: (),
+                )
+                self.assertEqual(result.status, LiveRegistrationStatus.FAILED)
+                self.assertEqual(
+                    result.reason_codes,
+                    ("MUTATION_TIME_TARGET_REVALIDATION_FAILED",),
+                )
+                self.assertEqual(called, [])
+
+                retry = execute_live_registration(
+                    self.binding,
+                    phase0_evidence_bytes=PHASE0_EVIDENCE,
+                    candidate=self.candidate,
+                    ast_attestation=ast,
+                    prior_evidence_capability=evidence,
+                    revalidate_mutation_target=lambda binding: phase0_evidence_sha256(PHASE0_EVIDENCE),
+                    prepare_runner=lambda binding: called.append("prepare"),
+                    acquire_registration_token=lambda repo: called.append("token") or REGISTRATION_TOKEN,
+                    run_registration=lambda binding, token: RegistrationExecution(0, "ok", ""),
+                    credential_handoff_cleared=lambda binding, token: True,
+                    read_runners=lambda repo: (),
+                )
+                self.assertEqual(retry.status, LiveRegistrationStatus.BLOCKED)
+                self.assertIn("LIVE_GATE_PRIOR_EVIDENCE_ALREADY_CONSUMED", retry.reason_codes)
+                self.assertEqual(called, [])
+
+    def test_target_drift_during_preparation_blocks_before_token(self):
+        evidence = authenticated_phase0_evidence(self.binding)
+        called = []
+
+        def revalidate(binding):
+            called.append("revalidate")
+            if called.count("revalidate") == 2:
+                raise RuntimeError("target drifted during preparation")
+            return phase0_evidence_sha256(PHASE0_EVIDENCE)
+
+        result = execute_live_registration(
+            self.binding,
+            phase0_evidence_bytes=PHASE0_EVIDENCE,
+            candidate=self.candidate,
+            ast_attestation=self.ast,
+            prior_evidence_capability=evidence,
+            revalidate_mutation_target=revalidate,
+            prepare_runner=lambda binding: called.append("prepare"),
+            acquire_registration_token=lambda repo: called.append("token") or REGISTRATION_TOKEN,
+            run_registration=lambda binding, token: called.append("run") or RegistrationExecution(0, "ok", ""),
+            credential_handoff_cleared=lambda binding, token: True,
+            read_runners=lambda repo: called.append("readback") or (),
+        )
+
+        self.assertEqual(result.status, LiveRegistrationStatus.FAILED)
+        self.assertEqual(
+            result.reason_codes, ("MUTATION_TIME_TARGET_REVALIDATION_FAILED",)
+        )
+        self.assertEqual(called, ["revalidate", "prepare", "revalidate"])
+
     def test_nonzero_child_exit_performs_bounded_failure_readback(self):
         evidence = authenticated_phase0_evidence(self.binding)
         readback_called = []
@@ -310,7 +388,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             phase0_evidence_bytes=PHASE0_EVIDENCE,
             candidate=self.candidate,
             ast_attestation=self.ast,
-            revalidate_mutation_target=lambda binding: None,
+            revalidate_mutation_target=lambda binding: phase0_evidence_sha256(PHASE0_EVIDENCE),
             prior_evidence_capability=evidence,
             prepare_runner=lambda binding: None,
             acquire_registration_token=lambda repo: REGISTRATION_TOKEN,
@@ -331,7 +409,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             phase0_evidence_bytes=PHASE0_EVIDENCE,
             candidate=self.candidate,
             ast_attestation=self.ast,
-            revalidate_mutation_target=lambda binding: None,
+            revalidate_mutation_target=lambda binding: phase0_evidence_sha256(PHASE0_EVIDENCE),
             prior_evidence_capability=evidence,
             prepare_runner=lambda binding: None,
             acquire_registration_token=lambda repo: REGISTRATION_TOKEN,
@@ -350,7 +428,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             phase0_evidence_bytes=PHASE0_EVIDENCE,
             candidate=self.candidate,
             ast_attestation=self.ast,
-            revalidate_mutation_target=lambda binding: None,
+            revalidate_mutation_target=lambda binding: phase0_evidence_sha256(PHASE0_EVIDENCE),
             prior_evidence_capability=evidence,
             prepare_runner=lambda binding: None,
             acquire_registration_token=lambda repo: REGISTRATION_TOKEN,
@@ -391,7 +469,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
                     phase0_evidence_bytes=PHASE0_EVIDENCE,
                     candidate=self.candidate,
                     ast_attestation=ast,
-                    revalidate_mutation_target=lambda binding: None,
+                    revalidate_mutation_target=lambda binding: phase0_evidence_sha256(PHASE0_EVIDENCE),
                     prior_evidence_capability=evidence,
                     prepare_runner=lambda binding: None,
                     acquire_registration_token=lambda repo: REGISTRATION_TOKEN,
