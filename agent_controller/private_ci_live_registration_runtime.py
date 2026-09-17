@@ -230,6 +230,76 @@ class WindowsEphemeralRegistrationRuntime:
         if not observed.endswith("\\c-admin"):
             raise RuntimeError("broker identity mismatch")
 
+    def _require_local_safety_baseline(self) -> None:
+        script = r"""
+$ErrorActionPreference = 'Stop'
+$TargetName = 'ac-runner'
+$Target = Get-LocalUser -Name $TargetName -ErrorAction SilentlyContinue
+$TargetEnabled = $false
+$TargetAdmin = $false
+if ($null -ne $Target) {
+    $TargetEnabled = [bool]$Target.Enabled
+    $AdminSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+    $AdminGroup = Get-LocalGroup -SID $AdminSid
+    $Qualified = "$env:COMPUTERNAME\$TargetName"
+    $Members = @(Get-LocalGroupMember -Group $AdminGroup.Name -ErrorAction Stop)
+    $TargetAdmin = $null -ne ($Members | Where-Object {
+        $_.Name -ieq $Qualified -or $_.Name -ieq $TargetName
+    })
+}
+$RunnerProcesses = @(
+    Get-CimInstance Win32_Process -ErrorAction Stop |
+        Where-Object { $_.Name -match 'Runner|actions' }
+)
+$RunnerServices = @(
+    Get-CimInstance Win32_Service -ErrorAction Stop |
+        Where-Object {
+            $_.Name -match 'runner|actions' -or
+            $_.DisplayName -match 'runner|actions'
+        }
+)
+$RunnerTasks = @(
+    Get-ScheduledTask -ErrorAction Stop |
+        Where-Object {
+            $_.TaskName -match 'runner|actions' -or
+            $_.TaskPath -match 'runner|actions'
+        }
+)
+[ordered]@{
+    target_identity_enabled = $TargetEnabled
+    target_identity_admin = $TargetAdmin
+    runner_process_count = $RunnerProcesses.Count
+    runner_service_count = $RunnerServices.Count
+    runner_task_count = $RunnerTasks.Count
+} | ConvertTo-Json -Compress
+""".strip()
+        completed = self._run_text(
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError("local safety baseline readback failed")
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("local safety baseline readback invalid") from error
+        if type(payload) is not dict:
+            raise RuntimeError("local safety baseline readback shape invalid")
+        if payload.get("target_identity_enabled") is not True:
+            raise RuntimeError("target identity is not enabled")
+        if payload.get("target_identity_admin") is not False:
+            raise RuntimeError("target identity is admin or uncertain")
+        if payload.get("runner_process_count") != 0:
+            raise RuntimeError("runner process drift detected")
+        if payload.get("runner_service_count") != 0:
+            raise RuntimeError("runner service drift detected")
+        if payload.get("runner_task_count") != 0:
+            raise RuntimeError("runner task drift detected")
+
     def _github_runners_payload(self, repository: str) -> dict[str, object]:
         completed = self._run_text(
             self.gh_executable,
@@ -275,6 +345,7 @@ class WindowsEphemeralRegistrationRuntime:
         if binding != self.binding:
             raise RuntimeError("runtime binding mismatch")
         self._require_broker_identity()
+        self._require_local_safety_baseline()
         if self.runner_root.exists():
             raise RuntimeError("fresh runner root already exists")
         if self._eligible_count(binding.repository) != 0:
