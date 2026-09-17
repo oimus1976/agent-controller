@@ -171,8 +171,11 @@ class MutationTimeLocalPreflightTests(unittest.TestCase):
 
             self.assertEqual(downloaded, [])
             self.assertFalse(Path(binding.runner_root).parent.exists())
-            self.assertEqual(len(endpoints), 2)
+            self.assertEqual(len(endpoints), 4)
+            self.assertNotIn("page=2", endpoints[0])
             self.assertIn("page=2", endpoints[1])
+            self.assertNotIn("page=2", endpoints[2])
+            self.assertIn("page=2", endpoints[3])
 
 
 if __name__ == "__main__":
