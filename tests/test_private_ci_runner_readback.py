@@ -1,15 +1,19 @@
 import unittest
 
+from agent_controller.private_ci_live_registration import (
+    FROZEN_RUNNER_LABEL,
+    FROZEN_RUNNER_NAME,
+)
 from agent_controller.private_ci_runner_readback import read_all_runner_items
 
 
-def runner(runner_id):
+def runner(runner_id, *, name=None, labels=()):
     return {
         "id": runner_id,
-        "name": f"runner-{runner_id}",
+        "name": name or f"runner-{runner_id}",
         "status": "offline",
         "busy": False,
-        "labels": [],
+        "labels": [{"name": label} for label in labels],
     }
 
 
@@ -84,6 +88,30 @@ class RunnerReadbackTests(unittest.TestCase):
                     "runners": [runner(1), runner(2)],
                 }
             )
+
+    def test_frozen_runner_name_without_frozen_label_is_blocked(self):
+        with self.assertRaisesRegex(RuntimeError, "name/label collision"):
+            read_all_runner_items(
+                lambda page: {
+                    "total_count": 1,
+                    "runners": [runner(9, name=FROZEN_RUNNER_NAME, labels=())],
+                }
+            )
+
+    def test_frozen_runner_name_with_frozen_label_is_readable(self):
+        items = read_all_runner_items(
+            lambda page: {
+                "total_count": 1,
+                "runners": [
+                    runner(
+                        9,
+                        name=FROZEN_RUNNER_NAME,
+                        labels=(FROZEN_RUNNER_LABEL,),
+                    )
+                ],
+            }
+        )
+        self.assertEqual(len(items), 1)
 
 
 if __name__ == "__main__":
