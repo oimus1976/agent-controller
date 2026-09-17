@@ -31,6 +31,16 @@ def binding_for(root):
     )
 
 
+def runner(runner_id, *, name=None, labels=()):
+    return {
+        "id": runner_id,
+        "name": name or f"runner-{runner_id}",
+        "status": "offline",
+        "busy": False,
+        "labels": [{"name": label} for label in labels],
+    }
+
+
 class MutationTimeLocalPreflightTests(unittest.TestCase):
     def _runtime(
         self,
@@ -102,6 +112,61 @@ class MutationTimeLocalPreflightTests(unittest.TestCase):
                 runtime.prepare_runner(binding)
             self.assertEqual(downloaded, [])
             self.assertFalse(Path(binding.runner_root).parent.exists())
+
+    def test_later_page_pilot_runner_blocks_before_filesystem_or_download(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding = binding_for(temporary_directory)
+            downloaded = []
+            endpoints = []
+
+            def command_runner(*command, **kwargs):
+                if command == ("hostname.exe",):
+                    return Completed(stdout="WOBBUFFET\n")
+                if command == ("whoami.exe",):
+                    return Completed(stdout="WOBBUFFET\\c-admin\n")
+                if command[0] == "powershell.exe":
+                    return Completed(
+                        stdout=json.dumps(
+                            {
+                                "target_identity_enabled": True,
+                                "target_identity_admin": False,
+                                "runner_process_count": 0,
+                                "runner_service_count": 0,
+                                "runner_task_count": 0,
+                            }
+                        )
+                    )
+                if command[0:2] == ("gh.exe", "api"):
+                    endpoint = command[2]
+                    endpoints.append(endpoint)
+                    if "page=2" in endpoint:
+                        payload = {
+                            "runners": [
+                                runner(
+                                    101,
+                                    name=binding.runner_name,
+                                    labels=(binding.runner_label,),
+                                )
+                            ]
+                        }
+                    else:
+                        payload = {"runners": [runner(index) for index in range(1, 101)]}
+                    return Completed(stdout=json.dumps(payload))
+                raise AssertionError(command)
+
+            runtime = WindowsEphemeralRegistrationRuntime(
+                binding,
+                command_runner=command_runner,
+                downloader=lambda url, path: downloaded.append((url, path)),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "stale eligible runner"):
+                runtime.prepare_runner(binding)
+
+            self.assertEqual(downloaded, [])
+            self.assertFalse(Path(binding.runner_root).parent.exists())
+            self.assertEqual(len(endpoints), 2)
+            self.assertIn("page=2", endpoints[1])
 
 
 if __name__ == "__main__":
