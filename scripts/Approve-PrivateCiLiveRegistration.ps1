@@ -25,10 +25,10 @@ if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 $ObservedHost = (hostname.exe).Trim()
 $ObservedIdentity = (whoami.exe).Trim()
-if ($ObservedHost -cne $ExpectedHost) {
+if ($ObservedHost -ine $ExpectedHost) {
     throw "Approval issuer host mismatch: $ObservedHost"
 }
-if ($ObservedIdentity -cne $ExpectedIdentity) {
+if ($ObservedIdentity -ine $ExpectedIdentity) {
     throw "Approval issuer identity mismatch: $ObservedIdentity"
 }
 if (-not (Test-Path -LiteralPath $PlanPath -PathType Leaf)) {
