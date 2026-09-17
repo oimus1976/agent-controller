@@ -255,7 +255,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
         self.assertIn("LIVE_GATE_PRIOR_EVIDENCE_ALREADY_CONSUMED", second.reason_codes)
         self.assertEqual(called, [])
 
-    def test_nonzero_child_exit_stops_before_readback(self):
+    def test_nonzero_child_exit_performs_bounded_failure_readback(self):
         evidence = authenticated_phase0_evidence(self.binding)
         readback_called = []
         result = execute_live_registration(
@@ -273,7 +273,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
         self.assertEqual(result.status, LiveRegistrationStatus.FAILED)
         self.assertEqual(result.reason_codes, ("REGISTRATION_CHILD_EXIT_NONZERO",))
         self.assertEqual(result.child_exit_code, 37)
-        self.assertEqual(readback_called, [])
+        self.assertEqual(readback_called, [True])
 
     def test_handoff_not_cleared_stops_before_readback(self):
         evidence = authenticated_phase0_evidence(self.binding)
