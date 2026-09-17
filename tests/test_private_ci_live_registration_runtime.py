@@ -72,7 +72,10 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
                 if command[0] == "powershell.exe":
                     return completed(command, stdout=safe_local_probe())
                 if command[0:2] == ("gh.exe", "api"):
-                    return completed(command, stdout=json.dumps({"runners": []}))
+                    return completed(
+                        command,
+                        stdout=json.dumps({"total_count": 0, "runners": []}),
+                    )
                 raise AssertionError(command)
 
             def downloader(url, destination):
@@ -115,6 +118,7 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
                         command,
                         stdout=json.dumps(
                             {
+                                "total_count": 1,
                                 "runners": [
                                     {
                                         "id": 1,
@@ -123,7 +127,7 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
                                         "busy": False,
                                         "labels": [{"name": binding.runner_label}],
                                     }
-                                ]
+                                ],
                             }
                         ),
                     )
@@ -138,6 +142,48 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
                 runtime.prepare_runner(binding)
             self.assertEqual(downloaded, [])
             self.assertFalse(Path(binding.runner_root).exists())
+
+    def test_prepare_runner_blocks_same_name_without_label_before_download(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding = self.binding_for(temporary_directory)
+            downloaded = []
+
+            def command_runner(*command, **kwargs):
+                if command == ("hostname.exe",):
+                    return completed(command, stdout="WOBBUFFET\n")
+                if command == ("whoami.exe",):
+                    return completed(command, stdout="WOBBUFFET\\c-admin\n")
+                if command[0] == "powershell.exe":
+                    return completed(command, stdout=safe_local_probe())
+                if command[0:2] == ("gh.exe", "api"):
+                    return completed(
+                        command,
+                        stdout=json.dumps(
+                            {
+                                "total_count": 1,
+                                "runners": [
+                                    {
+                                        "id": 2,
+                                        "name": binding.runner_name,
+                                        "status": "offline",
+                                        "busy": False,
+                                        "labels": [],
+                                    }
+                                ],
+                            }
+                        ),
+                    )
+                raise AssertionError(command)
+
+            runtime = WindowsEphemeralRegistrationRuntime(
+                binding,
+                command_runner=command_runner,
+                downloader=lambda url, path: downloaded.append(True),
+            )
+            with self.assertRaisesRegex(RuntimeError, "stale eligible runner"):
+                runtime.prepare_runner(binding)
+            self.assertEqual(downloaded, [])
+            self.assertFalse(Path(binding.runner_root).parent.exists())
 
     def test_registration_token_uses_fixed_repository_endpoint_and_never_enters_argv(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -216,6 +262,7 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
                         command,
                         stdout=json.dumps(
                             {
+                                "total_count": 1,
                                 "runners": [
                                     {
                                         "id": 7,
@@ -224,7 +271,7 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
                                         "busy": False,
                                         "labels": [{"name": binding.runner_label}],
                                     }
-                                ]
+                                ],
                             }
                         ),
                     )
