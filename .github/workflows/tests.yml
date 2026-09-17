@@ -43,3 +43,7 @@ jobs:
         run: python -m unittest discover -s tests -p "test_antigravity_windows_junction.py" -v
       - name: Run real Windows PowerShell 5.1 AST producer regressions
         run: python -m unittest discover -s tests -p "test_private_ci_ast_producer_windows.py" -v
+      - name: Run real Windows PowerShell 5.1 approval issuer regressions
+        run: python -m unittest discover -s tests -p "test_private_ci_approval_issuer_windows.py" -v
+      - name: Run real Windows PowerShell 5.1 consumption helper regressions
+        run: python -m unittest discover -s tests -p "test_private_ci_consumption_helper_windows.py" -v
