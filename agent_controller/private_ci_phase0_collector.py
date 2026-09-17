@@ -21,6 +21,7 @@ from agent_controller.private_ci_phase0_evidence import (
     Phase0Evidence,
     phase0_reason_codes,
 )
+from agent_controller.private_ci_runner_readback import read_all_runner_items
 
 CONTROLLER_REPOSITORY_URL = "https://github.com/oimus1976/agent-controller.git"
 PYTHON_EXECUTABLE = r"C:\Program Files\Python312\python.exe"
@@ -130,12 +131,20 @@ def _gh_json(command_runner: CommandRunner, endpoint: str) -> object:
     )
 
 
-def _matching_runner_count(payload: object) -> int:
-    if type(payload) is not dict or type(payload.get("runners")) is not list:
-        raise ValueError("phase0 collection invalid runner readback")
+def _runner_items(command_runner: CommandRunner) -> tuple[dict[str, object], ...]:
+    base = f"repos/{FROZEN_REPOSITORY}/actions/runners?per_page=100"
+
+    def fetch_page(page: int) -> object:
+        endpoint = base if page == 1 else f"{base}&page={page}"
+        return _gh_json(command_runner, endpoint)
+
+    return read_all_runner_items(fetch_page)
+
+
+def _matching_runner_count(items: tuple[dict[str, object], ...]) -> int:
     count = 0
-    for item in payload["runners"]:
-        if type(item) is not dict or type(item.get("labels")) is not list:
+    for item in items:
+        if type(item.get("labels")) is not list:
             raise ValueError("phase0 collection invalid runner item")
         labels = {
             label.get("name")
@@ -204,10 +213,7 @@ def collect_phase0_evidence(
     if type(branch) is not dict or type(branch.get("commit")) is not dict:
         raise ValueError("phase0 collection invalid workflow branch readback")
 
-    runners = _gh_json(
-        command_runner,
-        f"repos/{FROZEN_REPOSITORY}/actions/runners?per_page=100",
-    )
+    runners = _runner_items(command_runner)
 
     return Phase0Evidence(
         schema="agent-controller.private-ci-phase0-evidence.v1",
