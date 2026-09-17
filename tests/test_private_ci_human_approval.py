@@ -72,6 +72,24 @@ class HumanApprovalContractTests(unittest.TestCase):
             f"issue216-live-registration-approval-{PLAN_SHA}.json",
         )
 
+    def test_noncanonical_json_bytes_are_rejected(self):
+        raw = approval_bytes()
+        noncanonical = raw.replace(b'{"schema"', b'{ "schema"', 1)
+        with self.assertRaisesRegex(ValueError, "not canonical"):
+            parse_approval_bytes(
+                noncanonical,
+                expected_plan_sha256=PLAN_SHA,
+                now=lambda: NOW,
+            )
+
+    def test_extra_newline_is_rejected_as_noncanonical(self):
+        with self.assertRaisesRegex(ValueError, "not canonical"):
+            parse_approval_bytes(
+                approval_bytes() + b"\n",
+                expected_plan_sha256=PLAN_SHA,
+                now=lambda: NOW,
+            )
+
     def test_wrong_plan_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "plan SHA-256 mismatch"):
             parse_approval_bytes(
