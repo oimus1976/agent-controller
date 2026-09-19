@@ -781,6 +781,10 @@ $RunnerTasks = @(
                 continue
 
             if self._post_registration_items_are_exact(items):
+                # The remote runner may become visible after several seconds.
+                # Re-prove the local binding at the acceptance boundary rather
+                # than relying on the pre-loop read.
+                self._local_runner_settings()
                 return self._runner_readbacks(items, self.binding)
 
             if attempt == POST_REGISTRATION_READBACK_MAX_ATTEMPTS:
