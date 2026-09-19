@@ -25,6 +25,7 @@ from agent_controller.private_ci_live_registration import (
     FROZEN_RUNNER_NAME,
     FROZEN_RUNNER_ROOT,
     FROZEN_TARGET_SHA,
+    FROZEN_WORKFLOW_PATH,
     FROZEN_WORKFLOW_SHA,
     LIVE_REGISTRATION_SUCCESS_MARKER,
     LIVE_REGISTRATION_TRANSCRIPT,
@@ -123,6 +124,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
         self.assertEqual(self.binding.pull_request_number, FROZEN_PR_NUMBER)
         self.assertEqual(self.binding.target_sha, FROZEN_TARGET_SHA)
         self.assertEqual(self.binding.workflow_sha, FROZEN_WORKFLOW_SHA)
+        self.assertEqual(self.binding.workflow_path, FROZEN_WORKFLOW_PATH)
         self.assertEqual(self.binding.runner_name, FROZEN_RUNNER_NAME)
         self.assertEqual(self.binding.runner_label, FROZEN_RUNNER_LABEL)
         self.assertEqual(self.binding.environment_generation, FROZEN_ENVIRONMENT_GENERATION)
@@ -153,6 +155,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             {"pull_request_number": 999},
             {"target_sha": "b" * 40},
             {"workflow_sha": "c" * 40},
+            {"workflow_path": ".github/workflows/other.yml"},
             {"runner_name": "ac-ci-0000000000000000"},
             {"runner_label": "other-label"},
             {"environment_generation": "other-generation"},
