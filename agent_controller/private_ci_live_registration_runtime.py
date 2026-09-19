@@ -48,8 +48,8 @@ RUNNER_PACKAGE_URL = (
 RUNNER_PACKAGE_SHA256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
 RUNNER_PACKAGE_FILENAME = f"actions-runner-win-x64-{RUNNER_VERSION}.zip"
 
-PLAN_SCHEMA = "agent-controller.private-ci-live-registration-plan.v1"
-RESULT_SCHEMA = "agent-controller.private-ci-live-registration-result.v2"
+PLAN_SCHEMA = "agent-controller.private-ci-live-registration-plan.v2"
+RESULT_SCHEMA = "agent-controller.private-ci-live-registration-result.v3"
 
 POST_REGISTRATION_READBACK_MAX_ATTEMPTS = 6
 POST_REGISTRATION_READBACK_DELAY_SECONDS = 1.0
