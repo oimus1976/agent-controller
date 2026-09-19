@@ -213,6 +213,8 @@ class RegistrationExecution:
     exit_code: int
     stdout: str
     stderr: str
+    output_decoding_uncertain: bool = False
+    secret_output_redacted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,7 +503,7 @@ def execute_live_registration(
     except Exception:
         handoff_cleared = False
 
-    if stdout_leaked or stderr_leaked:
+    if execution.secret_output_redacted or stdout_leaked or stderr_leaked:
         return LiveRegistrationResult(
             LiveRegistrationStatus.FAILED,
             ("REGISTRATION_TOKEN_LEAKED_TO_CHILD_OUTPUT",),
@@ -510,6 +512,36 @@ def execute_live_registration(
             stdout,
             stderr,
             None,
+        )
+    if execution.output_decoding_uncertain:
+        reasons = ["REGISTRATION_NATIVE_OUTPUT_DECODE_FAILED"]
+        if execution.exit_code != 0:
+            reasons.append("REGISTRATION_CHILD_EXIT_NONZERO")
+        observed_runner_id: Optional[int] = None
+        try:
+            decode_failure_runners = read_runners(binding.repository)
+        except Exception:
+            reasons.append("RUNNER_READBACK_UNCERTAIN_AFTER_DECODE_FAILURE")
+        else:
+            decode_failure_runner, decode_failure_readback_reasons = _eligible_runner_readback(
+                binding,
+                decode_failure_runners,
+            )
+            if decode_failure_runner is not None and not decode_failure_readback_reasons:
+                observed_runner_id = decode_failure_runner.runner_id
+                reasons.append("REGISTRATION_MUTATION_OBSERVED_AFTER_DECODE_FAILURE")
+            elif decode_failure_runners and decode_failure_readback_reasons:
+                reasons.append("RUNNER_READBACK_UNCERTAIN_AFTER_DECODE_FAILURE")
+        if not handoff_cleared:
+            reasons.append("REGISTRATION_TOKEN_HANDOFF_NOT_CLEARED")
+        return LiveRegistrationResult(
+            LiveRegistrationStatus.FAILED,
+            tuple(reasons),
+            gate.candidate_sha256,
+            execution.exit_code,
+            stdout,
+            stderr,
+            observed_runner_id,
         )
     if execution.exit_code != 0:
         reasons = ["REGISTRATION_CHILD_EXIT_NONZERO"]

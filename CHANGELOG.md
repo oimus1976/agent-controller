@@ -15,6 +15,31 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-19 — Windows native-output decoding hardening after live pilot failure（Issue #219）
+
+関連: Issue #219, Issue #216, Issue #207, Issue #195
+
+### Added / changed
+
+- #216のfirst human-authorized private-CI live registrationで、runner登録child自体はexit 0かつGitHub/local runner identityも一致した一方、post-registration readbackが`UnicodeDecodeError`でfail closedした実機事象を根拠に、Windows native process output captureをbytes-firstへ変更。
+- UTF-8 strict decodeを優先し、失敗時のみWindows preferred encodingへstrict fallbackする。どちらでもdecodeできないbyte列は明示的uncertaintyとして扱う。
+- Ready後Codex reviewで判明したCP932 multibyte境界のtoken-redaction bypassを受け、registration tokenはnative outputのraw bytes段階でdecoderより先に検出・置換し、その検出事実を別フラグで保持して必ずFAILEDへ分類する。decode後の文字列redactionもdefense in depthとして維持する。
+- registration childのnative output decodeがuncertainでもchild exit codeを保持し、remote runner mutationが観測された場合はそのrunner idを記録したFAILED resultを返す。registrationの自動retryは行わない。
+- CP932 fallback、完全にundecodableなnative output、decode uncertainty後のobserved mutation / no-retryを回帰テストへ追加。
+
+### Safety / authority boundary
+
+- decode fallbackはreplacement decodeで成功扱いにしない。UTF-8 / preferred encodingのどちらでもstrict decodeできない場合はauthoritative PASSへ進めない。
+- registration tokenのargv非露出・durable evidence非記録・output redaction境界を維持する。
+- #216の2026-09-19 live attemptはFAILのままで、zero-residual safety cleanup完了後も`SELF_HOSTED_PRIVATE_CI_PASS`へ再分類しない。
+- 本修正は新しいlive pilot authorizationを与えない。次回live mutationはfresh Phase 0 / deterministic gate / human authorizationを改めて必要とする。
+
+### Validation status
+
+- このentryはIssue #219 Draft実装の一部。exact-head CIとindependent rereviewが完了するまでhuman Ready judgmentへ進まない。
+
+---
+
 ## 2026-09-18 — Mutation-time live-registration harness（Issue #217 / Draft PR #218）
 
 関連: Issue #217, Draft PR #218, Issue #216, ADR #90
