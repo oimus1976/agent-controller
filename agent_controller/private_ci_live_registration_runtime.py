@@ -193,7 +193,7 @@ def _redact_native_stream(
     *,
     secrets: tuple[str, ...],
 ) -> tuple[object, bool]:
-    if not secrets:
+    if value is None or not secrets:
         return value, False
 
     redacted = False
