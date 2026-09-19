@@ -308,6 +308,12 @@ foreach ($CommandAst in $CommandAsts) {
             $CommandText -match '(?i)-H\s+[''"]X-GitHub-Api-Version:\s*2026-03-10[''"]' -and
             $CommandText -match '(?i)repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/workflows/[A-Za-z0-9_.-]+\.ya?ml/runs\?event=workflow_dispatch&branch=main&per_page=100'
         )
+        $IsRunnerInventoryRead = (
+            $CommandText -match '(?i)^\s*gh\.exe\s+api\b' -and
+            $CommandText -notmatch '(?i)--method\b' -and
+            $CommandText -match '(?i)-H\s+[''"]X-GitHub-Api-Version:\s*2026-03-10[''"]' -and
+            $CommandText -match '(?i)repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runners\?per_page=100'
+        )
         $IsWorkflowDispatch = (
             $CommandText -match '(?i)^\s*gh\.exe\s+api\s+--method\s+POST\b' -and
             $CommandText -match '(?i)-H\s+[''"]X-GitHub-Api-Version:\s*2026-03-10[''"]' -and
@@ -315,7 +321,7 @@ foreach ($CommandAst in $CommandAsts) {
             $CommandText -match '(?i)-f\s+[''"]ref=main[''"]' -and
             $CommandText -notmatch '(?i)return_run_details'
         )
-        if ($IsWorkflowDispatchRead) {
+        if ($IsWorkflowDispatchRead -or $IsRunnerInventoryRead) {
             if (-not $ObservedEffects.Contains('HTTP_API_ACCESS')) {
                 $ObservedEffects.Add('HTTP_API_ACCESS')
             }
