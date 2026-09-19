@@ -12,10 +12,11 @@ from agent_controller.private_ci_live_registration import (
     FROZEN_RUNNER_NAME,
     FROZEN_RUNNER_ROOT,
     FROZEN_TARGET_SHA,
+    FROZEN_WORKFLOW_PATH,
     FROZEN_WORKFLOW_SHA,
 )
 
-PHASE0_EVIDENCE_SCHEMA = "agent-controller.private-ci-phase0-evidence.v1"
+PHASE0_EVIDENCE_SCHEMA = "agent-controller.private-ci-phase0-evidence.v2"
 EXPECTED_CONTROLLER_MAIN = "0b0508d4f6ad2765e315e39450b71adfb371f8ca"
 EXPECTED_CONTROLLER_TREE = r"C:\Users\c-admin\agent-controller-pilot-216"
 EXPECTED_HOST = "WOBBUFFET"
@@ -47,6 +48,7 @@ class Phase0Evidence:
     pull_request_head_sha: str
     pull_request_base: str
     workflow_sha: str
+    workflow_path: str
     runner_name: str
     runner_label: str
     environment_generation: str
@@ -116,6 +118,7 @@ def phase0_reason_codes(evidence: object) -> tuple[str, ...]:
         "pull_request_head_sha": FROZEN_TARGET_SHA,
         "pull_request_base": "main",
         "workflow_sha": FROZEN_WORKFLOW_SHA,
+        "workflow_path": FROZEN_WORKFLOW_PATH,
         "runner_name": FROZEN_RUNNER_NAME,
         "runner_label": FROZEN_RUNNER_LABEL,
         "environment_generation": FROZEN_ENVIRONMENT_GENERATION,
