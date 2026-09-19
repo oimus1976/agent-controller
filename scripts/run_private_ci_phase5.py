@@ -91,6 +91,14 @@ _ATOMIC_MUTATING_FILE_SYSTEM_RIGHTS = (
     "TakeOwnership",
 )
 _RUN_ID_PATTERN = re.compile(r"^PHASE5_WORKFLOW_RUN_ID=([1-9][0-9]*)$", re.MULTILINE)
+_RUNNER_PROCESS_ID_PATTERN = re.compile(
+    r"^PHASE5_RUNNER_PROCESS_ID=([1-9][0-9]*)$",
+    re.MULTILINE,
+)
+_RUNNER_PROCESS_OWNER_PATTERN = re.compile(
+    r"^PHASE5_RUNNER_PROCESS_OWNER=([^\r\n]+)$",
+    re.MULTILINE,
+)
 
 
 def _controller_repo_root() -> Path:
@@ -565,6 +573,26 @@ def _validate_phase5_consumption(
     return raw, hashlib.sha256(raw).hexdigest()
 
 
+def _extract_runner_process_identity(stdout: str) -> tuple[int, str]:
+    if type(stdout) is not str:
+        raise RuntimeError("Phase 5 candidate stdout invalid")
+    ids = _RUNNER_PROCESS_ID_PATTERN.findall(stdout)
+    owners = _RUNNER_PROCESS_OWNER_PATTERN.findall(stdout)
+    if len(ids) != 1 or len(owners) != 1:
+        raise RuntimeError(
+            "Phase 5 runner process identity evidence missing or ambiguous; "
+            "dispatch must not be retried"
+        )
+    process_id = int(ids[0])
+    owner = owners[0].strip()
+    if process_id <= 0 or not owner:
+        raise RuntimeError(
+            "Phase 5 runner process identity evidence invalid; "
+            "dispatch must not be retried"
+        )
+    return process_id, owner
+
+
 def _extract_workflow_run_id(stdout: str) -> int:
     if type(stdout) is not str:
         raise RuntimeError("Phase 5 candidate stdout invalid")
@@ -665,6 +693,8 @@ def _write_attempt_transcript(
     consumption_sha: str,
     child_exit_code: int | None,
     workflow_run_id: int | None,
+    runner_process_id: int | None = None,
+    runner_process_owner: str = "",
     stdout: str,
     stderr: str,
     status: str,
@@ -679,6 +709,8 @@ def _write_attempt_transcript(
         f"phase5_consumption_sha256={consumption_sha}",
         f"child_exit_code={'' if child_exit_code is None else child_exit_code}",
         f"workflow_run_id={'' if workflow_run_id is None else workflow_run_id}",
+        f"runner_process_id={'' if runner_process_id is None else runner_process_id}",
+        f"runner_process_owner={runner_process_owner}",
         f"status={status}",
     ]
     if error:
@@ -845,6 +877,8 @@ def command_apply(expected_plan_sha256: str) -> int:
     workflow_run_id: int | None = None
     child_stdout = ""
     child_stderr = ""
+    runner_process_id: int | None = None
+    runner_process_owner = ""
     try:
         if plan_path.read_bytes() != plan_raw:
             raise RuntimeError("Phase 5 plan changed after ownership acquisition")
@@ -883,6 +917,14 @@ def command_apply(expected_plan_sha256: str) -> int:
         except RuntimeError:
             workflow_run_id = None
 
+        try:
+            runner_process_id, runner_process_owner = (
+                _extract_runner_process_identity(child_stdout)
+            )
+        except RuntimeError:
+            runner_process_id = None
+            runner_process_owner = ""
+
         if child_exit_code != 0:
             raise RuntimeError(
                 f"Phase 5 candidate failed with exit {child_exit_code}; "
@@ -895,6 +937,16 @@ def command_apply(expected_plan_sha256: str) -> int:
                 "Phase 5 success marker missing; dispatch must not be retried"
             )
         workflow_run_id = _extract_workflow_run_id(child_stdout)
+        runner_process_id, runner_process_owner = (
+            _extract_runner_process_identity(child_stdout)
+        )
+        expected_owner = (
+            plan.binding.host + "\\" + plan.binding.target_identity
+        )
+        if runner_process_owner.casefold() != expected_owner.casefold():
+            raise RuntimeError(
+                "Phase 5 runner process owner mismatch; dispatch must not be retried"
+            )
 
         readback = _read_exact_phase5_run_job(
             binding=plan.binding,
@@ -931,6 +983,8 @@ def command_apply(expected_plan_sha256: str) -> int:
             runner_id=readback.runner_id,
             runner_name=readback.runner_name,
             runner_label=readback.runner_label,
+            runner_process_id=runner_process_id,
+            runner_process_owner=runner_process_owner,
             runner_child_exit_code=child_exit_code,
             runner_stdout_sha256=hashlib.sha256(
                 runner_stdout_raw
@@ -953,6 +1007,8 @@ def command_apply(expected_plan_sha256: str) -> int:
             consumption_sha=consumption_sha,
             child_exit_code=child_exit_code,
             workflow_run_id=workflow_run_id,
+            runner_process_id=runner_process_id,
+            runner_process_owner=runner_process_owner,
             stdout=child_stdout,
             stderr=child_stderr,
             status=PHASE5_RESULT_STATUS,
@@ -979,6 +1035,8 @@ def command_apply(expected_plan_sha256: str) -> int:
                 consumption_sha=consumption_sha,
                 child_exit_code=child_exit_code,
                 workflow_run_id=workflow_run_id,
+                runner_process_id=runner_process_id,
+                runner_process_owner=runner_process_owner,
                 stdout=child_stdout,
                 stderr=child_stderr,
                 status="PHASE5_FAILED_OR_UNCERTAIN",
