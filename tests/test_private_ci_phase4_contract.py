@@ -1,5 +1,7 @@
 import importlib
+import json
 import unittest
+from dataclasses import replace
 
 MODULE_NAME = "agent_controller.private_ci_phase4_contract"
 
@@ -136,6 +138,98 @@ class PrivateCiPhase4ContractRedTests(unittest.TestCase):
             binding.environment_generation,
             "ac-pilot-65bbb1dc7c48d6e3",
         )
+
+
+class PrivateCiRegistrationHandoffRedTests(unittest.TestCase):
+    def handoff(self, module, **overrides):
+        values = {
+            "schema": module.REGISTRATION_HANDOFF_SCHEMA,
+            "binding": valid_binding(module),
+            "phase0_evidence_sha256": "3" * 64,
+            "registration_plan_sha256": "4" * 64,
+            "human_approval_sha256": "5" * 64,
+            "registration_consumption_sha256": "6" * 64,
+            "registration_result_sha256": "7" * 64,
+            "local_runner_settings_sha256": "8" * 64,
+            "registration_status": "REGISTERED",
+        }
+        values.update(overrides)
+        return module.RegistrationHandoffEvidence(**values)
+
+    def test_registration_handoff_is_canonical_and_hash_chained(self):
+        module = contract_module()
+        evidence = self.handoff(module)
+        raw = module.registration_handoff_bytes(evidence)
+        parsed = module.parse_registration_handoff_bytes(raw)
+
+        self.assertEqual(parsed, evidence)
+        self.assertEqual(module.registration_handoff_reason_codes(parsed), ())
+        self.assertEqual(
+            tuple(parsed.__dataclass_fields__),
+            (
+                "schema",
+                "binding",
+                "phase0_evidence_sha256",
+                "registration_plan_sha256",
+                "human_approval_sha256",
+                "registration_consumption_sha256",
+                "registration_result_sha256",
+                "local_runner_settings_sha256",
+                "registration_status",
+            ),
+        )
+
+    def test_registration_handoff_rejects_nonregistered_or_invalid_hashes(self):
+        module = contract_module()
+        invalid_cases = (
+            (
+                {"registration_status": "FAILED"},
+                "REGISTRATION_HANDOFF_STATUS_NOT_REGISTERED",
+            ),
+            (
+                {"registration_result_sha256": "short"},
+                "REGISTRATION_HANDOFF_RESULT_SHA256_INVALID",
+            ),
+            (
+                {"local_runner_settings_sha256": "g" * 64},
+                "REGISTRATION_HANDOFF_LOCAL_SETTINGS_SHA256_INVALID",
+            ),
+        )
+        for changes, expected_reason in invalid_cases:
+            with self.subTest(changes=changes):
+                reasons = module.registration_handoff_reason_codes(
+                    self.handoff(module, **changes)
+                )
+                self.assertIn(expected_reason, reasons)
+
+    def test_registration_handoff_rejects_noncanonical_bytes(self):
+        module = contract_module()
+        evidence = self.handoff(module)
+        payload = json.loads(
+            module.registration_handoff_bytes(evidence).decode("utf-8")
+        )
+        noncanonical = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+
+        with self.assertRaisesRegex(ValueError, "canonical"):
+            module.parse_registration_handoff_bytes(noncanonical)
+
+    def test_registration_handoff_contains_no_secret_or_console_fields(self):
+        module = contract_module()
+        evidence = self.handoff(module)
+        payload = json.loads(
+            module.registration_handoff_bytes(evidence).decode("utf-8")
+        )
+
+        forbidden = {
+            "registration_token",
+            "gh_token",
+            "hmac_key",
+            "credential",
+            "password",
+            "stdout",
+            "stderr",
+        }
+        self.assertTrue(set(payload).isdisjoint(forbidden))
 
 
 if __name__ == "__main__":
