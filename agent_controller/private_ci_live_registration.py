@@ -214,6 +214,7 @@ class RegistrationExecution:
     stdout: str
     stderr: str
     output_decoding_uncertain: bool = False
+    secret_output_redacted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -502,7 +503,7 @@ def execute_live_registration(
     except Exception:
         handoff_cleared = False
 
-    if stdout_leaked or stderr_leaked:
+    if execution.secret_output_redacted or stdout_leaked or stderr_leaked:
         return LiveRegistrationResult(
             LiveRegistrationStatus.FAILED,
             ("REGISTRATION_TOKEN_LEAKED_TO_CHILD_OUTPUT",),
