@@ -78,6 +78,7 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
         self.assertEqual(
             spec.allowed_effect_families,
             (
+                "HTTP_API_ACCESS",
                 "PROCESS_CONTROL",
                 "PROCESS_LAUNCH",
                 "WORKFLOW_DISPATCH",
@@ -123,7 +124,10 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
             "Start-Process",
             "-Credential",
             "-LoadUserProfile",
+            "-UseNewEnvironment",
             "-PassThru",
+            "gh.exe api ",
+            "event=workflow_dispatch&branch=main&per_page=100",
             "gh.exe api --method POST",
             "inputs[pr_number]=4",
             f"inputs[expected_sha]={evidence.binding.target_sha}",
@@ -147,7 +151,7 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
         self.assertEqual(candidate.count("gh.exe api --method POST"), 1)
         self.assertNotIn("return_run_details", candidate)
         self.assertNotIn("SELF_HOSTED_PRIVATE_CI_PASS", candidate)
-        self.assertNotIn("-UseNewEnvironment", candidate)
+        self.assertIn("-UseNewEnvironment", candidate)
 
     def test_candidate_requires_dispatch_response_with_positive_run_id(self):
         m = module()
