@@ -475,8 +475,10 @@ $RunnerTasks = @(
         deadline: Optional[float] = None,
     ) -> tuple[dict[str, object], ...]:
         base = f"repos/{repository}/actions/runners?per_page=100"
+        attempt_started = False
 
         def fetch_page(page: int) -> object:
+            nonlocal attempt_started
             endpoint = base if page == 1 else f"{base}&page={page}"
             timeout: Optional[float] = None
             if deadline is not None:
@@ -485,6 +487,9 @@ $RunnerTasks = @(
                     raise RunnerReadbackFailure(
                         "RUNNER_READBACK_TIME_BUDGET_EXHAUSTED"
                     )
+                if not attempt_started:
+                    self._last_readback_attempts += 1
+                    attempt_started = True
             try:
                 completed = self._run_text(
                     self.gh_executable,
@@ -751,6 +756,12 @@ $RunnerTasks = @(
             + POST_REGISTRATION_READBACK_MAX_ELAPSED_SECONDS
         )
 
+        def require_time_budget() -> None:
+            if deadline - self.monotonic_clock() <= 0:
+                raise RunnerReadbackFailure(
+                    "RUNNER_READBACK_TIME_BUDGET_EXHAUSTED"
+                )
+
         def sleep_before_retry() -> None:
             remaining = deadline - self.monotonic_clock()
             if remaining <= 0:
@@ -762,11 +773,7 @@ $RunnerTasks = @(
             )
 
         for attempt in range(1, POST_REGISTRATION_READBACK_MAX_ATTEMPTS + 1):
-            if deadline - self.monotonic_clock() <= 0:
-                raise RunnerReadbackFailure(
-                    "RUNNER_READBACK_TIME_BUDGET_EXHAUSTED"
-                )
-            self._last_readback_attempts = attempt
+            require_time_budget()
             try:
                 items = self._github_runner_items(
                     repository,
@@ -780,11 +787,14 @@ $RunnerTasks = @(
                 sleep_before_retry()
                 continue
 
+            require_time_budget()
             if self._post_registration_items_are_exact(items):
                 # The remote runner may become visible after several seconds.
                 # Re-prove the local binding at the acceptance boundary rather
-                # than relying on the pre-loop read.
+                # than relying on the pre-loop read, then prove the time budget
+                # again before emitting a successful snapshot.
                 self._local_runner_settings()
+                require_time_budget()
                 return self._runner_readbacks(items, self.binding)
 
             if attempt == POST_REGISTRATION_READBACK_MAX_ATTEMPTS:
