@@ -1,3 +1,4 @@
+import hashlib
 import importlib
 import json
 import unittest
@@ -399,6 +400,60 @@ class PrivateCiPhase4CandidateRedTests(unittest.TestCase):
             + ".consumed.json"
         )
         self.assertIn(expected, candidate)
+
+
+class PrivateCiPhase4PlanningRedTests(unittest.TestCase):
+    def test_probe_digest_is_derived_from_exact_bytes(self):
+        module = contract_module()
+        raw = b"tracked phase4 probe\n"
+        self.assertEqual(
+            module.phase4_target_probe_sha256(raw),
+            hashlib.sha256(raw).hexdigest(),
+        )
+        with self.assertRaisesRegex(ValueError, "exact bytes"):
+            module.phase4_target_probe_sha256("not-bytes")
+
+    def test_plan_blocks_noncanonical_candidate_before_attestation(self):
+        module = contract_module()
+        handoff = valid_handoff(module)
+        handoff_raw = module.registration_handoff_bytes(handoff)
+        probe_raw = b"tracked phase4 probe\n"
+        canonical = module.render_phase4_target_environment_candidate(
+            handoff.binding,
+            handoff,
+            target_probe_sha256=module.phase4_target_probe_sha256(probe_raw),
+        )
+
+        result = module.plan_phase4_target_environment(
+            registration_handoff_bytes=handoff_raw,
+            target_probe_bytes=probe_raw,
+            candidate=canonical + "# drift\n",
+            ast_attestation=None,
+        )
+
+        self.assertEqual(result.status.value, "BLOCKED")
+        self.assertIn("PHASE4_CANDIDATE_NOT_CANONICAL", result.reason_codes)
+
+    def test_plan_rejects_noncanonical_handoff_bytes(self):
+        module = contract_module()
+        handoff = valid_handoff(module)
+        payload = json.loads(
+            module.registration_handoff_bytes(handoff).decode("utf-8")
+        )
+        noncanonical = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+
+        result = module.plan_phase4_target_environment(
+            registration_handoff_bytes=noncanonical,
+            target_probe_bytes=b"tracked phase4 probe\n",
+            candidate="Write-Output 'x'\n",
+            ast_attestation=None,
+        )
+
+        self.assertEqual(result.status.value, "BLOCKED")
+        self.assertEqual(
+            result.reason_codes,
+            ("REGISTRATION_HANDOFF_INVALID",),
+        )
 
 
 if __name__ == "__main__":
