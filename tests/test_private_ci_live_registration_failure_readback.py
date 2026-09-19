@@ -101,6 +101,42 @@ class PostFailureReadbackTests(unittest.TestCase):
             result.reason_codes,
         )
 
+    def test_decode_uncertainty_keeps_nonzero_child_failure_reason(self):
+        binding = frozen_live_registration_binding()
+        passed = SimpleNamespace(
+            status=OperatorGateStatus.PASS_TO_OPERATOR,
+            reason_codes=(),
+            candidate_sha256="c" * 64,
+        )
+
+        with (
+            mock.patch.object(live, "plan_live_registration", return_value=passed),
+            mock.patch.object(live, "validate_operator_step", return_value=passed),
+            mock.patch.object(live, "_require_frozen_target_still_exact"),
+        ):
+            result = execute_live_registration(
+                binding,
+                phase0_evidence_bytes=b"phase0\n",
+                candidate="candidate",
+                ast_attestation=object(),
+                prior_evidence_capability=object(),
+                prepare_runner=lambda observed: None,
+                acquire_registration_token=lambda repository: "one-time-token",
+                run_registration=lambda observed, token: RegistrationExecution(
+                    37,
+                    "\\x81",
+                    "",
+                    output_decoding_uncertain=True,
+                ),
+                credential_handoff_cleared=lambda observed, token: True,
+                read_runners=lambda repository: (),
+            )
+
+        self.assertEqual(result.status, LiveRegistrationStatus.FAILED)
+        self.assertEqual(result.child_exit_code, 37)
+        self.assertIn("REGISTRATION_NATIVE_OUTPUT_DECODE_FAILED", result.reason_codes)
+        self.assertIn("REGISTRATION_CHILD_EXIT_NONZERO", result.reason_codes)
+
     def test_nonzero_exit_with_matching_remote_runner_records_observed_mutation(self):
         binding = frozen_live_registration_binding()
         runner = RunnerReadback(
