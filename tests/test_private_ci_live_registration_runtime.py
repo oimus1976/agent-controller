@@ -339,7 +339,7 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             return completed(
                 command,
                 stdout=b"\x81" + secret.encode("ascii") + b"\r\n",
-                stderr=b"",
+                stderr=b"\x81" + secret.encode("ascii"),
             )
 
         runtime = WindowsEphemeralRegistrationRuntime(
@@ -359,6 +359,9 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
         self.assertNotIn(secret, result.stdout)
         self.assertNotIn("secret-token", result.stdout)
         self.assertIn("***", result.stdout)
+        self.assertNotIn(secret, result.stderr)
+        self.assertNotIn("secret-token", result.stderr)
+        self.assertIn("***", result.stderr)
 
     def test_registration_propagates_predecode_secret_redaction_as_leak_evidence(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
