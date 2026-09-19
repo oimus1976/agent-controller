@@ -60,12 +60,20 @@ class PrivateCiPilotFreezeCliTests(unittest.TestCase):
         controller = self.source.index("_require_controller_main_exact()")
         local = self.source.index("_local_zero_residual()", controller)
         target = self.source.index("_require_target_exact(", local)
-        build = self.source.index("build_fresh_pilot_identity_freeze(", target)
+        workflow_exclusive = self.source.index(
+            "_require_workflow_runner_exclusivity(",
+            target,
+        )
+        build = self.source.index(
+            "build_fresh_pilot_identity_freeze(",
+            workflow_exclusive,
+        )
         remote_runner = self.source.index("_require_no_pilot_runner(", build)
         write = self.source.index("_write_exclusive(output, raw)", remote_runner)
         self.assertLess(controller, local)
         self.assertLess(local, target)
-        self.assertLess(target, build)
+        self.assertLess(target, workflow_exclusive)
+        self.assertLess(workflow_exclusive, build)
         self.assertLess(build, remote_runner)
         self.assertLess(remote_runner, write)
 
