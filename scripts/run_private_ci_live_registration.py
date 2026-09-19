@@ -38,7 +38,7 @@ from agent_controller.private_ci_live_registration import (
     PHASE0_OPERATION_ID,
     PHASE0_STEP_ID,
     execute_live_registration,
-    frozen_live_registration_binding,
+    live_registration_binding_from_phase0_evidence_bytes,
     phase0_evidence_sha256,
     render_live_registration_candidate,
 )
@@ -315,6 +315,18 @@ def _require_frozen_target_still_exact(evidence: Phase0Evidence) -> None:
         raise RuntimeError("trusted workflow branch readback invalid")
     if branch["commit"].get("sha") != evidence.workflow_sha:
         raise RuntimeError("trusted workflow SHA drift")
+    workflow_file = _gh_json(
+        (
+            f"repos/{evidence.repository}/contents/{evidence.workflow_path}"
+            f"?ref={evidence.workflow_sha}"
+        )
+    )
+    if (
+        type(workflow_file) is not dict
+        or workflow_file.get("type") != "file"
+        or workflow_file.get("path") != evidence.workflow_path
+    ):
+        raise RuntimeError("trusted workflow path drift")
 
     matching = []
     for runner in _github_runner_items(evidence.repository):
@@ -489,7 +501,9 @@ def command_plan() -> int:
     _require_frozen_target_still_exact(evidence)
 
     ast_key, _ = _configure_authority()
-    binding = frozen_live_registration_binding()
+    binding = live_registration_binding_from_phase0_evidence_bytes(
+        phase0_bytes
+    )
     candidate = render_live_registration_candidate(binding)
     candidate_path = _candidate_path()
     plan_path = _plan_path()

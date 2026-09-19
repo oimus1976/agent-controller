@@ -145,7 +145,6 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
 
     def test_every_unclassified_static_command_fails_closed_as_unknown(self):
         cases = (
-            "Start-Process powershell.exe",
             "Set-Content -LiteralPath C:\\target -Value x",
             "New-LocalUser -Name x -NoPassword",
             "cmd.exe /c echo x",
@@ -207,6 +206,245 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
         self.assertFalse(report["heartbeat_or_progress_proven"])
         self.assertFalse(report["child_exit_code_proven"])
         self.assertFalse(report["fail_fast_proven"])
+
+    def test_automatic_variable_read_is_not_a_collision(self):
+        report, _ = self.run_producer(
+            self.bound_candidate("$BridgeNativeExit = $LASTEXITCODE")
+        )
+        self.assertNotIn(
+            "lastexitcode",
+            report["automatic_variable_collisions"],
+        )
+
+    def test_phase4_mutation_commands_have_explicit_effect_families(self):
+        cases = (
+            (
+                "Copy-Item -LiteralPath C:\\source -Destination C:\\target",
+                "FILESYSTEM_WRITE_MUTATION",
+            ),
+            (
+                "Stop-Process -Id 123 -Force",
+                "PROCESS_CONTROL",
+            ),
+        )
+        for command, expected in cases:
+            with self.subTest(command=command):
+                report, _ = self.run_producer(self.bound_candidate(command))
+                self.assertIn(expected, report["observed_effect_families"])
+                self.assertNotIn(
+                    "DYNAMIC_OR_UNKNOWN_COMMAND",
+                    report["observed_effect_families"],
+                )
+
+    def test_bounded_child_process_shape_proves_progress_exit_and_fail_fast(self):
+        candidate = self.bound_candidate(
+            "$BridgeStartedAt = Get-Date\n"
+            "$BridgeChild = Start-Process -FilePath 'powershell.exe' "
+            "-ArgumentList @('-NoProfile', '-Command', 'exit 0') -PassThru\n"
+            "while (-not $BridgeChild.HasExited) {\n"
+            "  $BridgeElapsedSeconds = [int]((Get-Date) - $BridgeStartedAt).TotalSeconds\n"
+            "  Write-Host (\"heartbeat phase=phase4 elapsed_seconds={0}\" -f $BridgeElapsedSeconds)\n"
+            "  Start-Sleep -Seconds 5\n"
+            "}\n"
+            "$BridgeChildExitCode = $BridgeChild.ExitCode\n"
+            "if ($BridgeChildExitCode -ne 0) { throw 'child failed' }"
+        )
+        report, _ = self.run_producer(candidate)
+        self.assertTrue(report["parsed"])
+        self.assertIn("PROCESS_LAUNCH", report["observed_effect_families"])
+        self.assertTrue(report["heartbeat_or_progress_proven"])
+        self.assertTrue(report["child_exit_code_proven"])
+        self.assertTrue(report["fail_fast_proven"])
+
+    def test_child_exit_proof_requires_passthru_process_exitcode(self):
+        cases = (
+            "$BridgeChild = Start-Process powershell.exe\n"
+            "$BridgeChildExitCode = 0\n"
+            "if ($BridgeChildExitCode -ne 0) { throw 'failed' }",
+            "$BridgeChild = Start-Process powershell.exe -PassThru\n"
+            "$BridgeChildExitCode = 0\n"
+            "if ($BridgeChildExitCode -ne 0) { throw 'failed' }",
+        )
+        for candidate_body in cases:
+            with self.subTest(candidate_body=candidate_body):
+                report, _ = self.run_producer(self.bound_candidate(candidate_body))
+                self.assertFalse(report["child_exit_code_proven"])
+
+    def test_fail_fast_proof_requires_nonzero_exit_guard_with_throw(self):
+        cases = (
+            "$BridgeChild = Start-Process powershell.exe -PassThru\n"
+            "$BridgeChildExitCode = $BridgeChild.ExitCode",
+            "$BridgeChild = Start-Process powershell.exe -PassThru\n"
+            "$BridgeChildExitCode = $BridgeChild.ExitCode\n"
+            "if ($BridgeChildExitCode -eq 0) { throw 'wrong guard' }",
+            "$BridgeChild = Start-Process powershell.exe -PassThru\n"
+            "$BridgeChildExitCode = $BridgeChild.ExitCode\n"
+            "if ($BridgeChildExitCode -ne 0) { Write-Host 'failed' }",
+        )
+        for candidate_body in cases:
+            with self.subTest(candidate_body=candidate_body):
+                report, _ = self.run_producer(self.bound_candidate(candidate_body))
+                self.assertFalse(report["fail_fast_proven"])
+
+    def test_heartbeat_proof_requires_process_liveness_loop_and_bounded_sleep(self):
+        cases = (
+            "Write-Host 'heartbeat phase=phase4 elapsed_seconds=0'\nStart-Sleep -Seconds 5",
+            "$BridgeChild = Start-Process powershell.exe -PassThru\n"
+            "while (-not $BridgeChild.HasExited) { Write-Host 'working'; Start-Sleep -Seconds 5 }",
+            "$BridgeChild = Start-Process powershell.exe -PassThru\n"
+            "while (-not $BridgeChild.HasExited) { "
+            "Write-Host 'heartbeat phase=phase4 elapsed_seconds=0'; Start-Sleep -Seconds 120 }",
+        )
+        for candidate_body in cases:
+            with self.subTest(candidate_body=candidate_body):
+                report, _ = self.run_producer(self.bound_candidate(candidate_body))
+                self.assertFalse(report["heartbeat_or_progress_proven"])
+
+
+
+    def test_exact_cim_getowner_is_read_only_but_other_cim_methods_are_unknown(self):
+        safe = (
+            "$BridgeOwner = Invoke-CimMethod "
+            "-InputObject $BridgeProcess -MethodName GetOwner"
+        )
+        report, _ = self.run_producer(self.bound_candidate(safe))
+        self.assertNotIn(
+            "DYNAMIC_OR_UNKNOWN_COMMAND",
+            report["observed_effect_families"],
+        )
+
+        unsafe = (
+            "$BridgeOwner = Invoke-CimMethod "
+            "-InputObject $BridgeProcess -MethodName Terminate"
+        )
+        unsafe_report, _ = self.run_producer(self.bound_candidate(unsafe))
+        self.assertIn(
+            "DYNAMIC_OR_UNKNOWN_COMMAND",
+            unsafe_report["observed_effect_families"],
+        )
+
+
+    def test_exact_runner_inventory_read_is_classified_read_only(self):
+        command = (
+            "gh.exe api "
+            "-H 'X-GitHub-Api-Version: 2026-03-10' "
+            "'repos/oimus1976/example/actions/runners?per_page=100'"
+        )
+        report, _ = self.run_producer(self.bound_candidate(command))
+        self.assertIn(
+            "HTTP_API_ACCESS",
+            report["observed_effect_families"],
+        )
+        self.assertNotIn(
+            "DYNAMIC_OR_UNKNOWN_COMMAND",
+            report["observed_effect_families"],
+        )
+
+        unsafe = (
+            "gh.exe api "
+            "-H 'X-GitHub-Api-Version: 2026-03-10' "
+            "'repos/oimus1976/example/actions/runners?per_page=50'"
+        )
+        unsafe_report, _ = self.run_producer(self.bound_candidate(unsafe))
+        self.assertIn(
+            "DYNAMIC_OR_UNKNOWN_COMMAND",
+            unsafe_report["observed_effect_families"],
+        )
+
+
+    def test_all_active_workflow_run_status_reads_are_classified_read_only(self):
+        for status in ("queued", "in_progress", "requested", "waiting", "pending"):
+            with self.subTest(status=status):
+                command = (
+                    "gh.exe api "
+                    "-H 'X-GitHub-Api-Version: 2026-03-10' "
+                    f"'repos/oimus1976/example/actions/workflows/pilot.yml/runs?"
+                    f"event=workflow_dispatch&branch=main&status={status}&per_page=100'"
+                )
+                report, _ = self.run_producer(self.bound_candidate(command))
+                self.assertIn(
+                    "HTTP_API_ACCESS",
+                    report["observed_effect_families"],
+                )
+                self.assertNotIn(
+                    "DYNAMIC_OR_UNKNOWN_COMMAND",
+                    report["observed_effect_families"],
+                )
+
+    def test_exact_workflow_dispatch_read_shape_is_classified_read_only(self):
+        command = (
+            "gh.exe api "
+            "-H 'X-GitHub-Api-Version: 2026-03-10' "
+            "'repos/oimus1976/example/actions/workflows/pilot.yml/runs?event=workflow_dispatch&branch=main&status=queued&per_page=100'"
+        )
+        report, _ = self.run_producer(self.bound_candidate(command))
+        self.assertIn(
+            "HTTP_API_ACCESS",
+            report["observed_effect_families"],
+        )
+        self.assertNotIn(
+            "DYNAMIC_OR_UNKNOWN_COMMAND",
+            report["observed_effect_families"],
+        )
+
+    def test_exact_workflow_dispatch_shape_is_classified(self):
+        command = (
+            "gh.exe api --method POST "
+            "-H 'X-GitHub-Api-Version: 2026-03-10' "
+            "'repos/oimus1976/example/actions/workflows/pilot.yml/dispatches' "
+            "-f 'ref=main'"
+        )
+        report, _ = self.run_producer(self.bound_candidate(command))
+        self.assertIn(
+            "WORKFLOW_DISPATCH",
+            report["observed_effect_families"],
+        )
+        self.assertNotIn(
+            "DYNAMIC_OR_UNKNOWN_COMMAND",
+            report["observed_effect_families"],
+        )
+
+    def test_other_gh_api_shapes_remain_unknown(self):
+        cases = (
+            "gh.exe api repos/oimus1976/example",
+            (
+                "gh.exe api "
+                "'repos/oimus1976/example/actions/workflows/pilot.yml/runs?event=workflow_dispatch&branch=main&per_page=100'"
+            ),
+            (
+                "gh.exe api "
+                "-H 'X-GitHub-Api-Version: 2026-03-10' "
+                "'repos/oimus1976/example/actions/workflows/pilot.yml/runs?event=workflow_dispatch&branch=other&status=queued&per_page=100'"
+            ),
+            (
+                "gh.exe api --method POST "
+                "'repos/oimus1976/example/actions/workflows/pilot.yml/dispatches'"
+            ),
+            (
+                "gh.exe api --method POST "
+                "-H 'X-GitHub-Api-Version: 2026-03-10' "
+                "'repos/oimus1976/example/issues' "
+                "-f 'ref=main'"
+            ),
+            (
+                "gh.exe api --method POST "
+                "-H 'X-GitHub-Api-Version: 2026-03-10' "
+                "'repos/oimus1976/example/actions/workflows/pilot.yml/dispatches' "
+                "-F 'return_run_details=true' "
+                "-f 'ref=main'"
+            ),
+        )
+        for command in cases:
+            with self.subTest(command=command):
+                report, _ = self.run_producer(self.bound_candidate(command))
+                self.assertIn(
+                    "DYNAMIC_OR_UNKNOWN_COMMAND",
+                    report["observed_effect_families"],
+                )
+                self.assertNotIn(
+                    "WORKFLOW_DISPATCH",
+                    report["observed_effect_families"],
+                )
 
 
 if __name__ == "__main__":

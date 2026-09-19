@@ -23,6 +23,7 @@ def binding_for(root):
         pull_request_number=binding.pull_request_number,
         target_sha=binding.target_sha,
         workflow_sha=binding.workflow_sha,
+        workflow_path=binding.workflow_path,
         runner_name=binding.runner_name,
         runner_label=binding.runner_label,
         environment_generation=binding.environment_generation,
