@@ -315,6 +315,18 @@ def _require_frozen_target_still_exact(evidence: Phase0Evidence) -> None:
         raise RuntimeError("trusted workflow branch readback invalid")
     if branch["commit"].get("sha") != evidence.workflow_sha:
         raise RuntimeError("trusted workflow SHA drift")
+    workflow_file = _gh_json(
+        (
+            f"repos/{evidence.repository}/contents/{evidence.workflow_path}"
+            f"?ref={evidence.workflow_sha}"
+        )
+    )
+    if (
+        type(workflow_file) is not dict
+        or workflow_file.get("type") != "file"
+        or workflow_file.get("path") != evidence.workflow_path
+    ):
+        raise RuntimeError("trusted workflow path drift")
 
     matching = []
     for runner in _github_runner_items(evidence.repository):
