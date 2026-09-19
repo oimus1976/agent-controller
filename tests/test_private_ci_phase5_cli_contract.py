@@ -16,6 +16,45 @@ class PrivateCiPhase5CliContractRedTests(unittest.TestCase):
         source = self.source()
         ast.parse(source, filename=str(self.path))
 
+
+
+    def test_phase5_plan_and_apply_require_post_phase4_generation_snapshot(self):
+        source = self.source()
+        plan_start = source.index("def command_plan()")
+        apply_start = source.index("def command_apply(", plan_start)
+        plan_region = source[plan_start:apply_start]
+        self.assertIn(
+            "_require_phase4_generation_snapshot_exact(phase4)",
+            plan_region,
+        )
+
+        approval = source.index(
+            "approval_raw, approval_sha = _require_phase5_approval(",
+            apply_start,
+        )
+        before_approval = source.rfind(
+            "_require_phase4_generation_snapshot_exact(phase4)",
+            apply_start,
+            approval,
+        )
+        self.assertGreater(before_approval, apply_start)
+
+        consume = source.index(
+            "consumption_raw, consumption_sha = _validate_phase5_consumption(",
+            approval,
+        )
+        execute = source.index(
+            '            str(candidate_path),',
+            consume,
+        )
+        after_consume = source.index(
+            "_require_phase4_generation_snapshot_exact(phase4)",
+            consume,
+            execute,
+        )
+        self.assertLess(consume, after_consume)
+        self.assertLess(after_consume, execute)
+
     def test_apply_consumes_durable_authority_before_single_candidate_execution(self):
         source = self.source()
         ownership = source.index("_acquire_phase5_ownership(")
