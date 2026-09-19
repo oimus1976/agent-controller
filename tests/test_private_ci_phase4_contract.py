@@ -50,6 +50,22 @@ def valid_binding(module, **overrides):
     return module.PrivateCiPilotBinding(**values)
 
 
+def valid_handoff(module, **overrides):
+    values = {
+        "schema": module.REGISTRATION_HANDOFF_SCHEMA,
+        "binding": valid_binding(module),
+        "phase0_evidence_sha256": "3" * 64,
+        "registration_plan_sha256": "4" * 64,
+        "human_approval_sha256": "5" * 64,
+        "registration_consumption_sha256": "6" * 64,
+        "registration_result_sha256": "7" * 64,
+        "local_runner_settings_sha256": "8" * 64,
+        "registration_status": "REGISTERED",
+    }
+    values.update(overrides)
+    return module.RegistrationHandoffEvidence(**values)
+
+
 class PrivateCiPhase4ContractRedTests(unittest.TestCase):
     def test_cross_phase_binding_contains_all_phase4_authority_fields(self):
         module = contract_module()
@@ -152,24 +168,9 @@ class PrivateCiPhase4ContractRedTests(unittest.TestCase):
 
 
 class PrivateCiRegistrationHandoffRedTests(unittest.TestCase):
-    def handoff(self, module, **overrides):
-        values = {
-            "schema": module.REGISTRATION_HANDOFF_SCHEMA,
-            "binding": valid_binding(module),
-            "phase0_evidence_sha256": "3" * 64,
-            "registration_plan_sha256": "4" * 64,
-            "human_approval_sha256": "5" * 64,
-            "registration_consumption_sha256": "6" * 64,
-            "registration_result_sha256": "7" * 64,
-            "local_runner_settings_sha256": "8" * 64,
-            "registration_status": "REGISTERED",
-        }
-        values.update(overrides)
-        return module.RegistrationHandoffEvidence(**values)
-
     def test_registration_handoff_is_canonical_and_hash_chained(self):
         module = contract_module()
-        evidence = self.handoff(module)
+        evidence = valid_handoff(module)
         raw = module.registration_handoff_bytes(evidence)
         parsed = module.parse_registration_handoff_bytes(raw)
 
@@ -209,13 +210,13 @@ class PrivateCiRegistrationHandoffRedTests(unittest.TestCase):
         for changes, expected_reason in invalid_cases:
             with self.subTest(changes=changes):
                 reasons = module.registration_handoff_reason_codes(
-                    self.handoff(module, **changes)
+                    valid_handoff(module, **changes)
                 )
                 self.assertIn(expected_reason, reasons)
 
     def test_registration_handoff_rejects_noncanonical_bytes(self):
         module = contract_module()
-        evidence = self.handoff(module)
+        evidence = valid_handoff(module)
         payload = json.loads(
             module.registration_handoff_bytes(evidence).decode("utf-8")
         )
@@ -226,7 +227,7 @@ class PrivateCiRegistrationHandoffRedTests(unittest.TestCase):
 
     def test_registration_handoff_contains_no_secret_or_console_fields(self):
         module = contract_module()
-        evidence = self.handoff(module)
+        evidence = valid_handoff(module)
         payload = json.loads(
             module.registration_handoff_bytes(evidence).decode("utf-8")
         )
@@ -263,7 +264,11 @@ class PrivateCiPhase4OperatorSpecRedTests(unittest.TestCase):
         self.assertEqual(spec.required_identity, "c-admin")
         self.assertEqual(
             spec.allowed_effect_families,
-            ("PRIVATE_CI_PHASE4_TARGET_ENVIRONMENT",),
+            (
+                "ACL_MUTATION",
+                "FILESYSTEM_WRITE_MUTATION",
+                "PROCESS_LAUNCH",
+            ),
         )
         self.assertTrue(spec.require_parser_attestation)
         self.assertTrue(spec.require_child_exit_code)
@@ -294,6 +299,105 @@ class PrivateCiPhase4OperatorSpecRedTests(unittest.TestCase):
                 valid_binding(module),
                 registration_handoff_sha256="short",
             )
+
+
+class PrivateCiPhase4CandidateRedTests(unittest.TestCase):
+    def test_candidate_is_canonical_and_bound_to_tracked_probe(self):
+        module = contract_module()
+        binding = valid_binding(module)
+        handoff = valid_handoff(module)
+        probe_sha = "b" * 64
+
+        candidate = module.render_phase4_target_environment_candidate(
+            binding,
+            handoff,
+            target_probe_sha256=probe_sha,
+        )
+
+        self.assertEqual(
+            candidate,
+            module.render_phase4_target_environment_candidate(
+                binding,
+                handoff,
+                target_probe_sha256=probe_sha,
+            ),
+        )
+        required = (
+            binding.repository,
+            binding.target_sha,
+            binding.controller_main_sha,
+            binding.controller_tree,
+            binding.workflow_sha,
+            binding.workflow_path,
+            binding.runner_name,
+            binding.runner_label,
+            binding.environment_generation,
+            binding.runner_root,
+            binding.target_identity,
+            handoff.registration_plan_sha256,
+            probe_sha,
+            "Invoke-PrivateCiPhase4TargetProbe.ps1",
+            "Get-Credential",
+            "Copy-Item",
+            "icacls.exe",
+            "Start-Process",
+            "-Credential",
+            "-LoadUserProfile",
+            "-PassThru",
+            "heartbeat phase=phase4",
+            "$BridgeChild.ExitCode",
+            "PHASE4_TARGET_ENVIRONMENT_PASS",
+        )
+        for fragment in required:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, candidate)
+
+        forbidden = (
+            "-UseNewEnvironment",
+            "workflow run",
+            "/dispatches",
+            "config.cmd",
+            "run.cmd",
+            "SELF_HOSTED_PRIVATE_CI_PASS",
+        )
+        for fragment in forbidden:
+            with self.subTest(fragment=fragment):
+                self.assertNotIn(fragment, candidate)
+
+    def test_candidate_rejects_binding_handoff_or_probe_digest_mismatch(self):
+        module = contract_module()
+        binding = valid_binding(module)
+        handoff = valid_handoff(module)
+
+        with self.assertRaisesRegex(ValueError, "binding mismatch"):
+            module.render_phase4_target_environment_candidate(
+                valid_binding(module, runner_id=24),
+                handoff,
+                target_probe_sha256="b" * 64,
+            )
+        with self.assertRaisesRegex(ValueError, "probe SHA-256"):
+            module.render_phase4_target_environment_candidate(
+                binding,
+                handoff,
+                target_probe_sha256="short",
+            )
+
+    def test_phase4_candidate_uses_exact_protected_registration_marker_path(self):
+        module = contract_module()
+        handoff = valid_handoff(module)
+        candidate = module.render_phase4_target_environment_candidate(
+            handoff.binding,
+            handoff,
+            target_probe_sha256="b" * 64,
+        )
+
+        expected = (
+            r"C:\ProgramData\agent-controller-private-ci-authority"
+            + r"\issue217-live-registration-"
+            + handoff.registration_plan_sha256
+            + ".consumed.json"
+        )
+        self.assertIn(expected, candidate)
 
 
 if __name__ == "__main__":
