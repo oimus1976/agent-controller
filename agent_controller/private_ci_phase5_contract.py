@@ -109,16 +109,21 @@ def render_phase5_exactly_one_job_candidate(
         f"repos/{binding.repository}/actions/workflows/"
         f"{workflow_filename}/dispatches"
     )
-    dispatch_queued_endpoint = (
-        f"repos/{binding.repository}/actions/workflows/"
-        f"{workflow_filename}/runs"
-        "?event=workflow_dispatch&branch=main&status=queued&per_page=100"
+    active_statuses = (
+        "queued",
+        "in_progress",
+        "requested",
+        "waiting",
+        "pending",
     )
-    dispatch_in_progress_endpoint = (
-        f"repos/{binding.repository}/actions/workflows/"
-        f"{workflow_filename}/runs"
-        "?event=workflow_dispatch&branch=main&status=in_progress&per_page=100"
-    )
+    active_endpoints = {
+        status: (
+            f"repos/{binding.repository}/actions/workflows/"
+            f"{workflow_filename}/runs"
+            f"?event=workflow_dispatch&branch=main&status={status}&per_page=100"
+        )
+        for status in active_statuses
+    }
     runners_endpoint = (
         f"repos/{binding.repository}/actions/runners?per_page=100"
     )
@@ -133,16 +138,14 @@ def render_phase5_exactly_one_job_candidate(
         / PHASE5_RUNNER_STDERR_FILENAME
     )
 
-    queued_read_command = (
-        "gh.exe api "
-        f"-H {_ps_single_quoted('X-GitHub-Api-Version: ' + GITHUB_API_VERSION)} "
-        f"{_ps_single_quoted(dispatch_queued_endpoint)}"
-    )
-    in_progress_read_command = (
-        "gh.exe api "
-        f"-H {_ps_single_quoted('X-GitHub-Api-Version: ' + GITHUB_API_VERSION)} "
-        f"{_ps_single_quoted(dispatch_in_progress_endpoint)}"
-    )
+    active_read_commands = {
+        status: (
+            "gh.exe api "
+            f"-H {_ps_single_quoted('X-GitHub-Api-Version: ' + GITHUB_API_VERSION)} "
+            f"{_ps_single_quoted(active_endpoints[status])}"
+        )
+        for status in active_statuses
+    }
     runner_read_command = (
         "gh.exe api "
         f"-H {_ps_single_quoted('X-GitHub-Api-Version: ' + GITHUB_API_VERSION)} "
@@ -188,8 +191,11 @@ def render_phase5_exactly_one_job_candidate(
         f"$BridgeRunnerStdoutPath = {_ps_single_quoted(runner_stdout)}",
         f"$BridgeRunnerStderrPath = {_ps_single_quoted(runner_stderr)}",
         f"$BridgeDispatchEndpoint = {_ps_single_quoted(dispatch_endpoint)}",
-        f"$BridgeDispatchQueuedEndpoint = {_ps_single_quoted(dispatch_queued_endpoint)}",
-        f"$BridgeDispatchInProgressEndpoint = {_ps_single_quoted(dispatch_in_progress_endpoint)}",
+        f"$BridgeActiveQueuedEndpoint = {_ps_single_quoted(active_endpoints['queued'])}",
+        f"$BridgeActiveInProgressEndpoint = {_ps_single_quoted(active_endpoints['in_progress'])}",
+        f"$BridgeActiveRequestedEndpoint = {_ps_single_quoted(active_endpoints['requested'])}",
+        f"$BridgeActiveWaitingEndpoint = {_ps_single_quoted(active_endpoints['waiting'])}",
+        f"$BridgeActivePendingEndpoint = {_ps_single_quoted(active_endpoints['pending'])}",
         f"$BridgeRunnersEndpoint = {_ps_single_quoted(runners_endpoint)}",
         f"$BridgeRunnerTimeoutSeconds = {PHASE5_RUNNER_TIMEOUT_SECONDS}",
         "$ErrorActionPreference = 'Stop'",
@@ -207,16 +213,31 @@ def render_phase5_exactly_one_job_candidate(
         "$BridgeExistingRunnerProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.Name -match 'Runner|actions' })",
         "if ($BridgeExistingRunnerProcesses.Count -ne 0) { throw 'Phase 5 stale local runner process detected before start' }",
         "",
-        f"$BridgeQueuedBeforeStartJson = {queued_read_command}",
+        f"$BridgeQueuedBeforeStartJson = {active_read_commands['queued']}",
         "$BridgeQueuedBeforeStartExitCode = $LASTEXITCODE",
         "if ($BridgeQueuedBeforeStartExitCode -ne 0) { throw 'Phase 5 queued-run readback failed before runner start' }",
         "$BridgeQueuedBeforeStart = $BridgeQueuedBeforeStartJson | ConvertFrom-Json",
         "if ($null -eq $BridgeQueuedBeforeStart.total_count -or [int]$BridgeQueuedBeforeStart.total_count -ne 0) { throw 'Phase 5 queued trusted workflow exists before runner start' }",
-        f"$BridgeInProgressBeforeStartJson = {in_progress_read_command}",
+        f"$BridgeInProgressBeforeStartJson = {active_read_commands['in_progress']}",
         "$BridgeInProgressBeforeStartExitCode = $LASTEXITCODE",
         "if ($BridgeInProgressBeforeStartExitCode -ne 0) { throw 'Phase 5 in-progress-run readback failed before runner start' }",
         "$BridgeInProgressBeforeStart = $BridgeInProgressBeforeStartJson | ConvertFrom-Json",
         "if ($null -eq $BridgeInProgressBeforeStart.total_count -or [int]$BridgeInProgressBeforeStart.total_count -ne 0) { throw 'Phase 5 in-progress trusted workflow exists before runner start' }",
+        f"$BridgeRequestedBeforeStartJson = {active_read_commands['requested']}",
+        "$BridgeRequestedBeforeStartExitCode = $LASTEXITCODE",
+        "if ($BridgeRequestedBeforeStartExitCode -ne 0) { throw 'Phase 5 requested-run readback failed before runner start' }",
+        "$BridgeRequestedBeforeStart = $BridgeRequestedBeforeStartJson | ConvertFrom-Json",
+        "if ($null -eq $BridgeRequestedBeforeStart.total_count -or [int]$BridgeRequestedBeforeStart.total_count -ne 0) { throw 'Phase 5 requested trusted workflow exists before runner start' }",
+        f"$BridgeWaitingBeforeStartJson = {active_read_commands['waiting']}",
+        "$BridgeWaitingBeforeStartExitCode = $LASTEXITCODE",
+        "if ($BridgeWaitingBeforeStartExitCode -ne 0) { throw 'Phase 5 waiting-run readback failed before runner start' }",
+        "$BridgeWaitingBeforeStart = $BridgeWaitingBeforeStartJson | ConvertFrom-Json",
+        "if ($null -eq $BridgeWaitingBeforeStart.total_count -or [int]$BridgeWaitingBeforeStart.total_count -ne 0) { throw 'Phase 5 waiting trusted workflow exists before runner start' }",
+        f"$BridgePendingBeforeStartJson = {active_read_commands['pending']}",
+        "$BridgePendingBeforeStartExitCode = $LASTEXITCODE",
+        "if ($BridgePendingBeforeStartExitCode -ne 0) { throw 'Phase 5 pending-run readback failed before runner start' }",
+        "$BridgePendingBeforeStart = $BridgePendingBeforeStartJson | ConvertFrom-Json",
+        "if ($null -eq $BridgePendingBeforeStart.total_count -or [int]$BridgePendingBeforeStart.total_count -ne 0) { throw 'Phase 5 pending trusted workflow exists before runner start' }",
         "",
         "$BridgeTargetCredential = Get-Credential -UserName $BridgeQualifiedTargetIdentity -Message 'Enter the local ac-runner credential for the reviewed Phase 5 plan.'",
         "if ($null -eq $BridgeTargetCredential) { throw 'Phase 5 target credential was not supplied' }",
@@ -278,16 +299,31 @@ def render_phase5_exactly_one_job_candidate(
         "if ($BridgeRemoteRunner.status -cne 'online') { throw 'Phase 5 pre-dispatch runner is not online' }",
         "if ([bool]$BridgeRemoteRunner.busy) { throw 'Phase 5 pre-dispatch runner is busy' }",
         "",
-        f"$BridgeQueuedBeforeDispatchJson = {queued_read_command}",
+        f"$BridgeQueuedBeforeDispatchJson = {active_read_commands['queued']}",
         "$BridgeQueuedBeforeDispatchExitCode = $LASTEXITCODE",
         "if ($BridgeQueuedBeforeDispatchExitCode -ne 0) { throw 'Phase 5 queued-run readback failed before dispatch' }",
         "$BridgeQueuedBeforeDispatch = $BridgeQueuedBeforeDispatchJson | ConvertFrom-Json",
         "if ($null -eq $BridgeQueuedBeforeDispatch.total_count -or [int]$BridgeQueuedBeforeDispatch.total_count -ne 0) { throw 'Phase 5 queued trusted workflow exists before dispatch' }",
-        f"$BridgeInProgressBeforeDispatchJson = {in_progress_read_command}",
+        f"$BridgeInProgressBeforeDispatchJson = {active_read_commands['in_progress']}",
         "$BridgeInProgressBeforeDispatchExitCode = $LASTEXITCODE",
         "if ($BridgeInProgressBeforeDispatchExitCode -ne 0) { throw 'Phase 5 in-progress-run readback failed before dispatch' }",
         "$BridgeInProgressBeforeDispatch = $BridgeInProgressBeforeDispatchJson | ConvertFrom-Json",
         "if ($null -eq $BridgeInProgressBeforeDispatch.total_count -or [int]$BridgeInProgressBeforeDispatch.total_count -ne 0) { throw 'Phase 5 in-progress trusted workflow exists before dispatch' }",
+        f"$BridgeRequestedBeforeDispatchJson = {active_read_commands['requested']}",
+        "$BridgeRequestedBeforeDispatchExitCode = $LASTEXITCODE",
+        "if ($BridgeRequestedBeforeDispatchExitCode -ne 0) { throw 'Phase 5 requested-run readback failed before dispatch' }",
+        "$BridgeRequestedBeforeDispatch = $BridgeRequestedBeforeDispatchJson | ConvertFrom-Json",
+        "if ($null -eq $BridgeRequestedBeforeDispatch.total_count -or [int]$BridgeRequestedBeforeDispatch.total_count -ne 0) { throw 'Phase 5 requested trusted workflow exists before dispatch' }",
+        f"$BridgeWaitingBeforeDispatchJson = {active_read_commands['waiting']}",
+        "$BridgeWaitingBeforeDispatchExitCode = $LASTEXITCODE",
+        "if ($BridgeWaitingBeforeDispatchExitCode -ne 0) { throw 'Phase 5 waiting-run readback failed before dispatch' }",
+        "$BridgeWaitingBeforeDispatch = $BridgeWaitingBeforeDispatchJson | ConvertFrom-Json",
+        "if ($null -eq $BridgeWaitingBeforeDispatch.total_count -or [int]$BridgeWaitingBeforeDispatch.total_count -ne 0) { throw 'Phase 5 waiting trusted workflow exists before dispatch' }",
+        f"$BridgePendingBeforeDispatchJson = {active_read_commands['pending']}",
+        "$BridgePendingBeforeDispatchExitCode = $LASTEXITCODE",
+        "if ($BridgePendingBeforeDispatchExitCode -ne 0) { throw 'Phase 5 pending-run readback failed before dispatch' }",
+        "$BridgePendingBeforeDispatch = $BridgePendingBeforeDispatchJson | ConvertFrom-Json",
+        "if ($null -eq $BridgePendingBeforeDispatch.total_count -or [int]$BridgePendingBeforeDispatch.total_count -ne 0) { throw 'Phase 5 pending trusted workflow exists before dispatch' }",
         "",
         f"$BridgeDispatchJson = {dispatch_command}",
         "$BridgeDispatchExitCode = $LASTEXITCODE",
