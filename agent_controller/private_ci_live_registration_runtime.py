@@ -748,7 +748,14 @@ def result_payload(
     plan: LiveRegistrationPlan,
     plan_sha256_value: str,
     result: LiveRegistrationResult,
+    runner_readback_attempts: int = 0,
 ) -> dict[str, object]:
+    if (
+        type(runner_readback_attempts) is not int
+        or runner_readback_attempts < 0
+        or runner_readback_attempts > POST_REGISTRATION_READBACK_MAX_ATTEMPTS
+    ):
+        raise ValueError("runner readback attempts invalid")
     return {
         "schema": RESULT_SCHEMA,
         "plan_sha256": plan_sha256_value,
@@ -764,6 +771,7 @@ def result_payload(
         "reason_codes": list(result.reason_codes),
         "child_exit_code": result.child_exit_code,
         "runner_id": result.runner_id,
+        "runner_readback_attempts": runner_readback_attempts,
         "stdout": result.stdout,
         "stderr": result.stderr,
     }
