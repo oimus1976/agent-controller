@@ -267,6 +267,7 @@ class PrivateCiPhase4OperatorSpecRedTests(unittest.TestCase):
             (
                 "ACL_MUTATION",
                 "FILESYSTEM_WRITE_MUTATION",
+                "PROCESS_CONTROL",
                 "PROCESS_LAUNCH",
             ),
         )
