@@ -64,9 +64,9 @@ def _local_probe(
     target_identity: str,
 ) -> dict[str, object]:
     quoted_target = target_identity.replace("'", "''")
-    script = rf"""
+    script = r"""
 $ErrorActionPreference = 'Stop'
-$TargetName = '{quoted_target}'
+$TargetName = '__TARGET_IDENTITY__'
 $Target = Get-LocalUser -Name $TargetName -ErrorAction SilentlyContinue
 $TargetEnabled = $false
 $TargetAdmin = $false
@@ -108,7 +108,7 @@ $RunnerTasks = @(
     runner_task_count = $RunnerTasks.Count
     powershell_version = $PSVersionTable.PSVersion.ToString()
 } | ConvertTo-Json -Compress
-""".strip()
+""".strip().replace("__TARGET_IDENTITY__", quoted_target)
     completed = command_runner(
         "powershell.exe",
         "-NoProfile",
