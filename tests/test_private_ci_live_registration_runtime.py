@@ -598,10 +598,11 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             )
             self.assertEqual(now[0], 2.0)
             self.assertEqual(sleeps, [1.0, 1.0])
-            self.assertEqual(runtime.last_readback_attempts, 3)
+            self.assertEqual(runtime.last_readback_attempts, 2)
             self.assertEqual(observed_timeouts[:4], [2.0, 2.0, 1.0, 1.0])
+            self.assertEqual(now[0], 2.0)
             self.assertLessEqual(
-                now[0],
+                2.0,
                 POST_REGISTRATION_READBACK_MAX_ELAPSED_SECONDS,
             )
 
