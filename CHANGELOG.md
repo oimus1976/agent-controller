@@ -25,6 +25,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - strict two-sweep primitive `read_all_runner_items()` は弱めず、sweep間runner set変化だけをtyped transientとして識別する。
 - post-registrationでは最大6 attempt、1秒間隔に加え、remote readback全体へ15秒のmonotonic wall-clock deadlineを設定する。各`gh api` subprocessにも残り時間をtimeoutとして渡し、delay合計も最大5秒に限定する。
 - retry対象は、(1) sweep間set変化、(2) stable snapshotだがfrozen runnerがまだ見えない場合のみ。duplicate eligible runner、wrong name/label、malformed/pagination異常などは即fail closedし、registration/token/configを再実行しない。
+- remote exact snapshotをacceptする直前にlocal `.runner` binding（name / work folder / ephemeral / DisableUpdate）を再検証し、stabilization中のlocal driftをfail closedする。
 - bounded exhaustionを`RUNNER_READBACK_STABILIZATION_EXHAUSTED` / `RUNNER_VISIBILITY_STABILIZATION_EXHAUSTED`として既存`RUNNER_READBACK_FAILED`に追加記録する。
 - live result schemaをv2へ更新し、`runner_readback_attempts`をresult/transcriptへ記録して、実際に何回read-only stabilizationしたかを監査可能にする。
 
