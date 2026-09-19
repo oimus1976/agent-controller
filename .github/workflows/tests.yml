@@ -47,6 +47,8 @@ jobs:
         run: python -m unittest discover -s tests -p "test_private_ci_phase4_target_probe_windows.py" -v
       - name: Run real Windows PowerShell 5.1 Phase 4 candidate regressions
         run: python -m unittest discover -s tests -p "test_private_ci_phase4_candidate_windows.py" -v
+      - name: Run real Windows PowerShell 5.1 Phase 5 candidate regressions
+        run: python -m unittest discover -s tests -p "test_private_ci_phase5_candidate_windows.py" -v
       - name: Run real Windows PowerShell 5.1 Phase 4 authority regressions
         run: python -m unittest discover -s tests -p "test_private_ci_phase4_authority_windows.py" -v
       - name: Run real Windows PowerShell 5.1 approval issuer regressions
