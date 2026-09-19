@@ -124,7 +124,6 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
             "Start-Process",
             "-Credential",
             "-LoadUserProfile",
-            "-UseNewEnvironment",
             "-PassThru",
             "gh.exe api ",
             "event=workflow_dispatch&branch=main&per_page=100",
@@ -139,6 +138,10 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
                 "inputs[expected_runner_name]="
                 + evidence.binding.runner_name
             ),
+            "PHASE5_RUNNER_PROCESS_ID=",
+            "PHASE5_RUNNER_PROCESS_OWNER=",
+            "Invoke-CimMethod",
+            "-MethodName GetOwner",
             "PHASE5_WORKFLOW_RUN_ID=",
             "heartbeat phase=phase5",
             "$BridgeChild.ExitCode",
@@ -151,7 +154,7 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
         self.assertEqual(candidate.count("gh.exe api --method POST"), 1)
         self.assertNotIn("return_run_details", candidate)
         self.assertNotIn("SELF_HOSTED_PRIVATE_CI_PASS", candidate)
-        self.assertIn("-UseNewEnvironment", candidate)
+        self.assertNotIn("-UseNewEnvironment", candidate)
 
     def test_candidate_requires_dispatch_response_with_positive_run_id(self):
         m = module()
