@@ -301,6 +301,28 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
                 self.assertFalse(report["heartbeat_or_progress_proven"])
 
 
+
+    def test_exact_cim_getowner_is_read_only_but_other_cim_methods_are_unknown(self):
+        safe = (
+            "$BridgeOwner = Invoke-CimMethod "
+            "-InputObject $BridgeProcess -MethodName GetOwner"
+        )
+        report, _ = self.run_producer(self.bound_candidate(safe))
+        self.assertNotIn(
+            "DYNAMIC_OR_UNKNOWN_COMMAND",
+            report["observed_effect_families"],
+        )
+
+        unsafe = (
+            "$BridgeOwner = Invoke-CimMethod "
+            "-InputObject $BridgeProcess -MethodName Terminate"
+        )
+        unsafe_report, _ = self.run_producer(self.bound_candidate(unsafe))
+        self.assertIn(
+            "DYNAMIC_OR_UNKNOWN_COMMAND",
+            unsafe_report["observed_effect_families"],
+        )
+
     def test_exact_workflow_dispatch_read_shape_is_classified_read_only(self):
         command = (
             "gh.exe api "
