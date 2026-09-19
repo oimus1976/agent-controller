@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import locale
 import os
 import shutil
 import subprocess
@@ -175,7 +176,43 @@ def validate_frozen_plan(
 
 
 Downloader = Callable[[str, Path], None]
-CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
+CommandRunner = Callable[..., subprocess.CompletedProcess[bytes | str]]
+
+
+@dataclass(frozen=True, slots=True)
+class NativeTextResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    decoding_errors: tuple[str, ...] = ()
+
+
+def _decode_native_stream(value: object, *, stream_name: str) -> tuple[str, bool]:
+    if value is None:
+        return "", False
+    if type(value) is str:
+        return value, False
+    if not isinstance(value, (bytes, bytearray)):
+        return str(value), True
+
+    raw = bytes(value)
+    encodings = ("utf-8", locale.getpreferredencoding(False))
+    seen: set[str] = set()
+    for encoding in encodings:
+        if not encoding:
+            continue
+        normalized = encoding.casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            return raw.decode(encoding, errors="strict"), False
+        except (UnicodeDecodeError, LookupError):
+            continue
+
+    # Preserve ASCII bytes (including any leaked ASCII token) exactly enough for
+    # downstream redaction while making undecodable bytes explicit and printable.
+    return raw.decode("ascii", errors="backslashreplace"), True
 
 
 def _default_downloader(url: str, destination: Path) -> None:
@@ -184,7 +221,7 @@ def _default_downloader(url: str, destination: Path) -> None:
             shutil.copyfileobj(response, output, length=1024 * 1024)
 
 
-def _default_command_runner(*command: str, **kwargs) -> subprocess.CompletedProcess[str]:
+def _default_command_runner(*command: str, **kwargs) -> subprocess.CompletedProcess[bytes | str]:
     return subprocess.run(list(command), check=False, **kwargs)
 
 
@@ -217,18 +254,45 @@ class WindowsEphemeralRegistrationRuntime:
     def runner_root(self) -> Path:
         return Path(self.binding.runner_root)
 
-    def _run_text(self, *command: str, cwd: Optional[Path] = None, env=None) -> subprocess.CompletedProcess[str]:
-        return self.command_runner(
+    def _run_text(self, *command: str, cwd: Optional[Path] = None, env=None) -> NativeTextResult:
+        completed = self.command_runner(
             *command,
             cwd=None if cwd is None else str(cwd),
             env=env,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
         )
+        stdout, stdout_error = _decode_native_stream(
+            completed.stdout,
+            stream_name="stdout",
+        )
+        stderr, stderr_error = _decode_native_stream(
+            completed.stderr,
+            stream_name="stderr",
+        )
+        decoding_errors = tuple(
+            name
+            for name, failed in (
+                ("stdout", stdout_error),
+                ("stderr", stderr_error),
+            )
+            if failed
+        )
+        return NativeTextResult(
+            returncode=completed.returncode,
+            stdout=stdout,
+            stderr=stderr,
+            decoding_errors=decoding_errors,
+        )
+
+    @staticmethod
+    def _require_decoded(completed: NativeTextResult, context: str) -> None:
+        if completed.decoding_errors:
+            streams = ",".join(completed.decoding_errors)
+            raise RuntimeError(f"{context} native output undecodable: {streams}")
 
     def _require_broker_identity(self) -> None:
         host = self._run_text("hostname.exe")
+        self._require_decoded(host, "host readback")
         if host.returncode != 0:
             raise RuntimeError("host readback failed")
         observed_host = host.stdout.strip()
@@ -236,6 +300,7 @@ class WindowsEphemeralRegistrationRuntime:
             raise RuntimeError("host mismatch")
 
         identity = self._run_text("whoami.exe")
+        self._require_decoded(identity, "broker identity readback")
         if identity.returncode != 0:
             raise RuntimeError("broker identity readback failed")
         observed_identity = identity.stdout.strip()
@@ -293,6 +358,7 @@ $RunnerTasks = @(
             "-Command",
             script,
         )
+        self._require_decoded(completed, "local safety baseline readback")
         if completed.returncode != 0:
             raise RuntimeError("local safety baseline readback failed")
         try:
@@ -318,6 +384,7 @@ $RunnerTasks = @(
         def fetch_page(page: int) -> object:
             endpoint = base if page == 1 else f"{base}&page={page}"
             completed = self._run_text(self.gh_executable, "api", endpoint)
+            self._require_decoded(completed, "GitHub runner readback")
             if completed.returncode != 0:
                 raise RuntimeError("GitHub runner readback failed")
             try:
@@ -405,6 +472,7 @@ $RunnerTasks = @(
             "POST",
             f"repos/{repository}/actions/runners/registration-token",
         )
+        self._require_decoded(completed, "registration token acquisition")
         if completed.returncode != 0:
             raise RuntimeError("registration token acquisition failed")
         payload = json.loads(completed.stdout)
@@ -450,6 +518,7 @@ $RunnerTasks = @(
             exit_code=completed.returncode,
             stdout=completed.stdout,
             stderr=completed.stderr,
+            output_decoding_uncertain=bool(completed.decoding_errors),
         )
 
     def credential_handoff_cleared(
