@@ -46,6 +46,8 @@ class Phase5ResultEvidence:
     runner_id: int
     runner_name: str
     runner_label: str
+    runner_process_id: int
+    runner_process_owner: str
     runner_child_exit_code: int
     runner_stdout_sha256: str
     runner_stderr_sha256: str
@@ -262,6 +264,7 @@ def phase5_result_reason_codes(
         ("PHASE5_RESULT_WORKFLOW_RUN_ID_INVALID", evidence.workflow_run_id),
         ("PHASE5_RESULT_JOB_ID_INVALID", evidence.job_id),
         ("PHASE5_RESULT_RUNNER_ID_INVALID", evidence.runner_id),
+        ("PHASE5_RESULT_RUNNER_PROCESS_ID_INVALID", evidence.runner_process_id),
     )
     for reason, value in positive_fields:
         if not _positive_int(value):
@@ -274,6 +277,14 @@ def phase5_result_reason_codes(
         reasons.append("PHASE5_RESULT_RUNNER_NAME_MISMATCH")
     if evidence.runner_label != evidence.binding.runner_label:
         reasons.append("PHASE5_RESULT_RUNNER_LABEL_MISMATCH")
+    expected_owner = (
+        evidence.binding.host + "\\" + evidence.binding.target_identity
+    )
+    if (
+        type(evidence.runner_process_owner) is not str
+        or evidence.runner_process_owner.casefold() != expected_owner.casefold()
+    ):
+        reasons.append("PHASE5_RESULT_RUNNER_PROCESS_OWNER_MISMATCH")
     if evidence.runner_child_exit_code != 0:
         reasons.append("PHASE5_RESULT_CHILD_EXIT_INVALID")
     if evidence.status != PHASE5_RESULT_STATUS:
@@ -341,6 +352,8 @@ def parse_phase5_result_bytes(raw: bytes) -> Phase5ResultEvidence:
             runner_id=payload["runner_id"],
             runner_name=payload["runner_name"],
             runner_label=payload["runner_label"],
+            runner_process_id=payload["runner_process_id"],
+            runner_process_owner=payload["runner_process_owner"],
             runner_child_exit_code=payload["runner_child_exit_code"],
             runner_stdout_sha256=payload["runner_stdout_sha256"],
             runner_stderr_sha256=payload["runner_stderr_sha256"],
