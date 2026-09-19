@@ -23,6 +23,7 @@ PHASE5_BROKER_IDENTITY = "c-admin"
 PHASE5_TRANSCRIPT_FILENAME = "issue225-phase5-exactly-one-job.log"
 PHASE5_SUCCESS_MARKER = "PHASE5_EXACTLY_ONE_JOB_ATTEMPT_COMPLETE"
 PHASE5_EFFECTS = (
+    "HTTP_API_ACCESS",
     "PROCESS_CONTROL",
     "PROCESS_LAUNCH",
     "WORKFLOW_DISPATCH",
@@ -108,6 +109,11 @@ def render_phase5_exactly_one_job_candidate(
         f"repos/{binding.repository}/actions/workflows/"
         f"{workflow_filename}/dispatches"
     )
+    dispatch_runs_endpoint = (
+        f"repos/{binding.repository}/actions/workflows/"
+        f"{workflow_filename}/runs"
+        "?event=workflow_dispatch&branch=main&per_page=100"
+    )
     qualified_target = f"{binding.host}\\{binding.target_identity}"
     runner_command = str(PureWindowsPath(binding.runner_root) / "run.cmd")
     runner_stdout = str(
@@ -117,6 +123,12 @@ def render_phase5_exactly_one_job_candidate(
     runner_stderr = str(
         PureWindowsPath(binding.runner_root)
         / PHASE5_RUNNER_STDERR_FILENAME
+    )
+
+    dispatch_read_command = (
+        "gh.exe api "
+        f"-H {_ps_single_quoted('X-GitHub-Api-Version: ' + GITHUB_API_VERSION)} "
+        f"{_ps_single_quoted(dispatch_runs_endpoint)}"
     )
 
     dispatch_command = (
@@ -158,6 +170,7 @@ def render_phase5_exactly_one_job_candidate(
         f"$BridgeRunnerStdoutPath = {_ps_single_quoted(runner_stdout)}",
         f"$BridgeRunnerStderrPath = {_ps_single_quoted(runner_stderr)}",
         f"$BridgeDispatchEndpoint = {_ps_single_quoted(dispatch_endpoint)}",
+        f"$BridgeDispatchRunsEndpoint = {_ps_single_quoted(dispatch_runs_endpoint)}",
         f"$BridgeRunnerTimeoutSeconds = {PHASE5_RUNNER_TIMEOUT_SECONDS}",
         "$ErrorActionPreference = 'Stop'",
         "",
@@ -170,12 +183,23 @@ def render_phase5_exactly_one_job_candidate(
         "if ($BridgeTargetCredential.UserName -ine $BridgeQualifiedTargetIdentity) { throw 'Phase 5 target credential identity mismatch' }",
         "",
         "$BridgeStartedAt = Get-Date",
-        "$BridgeChild = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d','/s','/c','run.cmd') -Credential $BridgeTargetCredential -LoadUserProfile -WorkingDirectory $BridgeRunnerRoot -RedirectStandardOutput $BridgeRunnerStdoutPath -RedirectStandardError $BridgeRunnerStderrPath -PassThru",
+        "$BridgeChild = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d','/s','/c','run.cmd') -Credential $BridgeTargetCredential -LoadUserProfile -UseNewEnvironment -WorkingDirectory $BridgeRunnerRoot -RedirectStandardOutput $BridgeRunnerStdoutPath -RedirectStandardError $BridgeRunnerStderrPath -PassThru",
         "Start-Sleep -Seconds 1",
         "if ($BridgeChild.HasExited) {",
         "    $BridgeChildExitCode = $BridgeChild.ExitCode",
         "    throw 'Phase 5 runner listener exited before dispatch'",
         "}",
+        "",
+        f"$BridgePriorRunsJson = {dispatch_read_command}",
+        "$BridgePriorRunsExitCode = $LASTEXITCODE",
+        "if ($BridgePriorRunsExitCode -ne 0) { throw 'Phase 5 pre-dispatch readback failed; dispatch must not be attempted' }",
+        "if (-not $BridgePriorRunsJson) { throw 'Phase 5 pre-dispatch readback was empty; dispatch must not be attempted' }",
+        "$BridgePriorRuns = $BridgePriorRunsJson | ConvertFrom-Json",
+        "if ($null -eq $BridgePriorRuns.total_count -or $null -eq $BridgePriorRuns.workflow_runs) { throw 'Phase 5 pre-dispatch readback shape invalid; dispatch must not be attempted' }",
+        "$BridgePriorRunItems = @($BridgePriorRuns.workflow_runs)",
+        "if ([int]$BridgePriorRuns.total_count -gt $BridgePriorRunItems.Count) { throw 'Phase 5 pre-dispatch readback incomplete; dispatch must not be attempted' }",
+        "$BridgeMatchingPriorRuns = @($BridgePriorRunItems | Where-Object { $_.head_sha -eq $BridgeWorkflowSha })",
+        "if ($BridgeMatchingPriorRuns.Count -ne 0) { throw 'Phase 5 prior workflow dispatch exists; dispatch must not be retried' }",
         "",
         f"$BridgeDispatchJson = {dispatch_command}",
         "$BridgeDispatchExitCode = $LASTEXITCODE",
