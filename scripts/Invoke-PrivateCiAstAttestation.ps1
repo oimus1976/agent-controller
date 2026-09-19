@@ -296,8 +296,10 @@ foreach ($CommandAst in $CommandAsts) {
         $CommandText = $CommandAst.Extent.Text
         $IsWorkflowDispatch = (
             $CommandText -match '(?i)^\s*gh\.exe\s+api\s+--method\s+POST\b' -and
+            $CommandText -match '(?i)-H\s+[''"]X-GitHub-Api-Version:\s*2026-03-10[''"]' -and
             $CommandText -match '(?i)repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/workflows/[A-Za-z0-9_.-]+\.ya?ml/dispatches' -and
-            $CommandText -match '(?i)-F\s+[''"]return_run_details=true[''"]'
+            $CommandText -match '(?i)-f\s+[''"]ref=main[''"]' -and
+            $CommandText -notmatch '(?i)return_run_details'
         )
         if ($IsWorkflowDispatch) {
             if (-not $ObservedEffects.Contains('WORKFLOW_DISPATCH')) {
