@@ -282,7 +282,7 @@ foreach ($CommandAst in $CommandAsts) {
             $ObservedEffects.Add('FILESYSTEM_DESTRUCTIVE_MUTATION')
         }
     }
-    elseif ($LowerName -in @('set-acl', 'icacls')) {
+    elseif ($LowerName -in @('set-acl', 'icacls', 'icacls.exe')) {
         if (-not $ObservedEffects.Contains('ACL_MUTATION')) {
             $ObservedEffects.Add('ACL_MUTATION')
         }
