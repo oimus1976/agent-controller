@@ -355,7 +355,7 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
         command = (
             "gh.exe api "
             "-H 'X-GitHub-Api-Version: 2026-03-10' "
-            "'repos/oimus1976/example/actions/workflows/pilot.yml/runs?event=workflow_dispatch&branch=main&per_page=100'"
+            "'repos/oimus1976/example/actions/workflows/pilot.yml/runs?event=workflow_dispatch&branch=main&status=queued&per_page=100'"
         )
         report, _ = self.run_producer(self.bound_candidate(command))
         self.assertIn(
@@ -394,7 +394,7 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
             (
                 "gh.exe api "
                 "-H 'X-GitHub-Api-Version: 2026-03-10' "
-                "'repos/oimus1976/example/actions/workflows/pilot.yml/runs?event=workflow_dispatch&branch=other&per_page=100'"
+                "'repos/oimus1976/example/actions/workflows/pilot.yml/runs?event=workflow_dispatch&branch=other&status=queued&per_page=100'"
             ),
             (
                 "gh.exe api --method POST "
