@@ -305,7 +305,6 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
             "gh.exe api --method POST "
             "-H 'X-GitHub-Api-Version: 2026-03-10' "
             "'repos/oimus1976/example/actions/workflows/pilot.yml/dispatches' "
-            "-F 'return_run_details=true' "
             "-f 'ref=main'"
         )
         report, _ = self.run_producer(self.bound_candidate(command))
@@ -327,8 +326,16 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
             ),
             (
                 "gh.exe api --method POST "
+                "-H 'X-GitHub-Api-Version: 2026-03-10' "
                 "'repos/oimus1976/example/issues' "
-                "-F 'return_run_details=true'"
+                "-f 'ref=main'"
+            ),
+            (
+                "gh.exe api --method POST "
+                "-H 'X-GitHub-Api-Version: 2026-03-10' "
+                "'repos/oimus1976/example/actions/workflows/pilot.yml/dispatches' "
+                "-F 'return_run_details=true' "
+                "-f 'ref=main'"
             ),
         )
         for command in cases:
