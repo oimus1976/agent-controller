@@ -251,6 +251,30 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             self.assertIn("--disableupdate", config_call)
             self.assertNotIn("--token", config_call)
 
+    def test_none_native_stream_stays_empty_when_secret_redaction_is_enabled(self):
+        binding = frozen_live_registration_binding()
+
+        def command_runner(*command, **kwargs):
+            return completed(
+                command,
+                stdout=None,
+                stderr=None,
+            )
+
+        runtime = WindowsEphemeralRegistrationRuntime(
+            binding,
+            command_runner=command_runner,
+        )
+        result = runtime._run_text(
+            "fake-native.exe",
+            redact_secrets=(TOKEN,),
+        )
+
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(result.secret_output_redacted)
+        self.assertEqual(result.decoding_errors, ())
+
     def test_native_output_falls_back_to_windows_preferred_encoding(self):
         binding = frozen_live_registration_binding()
 
