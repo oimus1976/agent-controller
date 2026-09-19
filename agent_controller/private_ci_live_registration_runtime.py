@@ -6,6 +6,7 @@ import locale
 import os
 import shutil
 import subprocess
+import time
 import urllib.request
 import zipfile
 from dataclasses import asdict, dataclass
@@ -23,6 +24,7 @@ from agent_controller.private_ci_live_registration import (
     LiveRegistrationResult,
     RegistrationExecution,
     RunnerReadback,
+    RunnerReadbackFailure,
     build_live_registration_spec,
     frozen_live_registration_binding,
     phase0_evidence_sha256,
@@ -33,7 +35,10 @@ from agent_controller.private_ci_phase0_evidence import (
     EXPECTED_BROKER_IDENTITY,
     EXPECTED_HOST,
 )
-from agent_controller.private_ci_runner_readback import read_all_runner_items
+from agent_controller.private_ci_runner_readback import (
+    RunnerSetChangedAcrossSweeps,
+    read_all_runner_items,
+)
 
 RUNNER_VERSION = "2.337.0"
 RUNNER_PACKAGE_URL = (
@@ -44,7 +49,13 @@ RUNNER_PACKAGE_SHA256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d
 RUNNER_PACKAGE_FILENAME = f"actions-runner-win-x64-{RUNNER_VERSION}.zip"
 
 PLAN_SCHEMA = "agent-controller.private-ci-live-registration-plan.v1"
-RESULT_SCHEMA = "agent-controller.private-ci-live-registration-result.v1"
+RESULT_SCHEMA = "agent-controller.private-ci-live-registration-result.v2"
+
+POST_REGISTRATION_READBACK_MAX_ATTEMPTS = 6
+POST_REGISTRATION_READBACK_DELAY_SECONDS = 1.0
+POST_REGISTRATION_READBACK_MAX_WAIT_SECONDS = (
+    POST_REGISTRATION_READBACK_MAX_ATTEMPTS - 1
+) * POST_REGISTRATION_READBACK_DELAY_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +188,7 @@ def validate_frozen_plan(
 
 Downloader = Callable[[str, Path], None]
 CommandRunner = Callable[..., subprocess.CompletedProcess[bytes | str]]
+Sleeper = Callable[[float], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,15 +304,22 @@ class WindowsEphemeralRegistrationRuntime:
         gh_executable: str = "gh.exe",
         command_runner: CommandRunner = _default_command_runner,
         downloader: Downloader = _default_downloader,
+        sleeper: Sleeper = time.sleep,
     ) -> None:
         self.binding = binding
         self.gh_executable = gh_executable
         self.command_runner = command_runner
         self.downloader = downloader
+        self.sleeper = sleeper
+        self._last_readback_attempts = 0
 
     @property
     def runner_root(self) -> Path:
         return Path(self.binding.runner_root)
+
+    @property
+    def last_readback_attempts(self) -> int:
+        return self._last_readback_attempts
 
     def _run_text(
         self,
@@ -630,12 +649,46 @@ $RunnerTasks = @(
             raise RuntimeError("local runner update disablement missing")
         return payload
 
-    def read_runners(self, repository: str) -> tuple[RunnerReadback, ...]:
-        if repository != self.binding.repository:
-            raise RuntimeError("runner readback repository mismatch")
-        self._local_runner_settings()
+    def _post_registration_items_are_exact(
+        self,
+        items: tuple[dict[str, object], ...],
+    ) -> bool:
+        eligible: list[tuple[dict[str, object], tuple[str, ...]]] = []
+        for raw in items:
+            labels = raw.get("labels")
+            if type(labels) is not list:
+                raise RuntimeError("GitHub runner labels shape invalid")
+            label_names = tuple(
+                item["name"]
+                for item in labels
+                if type(item) is dict and type(item.get("name")) is str
+            )
+            if (
+                raw.get("name") == self.binding.runner_name
+                or self.binding.runner_label in label_names
+            ):
+                eligible.append((raw, label_names))
+
+        if not eligible:
+            return False
+        if len(eligible) != 1:
+            raise RunnerReadbackFailure("RUNNER_READBACK_ELIGIBLE_COUNT_UNSAFE")
+
+        raw, label_names = eligible[0]
+        if (
+            raw.get("name") != self.binding.runner_name
+            or self.binding.runner_label not in label_names
+        ):
+            raise RunnerReadbackFailure("RUNNER_READBACK_IDENTITY_MISMATCH")
+        return True
+
+    @staticmethod
+    def _runner_readbacks(
+        items: tuple[dict[str, object], ...],
+        binding: LiveRegistrationBinding,
+    ) -> tuple[RunnerReadback, ...]:
         result: list[RunnerReadback] = []
-        for raw in self._github_runner_items(repository):
+        for raw in items:
             labels = raw.get("labels")
             if type(labels) is not list:
                 raise RuntimeError("GitHub runner labels shape invalid")
@@ -653,12 +706,41 @@ $RunnerTasks = @(
                     labels=label_names,
                     ephemeral=(
                         True
-                        if raw.get("name") == self.binding.runner_name
+                        if raw.get("name") == binding.runner_name
                         else None
                     ),
                 )
             )
         return tuple(result)
+
+    def read_runners(self, repository: str) -> tuple[RunnerReadback, ...]:
+        if repository != self.binding.repository:
+            raise RuntimeError("runner readback repository mismatch")
+        self._local_runner_settings()
+        self._last_readback_attempts = 0
+
+        for attempt in range(1, POST_REGISTRATION_READBACK_MAX_ATTEMPTS + 1):
+            self._last_readback_attempts = attempt
+            try:
+                items = self._github_runner_items(repository)
+            except RunnerSetChangedAcrossSweeps:
+                if attempt == POST_REGISTRATION_READBACK_MAX_ATTEMPTS:
+                    raise RunnerReadbackFailure(
+                        "RUNNER_READBACK_STABILIZATION_EXHAUSTED"
+                    )
+                self.sleeper(POST_REGISTRATION_READBACK_DELAY_SECONDS)
+                continue
+
+            if self._post_registration_items_are_exact(items):
+                return self._runner_readbacks(items, self.binding)
+
+            if attempt == POST_REGISTRATION_READBACK_MAX_ATTEMPTS:
+                raise RunnerReadbackFailure(
+                    "RUNNER_VISIBILITY_STABILIZATION_EXHAUSTED"
+                )
+            self.sleeper(POST_REGISTRATION_READBACK_DELAY_SECONDS)
+
+        raise AssertionError("post-registration readback loop escaped safety bound")
 
 
 def result_payload(
