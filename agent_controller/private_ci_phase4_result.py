@@ -29,6 +29,7 @@ class Phase4ResultEvidence:
     target_probe_result_sha256: str
     target_probe_stdout_sha256: str
     target_probe_stderr_sha256: str
+    runner_generation_snapshot_sha256: str
     status: str
     completed_at: str
 
@@ -127,6 +128,10 @@ def phase4_result_reason_codes(
             "PHASE4_RESULT_PROBE_STDERR_SHA_INVALID",
             evidence.target_probe_stderr_sha256,
         ),
+        (
+            "PHASE4_RESULT_RUNNER_SNAPSHOT_SHA_INVALID",
+            evidence.runner_generation_snapshot_sha256,
+        ),
     )
     for reason, value in digest_fields:
         if not _digest(value):
@@ -201,6 +206,9 @@ def parse_phase4_result_bytes(raw: bytes) -> Phase4ResultEvidence:
             ],
             target_probe_stderr_sha256=payload[
                 "target_probe_stderr_sha256"
+            ],
+            runner_generation_snapshot_sha256=payload[
+                "runner_generation_snapshot_sha256"
             ],
             status=payload["status"],
             completed_at=payload["completed_at"],
