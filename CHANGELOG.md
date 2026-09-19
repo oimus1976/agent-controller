@@ -15,6 +15,32 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-19 — Bounded post-registration runner readback stabilization（Issue #221）
+
+関連: Issue #221, Issue #216, Issue #219, PR #220, Issue #195
+
+### Added / changed
+
+- first human-authorized private-CI live registrationで、registration child exit 0の後に`RUNNER_READBACK_FAILED`となり、fresh reconciliationではexact runner registrationが確認できた実機事象を受け、post-registration runner readbackにbounded stabilizationを追加。
+- strict two-sweep primitive `read_all_runner_items()` は弱めず、sweep間runner set変化だけをtyped transientとして識別する。
+- post-registrationでは最大6 attempt、1秒間隔、最大待機5秒に限定し、各attemptでstrict two-sweep snapshotを改めて要求する。
+- retry対象は、(1) sweep間set変化、(2) stable snapshotだがfrozen runnerがまだ見えない場合のみ。duplicate eligible runner、wrong name/label、malformed/pagination異常などは即fail closedし、registration/token/configを再実行しない。
+- bounded exhaustionを`RUNNER_READBACK_STABILIZATION_EXHAUSTED` / `RUNNER_VISIBILITY_STABILIZATION_EXHAUSTED`として既存`RUNNER_READBACK_FAILED`に追加記録する。
+- live result schemaをv2へ更新し、`runner_readback_attempts`をresult/transcriptへ記録して、実際に何回read-only stabilizationしたかを監査可能にする。
+
+### Safety / authority boundary
+
+- stabilization loopはread-onlyであり、registration credential取得・runner config・workflow dispatch・target executionを含まない。
+- consumed human authorizationに対するregistration mutationはexactly-onceのままで、readback uncertaintyを理由に自動再登録しない。
+- stable snapshot primitive自体のfail-closed structural validationは維持する。
+- #216の既存live attemptはFAILのままで、#219/#220のmergeおよび本修正だけでは再pilotを許可しない。次回live mutationにはfresh Phase 0 / plan / human authorizationが必要。
+
+### Validation status
+
+- このentryはIssue #221 Draft実装の一部。exact-head CIとindependent rereviewが完了するまでhuman Ready judgmentへ進まない。
+
+---
+
 ## 2026-09-19 — Windows native-output decoding hardening after live pilot failure（Issue #219）
 
 関連: Issue #219, Issue #216, Issue #207, Issue #195
