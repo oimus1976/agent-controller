@@ -207,6 +207,35 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
         self.assertFalse(report["child_exit_code_proven"])
         self.assertFalse(report["fail_fast_proven"])
 
+    def test_automatic_variable_read_is_not_a_collision(self):
+        report, _ = self.run_producer(
+            self.bound_candidate("$BridgeNativeExit = $LASTEXITCODE")
+        )
+        self.assertNotIn(
+            "lastexitcode",
+            report["automatic_variable_collisions"],
+        )
+
+    def test_phase4_mutation_commands_have_explicit_effect_families(self):
+        cases = (
+            (
+                "Copy-Item -LiteralPath C:\\source -Destination C:\\target",
+                "FILESYSTEM_WRITE_MUTATION",
+            ),
+            (
+                "Stop-Process -Id 123 -Force",
+                "PROCESS_CONTROL",
+            ),
+        )
+        for command, expected in cases:
+            with self.subTest(command=command):
+                report, _ = self.run_producer(self.bound_candidate(command))
+                self.assertIn(expected, report["observed_effect_families"])
+                self.assertNotIn(
+                    "DYNAMIC_OR_UNKNOWN_COMMAND",
+                    report["observed_effect_families"],
+                )
+
     def test_bounded_child_process_shape_proves_progress_exit_and_fail_fast(self):
         candidate = self.bound_candidate(
             "$BridgeStartedAt = Get-Date\n"
