@@ -68,6 +68,9 @@ from agent_controller.private_ci_phase4_runtime import (
     validate_frozen_phase4_plan,
 )
 from agent_controller.private_ci_runner_readback import read_all_runner_items
+from agent_controller.private_ci_runner_tree_snapshot import (
+    runner_generation_snapshot_sha256,
+)
 
 
 HANDOFF_FILENAME = "issue225-registration-handoff.json"
@@ -537,6 +540,21 @@ def _probe_paths(binding) -> tuple[Path, Path, Path]:
     )
 
 
+
+def _require_generation_snapshot_exact(handoff) -> str:
+    runner_root = Path(handoff.binding.runner_root)
+    generation_root = runner_root.parent
+    observed = runner_generation_snapshot_sha256(
+        generation_root=generation_root,
+        runner_root=runner_root,
+        work_folder=handoff.binding.work_folder,
+    )
+    if observed != handoff.runner_generation_snapshot_sha256:
+        raise RuntimeError(
+            "Phase 4 runner generation snapshot drift"
+        )
+    return observed
+
 def command_plan() -> int:
     handoff_path = authoritative_path(HANDOFF_FILENAME)
     candidate_path = authoritative_path(PHASE4_CANDIDATE_FILENAME)
@@ -556,6 +574,7 @@ def command_plan() -> int:
 
     handoff_raw = handoff_path.read_bytes()
     handoff = parse_registration_handoff_bytes(handoff_raw)
+    _require_generation_snapshot_exact(handoff)
     probe_raw = probe_path.read_bytes()
     probe_sha = phase4_target_probe_sha256(probe_raw)
     candidate = render_phase4_target_environment_candidate(
@@ -648,6 +667,7 @@ def command_apply(expected_plan_sha256: str) -> int:
     _require_non_elevated_broker(plan.binding)
     _require_controller_source_exact(plan.binding)
     _require_remote_binding_exact(plan.binding)
+    _require_generation_snapshot_exact(handoff)
     approval_raw, approval_sha = _require_phase4_approval(
         plan_sha,
         plan.binding,
@@ -713,6 +733,9 @@ def command_apply(expected_plan_sha256: str) -> int:
         )
     _require_controller_source_exact(plan.binding)
     _require_remote_binding_exact(plan.binding)
+    observed_generation_snapshot_sha = _require_generation_snapshot_exact(
+        handoff
+    )
 
     started_at = datetime.now(timezone.utc).isoformat()
     completed = _completed(
@@ -780,6 +803,7 @@ def command_apply(expected_plan_sha256: str) -> int:
         target_probe_result_sha256=sha256_bytes(probe_result_raw),
         target_probe_stdout_sha256=sha256_bytes(probe_stdout_raw),
         target_probe_stderr_sha256=sha256_bytes(probe_stderr_raw),
+        runner_generation_snapshot_sha256=observed_generation_snapshot_sha,
         status=PHASE4_RESULT_STATUS,
         completed_at=ended_at,
     )
@@ -796,6 +820,7 @@ def command_apply(expected_plan_sha256: str) -> int:
         f"candidate_sha256={plan.candidate_sha256}\n"
         f"target_probe_sha256={plan.target_probe_sha256}\n"
         f"target_probe_result_sha256={evidence.target_probe_result_sha256}\n"
+        f"runner_generation_snapshot_sha256={evidence.runner_generation_snapshot_sha256}\n"
         "status=PHASE4_TARGET_ENVIRONMENT_PASS\n"
         "--- stdout ---\n"
         f"{completed.stdout}\n"
