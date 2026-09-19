@@ -17,7 +17,8 @@ from agent_controller.private_ci_live_registration import (
 from agent_controller.private_ci_live_registration_runtime import (
     POST_REGISTRATION_READBACK_DELAY_SECONDS,
     POST_REGISTRATION_READBACK_MAX_ATTEMPTS,
-    POST_REGISTRATION_READBACK_MAX_WAIT_SECONDS,
+    POST_REGISTRATION_READBACK_MAX_DELAY_SECONDS,
+    POST_REGISTRATION_READBACK_MAX_ELAPSED_SECONDS,
     WindowsEphemeralRegistrationRuntime,
 )
 
@@ -540,7 +541,68 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             )
             self.assertEqual(
                 sum(sleeps),
-                POST_REGISTRATION_READBACK_MAX_WAIT_SECONDS,
+                POST_REGISTRATION_READBACK_MAX_DELAY_SECONDS,
+            )
+
+    def test_post_registration_readback_enforces_wall_clock_budget(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding = self.binding_for(temporary_directory)
+            root = Path(binding.runner_root)
+            root.mkdir(parents=True)
+            (root / ".runner").write_text(
+                json.dumps(
+                    {
+                        "AgentName": binding.runner_name,
+                        "WorkFolder": binding.work_folder,
+                        "Ephemeral": True,
+                        "DisableUpdate": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            now = [0.0]
+            sleeps = []
+            observed_timeouts = []
+
+            def clock():
+                return now[0]
+
+            def sleeper(seconds):
+                sleeps.append(seconds)
+                now[0] += seconds
+
+            def command_runner(*command, **kwargs):
+                observed_timeouts.append(kwargs.get("timeout"))
+                return completed(
+                    command,
+                    stdout=json.dumps({"total_count": 0, "runners": []}),
+                )
+
+            runtime = WindowsEphemeralRegistrationRuntime(
+                binding,
+                command_runner=command_runner,
+                sleeper=sleeper,
+                monotonic_clock=clock,
+            )
+            with mock.patch(
+                "agent_controller.private_ci_live_registration_runtime."
+                "POST_REGISTRATION_READBACK_MAX_ELAPSED_SECONDS",
+                2.0,
+            ):
+                with self.assertRaises(RunnerReadbackFailure) as raised:
+                    runtime.read_runners(binding.repository)
+
+            self.assertEqual(
+                raised.exception.reason_code,
+                "RUNNER_READBACK_TIME_BUDGET_EXHAUSTED",
+            )
+            self.assertEqual(now[0], 2.0)
+            self.assertEqual(sleeps, [1.0, 1.0])
+            self.assertEqual(runtime.last_readback_attempts, 3)
+            self.assertEqual(observed_timeouts[:4], [2.0, 2.0, 1.0, 1.0])
+            self.assertLessEqual(
+                now[0],
+                POST_REGISTRATION_READBACK_MAX_ELAPSED_SECONDS,
             )
 
     def test_post_registration_stable_zero_exhausts_visibility_bound(self):
