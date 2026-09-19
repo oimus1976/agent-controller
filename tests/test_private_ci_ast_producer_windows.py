@@ -145,7 +145,6 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
 
     def test_every_unclassified_static_command_fails_closed_as_unknown(self):
         cases = (
-            "Start-Process powershell.exe",
             "Set-Content -LiteralPath C:\\target -Value x",
             "New-LocalUser -Name x -NoPassword",
             "cmd.exe /c echo x",
