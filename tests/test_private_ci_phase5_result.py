@@ -1,4 +1,6 @@
+import json
 import unittest
+from dataclasses import replace
 
 from agent_controller.private_ci_phase4_contract import PrivateCiPilotBinding
 
@@ -86,10 +88,92 @@ def job_payload(**overrides):
     return payload
 
 
+def result_evidence():
+    m = __import__(
+        "agent_controller.private_ci_phase5_result",
+        fromlist=["Phase5ResultEvidence"],
+    )
+    return m.Phase5ResultEvidence(
+        schema=m.PHASE5_RESULT_SCHEMA,
+        binding=binding(),
+        phase5_plan_sha256="1" * 64,
+        phase4_result_sha256="2" * 64,
+        human_approval_sha256="3" * 64,
+        phase5_consumption_sha256="4" * 64,
+        candidate_sha256="5" * 64,
+        workflow_run_id=9001,
+        workflow_run_attempt=1,
+        job_id=7001,
+        runner_id=binding().runner_id,
+        runner_name=binding().runner_name,
+        runner_label=binding().runner_label,
+        runner_child_exit_code=0,
+        runner_stdout_sha256="6" * 64,
+        runner_stderr_sha256="7" * 64,
+        status=m.PHASE5_RESULT_STATUS,
+        completed_at="2026-09-19T14:00:00+00:00",
+    )
+
+
 class PrivateCiPhase5ReadbackRedTests(unittest.TestCase):
     def module(self):
         from agent_controller import private_ci_phase5_result
         return private_ci_phase5_result
+
+
+    def test_phase5_result_roundtrips_canonically(self):
+        m = self.module()
+        evidence = result_evidence()
+        raw = m.phase5_result_bytes(evidence)
+        self.assertEqual(m.parse_phase5_result_bytes(raw), evidence)
+
+        payload = json.loads(raw.decode("utf-8"))
+        noncanonical = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+        with self.assertRaisesRegex(ValueError, "canonical"):
+            m.parse_phase5_result_bytes(noncanonical)
+
+    def test_phase5_result_cannot_claim_pass_with_child_or_binding_drift(self):
+        m = self.module()
+        with self.assertRaisesRegex(ValueError, "CHILD_EXIT"):
+            m.phase5_result_bytes(
+                replace(result_evidence(), runner_child_exit_code=1)
+            )
+        with self.assertRaisesRegex(ValueError, "RUNNER_ID_MISMATCH"):
+            m.phase5_result_bytes(
+                replace(result_evidence(), runner_id=24)
+            )
+        with self.assertRaisesRegex(ValueError, "RUN_ATTEMPT"):
+            m.phase5_result_bytes(
+                replace(result_evidence(), workflow_run_attempt=2)
+            )
+
+    def test_workflow_path_api_ref_suffix_is_accepted_only_for_main(self):
+        m = self.module()
+        observed = m.validate_phase5_run_job_readback(
+            run_payload=run_payload(
+                path=(
+                    ".github/workflows/private-ci-windows-pilot.yml"
+                    "@refs/heads/main"
+                )
+            ),
+            jobs_payload={"total_count": 1, "jobs": [job_payload()]},
+            binding=binding(),
+            expected_workflow_run_id=9001,
+        )
+        self.assertEqual(observed.workflow_run_id, 9001)
+
+        with self.assertRaises(ValueError):
+            m.validate_phase5_run_job_readback(
+                run_payload=run_payload(
+                    path=(
+                        ".github/workflows/private-ci-windows-pilot.yml"
+                        "@refs/heads/other"
+                    )
+                ),
+                jobs_payload={"total_count": 1, "jobs": [job_payload()]},
+                binding=binding(),
+                expected_workflow_run_id=9001,
+            )
 
     def test_exact_run_and_job_pass(self):
         m = self.module()
