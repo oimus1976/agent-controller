@@ -181,7 +181,7 @@ def render_phase5_exactly_one_job_candidate(
         f"$BridgeDispatchJson = {dispatch_command}",
         "$BridgeDispatchExitCode = $LASTEXITCODE",
         "if ($BridgeDispatchExitCode -ne 0) { throw 'Phase 5 dispatch request failed; do not retry' }",
-        "if ([string]::IsNullOrWhiteSpace([string]$BridgeDispatchJson)) { throw 'Phase 5 dispatch response was empty; do not retry' }",
+        "if (-not $BridgeDispatchJson) { throw 'Phase 5 dispatch response was empty; do not retry' }",
         "$BridgeDispatch = $BridgeDispatchJson | ConvertFrom-Json",
         "if ($null -eq $BridgeDispatch.workflow_run_id -or [long]$BridgeDispatch.workflow_run_id -le 0) { throw 'Phase 5 dispatch response workflow_run_id invalid; do not retry' }",
         "$BridgeWorkflowRunId = [long]$BridgeDispatch.workflow_run_id",
