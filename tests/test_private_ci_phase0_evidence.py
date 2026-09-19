@@ -22,6 +22,7 @@ from agent_controller.private_ci_live_registration import (
     FROZEN_RUNNER_NAME,
     FROZEN_RUNNER_ROOT,
     FROZEN_TARGET_SHA,
+    FROZEN_WORKFLOW_PATH,
     FROZEN_WORKFLOW_SHA,
 )
 
@@ -50,6 +51,7 @@ def valid_evidence():
         pull_request_head_sha=FROZEN_TARGET_SHA,
         pull_request_base="main",
         workflow_sha=FROZEN_WORKFLOW_SHA,
+        workflow_path=FROZEN_WORKFLOW_PATH,
         runner_name=FROZEN_RUNNER_NAME,
         runner_label=FROZEN_RUNNER_LABEL,
         environment_generation=FROZEN_ENVIRONMENT_GENERATION,
@@ -88,6 +90,7 @@ class PrivateCiPhase0EvidenceTests(unittest.TestCase):
             {"pull_request_draft": False},
             {"pull_request_head_sha": "b" * 40},
             {"workflow_sha": "c" * 40},
+            {"workflow_path": ".github/workflows/other.yml"},
             {"runner_root_exists": True},
             {"matching_pilot_runner_count": 1},
             {"runner_process_count": 1},
