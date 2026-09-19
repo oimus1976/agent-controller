@@ -14,10 +14,12 @@ from agent_controller.private_ci_live_registration import (
     FROZEN_RUNNER_NAME,
     FROZEN_RUNNER_ROOT,
     FROZEN_TARGET_SHA,
+    FROZEN_WORKFLOW_PATH,
     FROZEN_WORKFLOW_SHA,
 )
 from agent_controller.private_ci_phase0_evidence import (
     EXPECTED_TARGET_IDENTITY,
+    PHASE0_EVIDENCE_SCHEMA,
     Phase0Evidence,
     phase0_reason_codes,
 )
@@ -212,11 +214,25 @@ def collect_phase0_evidence(
     branch = _gh_json(command_runner, f"repos/{FROZEN_REPOSITORY}/branches/main")
     if type(branch) is not dict or type(branch.get("commit")) is not dict:
         raise ValueError("phase0 collection invalid workflow branch readback")
+    observed_workflow_sha = str(branch["commit"].get("sha", ""))
+    workflow_file = _gh_json(
+        command_runner,
+        (
+            f"repos/{FROZEN_REPOSITORY}/contents/{FROZEN_WORKFLOW_PATH}"
+            f"?ref={observed_workflow_sha}"
+        ),
+    )
+    if (
+        type(workflow_file) is not dict
+        or workflow_file.get("type") != "file"
+        or workflow_file.get("path") != FROZEN_WORKFLOW_PATH
+    ):
+        raise ValueError("phase0 collection invalid workflow path readback")
 
     runners = _runner_items(command_runner)
 
     return Phase0Evidence(
-        schema="agent-controller.private-ci-phase0-evidence.v1",
+        schema=PHASE0_EVIDENCE_SCHEMA,
         collected_at=now().isoformat(),
         status="PHASE0_PASS",
         controller_main_sha=remote_main,
@@ -237,7 +253,8 @@ def collect_phase0_evidence(
         pull_request_head_repository=str(head_repo.get("full_name", "")),
         pull_request_head_sha=str(pr["head"].get("sha", "")),
         pull_request_base=str(pr["base"].get("ref", "")),
-        workflow_sha=str(branch["commit"].get("sha", "")),
+        workflow_sha=observed_workflow_sha,
+        workflow_path=FROZEN_WORKFLOW_PATH,
         runner_name=FROZEN_RUNNER_NAME,
         runner_label=FROZEN_RUNNER_LABEL,
         environment_generation=FROZEN_ENVIRONMENT_GENERATION,
