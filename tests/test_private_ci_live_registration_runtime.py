@@ -11,9 +11,13 @@ from unittest import mock
 
 from agent_controller.private_ci_live_registration import (
     REGISTRATION_TOKEN_ENVIRONMENT_NAME,
+    RunnerReadbackFailure,
     frozen_live_registration_binding,
 )
 from agent_controller.private_ci_live_registration_runtime import (
+    POST_REGISTRATION_READBACK_DELAY_SECONDS,
+    POST_REGISTRATION_READBACK_MAX_ATTEMPTS,
+    POST_REGISTRATION_READBACK_MAX_WAIT_SECONDS,
     WindowsEphemeralRegistrationRuntime,
 )
 
@@ -417,6 +421,286 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             self.assertTrue(execution.secret_output_redacted)
             self.assertNotIn(TOKEN, execution.stdout)
             self.assertIn("***", execution.stdout)
+
+    def test_post_registration_readback_stabilizes_from_zero_to_exact_runner(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding = self.binding_for(temporary_directory)
+            root = Path(binding.runner_root)
+            root.mkdir(parents=True)
+            (root / ".runner").write_text(
+                json.dumps(
+                    {
+                        "AgentName": binding.runner_name,
+                        "WorkFolder": binding.work_folder,
+                        "Ephemeral": True,
+                        "DisableUpdate": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            gh_calls = []
+            sleeps = []
+
+            def command_runner(*command, **kwargs):
+                self.assertEqual(command[0:2], ("gh.exe", "api"))
+                gh_calls.append(command)
+                if len(gh_calls) <= 2:
+                    payload = {"total_count": 0, "runners": []}
+                else:
+                    payload = {
+                        "total_count": 1,
+                        "runners": [
+                            {
+                                "id": 21,
+                                "name": binding.runner_name,
+                                "status": "offline",
+                                "busy": False,
+                                "labels": [{"name": binding.runner_label}],
+                            }
+                        ],
+                    }
+                return completed(command, stdout=json.dumps(payload))
+
+            runtime = WindowsEphemeralRegistrationRuntime(
+                binding,
+                command_runner=command_runner,
+                sleeper=sleeps.append,
+            )
+            runners = runtime.read_runners(binding.repository)
+
+            self.assertEqual(runtime.last_readback_attempts, 2)
+            self.assertEqual(len(gh_calls), 4)
+            self.assertEqual(sleeps, [POST_REGISTRATION_READBACK_DELAY_SECONDS])
+            self.assertEqual(len(runners), 1)
+            self.assertEqual(runners[0].runner_id, 21)
+
+    def test_post_registration_sweep_instability_exhausts_bounded_attempts(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding = self.binding_for(temporary_directory)
+            root = Path(binding.runner_root)
+            root.mkdir(parents=True)
+            (root / ".runner").write_text(
+                json.dumps(
+                    {
+                        "AgentName": binding.runner_name,
+                        "WorkFolder": binding.work_folder,
+                        "Ephemeral": True,
+                        "DisableUpdate": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            gh_calls = []
+            sleeps = []
+
+            def command_runner(*command, **kwargs):
+                self.assertEqual(command[0:2], ("gh.exe", "api"))
+                gh_calls.append(command)
+                if len(gh_calls) % 2:
+                    payload = {"total_count": 0, "runners": []}
+                else:
+                    payload = {
+                        "total_count": 1,
+                        "runners": [
+                            {
+                                "id": 21,
+                                "name": binding.runner_name,
+                                "status": "offline",
+                                "busy": False,
+                                "labels": [{"name": binding.runner_label}],
+                            }
+                        ],
+                    }
+                return completed(command, stdout=json.dumps(payload))
+
+            runtime = WindowsEphemeralRegistrationRuntime(
+                binding,
+                command_runner=command_runner,
+                sleeper=sleeps.append,
+            )
+            with self.assertRaises(RunnerReadbackFailure) as raised:
+                runtime.read_runners(binding.repository)
+
+            self.assertEqual(
+                raised.exception.reason_code,
+                "RUNNER_READBACK_STABILIZATION_EXHAUSTED",
+            )
+            self.assertEqual(
+                runtime.last_readback_attempts,
+                POST_REGISTRATION_READBACK_MAX_ATTEMPTS,
+            )
+            self.assertEqual(
+                len(gh_calls),
+                POST_REGISTRATION_READBACK_MAX_ATTEMPTS * 2,
+            )
+            self.assertEqual(
+                sleeps,
+                [POST_REGISTRATION_READBACK_DELAY_SECONDS]
+                * (POST_REGISTRATION_READBACK_MAX_ATTEMPTS - 1),
+            )
+            self.assertEqual(
+                sum(sleeps),
+                POST_REGISTRATION_READBACK_MAX_WAIT_SECONDS,
+            )
+
+    def test_post_registration_stable_zero_exhausts_visibility_bound(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding = self.binding_for(temporary_directory)
+            root = Path(binding.runner_root)
+            root.mkdir(parents=True)
+            (root / ".runner").write_text(
+                json.dumps(
+                    {
+                        "AgentName": binding.runner_name,
+                        "WorkFolder": binding.work_folder,
+                        "Ephemeral": True,
+                        "DisableUpdate": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            sleeps = []
+
+            def command_runner(*command, **kwargs):
+                return completed(
+                    command,
+                    stdout=json.dumps({"total_count": 0, "runners": []}),
+                )
+
+            runtime = WindowsEphemeralRegistrationRuntime(
+                binding,
+                command_runner=command_runner,
+                sleeper=sleeps.append,
+            )
+            with self.assertRaises(RunnerReadbackFailure) as raised:
+                runtime.read_runners(binding.repository)
+
+            self.assertEqual(
+                raised.exception.reason_code,
+                "RUNNER_VISIBILITY_STABILIZATION_EXHAUSTED",
+            )
+            self.assertEqual(
+                runtime.last_readback_attempts,
+                POST_REGISTRATION_READBACK_MAX_ATTEMPTS,
+            )
+            self.assertEqual(
+                len(sleeps),
+                POST_REGISTRATION_READBACK_MAX_ATTEMPTS - 1,
+            )
+
+    def test_post_registration_wrong_identity_fails_immediately_without_retry(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding = self.binding_for(temporary_directory)
+            root = Path(binding.runner_root)
+            root.mkdir(parents=True)
+            (root / ".runner").write_text(
+                json.dumps(
+                    {
+                        "AgentName": binding.runner_name,
+                        "WorkFolder": binding.work_folder,
+                        "Ephemeral": True,
+                        "DisableUpdate": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            gh_calls = []
+            sleeps = []
+
+            def command_runner(*command, **kwargs):
+                gh_calls.append(command)
+                return completed(
+                    command,
+                    stdout=json.dumps(
+                        {
+                            "total_count": 1,
+                            "runners": [
+                                {
+                                    "id": 22,
+                                    "name": "wrong-name",
+                                    "status": "offline",
+                                    "busy": False,
+                                    "labels": [{"name": binding.runner_label}],
+                                }
+                            ],
+                        }
+                    ),
+                )
+
+            runtime = WindowsEphemeralRegistrationRuntime(
+                binding,
+                command_runner=command_runner,
+                sleeper=sleeps.append,
+            )
+            with self.assertRaises(RunnerReadbackFailure) as raised:
+                runtime.read_runners(binding.repository)
+
+            self.assertEqual(
+                raised.exception.reason_code,
+                "RUNNER_READBACK_IDENTITY_MISMATCH",
+            )
+            self.assertEqual(runtime.last_readback_attempts, 1)
+            self.assertEqual(len(gh_calls), 2)
+            self.assertEqual(sleeps, [])
+
+    def test_post_registration_duplicate_eligible_runners_fail_immediately(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding = self.binding_for(temporary_directory)
+            root = Path(binding.runner_root)
+            root.mkdir(parents=True)
+            (root / ".runner").write_text(
+                json.dumps(
+                    {
+                        "AgentName": binding.runner_name,
+                        "WorkFolder": binding.work_folder,
+                        "Ephemeral": True,
+                        "DisableUpdate": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            sleeps = []
+
+            def command_runner(*command, **kwargs):
+                return completed(
+                    command,
+                    stdout=json.dumps(
+                        {
+                            "total_count": 2,
+                            "runners": [
+                                {
+                                    "id": 21,
+                                    "name": binding.runner_name,
+                                    "status": "offline",
+                                    "busy": False,
+                                    "labels": [{"name": binding.runner_label}],
+                                },
+                                {
+                                    "id": 22,
+                                    "name": "duplicate",
+                                    "status": "offline",
+                                    "busy": False,
+                                    "labels": [{"name": binding.runner_label}],
+                                },
+                            ],
+                        }
+                    ),
+                )
+
+            runtime = WindowsEphemeralRegistrationRuntime(
+                binding,
+                command_runner=command_runner,
+                sleeper=sleeps.append,
+            )
+            with self.assertRaises(RunnerReadbackFailure) as raised:
+                runtime.read_runners(binding.repository)
+
+            self.assertEqual(
+                raised.exception.reason_code,
+                "RUNNER_READBACK_ELIGIBLE_COUNT_UNSAFE",
+            )
+            self.assertEqual(runtime.last_readback_attempts, 1)
+            self.assertEqual(sleeps, [])
 
     def test_credential_handoff_scan_detects_plaintext_token(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
