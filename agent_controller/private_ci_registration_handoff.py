@@ -29,6 +29,9 @@ from agent_controller.private_ci_phase4_contract import (
     RegistrationHandoffEvidence,
     registration_handoff_bytes,
 )
+from agent_controller.private_ci_runner_tree_snapshot import (
+    parse_runner_generation_snapshot_bytes,
+)
 
 
 HUMAN_AUTHORIZATION_METHOD = "uac-elevated-acl-protected-approval-v1"
@@ -153,6 +156,7 @@ def build_registration_handoff_evidence(
     registration_consumption_bytes: bytes,
     registration_result_bytes: bytes,
     local_runner_settings_bytes: bytes,
+    runner_generation_snapshot_bytes: bytes,
 ) -> RegistrationHandoffEvidence:
     phase0 = validate_phase0_evidence_bytes(phase0_evidence_bytes)
     phase0_sha = _sha256(phase0_evidence_bytes)
@@ -232,6 +236,11 @@ def build_registration_handoff_evidence(
         expected_runner_name=expected_binding.runner_name,
         expected_work_folder=expected_binding.work_folder,
     )
+    snapshot = parse_runner_generation_snapshot_bytes(
+        runner_generation_snapshot_bytes
+    )
+    if snapshot["work_folder"] != expected_binding.work_folder:
+        raise ValueError("runner generation snapshot work folder mismatch")
 
     cross_phase_binding = PrivateCiPilotBinding(
         repository=expected_binding.repository,
@@ -260,6 +269,9 @@ def build_registration_handoff_evidence(
         registration_consumption_sha256=consumption_sha,
         registration_result_sha256=_sha256(registration_result_bytes),
         local_runner_settings_sha256=_sha256(local_runner_settings_bytes),
+        runner_generation_snapshot_sha256=_sha256(
+            runner_generation_snapshot_bytes
+        ),
         registration_status="REGISTERED",
     )
     registration_handoff_bytes(evidence)
