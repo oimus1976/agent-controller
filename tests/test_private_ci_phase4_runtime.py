@@ -49,6 +49,7 @@ def handoff():
         registration_consumption_sha256="6" * 64,
         registration_result_sha256="7" * 64,
         local_runner_settings_sha256="8" * 64,
+        runner_generation_snapshot_sha256="9" * 64,
         registration_status="REGISTERED",
     )
 
