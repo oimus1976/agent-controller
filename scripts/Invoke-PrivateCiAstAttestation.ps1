@@ -272,7 +272,7 @@ foreach ($CommandAst in $CommandAsts) {
             $ObservedEffects.Add('PROCESS_CONTROL')
         }
     }
-    elseif ($LowerName -in @('copy-item', 'set-content', 'out-file')) {
+    elseif ($LowerName -eq 'copy-item') {
         if (-not $ObservedEffects.Contains('FILESYSTEM_WRITE_MUTATION')) {
             $ObservedEffects.Add('FILESYSTEM_WRITE_MUTATION')
         }
