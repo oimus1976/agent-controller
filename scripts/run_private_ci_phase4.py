@@ -733,9 +733,7 @@ def command_apply(expected_plan_sha256: str) -> int:
         )
     _require_controller_source_exact(plan.binding)
     _require_remote_binding_exact(plan.binding)
-    observed_generation_snapshot_sha = _require_generation_snapshot_exact(
-        handoff
-    )
+    _require_generation_snapshot_exact(handoff)
 
     started_at = datetime.now(timezone.utc).isoformat()
     completed = _completed(
@@ -790,6 +788,12 @@ def command_apply(expected_plan_sha256: str) -> int:
     )
     probe_stdout_raw = probe_stdout_path.read_bytes()
     probe_stderr_raw = probe_stderr_path.read_bytes()
+    runner_root = Path(plan.binding.runner_root)
+    post_generation_snapshot_sha = runner_generation_snapshot_sha256(
+        generation_root=runner_root.parent,
+        runner_root=runner_root,
+        work_folder=plan.binding.work_folder,
+    )
 
     evidence = Phase4ResultEvidence(
         schema=PHASE4_RESULT_SCHEMA,
@@ -803,7 +807,7 @@ def command_apply(expected_plan_sha256: str) -> int:
         target_probe_result_sha256=sha256_bytes(probe_result_raw),
         target_probe_stdout_sha256=sha256_bytes(probe_stdout_raw),
         target_probe_stderr_sha256=sha256_bytes(probe_stderr_raw),
-        runner_generation_snapshot_sha256=observed_generation_snapshot_sha,
+        runner_generation_snapshot_sha256=post_generation_snapshot_sha,
         status=PHASE4_RESULT_STATUS,
         completed_at=ended_at,
     )
