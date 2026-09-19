@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ from agent_controller.private_ci_pilot_identity import (
     PRIVATE_CI_TARGET_IDENTITY,
     build_fresh_pilot_identity_freeze,
     pilot_identity_freeze_bytes,
+    validate_pilot_workflow_runner_exclusivity,
 )
 from agent_controller.private_ci_runner_readback import read_all_runner_items
 
@@ -233,6 +235,63 @@ def _require_target_exact(
     return target_sha, workflow_sha
 
 
+
+def _require_workflow_runner_exclusivity(
+    *,
+    repository: str,
+    workflow_sha: str,
+    trusted_workflow_path: str,
+) -> None:
+    inventory = _gh_json(
+        f"repos/{repository}/contents/.github/workflows?ref={workflow_sha}"
+    )
+    if type(inventory) is not list or not inventory:
+        raise RuntimeError("fresh freeze workflow inventory invalid")
+
+    sources: dict[str, str] = {}
+    for item in inventory:
+        if (
+            type(item) is not dict
+            or item.get("type") != "file"
+            or type(item.get("path")) is not str
+        ):
+            raise RuntimeError("fresh freeze workflow inventory entry invalid")
+        path = item["path"]
+        if not path.endswith((".yml", ".yaml")):
+            raise RuntimeError("fresh freeze unexpected workflow entry")
+        payload = _gh_json(
+            f"repos/{repository}/contents/{path}?ref={workflow_sha}"
+        )
+        if (
+            type(payload) is not dict
+            or payload.get("type") != "file"
+            or payload.get("path") != path
+            or payload.get("encoding") != "base64"
+            or type(payload.get("content")) is not str
+        ):
+            raise RuntimeError(
+                f"fresh freeze workflow content readback invalid: {path}"
+            )
+        encoded = payload["content"].replace("\n", "")
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+            source = raw.decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as error:
+            raise RuntimeError(
+                f"fresh freeze workflow content decode failed: {path}"
+            ) from error
+        sources[path] = source
+
+    try:
+        validate_pilot_workflow_runner_exclusivity(
+            sources,
+            trusted_workflow_path=trusted_workflow_path,
+        )
+    except ValueError as error:
+        raise RuntimeError(
+            "fresh freeze workflow runner exclusivity invalid"
+        ) from error
+
 def _require_no_pilot_runner(repository: str, runner_name: str) -> None:
     matches = []
     for item in _runner_items(repository):
@@ -288,6 +347,11 @@ def main() -> int:
             repository=options.repository,
             pull_request_number=options.pull_request_number,
             workflow_path=options.workflow_path,
+        )
+        _require_workflow_runner_exclusivity(
+            repository=options.repository,
+            workflow_sha=workflow_sha,
+            trusted_workflow_path=options.workflow_path,
         )
 
         nonce = secrets.token_hex(8)
