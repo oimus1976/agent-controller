@@ -123,7 +123,6 @@ def render_phase5_exactly_one_job_candidate(
         "gh.exe api --method POST "
         f"-H {_ps_single_quoted('X-GitHub-Api-Version: ' + GITHUB_API_VERSION)} "
         f"{_ps_single_quoted(dispatch_endpoint)} "
-        "-F 'return_run_details=true' "
         "-f 'ref=main' "
         f"-f {_ps_single_quoted('inputs[pr_number]=' + str(binding.pull_request_number))} "
         f"-f {_ps_single_quoted('inputs[expected_sha]=' + binding.target_sha)} "
