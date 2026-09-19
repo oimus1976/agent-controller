@@ -231,5 +231,58 @@ class PrivateCiRegistrationHandoffRedTests(unittest.TestCase):
         self.assertTrue(set(payload).isdisjoint(forbidden))
 
 
+class PrivateCiPhase4OperatorSpecRedTests(unittest.TestCase):
+    def test_phase4_spec_requires_exact_registration_handoff(self):
+        module = contract_module()
+        binding = valid_binding(module)
+        handoff_sha = "9" * 64
+
+        spec = module.build_phase4_target_environment_spec(
+            binding,
+            registration_handoff_sha256=handoff_sha,
+        )
+
+        self.assertEqual(spec.operation_id, "issue225-phase4-target-environment")
+        self.assertEqual(spec.step_id, "prepare-target-environment")
+        self.assertEqual(spec.repository, binding.repository)
+        self.assertEqual(spec.pull_request_number, binding.pull_request_number)
+        self.assertEqual(spec.target_sha, binding.target_sha)
+        self.assertEqual(spec.target_host_role, "private-ci-owner-machine")
+        self.assertEqual(spec.required_identity, "c-admin")
+        self.assertEqual(
+            spec.allowed_effect_families,
+            ("PRIVATE_CI_PHASE4_TARGET_ENVIRONMENT",),
+        )
+        self.assertTrue(spec.require_parser_attestation)
+        self.assertTrue(spec.require_child_exit_code)
+        self.assertTrue(spec.require_fail_fast)
+        self.assertIsNotNone(spec.prior_evidence_requirement)
+        self.assertEqual(
+            spec.prior_evidence_requirement.producer_operation_id,
+            "issue225-registration-handoff",
+        )
+        self.assertEqual(
+            spec.prior_evidence_requirement.producer_step_id,
+            "registration-handoff",
+        )
+        self.assertEqual(
+            spec.prior_evidence_requirement.evidence_sha256,
+            handoff_sha,
+        )
+
+    def test_phase4_spec_rejects_invalid_binding_or_handoff_digest(self):
+        module = contract_module()
+        with self.assertRaisesRegex(ValueError, "pilot binding"):
+            module.build_phase4_target_environment_spec(
+                valid_binding(module, runner_id=0),
+                registration_handoff_sha256="9" * 64,
+            )
+        with self.assertRaisesRegex(ValueError, "handoff SHA-256"):
+            module.build_phase4_target_environment_spec(
+                valid_binding(module),
+                registration_handoff_sha256="short",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
