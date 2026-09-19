@@ -549,7 +549,7 @@ def render_phase4_target_environment_candidate(
         ") -Credential $BridgeTargetCredential -LoadUserProfile -WorkingDirectory $BridgeRunnerRoot -RedirectStandardOutput $BridgeTargetProbeStdoutPath -RedirectStandardError $BridgeTargetProbeStderrPath -PassThru",
         "while (-not $BridgeChild.HasExited) {",
         "    $BridgeElapsedSeconds = [int]((Get-Date) - $BridgeStartedAt).TotalSeconds",
-        "    Write-Host ("heartbeat phase=phase4 elapsed_seconds={0}" -f $BridgeElapsedSeconds)",
+        '    Write-Host ("heartbeat phase=phase4 elapsed_seconds={0}" -f $BridgeElapsedSeconds)',
         "    if ($BridgeElapsedSeconds -ge $BridgeTargetTimeoutSeconds) {",
         "        Stop-Process -Id $BridgeChild.Id -Force -ErrorAction Stop",
         "        throw 'Phase 4 target probe timeout'",
