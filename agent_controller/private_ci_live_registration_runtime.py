@@ -834,6 +834,7 @@ def result_payload(
         "pull_request_number": plan.binding.pull_request_number,
         "target_sha": plan.binding.target_sha,
         "workflow_sha": plan.binding.workflow_sha,
+        "workflow_path": plan.binding.workflow_path,
         "runner_name": plan.binding.runner_name,
         "runner_label": plan.binding.runner_label,
         "environment_generation": plan.binding.environment_generation,
