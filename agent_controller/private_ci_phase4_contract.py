@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass
 from pathlib import PurePosixPath, PureWindowsPath
@@ -8,9 +9,15 @@ from agent_controller.operator_step_gate import (
     AUTHORITATIVE_EVIDENCE_ROOT,
     PRIVATE_LOCAL_CI_WORKSTREAM,
     WINDOWS_POWERSHELL_51,
+    AuthenticatedAstAttestation,
     OperatorEffectClass,
+    OperatorGateResult,
+    OperatorGateStatus,
     OperatorStepSpec,
     PriorEvidenceRequirement,
+    _attestation_reason_codes,
+    _candidate_sha256,
+    _spec_reason_codes,
 )
 
 
@@ -576,3 +583,74 @@ def render_phase4_target_environment_candidate(
         "",
     ]
     return "\n".join(lines)
+
+
+
+def phase4_target_probe_sha256(raw: bytes) -> str:
+    if type(raw) is not bytes:
+        raise ValueError("target probe must be exact bytes")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def plan_phase4_target_environment(
+    *,
+    registration_handoff_bytes: bytes,
+    target_probe_bytes: bytes,
+    candidate: str,
+    ast_attestation: AuthenticatedAstAttestation | None,
+) -> OperatorGateResult:
+    candidate_sha = _candidate_sha256(
+        candidate if type(candidate) is str else ""
+    )
+    try:
+        handoff = parse_registration_handoff_bytes(
+            registration_handoff_bytes
+        )
+    except (TypeError, ValueError, UnicodeError, json.JSONDecodeError):
+        return OperatorGateResult(
+            OperatorGateStatus.BLOCKED,
+            ("REGISTRATION_HANDOFF_INVALID",),
+            candidate_sha,
+        )
+
+    try:
+        probe_sha = phase4_target_probe_sha256(target_probe_bytes)
+    except ValueError:
+        return OperatorGateResult(
+            OperatorGateStatus.BLOCKED,
+            ("PHASE4_TARGET_PROBE_BYTES_INVALID",),
+            candidate_sha,
+        )
+
+    expected = render_phase4_target_environment_candidate(
+        handoff.binding,
+        handoff,
+        target_probe_sha256=probe_sha,
+    )
+    handoff_sha = hashlib.sha256(registration_handoff_bytes).hexdigest()
+    spec = build_phase4_target_environment_spec(
+        handoff.binding,
+        registration_handoff_sha256=handoff_sha,
+    )
+
+    reasons: list[str] = []
+    if type(candidate) is not str or candidate != expected:
+        reasons.append("PHASE4_CANDIDATE_NOT_CANONICAL")
+    reasons.extend(_spec_reason_codes(spec))
+    if reasons:
+        return OperatorGateResult(
+            OperatorGateStatus.BLOCKED,
+            tuple(reasons),
+            candidate_sha,
+        )
+
+    status, attestation_reasons = _attestation_reason_codes(
+        spec,
+        candidate_sha,
+        ast_attestation,
+    )
+    return OperatorGateResult(
+        status,
+        attestation_reasons,
+        candidate_sha,
+    )
