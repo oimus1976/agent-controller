@@ -107,6 +107,8 @@ def result_evidence():
         runner_id=binding().runner_id,
         runner_name=binding().runner_name,
         runner_label=binding().runner_label,
+        runner_process_id=8123,
+        runner_process_owner=r"WOBBUFFET\ac-runner",
         runner_child_exit_code=0,
         runner_stdout_sha256="6" * 64,
         runner_stderr_sha256="7" * 64,
@@ -145,6 +147,13 @@ class PrivateCiPhase5ReadbackRedTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "RUN_ATTEMPT"):
             m.phase5_result_bytes(
                 replace(result_evidence(), workflow_run_attempt=2)
+            )
+        with self.assertRaisesRegex(ValueError, "PROCESS_OWNER"):
+            m.phase5_result_bytes(
+                replace(
+                    result_evidence(),
+                    runner_process_owner=r"WOBBUFFET\c-admin",
+                )
             )
 
     def test_workflow_path_api_ref_suffix_is_accepted_only_for_main(self):
