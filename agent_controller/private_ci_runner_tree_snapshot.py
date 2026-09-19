@@ -122,7 +122,7 @@ def runner_generation_snapshot_bytes(
     runner_root: Path,
     work_folder: str,
 ) -> bytes:
-    if type(generation_root) is not Path or type(runner_root) is not Path:
+    if not isinstance(generation_root, Path) or not isinstance(runner_root, Path):
         raise ValueError("runner snapshot paths must be Path")
     if type(work_folder) is not str or not work_folder:
         raise ValueError("runner snapshot work folder invalid")
