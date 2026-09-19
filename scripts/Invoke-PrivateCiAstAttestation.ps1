@@ -186,20 +186,43 @@ $AutomaticVariableNames = @(
     'myinvocation', 'psboundparameters', 'pwd', 'host', 'executioncontext'
 )
 $AutomaticVariableCollisions = New-Object System.Collections.Generic.List[string]
-$VariableAsts = $Ast.FindAll({
-    param($Node)
-    $Node -is [System.Management.Automation.Language.VariableExpressionAst]
-}, $true)
-foreach ($VariableAst in $VariableAsts) {
-    $UserPath = $VariableAst.VariablePath.UserPath
+
+function Add-AutomaticVariableCollision {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$UserPath
+    )
+
     if ([string]::IsNullOrWhiteSpace($UserPath)) {
-        continue
+        return
     }
     $NormalizedName = (Get-NormalizedVariableUserPath -UserPath $UserPath).ToLowerInvariant()
-    if ($AutomaticVariableNames -contains $NormalizedName) {
-        if (-not $AutomaticVariableCollisions.Contains($NormalizedName)) {
-            $AutomaticVariableCollisions.Add($NormalizedName)
-        }
+    if (
+        $AutomaticVariableNames -contains $NormalizedName -and
+        -not $AutomaticVariableCollisions.Contains($NormalizedName)
+    ) {
+        $AutomaticVariableCollisions.Add($NormalizedName)
+    }
+}
+
+foreach ($AssignmentAst in $AssignmentAsts) {
+    if ($AssignmentAst.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
+        Add-AutomaticVariableCollision -UserPath $AssignmentAst.Left.VariablePath.UserPath
+        continue
+    }
+    foreach ($VariableNode in $AssignmentAst.Left.FindAll({
+        param($Node)
+        $Node -is [System.Management.Automation.Language.VariableExpressionAst]
+    }, $true)) {
+        Add-AutomaticVariableCollision -UserPath $VariableNode.VariablePath.UserPath
+    }
+}
+foreach ($ParameterAst in $ParameterAsts) {
+    Add-AutomaticVariableCollision -UserPath $ParameterAst.Name.VariablePath.UserPath
+}
+foreach ($ForEachAst in $ForEachAsts) {
+    if ($null -ne $ForEachAst.Variable) {
+        Add-AutomaticVariableCollision -UserPath $ForEachAst.Variable.VariablePath.UserPath
     }
 }
 
@@ -230,12 +253,28 @@ foreach ($CommandAst in $CommandAsts) {
         $LowerName = $LowerName.Substring($LastSlash + 1)
     }
 
-    if ($LowerName -in @('write-output', 'write-host', 'get-date', 'start-sleep')) {
+    if ($LowerName -in @(
+        'write-output', 'write-host', 'get-date', 'start-sleep',
+        'hostname.exe', 'whoami.exe', 'get-localuser', 'get-localgroupmember',
+        'test-path', 'get-item', 'get-childitem', 'get-ciminstance',
+        'get-scheduledtask', 'get-filehash', 'get-credential', 'get-content',
+        'convertfrom-json', 'select-object', 'where-object'
+    )) {
         continue
     }
     elseif ($LowerName -eq 'start-process') {
         if (-not $ObservedEffects.Contains('PROCESS_LAUNCH')) {
             $ObservedEffects.Add('PROCESS_LAUNCH')
+        }
+    }
+    elseif ($LowerName -eq 'stop-process') {
+        if (-not $ObservedEffects.Contains('PROCESS_CONTROL')) {
+            $ObservedEffects.Add('PROCESS_CONTROL')
+        }
+    }
+    elseif ($LowerName -in @('copy-item', 'set-content', 'out-file')) {
+        if (-not $ObservedEffects.Contains('FILESYSTEM_WRITE_MUTATION')) {
+            $ObservedEffects.Add('FILESYSTEM_WRITE_MUTATION')
         }
     }
     elseif ($LowerName -in @('remove-item', 'del', 'erase', 'rd', 'rmdir')) {
