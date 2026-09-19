@@ -61,6 +61,7 @@ def valid_handoff(module, **overrides):
         "registration_consumption_sha256": "6" * 64,
         "registration_result_sha256": "7" * 64,
         "local_runner_settings_sha256": "8" * 64,
+        "runner_generation_snapshot_sha256": "9" * 64,
         "registration_status": "REGISTERED",
     }
     values.update(overrides)
@@ -188,6 +189,7 @@ class PrivateCiRegistrationHandoffRedTests(unittest.TestCase):
                 "registration_consumption_sha256",
                 "registration_result_sha256",
                 "local_runner_settings_sha256",
+                "runner_generation_snapshot_sha256",
                 "registration_status",
             ),
         )
@@ -206,6 +208,10 @@ class PrivateCiRegistrationHandoffRedTests(unittest.TestCase):
             (
                 {"local_runner_settings_sha256": "g" * 64},
                 "REGISTRATION_HANDOFF_LOCAL_SETTINGS_SHA256_INVALID",
+            ),
+            (
+                {"runner_generation_snapshot_sha256": "g" * 64},
+                "REGISTRATION_HANDOFF_RUNNER_SNAPSHOT_SHA256_INVALID",
             ),
         )
         for changes, expected_reason in invalid_cases:
