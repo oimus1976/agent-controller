@@ -32,6 +32,8 @@ def valid_binding(module, **overrides):
         "repository": REPOSITORY,
         "pull_request_number": 4,
         "target_sha": TARGET_SHA,
+        "controller_main_sha": "a" * 40,
+        "controller_tree": r"C:\Users\c-admin\agent-controller-pilot-225",
         "workflow_sha": WORKFLOW_SHA,
         "workflow_path": WORKFLOW_PATH,
         "runner_id": 23,
@@ -59,6 +61,8 @@ class PrivateCiPhase4ContractRedTests(unittest.TestCase):
                 "repository",
                 "pull_request_number",
                 "target_sha",
+                "controller_main_sha",
+                "controller_tree",
                 "workflow_sha",
                 "workflow_path",
                 "runner_id",
@@ -80,6 +84,14 @@ class PrivateCiPhase4ContractRedTests(unittest.TestCase):
             (
                 {"target_sha": "A" * 40},
                 "PILOT_BINDING_TARGET_SHA_INVALID",
+            ),
+            (
+                {"controller_main_sha": "short"},
+                "PILOT_BINDING_CONTROLLER_MAIN_SHA_INVALID",
+            ),
+            (
+                {"controller_tree": r"relative\controller"},
+                "PILOT_BINDING_CONTROLLER_TREE_INVALID",
             ),
             (
                 {"workflow_sha": "short"},
