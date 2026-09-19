@@ -28,6 +28,13 @@ from agent_controller.owner_machine_jit_bridge import (
     REGISTRATION_EFFECTS,
     TRUSTED_BROKER_IDENTITY,
 )
+from agent_controller.private_ci_pilot_identity import (
+    HISTORICAL_CONSUMED_ENVIRONMENT_GENERATION,
+    HISTORICAL_CONSUMED_RUNNER_NAME,
+    PRIVATE_CI_RUNNER_LABEL,
+    PRIVATE_CI_WORK_FOLDER,
+    canonical_runner_root,
+)
 
 LIVE_REGISTRATION_OPERATION_ID = "issue217-live-registration"
 LIVE_REGISTRATION_STEP_ID = "register-ephemeral-runner"
@@ -65,10 +72,15 @@ class LiveRegistrationBinding:
     runner_label: str
     environment_generation: str
     runner_root: str
-    work_folder: str = FROZEN_WORK_FOLDER
+    work_folder: str = PRIVATE_CI_WORK_FOLDER
 
 
 def frozen_live_registration_binding() -> LiveRegistrationBinding:
+    """Historical #216 attempt binding retained only for archival regression.
+
+    Production fresh-pilot code must derive its binding from validated Phase 0
+    evidence with live_registration_binding_from_phase0_evidence_bytes().
+    """
     return LiveRegistrationBinding(
         repository=FROZEN_REPOSITORY,
         pull_request_number=FROZEN_PR_NUMBER,
@@ -83,31 +95,121 @@ def frozen_live_registration_binding() -> LiveRegistrationBinding:
     )
 
 
+def _lower_sha(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 40
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _workflow_path_valid(value: object) -> bool:
+    if type(value) is not str or not value or "\\" in value:
+        return False
+    from pathlib import PurePosixPath
+
+    path = PurePosixPath(value)
+    return (
+        not path.is_absolute()
+        and ".." not in path.parts
+        and len(path.parts) >= 3
+        and path.parts[:2] == (".github", "workflows")
+        and path.suffix in (".yml", ".yaml")
+        and str(path) == value
+    )
+
+
 def _binding_reason_codes(binding: object) -> tuple[str, ...]:
     if type(binding) is not LiveRegistrationBinding:
         return ("LIVE_REGISTRATION_BINDING_TYPE_INVALID",)
-    expected = frozen_live_registration_binding()
+
     reasons: list[str] = []
-    fields = (
-        ("LIVE_REGISTRATION_REPOSITORY_MISMATCH", binding.repository, expected.repository),
-        ("LIVE_REGISTRATION_PR_MISMATCH", binding.pull_request_number, expected.pull_request_number),
-        ("LIVE_REGISTRATION_TARGET_SHA_MISMATCH", binding.target_sha, expected.target_sha),
-        ("LIVE_REGISTRATION_WORKFLOW_SHA_MISMATCH", binding.workflow_sha, expected.workflow_sha),
-        ("LIVE_REGISTRATION_WORKFLOW_PATH_MISMATCH", binding.workflow_path, expected.workflow_path),
-        ("LIVE_REGISTRATION_RUNNER_NAME_MISMATCH", binding.runner_name, expected.runner_name),
-        ("LIVE_REGISTRATION_RUNNER_LABEL_MISMATCH", binding.runner_label, expected.runner_label),
-        (
-            "LIVE_REGISTRATION_ENVIRONMENT_GENERATION_MISMATCH",
-            binding.environment_generation,
-            expected.environment_generation,
-        ),
-        ("LIVE_REGISTRATION_RUNNER_ROOT_MISMATCH", binding.runner_root, expected.runner_root),
-        ("LIVE_REGISTRATION_WORK_FOLDER_MISMATCH", binding.work_folder, expected.work_folder),
-    )
-    for reason, observed, required in fields:
-        if observed != required:
-            reasons.append(reason)
+    if (
+        type(binding.repository) is not str
+        or binding.repository.count("/") != 1
+        or any(not part for part in binding.repository.split("/"))
+    ):
+        reasons.append("LIVE_REGISTRATION_REPOSITORY_INVALID")
+    if (
+        type(binding.pull_request_number) is not int
+        or binding.pull_request_number <= 0
+    ):
+        reasons.append("LIVE_REGISTRATION_PR_INVALID")
+    if not _lower_sha(binding.target_sha):
+        reasons.append("LIVE_REGISTRATION_TARGET_SHA_INVALID")
+    if not _lower_sha(binding.workflow_sha):
+        reasons.append("LIVE_REGISTRATION_WORKFLOW_SHA_INVALID")
+    if not _workflow_path_valid(binding.workflow_path):
+        reasons.append("LIVE_REGISTRATION_WORKFLOW_PATH_INVALID")
+
+    if (
+        type(binding.runner_name) is not str
+        or not binding.runner_name.startswith("ac-ci-")
+        or len(binding.runner_name) != len("ac-ci-") + 16
+        or any(
+            character not in "0123456789abcdef"
+            for character in binding.runner_name[len("ac-ci-"):]
+        )
+    ):
+        reasons.append("LIVE_REGISTRATION_RUNNER_NAME_INVALID")
+    if binding.runner_name == HISTORICAL_CONSUMED_RUNNER_NAME:
+        reasons.append("LIVE_REGISTRATION_HISTORICAL_RUNNER_REUSE")
+    if binding.runner_label != PRIVATE_CI_RUNNER_LABEL:
+        reasons.append("LIVE_REGISTRATION_RUNNER_LABEL_INVALID")
+
+    if (
+        type(binding.environment_generation) is not str
+        or not binding.environment_generation.startswith("ac-pilot-")
+        or len(binding.environment_generation) != len("ac-pilot-") + 16
+        or any(
+            character not in "0123456789abcdef"
+            for character in binding.environment_generation[len("ac-pilot-"):]
+        )
+    ):
+        reasons.append("LIVE_REGISTRATION_GENERATION_INVALID")
+    if (
+        binding.environment_generation
+        == HISTORICAL_CONSUMED_ENVIRONMENT_GENERATION
+    ):
+        reasons.append("LIVE_REGISTRATION_HISTORICAL_GENERATION_REUSE")
+    if (
+        type(binding.environment_generation) is str
+        and binding.environment_generation.startswith("ac-pilot-")
+        and binding.runner_root
+        != canonical_runner_root(binding.environment_generation)
+    ):
+        reasons.append("LIVE_REGISTRATION_RUNNER_ROOT_NOT_CANONICAL")
+    if binding.work_folder != PRIVATE_CI_WORK_FOLDER:
+        reasons.append("LIVE_REGISTRATION_WORK_FOLDER_INVALID")
     return tuple(reasons)
+
+
+def live_registration_binding_from_phase0_evidence_bytes(
+    phase0_evidence_bytes: bytes,
+) -> LiveRegistrationBinding:
+    from agent_controller.private_ci_phase0_evidence import (
+        validate_phase0_evidence_bytes,
+    )
+
+    evidence = validate_phase0_evidence_bytes(phase0_evidence_bytes)
+    binding = LiveRegistrationBinding(
+        repository=evidence.repository,
+        pull_request_number=evidence.pull_request_number,
+        target_sha=evidence.pull_request_head_sha,
+        workflow_sha=evidence.workflow_sha,
+        workflow_path=evidence.workflow_path,
+        runner_name=evidence.runner_name,
+        runner_label=evidence.runner_label,
+        environment_generation=evidence.environment_generation,
+        runner_root=evidence.runner_root,
+        work_folder=evidence.work_folder,
+    )
+    reasons = _binding_reason_codes(binding)
+    if reasons:
+        raise ValueError(
+            "live registration binding blocked: " + ",".join(reasons)
+        )
+    return binding
 
 
 def build_live_registration_spec(
