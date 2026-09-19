@@ -322,7 +322,12 @@ PHASE4_HOST_ROLE = "private-ci-owner-machine"
 PHASE4_BROKER_IDENTITY = "c-admin"
 PHASE4_TRANSCRIPT_FILENAME = "issue225-phase4-target-environment.log"
 PHASE4_SUCCESS_MARKER = "PHASE4_TARGET_ENVIRONMENT_PASS"
-PHASE4_EFFECTS = ("PRIVATE_CI_PHASE4_TARGET_ENVIRONMENT",)
+PHASE4_EFFECTS = (
+    "ACL_MUTATION",
+    "FILESYSTEM_WRITE_MUTATION",
+    "PROCESS_CONTROL",
+    "PROCESS_LAUNCH",
+)
 REGISTRATION_HANDOFF_OPERATION_ID = "issue225-registration-handoff"
 REGISTRATION_HANDOFF_STEP_ID = "registration-handoff"
 
@@ -365,3 +370,208 @@ def build_phase4_target_environment_spec(
         require_child_exit_code=True,
         require_fail_fast=True,
     )
+
+
+PHASE4_TARGET_PROBE_FILENAME = "Invoke-PrivateCiPhase4TargetProbe.ps1"
+PHASE4_TARGET_PROBE_COPY_FILENAME = "issue225-phase4-target-probe.ps1"
+PHASE4_TARGET_PROBE_RESULT_FILENAME = "issue225-phase4-target-probe-result.json"
+PHASE4_TARGET_PROBE_STDOUT_FILENAME = "issue225-phase4-target-probe-stdout.log"
+PHASE4_TARGET_PROBE_STDERR_FILENAME = "issue225-phase4-target-probe-stderr.log"
+PHASE4_AUTHORITY_ROOT = r"C:\ProgramData\agent-controller-private-ci-authority"
+PHASE4_TARGET_TIMEOUT_SECONDS = 60
+PHASE4_HEARTBEAT_SECONDS = 5
+PHASE4_TRUSTED_GH_PATH = r"C:\Program Files\GitHub CLI\gh.exe"
+
+
+def _ps_single_quoted(value: str) -> str:
+    if type(value) is not str:
+        raise ValueError("PowerShell literal must be string")
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _phase4_registration_marker_path(handoff: RegistrationHandoffEvidence) -> str:
+    return str(
+        PureWindowsPath(PHASE4_AUTHORITY_ROOT)
+        / (
+            "issue217-live-registration-"
+            + handoff.registration_plan_sha256
+            + ".consumed.json"
+        )
+    )
+
+
+def render_phase4_target_environment_candidate(
+    binding: PrivateCiPilotBinding,
+    handoff: RegistrationHandoffEvidence,
+    *,
+    target_probe_sha256: str,
+) -> str:
+    binding_reasons = pilot_binding_reason_codes(binding)
+    if binding_reasons:
+        raise ValueError("pilot binding invalid: " + ",".join(binding_reasons))
+    handoff_reasons = registration_handoff_reason_codes(handoff)
+    if handoff_reasons:
+        raise ValueError(
+            "registration handoff invalid: " + ",".join(handoff_reasons)
+        )
+    if handoff.binding != binding:
+        raise ValueError("registration handoff binding mismatch")
+    if not _sha256_digest(target_probe_sha256):
+        raise ValueError("target probe SHA-256 invalid")
+
+    source_probe = str(
+        PureWindowsPath(binding.controller_tree)
+        / "scripts"
+        / PHASE4_TARGET_PROBE_FILENAME
+    )
+    copied_probe = str(
+        PureWindowsPath(binding.runner_root)
+        / PHASE4_TARGET_PROBE_COPY_FILENAME
+    )
+    probe_result = str(
+        PureWindowsPath(binding.runner_root)
+        / PHASE4_TARGET_PROBE_RESULT_FILENAME
+    )
+    probe_stdout = str(
+        PureWindowsPath(binding.runner_root)
+        / PHASE4_TARGET_PROBE_STDOUT_FILENAME
+    )
+    probe_stderr = str(
+        PureWindowsPath(binding.runner_root)
+        / PHASE4_TARGET_PROBE_STDERR_FILENAME
+    )
+    work_path = str(PureWindowsPath(binding.runner_root) / binding.work_folder)
+    marker_path = _phase4_registration_marker_path(handoff)
+    qualified_target = f"{binding.host}\\{binding.target_identity}"
+
+    lines = [
+        f"$BridgeRepository = {_ps_single_quoted(binding.repository)}",
+        f"$BridgePullRequestNumber = {binding.pull_request_number}",
+        f"$BridgeTargetSha = {_ps_single_quoted(binding.target_sha)}",
+        f"$BridgeTargetHostRole = {_ps_single_quoted(PHASE4_HOST_ROLE)}",
+        f"$BridgeRequiredIdentity = {_ps_single_quoted(PHASE4_BROKER_IDENTITY)}",
+        f"$BridgeEvidenceRoot = {_ps_single_quoted(AUTHORITATIVE_EVIDENCE_ROOT)}",
+        f"$BridgeTranscriptFilename = {_ps_single_quoted(PHASE4_TRANSCRIPT_FILENAME)}",
+        f"$BridgeExpectedSuccessMarker = {_ps_single_quoted(PHASE4_SUCCESS_MARKER)}",
+        f"$BridgeControllerMainSha = {_ps_single_quoted(binding.controller_main_sha)}",
+        f"$BridgeControllerTree = {_ps_single_quoted(binding.controller_tree)}",
+        f"$BridgeWorkflowSha = {_ps_single_quoted(binding.workflow_sha)}",
+        f"$BridgeWorkflowPath = {_ps_single_quoted(binding.workflow_path)}",
+        f"$BridgeRunnerId = {binding.runner_id}",
+        f"$BridgeRunnerName = {_ps_single_quoted(binding.runner_name)}",
+        f"$BridgeRunnerLabel = {_ps_single_quoted(binding.runner_label)}",
+        f"$BridgeEnvironmentGeneration = {_ps_single_quoted(binding.environment_generation)}",
+        f"$BridgeRunnerRoot = {_ps_single_quoted(binding.runner_root)}",
+        f"$BridgeWorkFolder = {_ps_single_quoted(binding.work_folder)}",
+        f"$BridgeWorkPath = {_ps_single_quoted(work_path)}",
+        f"$BridgeHost = {_ps_single_quoted(binding.host)}",
+        f"$BridgeBrokerIdentity = {_ps_single_quoted(binding.broker_identity)}",
+        f"$BridgeTargetIdentity = {_ps_single_quoted(binding.target_identity)}",
+        f"$BridgeQualifiedTargetIdentity = {_ps_single_quoted(qualified_target)}",
+        f"$BridgeRegistrationPlanSha = {_ps_single_quoted(handoff.registration_plan_sha256)}",
+        f"$BridgeRegistrationMarkerPath = {_ps_single_quoted(marker_path)}",
+        f"$BridgeTargetProbeSource = {_ps_single_quoted(source_probe)}",
+        f"$BridgeTargetProbePath = {_ps_single_quoted(copied_probe)}",
+        f"$BridgeTargetProbeSha256 = {_ps_single_quoted(target_probe_sha256)}",
+        f"$BridgeTargetProbeResultPath = {_ps_single_quoted(probe_result)}",
+        f"$BridgeTargetProbeStdoutPath = {_ps_single_quoted(probe_stdout)}",
+        f"$BridgeTargetProbeStderrPath = {_ps_single_quoted(probe_stderr)}",
+        f"$BridgeTrustedGhPath = {_ps_single_quoted(PHASE4_TRUSTED_GH_PATH)}",
+        f"$BridgeTargetTimeoutSeconds = {PHASE4_TARGET_TIMEOUT_SECONDS}",
+        f"$BridgeHeartbeatSeconds = {PHASE4_HEARTBEAT_SECONDS}",
+        "$ErrorActionPreference = 'Stop'",
+        "",
+        "$BridgeObservedHost = hostname.exe",
+        "if ($BridgeObservedHost -ine $BridgeHost) { throw 'Phase 4 host mismatch' }",
+        "$BridgeObservedIdentity = whoami.exe",
+        "if ($BridgeObservedIdentity -ine $BridgeBrokerIdentity) { throw 'Phase 4 broker identity mismatch' }",
+        "",
+        "$BridgeTargetUser = Get-LocalUser -Name $BridgeTargetIdentity -ErrorAction Stop",
+        "if (-not $BridgeTargetUser.Enabled) { throw 'Phase 4 target identity is disabled' }",
+        "$BridgeTargetSid = $BridgeTargetUser.SID.Value",
+        "$BridgeAdminMembers = @(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop)",
+        "if ($null -ne ($BridgeAdminMembers | Where-Object { $_.SID.Value -eq $BridgeTargetSid })) {",
+        "    throw 'Phase 4 target identity is local admin'",
+        "}",
+        "",
+        "if (-not (Test-Path -LiteralPath $BridgeRunnerRoot -PathType Container)) { throw 'Phase 4 runner root missing' }",
+        "if (Test-Path -LiteralPath $BridgeWorkPath) { throw 'Phase 4 prior workspace exists' }",
+        "foreach ($BridgeFreshPath in @($BridgeTargetProbePath, $BridgeTargetProbeResultPath, $BridgeTargetProbeStdoutPath, $BridgeTargetProbeStderrPath)) {",
+        "    if (Test-Path -LiteralPath $BridgeFreshPath) { throw 'Phase 4 generated path already exists' }",
+        "}",
+        "if (-not (Test-Path -LiteralPath $BridgeRegistrationMarkerPath -PathType Leaf)) { throw 'Phase 4 registration marker missing' }",
+        "",
+        "$BridgePendingPaths = @($BridgeRunnerRoot)",
+        "while ($BridgePendingPaths.Count -gt 0) {",
+        "    $BridgeCurrentPath = $BridgePendingPaths[0]",
+        "    if ($BridgePendingPaths.Count -eq 1) { $BridgePendingPaths = @() }",
+        "    else { $BridgePendingPaths = @($BridgePendingPaths[1..($BridgePendingPaths.Count - 1)]) }",
+        "    $BridgeCurrentItem = Get-Item -LiteralPath $BridgeCurrentPath -Force -ErrorAction Stop",
+        "    if (($BridgeCurrentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Phase 4 reparse point blocked' }",
+        "    if ($BridgeCurrentItem.PSIsContainer) {",
+        "        foreach ($BridgeChildItem in @(Get-ChildItem -LiteralPath $BridgeCurrentPath -Force -ErrorAction Stop)) {",
+        "            if (($BridgeChildItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Phase 4 child reparse point blocked' }",
+        "            if ($BridgeChildItem.PSIsContainer) { $BridgePendingPaths += $BridgeChildItem.FullName }",
+        "        }",
+        "    }",
+        "}",
+        "",
+        "$BridgeRunnerProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.Name -match 'Runner|actions' })",
+        "if ($BridgeRunnerProcesses.Count -ne 0) { throw 'Phase 4 stale runner process detected' }",
+        "$BridgeRunnerServices = @(Get-CimInstance Win32_Service -ErrorAction Stop | Where-Object { $_.Name -match 'runner|actions' -or $_.DisplayName -match 'runner|actions' })",
+        "if ($BridgeRunnerServices.Count -ne 0) { throw 'Phase 4 stale runner service detected' }",
+        "$BridgeRunnerTasks = @(Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -match 'runner|actions' -or $_.TaskPath -match 'runner|actions' })",
+        "if ($BridgeRunnerTasks.Count -ne 0) { throw 'Phase 4 stale runner task detected' }",
+        "",
+        "$BridgeSourceProbeHash = (Get-FileHash -LiteralPath $BridgeTargetProbeSource -Algorithm SHA256).Hash.ToLowerInvariant()",
+        "if ($BridgeSourceProbeHash -cne $BridgeTargetProbeSha256) { throw 'Phase 4 target probe source hash mismatch' }",
+        "Copy-Item -LiteralPath $BridgeTargetProbeSource -Destination $BridgeTargetProbePath -ErrorAction Stop",
+        "$BridgeCopiedProbeHash = (Get-FileHash -LiteralPath $BridgeTargetProbePath -Algorithm SHA256).Hash.ToLowerInvariant()",
+        "if ($BridgeCopiedProbeHash -cne $BridgeTargetProbeSha256) { throw 'Phase 4 copied target probe hash mismatch' }",
+        "",
+        "$BridgeAclProcess = Start-Process -FilePath 'icacls.exe' -ArgumentList @($BridgeRunnerRoot, '/inheritance:r', '/grant:r', ('*' + $BridgeTargetSid + ':(OI)(CI)(M)'), '/T', '/C') -Wait -PassThru",
+        "if ($BridgeAclProcess.ExitCode -ne 0) { throw 'Phase 4 runner-root ACL preparation failed' }",
+        "",
+        "$BridgeTargetCredential = Get-Credential -UserName $BridgeQualifiedTargetIdentity -Message 'Enter the local ac-runner credential for the reviewed Phase 4 plan.'",
+        "if ($null -eq $BridgeTargetCredential) { throw 'Phase 4 target credential was not supplied' }",
+        "if ($BridgeTargetCredential.UserName -ine $BridgeQualifiedTargetIdentity) { throw 'Phase 4 target credential identity mismatch' }",
+        "",
+        "$BridgeStartedAt = Get-Date",
+        "$BridgeChild = Start-Process -FilePath 'powershell.exe' -ArgumentList @(",
+        "    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',",
+        "    '-File', $BridgeTargetProbePath,",
+        "    '-ExpectedHost', $BridgeHost,",
+        "    '-ExpectedIdentity', $BridgeQualifiedTargetIdentity,",
+        "    '-AuthorityMarkerPath', $BridgeRegistrationMarkerPath,",
+        "    '-ResultPath', $BridgeTargetProbeResultPath,",
+        "    '-TrustedGhPath', $BridgeTrustedGhPath",
+        ") -Credential $BridgeTargetCredential -LoadUserProfile -WorkingDirectory $BridgeRunnerRoot -RedirectStandardOutput $BridgeTargetProbeStdoutPath -RedirectStandardError $BridgeTargetProbeStderrPath -PassThru",
+        "while (-not $BridgeChild.HasExited) {",
+        "    $BridgeElapsedSeconds = [int]((Get-Date) - $BridgeStartedAt).TotalSeconds",
+        "    Write-Host ("heartbeat phase=phase4 elapsed_seconds={0}" -f $BridgeElapsedSeconds)",
+        "    if ($BridgeElapsedSeconds -ge $BridgeTargetTimeoutSeconds) {",
+        "        Stop-Process -Id $BridgeChild.Id -Force -ErrorAction Stop",
+        "        throw 'Phase 4 target probe timeout'",
+        "    }",
+        "    Start-Sleep -Seconds $BridgeHeartbeatSeconds",
+        "}",
+        "$BridgeChildExitCode = $BridgeChild.ExitCode",
+        "if ($BridgeChildExitCode -ne 0) { throw 'Phase 4 target probe failed' }",
+        "",
+        "if (-not (Test-Path -LiteralPath $BridgeTargetProbeResultPath -PathType Leaf)) { throw 'Phase 4 target probe result missing' }",
+        "$BridgeProbeResult = Get-Content -LiteralPath $BridgeTargetProbeResultPath -Raw -Encoding UTF8 | ConvertFrom-Json",
+        "if ($BridgeProbeResult.schema -cne 'agent-controller.private-ci-phase4-target-probe.v1') { throw 'Phase 4 target probe schema mismatch' }",
+        "if ($BridgeProbeResult.status -cne 'TARGET_PROBE_PASS') { throw 'Phase 4 target probe did not pass' }",
+        "if ($BridgeProbeResult.host -ine $BridgeHost) { throw 'Phase 4 target probe host mismatch' }",
+        "if ($BridgeProbeResult.identity -ine $BridgeQualifiedTargetIdentity) { throw 'Phase 4 target probe identity mismatch' }",
+        "if ($BridgeProbeResult.admin_sid_present -ne $false) { throw 'Phase 4 target probe admin status unsafe' }",
+        "if ($BridgeProbeResult.high_integrity_present -ne $false) { throw 'Phase 4 target probe integrity unsafe' }",
+        "if ($BridgeProbeResult.forbidden_environment_count -ne 0) { throw 'Phase 4 target probe environment unsafe' }",
+        "if ($BridgeProbeResult.broker_credential_roots_readable -ne 0) { throw 'Phase 4 broker credential isolation failed' }",
+        "if ($BridgeProbeResult.gh_authenticated -ne $false) { throw 'Phase 4 target gh authentication isolation failed' }",
+        "if ($BridgeProbeResult.authority_marker_write_denied -ne $true) { throw 'Phase 4 durable authority isolation failed' }",
+        "",
+        "Write-Output 'PHASE4_TARGET_ENVIRONMENT_PASS'",
+        "",
+    ]
+    return "\n".join(lines)
