@@ -22,29 +22,33 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 ### Added / changed
 
 - #216の実機pilotでPhase 3 registration PASS後にPhase 4/5のcontroller-owned live harnessが存在しないことが判明したため、Requirement -> AC -> planned testsのtraceability baselineをIssue #225へ固定。
-- Phase 3 -> Phase 4 -> Phase 5で共有するcross-phase pilot bindingの最初のcontractを追加し、repository / PR / target SHA / trusted workflow SHA+path / runner id-name-label / environment generation / runner root-work folder / host / broker identity / target identityを明示的に保持する。
-- bindingはconsumed済みhistorical #216 runner/generationへ固定せず、invalid SHA、runner id、identity collision、workflow path traversal、relative runner root等をdeterministicにrejectする。
-- successful registrationからPhase 4へ渡すsecret-free canonical registration handoff evidenceを追加し、Phase 0 / registration plan / human approval / protected consumption / registration result / local runner settingsのSHA-256とREGISTERED statusをhash-chainとして保持する。
-- handoff document自体はauthorityではないことを明示。次段でauthenticated exact-byte evidence + restart-safe durable consumptionへ接続する。
-- #202のWOBBUFFET実測を再確認し、将来のtarget-identity launchはcharacterized `Start-Process -Credential -LoadUserProfile -WorkingDirectory`系を基準とし、同hostで失敗済みの`-UseNewEnvironment`を初期実装へ持ち込まない方針をIssue #225へ記録。
+- Phase 3 -> Phase 4 -> Phase 5で共有するcross-phase pilot bindingを追加し、repository / PR / target SHA / trusted workflow SHA+path / runner id-name-label / environment generation / runner root-work folder / host / broker identity / target identityを明示的に保持する。
+- consumed済みhistorical #216 runner/generationをfuture pilotで再利用しないfresh pilot identity contractを追加。controller-owned freeze builder/CLIはGitHub/owner-machineのfresh readbackからtarget/workflow SHAを凍結し、16桁nonceからrunner name / generation / canonical runner rootを一度だけ生成する。
+- successful registrationからPhase 4へ渡すsecret-free canonical registration handoffをv2へ更新。Phase 0 / registration plan / human approval / protected consumption / registration result / local runner settingsに加え、fresh generation全体のcanonical tree snapshot SHA-256をhash-chainへ含める。
+- generation snapshotはgeneration root直下がcanonical `runner` 1ディレクトリだけであること、`_work`がまだ存在しないこと、symlink/reparse pointがないこと、全file path/content/sizeが凍結snapshotと一致することを検査する。Phase 4はplan時、human approval前、durable consumption後かつmutation直前にsnapshotを再検証する。
+- Phase 4に独立human approval、restart-safe durable consumption、target-side `ac-runner` runtime probe、broker/provider credential isolation、durable-authority write denial、workspace/reparse/process/service/task freshness check、canonical Phase 4 evidenceを実装。
+- #202のWOBBUFFET実測を正本として、target launchはcharacterized `Start-Process -Credential -LoadUserProfile -WorkingDirectory`境界を維持。同hostで失敗済みの`-UseNewEnvironment`は使用せず、target-side environment probeとPhase 5のactual `Runner.Listener.exe` owner readbackで補強する。
+- Phase 5にregistration/Phase 4とは別のhuman approvalとdurable one-attempt consumptionを追加。markerをdispatch前に`CreateNew`し、timeout/transport uncertainty/malformed responseを含む失敗後のredispatchを禁止する。
+- GitHub.com REST API `2026-03-10`の現行workflow-dispatch contractへ更新。旧`return_run_details` parameterを削除し、POSTのHTTP 200 responseが返すexact `workflow_run_id`だけをrun/job correlationに使用する。
+- Phase 5はactual runner listener PID/owner=`WOBBUFFET\\ac-runner`、GitHub runner id/name/label唯一性、online/idle状態、prior exact workflow dispatch 0件をdispatch直前にfresh rereadする。その後exactly one POSTだけを許可し、returned run idに対してrun_attempt=1、trusted workflow SHA/path、actor/triggering actor、exactly one expected job、runner binding、expected metadata-only stepsのterminal successをauthoritativeにread backする。
+- Phase 5 resultはconsole markerだけではPASSせず、real child exit、runner stdout/stderr hashes、local runner process identity、workflow run/job bindingをcanonical evidenceへ保持する。
 
 ### Safety / authority boundary
 
-- 本段階はcontract/canonical evidenceのみ。runner start、workflow dispatch、target checkout/job、owner-machine mutationは実装・実行していない。
-- raw handoff JSONはPhase 4 authorityではなく、registration approvalやhistorical consumed authorityの再利用も許可しない。
-- public `agent-controller`はGitHub-hosted onlyのまま。
-- Ready / merge / live dispatch / target executionはADR #90によりhuman-final。
+- handoff/result JSONはevidenceであり、それ自体を再利用可能なauthorityとして扱わない。Phase 4/5のlive effectは各専用human approval + protected durable consumption + authenticated AST/effect gateをすべて通る必要がある。
+- registration approvalはPhase 4/5を許可せず、Phase 4 approvalはPhase 5 dispatchを許可しない。失敗・timeout・unknown state・process restart後に同じconsumed authorityを復活させない。
+- current #216 historical runner/generation/Phase0/plan/approval/consumptionは再利用禁止。#225 merge後の#216 pilotはcontroller-owned fresh freezeからPhase 0-5を新規authority chainでやり直す。
+- #225は`SELF_HOSTED_PRIVATE_CI_PASS`を発行しない。Phase 6 cleanup + Phase 7 zero residualを含むfinal pilot classificationは#216の責務。
+- public `agent-controller`はGitHub-hosted onlyのまま。Ready / merge / destructive cleanup / live dispatch / target executionはADR #90によりhuman-final。
 
 ### Validation status
 
-- Initial RED run #617: expected 4 failures because Phase 4 contract module was absent.
-- Cross-phase binding implementation run #618: SUCCESS.
-- Registration handoff RED run #619: expected handoff API-only failures.
-- Canonical handoff implementation run #620: SUCCESS.
-- このentryはDraft PR #226の途中記録。Phase 4/5 runtime、durable consumption、exactly-one dispatch、adversarial reviewは未完了。
+- Initial RED run #617からRequirement/ACごとのRED -> implementationを継続。
+- Phase 5 API/authority/runtime実装後、run #735でLinux deterministic suiteとWindows PowerShell 5.1 AST / Phase 4 / Phase 5 candidate / authority regressionsがSUCCESS。
+- generation snapshot追加後のrun #749ではWindows laneはSUCCESS、LinuxはPath concrete-type判定だけがREDとなり、`isinstance(..., Path)`へ修正済み。
+- 最新exact-head CIは継続確認中。adversarial review / remediation loop / human Ready / mergeは未完了であり、#216 live pilotは再開していない。
 
 ---
-
 ## 2026-09-19 — Real Actions Runner `.runner` schema contract（Issue #223）
 
 関連: Issue #223, Issue #216, Issue #221, PR #222
