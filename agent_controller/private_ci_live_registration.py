@@ -514,6 +514,8 @@ def execute_live_registration(
         )
     if execution.output_decoding_uncertain:
         reasons = ["REGISTRATION_NATIVE_OUTPUT_DECODE_FAILED"]
+        if execution.exit_code != 0:
+            reasons.append("REGISTRATION_CHILD_EXIT_NONZERO")
         observed_runner_id: Optional[int] = None
         try:
             decode_failure_runners = read_runners(binding.repository)
