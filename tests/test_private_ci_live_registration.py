@@ -196,12 +196,11 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
             with self.subTest(changes=changes):
                 binding = replace(self.binding, **changes)
                 candidate = render_live_registration_candidate(binding)
-                ast = authenticated_ast(binding, candidate)
                 result = plan_live_registration(
                     binding,
                     phase0_evidence_bytes=PHASE0_EVIDENCE,
                     candidate=candidate,
-                    ast_attestation=ast,
+                    ast_attestation=self.ast,
                 )
                 self.assertFalse(result.passed)
                 self.assertEqual(result.status.value, "BLOCKED")
