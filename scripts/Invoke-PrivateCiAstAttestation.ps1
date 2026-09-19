@@ -377,33 +377,7 @@ foreach ($AssignmentAst in $AssignmentAsts) {
         }
     }
     elseif ($LeftName -ieq 'BridgeChildExitCode') {
-        if ($AssignmentAst.Right.Extent.Text -match '(?i)^\s*\$BridgeChild\.ExitCode\s*
-    runtime = 'Windows PowerShell 5.1'
-    parser = 'System.Management.Automation.Language.Parser'
-    candidate_sha256 = $CandidateSha256
-    spec_sha256 = $SpecSha256
-    parsed = ($StructuralErrorCount -eq 0)
-    error_count = $StructuralErrorCount
-    repository = [string]$Bindings['BridgeRepository']
-    pull_request_number = [int]$Bindings['BridgePullRequestNumber']
-    target_sha = [string]$Bindings['BridgeTargetSha']
-    target_host_role = [string]$Bindings['BridgeTargetHostRole']
-    required_identity = [string]$Bindings['BridgeRequiredIdentity']
-    evidence_root = [string]$Bindings['BridgeEvidenceRoot']
-    transcript_filename = [string]$Bindings['BridgeTranscriptFilename']
-    expected_success_marker = [string]$Bindings['BridgeExpectedSuccessMarker']
-    observed_effect_families = @($ObservedEffects)
-    automatic_variable_collisions = @($AutomaticVariableCollisions)
-    unresolved_placeholders = @($UnresolvedPlaceholders)
-    forbidden_convenience_paths = @($ForbiddenConveniencePaths)
-    self_declared_gate_authority = ($CandidateText -match '(?im)^\s*(Write-Output|Write-Host)\s+["'']?PASS_TO_OPERATOR["'']?\s*$')
-    heartbeat_or_progress_proven = $HeartbeatOrProgressProven
-    child_exit_code_proven = $ChildExitCodeProven
-    fail_fast_proven = $FailFastProven
-}
-
-$Result | ConvertTo-Json -Depth 5 -Compress
-) {
+        if ($AssignmentAst.Right.Extent.Text -match '(?i)^\s*\$BridgeChild\.ExitCode\s*$') {
             $ChildExitCodeAssigned = $true
         }
     }
@@ -431,10 +405,10 @@ if ($ChildProcessAssigned -and $StartedAtAssigned) {
         }
 
         $ElapsedAssignmentProven = $false
-        $BodyAssignments = $WhileAst.Body.FindAll({
+        $BodyAssignments = @($WhileAst.Body.FindAll({
             param($Node)
             $Node -is [System.Management.Automation.Language.AssignmentStatementAst]
-        }, $true)
+        }, $true))
         foreach ($BodyAssignment in $BodyAssignments) {
             if ($BodyAssignment.Left -isnot [System.Management.Automation.Language.VariableExpressionAst]) {
                 continue
@@ -456,15 +430,15 @@ if ($ChildProcessAssigned -and $StartedAtAssigned) {
             continue
         }
 
-        $SleepSeconds = $null
         $SleepMatch = [regex]::Match(
             $BodyText,
             '(?i)Start-Sleep\s+-Seconds\s+([0-9]+)'
         )
-        if ($SleepMatch.Success) {
-            $SleepSeconds = [int]$SleepMatch.Groups[1].Value
+        if (-not $SleepMatch.Success) {
+            continue
         }
-        if ($null -eq $SleepSeconds -or $SleepSeconds -lt 1 -or $SleepSeconds -gt 60) {
+        $SleepSeconds = [int]$SleepMatch.Groups[1].Value
+        if ($SleepSeconds -lt 1 -or $SleepSeconds -gt 60) {
             continue
         }
 
@@ -476,10 +450,10 @@ if ($ChildProcessAssigned -and $StartedAtAssigned) {
 $ChildExitCodeProven = $ChildProcessAssigned -and $ChildExitCodeAssigned
 $FailFastProven = $false
 if ($ChildExitCodeProven) {
-    $IfAsts = $Ast.FindAll({
+    $IfAsts = @($Ast.FindAll({
         param($Node)
         $Node -is [System.Management.Automation.Language.IfStatementAst]
-    }, $true)
+    }, $true))
     foreach ($IfAst in $IfAsts) {
         $IfText = $IfAst.Extent.Text
         $ThrowAsts = @($IfAst.FindAll({
@@ -517,9 +491,9 @@ $Result = [ordered]@{
     unresolved_placeholders = @($UnresolvedPlaceholders)
     forbidden_convenience_paths = @($ForbiddenConveniencePaths)
     self_declared_gate_authority = ($CandidateText -match '(?im)^\s*(Write-Output|Write-Host)\s+["'']?PASS_TO_OPERATOR["'']?\s*$')
-    heartbeat_or_progress_proven = $false
-    child_exit_code_proven = $false
-    fail_fast_proven = $false
+    heartbeat_or_progress_proven = $HeartbeatOrProgressProven
+    child_exit_code_proven = $ChildExitCodeProven
+    fail_fast_proven = $FailFastProven
 }
 
 $Result | ConvertTo-Json -Depth 5 -Compress
