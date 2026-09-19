@@ -185,6 +185,54 @@ class NativeTextResult:
     stdout: str
     stderr: str
     decoding_errors: tuple[str, ...] = ()
+    secret_output_redacted: bool = False
+
+
+def _redact_native_stream(
+    value: object,
+    *,
+    secrets: tuple[str, ...],
+) -> tuple[object, bool]:
+    if not secrets:
+        return value, False
+
+    redacted = False
+    if type(value) is str:
+        text = value
+        for secret in secrets:
+            if secret and secret in text:
+                text = text.replace(secret, "***")
+                redacted = True
+        return text, redacted
+
+    if isinstance(value, (bytes, bytearray)):
+        raw = bytes(value)
+        encodings = ("utf-8", locale.getpreferredencoding(False))
+        for secret in secrets:
+            if not secret:
+                continue
+            seen: set[bytes] = set()
+            for encoding in encodings:
+                if not encoding:
+                    continue
+                try:
+                    needle = secret.encode(encoding, errors="strict")
+                except (UnicodeEncodeError, LookupError):
+                    continue
+                if not needle or needle in seen:
+                    continue
+                seen.add(needle)
+                if needle in raw:
+                    raw = raw.replace(needle, b"***")
+                    redacted = True
+        return raw, redacted
+
+    text = str(value)
+    for secret in secrets:
+        if secret and secret in text:
+            text = text.replace(secret, "***")
+            redacted = True
+    return text, redacted
 
 
 def _decode_native_stream(value: object, *, stream_name: str) -> tuple[str, bool]:
@@ -254,19 +302,33 @@ class WindowsEphemeralRegistrationRuntime:
     def runner_root(self) -> Path:
         return Path(self.binding.runner_root)
 
-    def _run_text(self, *command: str, cwd: Optional[Path] = None, env=None) -> NativeTextResult:
+    def _run_text(
+        self,
+        *command: str,
+        cwd: Optional[Path] = None,
+        env=None,
+        redact_secrets: tuple[str, ...] = (),
+    ) -> NativeTextResult:
         completed = self.command_runner(
             *command,
             cwd=None if cwd is None else str(cwd),
             env=env,
             capture_output=True,
         )
-        stdout, stdout_error = _decode_native_stream(
+        raw_stdout, stdout_secret_redacted = _redact_native_stream(
             completed.stdout,
+            secrets=redact_secrets,
+        )
+        raw_stderr, stderr_secret_redacted = _redact_native_stream(
+            completed.stderr,
+            secrets=redact_secrets,
+        )
+        stdout, stdout_error = _decode_native_stream(
+            raw_stdout,
             stream_name="stdout",
         )
         stderr, stderr_error = _decode_native_stream(
-            completed.stderr,
+            raw_stderr,
             stream_name="stderr",
         )
         decoding_errors = tuple(
@@ -282,6 +344,9 @@ class WindowsEphemeralRegistrationRuntime:
             stdout=stdout,
             stderr=stderr,
             decoding_errors=decoding_errors,
+            secret_output_redacted=(
+                stdout_secret_redacted or stderr_secret_redacted
+            ),
         )
 
     @staticmethod
@@ -513,12 +578,14 @@ $RunnerTasks = @(
             "--no-default-labels",
             cwd=self.runner_root,
             env=child_env,
+            redact_secrets=(registration_token,),
         )
         return RegistrationExecution(
             exit_code=completed.returncode,
             stdout=completed.stdout,
             stderr=completed.stderr,
             output_decoding_uncertain=bool(completed.decoding_errors),
+            secret_output_redacted=completed.secret_output_redacted,
         )
 
     def credential_handoff_cleared(
