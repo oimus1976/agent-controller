@@ -4,7 +4,10 @@ from agent_controller.private_ci_live_registration import (
     FROZEN_RUNNER_LABEL,
     FROZEN_RUNNER_NAME,
 )
-from agent_controller.private_ci_runner_readback import read_all_runner_items
+from agent_controller.private_ci_runner_readback import (
+    RunnerSetChangedAcrossSweeps,
+    read_all_runner_items,
+)
 
 
 def runner(runner_id, *, name=None, labels=()):
@@ -184,8 +187,9 @@ class RunnerReadbackTests(unittest.TestCase):
                 return {"total_count": 101, "runners": [runner(last_id)]}
             raise AssertionError(page)
 
-        with self.assertRaisesRegex(RuntimeError, "changed across sweeps"):
+        with self.assertRaises(RunnerSetChangedAcrossSweeps) as raised:
             read_all_runner_items(fetch_page)
+        self.assertRegex(str(raised.exception), "changed across sweeps")
 
     def test_order_only_change_between_sweeps_is_accepted(self):
         call_count = 0
