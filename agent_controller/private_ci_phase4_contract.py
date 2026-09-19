@@ -4,6 +4,15 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import PurePosixPath, PureWindowsPath
 
+from agent_controller.operator_step_gate import (
+    AUTHORITATIVE_EVIDENCE_ROOT,
+    PRIVATE_LOCAL_CI_WORKSTREAM,
+    WINDOWS_POWERSHELL_51,
+    OperatorEffectClass,
+    OperatorStepSpec,
+    PriorEvidenceRequirement,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class PrivateCiPilotBinding:
@@ -299,3 +308,54 @@ def parse_registration_handoff_bytes(
     if raw != canonical:
         raise ValueError("registration handoff is not canonical")
     return evidence
+
+
+PHASE4_OPERATION_ID = "issue225-phase4-target-environment"
+PHASE4_STEP_ID = "prepare-target-environment"
+PHASE4_HOST_ROLE = "private-ci-owner-machine"
+PHASE4_BROKER_IDENTITY = "c-admin"
+PHASE4_TRANSCRIPT_FILENAME = "issue225-phase4-target-environment.log"
+PHASE4_SUCCESS_MARKER = "PHASE4_TARGET_ENVIRONMENT_PASS"
+PHASE4_EFFECTS = ("PRIVATE_CI_PHASE4_TARGET_ENVIRONMENT",)
+REGISTRATION_HANDOFF_OPERATION_ID = "issue225-registration-handoff"
+REGISTRATION_HANDOFF_STEP_ID = "registration-handoff"
+
+
+def build_phase4_target_environment_spec(
+    binding: PrivateCiPilotBinding,
+    *,
+    registration_handoff_sha256: str,
+) -> OperatorStepSpec:
+    binding_reasons = pilot_binding_reason_codes(binding)
+    if binding_reasons:
+        raise ValueError(
+            "pilot binding invalid: " + ",".join(binding_reasons)
+        )
+    if not _sha256_digest(registration_handoff_sha256):
+        raise ValueError("registration handoff SHA-256 invalid")
+
+    return OperatorStepSpec(
+        operation_id=PHASE4_OPERATION_ID,
+        step_id=PHASE4_STEP_ID,
+        workstream=PRIVATE_LOCAL_CI_WORKSTREAM,
+        repository=binding.repository,
+        pull_request_number=binding.pull_request_number,
+        target_sha=binding.target_sha,
+        target_host_role=PHASE4_HOST_ROLE,
+        required_identity=PHASE4_BROKER_IDENTITY,
+        shell_runtime=WINDOWS_POWERSHELL_51,
+        effect_class=OperatorEffectClass.BOUNDED_MUTATION,
+        evidence_root=AUTHORITATIVE_EVIDENCE_ROOT,
+        transcript_filename=PHASE4_TRANSCRIPT_FILENAME,
+        expected_success_marker=PHASE4_SUCCESS_MARKER,
+        allowed_effect_families=PHASE4_EFFECTS,
+        prior_evidence_requirement=PriorEvidenceRequirement(
+            producer_operation_id=REGISTRATION_HANDOFF_OPERATION_ID,
+            producer_step_id=REGISTRATION_HANDOFF_STEP_ID,
+            evidence_sha256=registration_handoff_sha256,
+        ),
+        require_parser_attestation=True,
+        require_heartbeat_or_progress=False,
+        require_child_exit_code=True,
+        require_fail_fast=True,
+    )
