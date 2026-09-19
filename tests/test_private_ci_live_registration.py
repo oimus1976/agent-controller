@@ -18,28 +18,26 @@ from agent_controller.operator_step_gate import (
     prior_evidence_auth_message,
 )
 from agent_controller.private_ci_live_registration import (
-    FROZEN_ENVIRONMENT_GENERATION,
-    FROZEN_PR_NUMBER,
-    FROZEN_REPOSITORY,
-    FROZEN_RUNNER_LABEL,
-    FROZEN_RUNNER_NAME,
-    FROZEN_RUNNER_ROOT,
-    FROZEN_TARGET_SHA,
-    FROZEN_WORKFLOW_PATH,
-    FROZEN_WORKFLOW_SHA,
     LIVE_REGISTRATION_SUCCESS_MARKER,
     LIVE_REGISTRATION_TRANSCRIPT,
     PHASE0_OPERATION_ID,
     PHASE0_STEP_ID,
+    LiveRegistrationBinding,
     LiveRegistrationStatus,
     RegistrationExecution,
     RunnerReadback,
     build_live_registration_spec,
     execute_live_registration,
-    frozen_live_registration_binding,
     phase0_evidence_sha256,
     plan_live_registration,
     render_live_registration_candidate,
+)
+
+from agent_controller.private_ci_pilot_identity import (
+    HISTORICAL_CONSUMED_ENVIRONMENT_GENERATION,
+    HISTORICAL_CONSUMED_RUNNER_NAME,
+    PRIVATE_CI_RUNNER_LABEL,
+    canonical_runner_root,
 )
 
 
@@ -47,6 +45,22 @@ AST_KEY = b"A" * 32
 EVIDENCE_KEY = b"E" * 32
 PHASE0_EVIDENCE = b"canonical phase0 evidence\nPHASE0_PASS\n"
 REGISTRATION_TOKEN = "runner-registration-token-secret"
+
+
+def fresh_binding():
+    generation = "ac-pilot-0123456789abcdef"
+    return LiveRegistrationBinding(
+        repository="oimus1976/example-private",
+        pull_request_number=4,
+        target_sha="1" * 40,
+        workflow_sha="2" * 40,
+        workflow_path=".github/workflows/private-ci-windows-pilot.yml",
+        runner_name="ac-ci-0123456789abcdef",
+        runner_label=PRIVATE_CI_RUNNER_LABEL,
+        environment_generation=generation,
+        runner_root=canonical_runner_root(generation),
+        work_folder="_work",
+    )
 
 
 def authenticated_ast(binding, candidate, evidence_bytes=PHASE0_EVIDENCE):
@@ -108,7 +122,7 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
     def setUp(self):
         gate._ACTIVE_CONTROLLER_AUTHORITY = None
         configure_controller_authority(ast_hmac_key=AST_KEY, evidence_hmac_key=EVIDENCE_KEY)
-        self.binding = frozen_live_registration_binding()
+        self.binding = fresh_binding()
         self.candidate = render_live_registration_candidate(self.binding)
         self.ast = authenticated_ast(self.binding, self.candidate)
         self.target_revalidation = patch.object(
@@ -119,24 +133,36 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
         patch.stopall()
         gate._ACTIVE_CONTROLLER_AUTHORITY = None
 
-    def test_frozen_binding_matches_issue_216_identity(self):
-        self.assertEqual(self.binding.repository, FROZEN_REPOSITORY)
-        self.assertEqual(self.binding.pull_request_number, FROZEN_PR_NUMBER)
-        self.assertEqual(self.binding.target_sha, FROZEN_TARGET_SHA)
-        self.assertEqual(self.binding.workflow_sha, FROZEN_WORKFLOW_SHA)
-        self.assertEqual(self.binding.workflow_path, FROZEN_WORKFLOW_PATH)
-        self.assertEqual(self.binding.runner_name, FROZEN_RUNNER_NAME)
-        self.assertEqual(self.binding.runner_label, FROZEN_RUNNER_LABEL)
-        self.assertEqual(self.binding.environment_generation, FROZEN_ENVIRONMENT_GENERATION)
-        self.assertEqual(self.binding.runner_root, FROZEN_RUNNER_ROOT)
+    def test_fresh_binding_is_structurally_bound_and_not_historical(self):
+        self.assertEqual(self.binding.repository, "oimus1976/example-private")
+        self.assertEqual(self.binding.pull_request_number, 4)
+        self.assertEqual(self.binding.target_sha, "1" * 40)
+        self.assertEqual(self.binding.workflow_sha, "2" * 40)
+        self.assertEqual(
+            self.binding.workflow_path,
+            ".github/workflows/private-ci-windows-pilot.yml",
+        )
+        self.assertNotEqual(
+            self.binding.runner_name,
+            HISTORICAL_CONSUMED_RUNNER_NAME,
+        )
+        self.assertEqual(self.binding.runner_label, PRIVATE_CI_RUNNER_LABEL)
+        self.assertNotEqual(
+            self.binding.environment_generation,
+            HISTORICAL_CONSUMED_ENVIRONMENT_GENERATION,
+        )
+        self.assertEqual(
+            self.binding.runner_root,
+            canonical_runner_root(self.binding.environment_generation),
+        )
 
     def test_candidate_is_token_free_and_ephemeral(self):
         self.assertNotIn(REGISTRATION_TOKEN, self.candidate)
         self.assertNotIn("--token", self.candidate.lower())
         self.assertIn("--ephemeral", self.candidate)
         self.assertIn("--no-default-labels", self.candidate)
-        self.assertIn(FROZEN_RUNNER_NAME, self.candidate)
-        self.assertIn(FROZEN_RUNNER_LABEL, self.candidate)
+        self.assertIn(self.binding.runner_name, self.candidate)
+        self.assertIn(self.binding.runner_label, self.candidate)
         self.assertIn(LIVE_REGISTRATION_TRANSCRIPT, self.candidate)
         self.assertIn(LIVE_REGISTRATION_SUCCESS_MARKER, self.candidate)
 
@@ -149,15 +175,20 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
         )
         self.assertTrue(result.passed)
 
-    def test_frozen_binding_drift_is_blocked(self):
+    def test_invalid_or_historical_binding_is_blocked(self):
+        historical_generation = HISTORICAL_CONSUMED_ENVIRONMENT_GENERATION
         cases = (
-            {"repository": "attacker/repo"},
-            {"pull_request_number": 999},
-            {"target_sha": "b" * 40},
-            {"workflow_sha": "c" * 40},
-            {"workflow_path": ".github/workflows/other.yml"},
-            {"runner_name": "ac-ci-0000000000000000"},
+            {"repository": "invalid"},
+            {"pull_request_number": 0},
+            {"target_sha": "b" * 39},
+            {"workflow_sha": "C" * 40},
+            {"workflow_path": "../other.yml"},
+            {"runner_name": HISTORICAL_CONSUMED_RUNNER_NAME},
             {"runner_label": "other-label"},
+            {
+                "environment_generation": historical_generation,
+                "runner_root": canonical_runner_root(historical_generation),
+            },
             {"environment_generation": "other-generation"},
             {"runner_root": r"C:\other"},
         )
