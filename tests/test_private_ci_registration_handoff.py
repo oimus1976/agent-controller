@@ -17,9 +17,7 @@ from agent_controller.private_ci_live_registration import (
     render_live_registration_candidate,
 )
 from agent_controller.private_ci_live_registration_runtime import (
-    HUMAN_AUTHORIZATION_METHOD if False else RESULT_SCHEMA,
-)
-from agent_controller.private_ci_live_registration_runtime import (
+    RESULT_SCHEMA,
     RUNNER_PACKAGE_SHA256,
     RUNNER_PACKAGE_URL,
     RUNNER_VERSION,
