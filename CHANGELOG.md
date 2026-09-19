@@ -26,7 +26,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - post-registrationでは最大6 attempt、1秒間隔に加え、remote readback全体へ15秒のmonotonic wall-clock deadlineを設定する。各`gh api` subprocessにも残り時間をtimeoutとして渡し、delay合計も最大5秒に限定する。deadlineはstrict snapshot完了後とacceptance-time local binding再検証後にも再確認し、期限後のREGISTEREDを禁止する。
 - `runner_readback_attempts`は最初のremote requestを実際に開始する境界でのみ加算し、deadline切れでAPIを開始しなかったiterationを証跡上のattemptに数えない。
 - retry対象は、(1) sweep間set変化、(2) stable snapshotだがfrozen runnerがまだ見えない場合のみ。duplicate eligible runner、wrong name/label、malformed/pagination異常などは即fail closedし、registration/token/configを再実行しない。
-- remote exact snapshotをacceptする直前にlocal `.runner` binding（name / work folder / ephemeral / DisableUpdate）を再検証し、stabilization中のlocal driftをfail closedする。
+- remote exact snapshotをacceptする直前にlocal `.runner` binding（name / work folder / ephemeral / DisableUpdate）を再検証し、stabilization中のlocal driftをfail closedする。stable snapshot全体はexact eligible runner 1件へ縮約してreadbackを構築し、その構築後にfinal deadline checkを行うことで、大規模snapshot変換や後段scanがdeadline後のREGISTEREDを生まないようにする。
 - bounded exhaustionを`RUNNER_READBACK_STABILIZATION_EXHAUSTED` / `RUNNER_VISIBILITY_STABILIZATION_EXHAUSTED`として既存`RUNNER_READBACK_FAILED`に追加記録する。
 - live result schemaをv2へ更新し、`runner_readback_attempts`をresult/transcriptへ記録して、実際に何回read-only stabilizationしたかを監査可能にする。
 
