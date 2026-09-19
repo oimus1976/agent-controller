@@ -8,6 +8,7 @@ from agent_controller.private_ci_live_registration import (
     LiveRegistrationStatus,
     RegistrationExecution,
     RunnerReadback,
+    RunnerReadbackFailure,
     execute_live_registration,
     frozen_live_registration_binding,
 )
@@ -136,6 +137,75 @@ class PostFailureReadbackTests(unittest.TestCase):
         self.assertEqual(result.child_exit_code, 37)
         self.assertIn("REGISTRATION_NATIVE_OUTPUT_DECODE_FAILED", result.reason_codes)
         self.assertIn("REGISTRATION_CHILD_EXIT_NONZERO", result.reason_codes)
+
+    def test_successful_child_with_bounded_readback_exhaustion_does_not_retry_registration(self):
+        binding = frozen_live_registration_binding()
+        passed = SimpleNamespace(
+            status=OperatorGateStatus.PASS_TO_OPERATOR,
+            reason_codes=(),
+            candidate_sha256="c" * 64,
+        )
+        registration_calls = []
+        read_attempts = []
+
+        def run_registration(observed, token):
+            registration_calls.append((observed, token))
+            return RegistrationExecution(0, "configured", "")
+
+        def fail_after_bounded_readback(repository):
+            read_attempts.extend(range(1, 7))
+            raise RunnerReadbackFailure(
+                "RUNNER_VISIBILITY_STABILIZATION_EXHAUSTED"
+            )
+
+        with (
+            mock.patch.object(live, "plan_live_registration", return_value=passed),
+            mock.patch.object(live, "validate_operator_step", return_value=passed),
+            mock.patch.object(live, "_require_frozen_target_still_exact"),
+        ):
+            result = execute_live_registration(
+                binding,
+                phase0_evidence_bytes=b"phase0\n",
+                candidate="candidate",
+                ast_attestation=object(),
+                prior_evidence_capability=object(),
+                prepare_runner=lambda observed: None,
+                acquire_registration_token=lambda repository: "one-time-token",
+                run_registration=run_registration,
+                credential_handoff_cleared=lambda observed, token: True,
+                read_runners=fail_after_bounded_readback,
+            )
+
+        self.assertEqual(len(registration_calls), 1)
+        self.assertEqual(len(read_attempts), 6)
+        self.assertEqual(result.status, LiveRegistrationStatus.FAILED)
+        self.assertEqual(result.child_exit_code, 0)
+        self.assertEqual(
+            result.reason_codes,
+            (
+                "RUNNER_READBACK_FAILED",
+                "RUNNER_VISIBILITY_STABILIZATION_EXHAUSTED",
+            ),
+        )
+
+    def test_nonzero_child_preserves_typed_readback_exhaustion_reason(self):
+        def fail_readback(repository):
+            raise RunnerReadbackFailure(
+                "RUNNER_READBACK_STABILIZATION_EXHAUSTED"
+            )
+
+        result = self._execute(fail_readback)
+
+        self.assertEqual(result.status, LiveRegistrationStatus.FAILED)
+        self.assertIn("REGISTRATION_CHILD_EXIT_NONZERO", result.reason_codes)
+        self.assertIn(
+            "RUNNER_READBACK_UNCERTAIN_AFTER_CHILD_FAILURE",
+            result.reason_codes,
+        )
+        self.assertIn(
+            "RUNNER_READBACK_STABILIZATION_EXHAUSTED",
+            result.reason_codes,
+        )
 
     def test_nonzero_exit_with_matching_remote_runner_records_observed_mutation(self):
         binding = frozen_live_registration_binding()
