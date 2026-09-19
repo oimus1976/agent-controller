@@ -536,7 +536,7 @@ def render_phase4_target_environment_candidate(
         "$BridgeCopiedProbeHash = (Get-FileHash -LiteralPath $BridgeTargetProbePath -Algorithm SHA256).Hash",
         "if ($BridgeCopiedProbeHash -ine $BridgeTargetProbeSha256) { throw 'Phase 4 copied target probe hash mismatch' }",
         "",
-        "icacls.exe $BridgeRunnerRoot /inheritance:r /grant:r ('*' + $BridgeTargetSid + ':(OI)(CI)(M)') /T /C | Write-Host",
+        "icacls.exe $BridgeRunnerRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' ('*' + $BridgeTargetSid + ':(OI)(CI)(M)') /T /C | Write-Host",
         "$BridgeAclExitCode = $LASTEXITCODE",
         "if ($BridgeAclExitCode -ne 0) { throw 'Phase 4 runner-root ACL preparation failed' }",
         "",
