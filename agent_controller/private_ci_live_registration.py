@@ -41,6 +41,7 @@ FROZEN_REPOSITORY = "oimus1976/ai-dev-starter-adoption-smoke-2"
 FROZEN_PR_NUMBER = 4
 FROZEN_TARGET_SHA = "17a17c04af8adadd61b8d9447493404da8e00a73"
 FROZEN_WORKFLOW_SHA = "c13ea3ad4fa66c0583e251a71143934a36025992"
+FROZEN_WORKFLOW_PATH = ".github/workflows/private-ci-windows-pilot.yml"
 FROZEN_RUNNER_NAME = "ac-ci-153d6e1a29fea2cd"
 FROZEN_RUNNER_LABEL = "private-ci-windows-pilot"
 FROZEN_ENVIRONMENT_GENERATION = "ac-pilot-65bbb1dc7c48d6e3"
@@ -59,6 +60,7 @@ class LiveRegistrationBinding:
     pull_request_number: int
     target_sha: str
     workflow_sha: str
+    workflow_path: str
     runner_name: str
     runner_label: str
     environment_generation: str
@@ -72,6 +74,7 @@ def frozen_live_registration_binding() -> LiveRegistrationBinding:
         pull_request_number=FROZEN_PR_NUMBER,
         target_sha=FROZEN_TARGET_SHA,
         workflow_sha=FROZEN_WORKFLOW_SHA,
+        workflow_path=FROZEN_WORKFLOW_PATH,
         runner_name=FROZEN_RUNNER_NAME,
         runner_label=FROZEN_RUNNER_LABEL,
         environment_generation=FROZEN_ENVIRONMENT_GENERATION,
@@ -90,6 +93,7 @@ def _binding_reason_codes(binding: object) -> tuple[str, ...]:
         ("LIVE_REGISTRATION_PR_MISMATCH", binding.pull_request_number, expected.pull_request_number),
         ("LIVE_REGISTRATION_TARGET_SHA_MISMATCH", binding.target_sha, expected.target_sha),
         ("LIVE_REGISTRATION_WORKFLOW_SHA_MISMATCH", binding.workflow_sha, expected.workflow_sha),
+        ("LIVE_REGISTRATION_WORKFLOW_PATH_MISMATCH", binding.workflow_path, expected.workflow_path),
         ("LIVE_REGISTRATION_RUNNER_NAME_MISMATCH", binding.runner_name, expected.runner_name),
         ("LIVE_REGISTRATION_RUNNER_LABEL_MISMATCH", binding.runner_label, expected.runner_label),
         (
@@ -154,6 +158,7 @@ def render_live_registration_candidate(binding: LiveRegistrationBinding) -> str:
         f"$BridgeTranscriptFilename = {_ps_single_quoted(LIVE_REGISTRATION_TRANSCRIPT)}",
         f"$BridgeExpectedSuccessMarker = {_ps_single_quoted(LIVE_REGISTRATION_SUCCESS_MARKER)}",
         f"$BridgeWorkflowSha = {_ps_single_quoted(binding.workflow_sha)}",
+        f"$BridgeWorkflowPath = {_ps_single_quoted(binding.workflow_path)}",
         f"$BridgeRunnerName = {_ps_single_quoted(binding.runner_name)}",
         f"$BridgeRunnerLabel = {_ps_single_quoted(binding.runner_label)}",
         f"$BridgeEnvironmentGeneration = {_ps_single_quoted(binding.environment_generation)}",
