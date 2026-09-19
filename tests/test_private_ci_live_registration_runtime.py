@@ -86,10 +86,11 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
 
         self.assertEqual(
             RESULT_SCHEMA,
-            "agent-controller.private-ci-live-registration-result.v2",
+            "agent-controller.private-ci-live-registration-result.v3",
         )
         self.assertEqual(payload["schema"], RESULT_SCHEMA)
         self.assertEqual(payload["runner_readback_attempts"], 2)
+        self.assertEqual(payload["workflow_path"], binding.workflow_path)
 
         with self.assertRaisesRegex(ValueError, "readback attempts"):
             result_payload(
