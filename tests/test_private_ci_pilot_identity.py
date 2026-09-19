@@ -12,6 +12,7 @@ from agent_controller.private_ci_pilot_identity import (
     PRIVATE_CI_TARGET_IDENTITY,
     PRIVATE_CI_WORK_FOLDER,
     PrivateCiPilotIdentityFreeze,
+    build_fresh_pilot_identity_freeze,
     canonical_runner_root,
     parse_pilot_identity_freeze_bytes,
     pilot_identity_freeze_bytes,
@@ -42,6 +43,58 @@ def valid_freeze():
 
 
 class PrivateCiPilotIdentityFreezeTests(unittest.TestCase):
+
+
+    def test_fresh_builder_derives_runner_and_generation_from_nonce(self):
+        freeze = build_fresh_pilot_identity_freeze(
+            repository="oimus1976/example-private",
+            pull_request_number=4,
+            target_sha="1" * 40,
+            workflow_sha="2" * 40,
+            workflow_path=".github/workflows/private-ci-windows-pilot.yml",
+            nonce="0123456789abcdef",
+            controller_main_sha="a" * 40,
+            controller_tree=r"C:\Users\c-admin\agent-controller-pilot-225",
+        )
+        self.assertEqual(freeze.runner_name, "ac-ci-0123456789abcdef")
+        self.assertEqual(
+            freeze.environment_generation,
+            "ac-pilot-0123456789abcdef",
+        )
+        self.assertEqual(
+            freeze.runner_root,
+            canonical_runner_root("ac-pilot-0123456789abcdef"),
+        )
+        self.assertEqual(pilot_identity_freeze_reason_codes(freeze), ())
+
+    def test_fresh_builder_rejects_bad_or_historical_nonce(self):
+        with self.assertRaisesRegex(ValueError, "nonce"):
+            build_fresh_pilot_identity_freeze(
+                repository="oimus1976/example-private",
+                pull_request_number=4,
+                target_sha="1" * 40,
+                workflow_sha="2" * 40,
+                workflow_path=".github/workflows/private-ci-windows-pilot.yml",
+                nonce="short",
+                controller_main_sha="a" * 40,
+                controller_tree=r"C:\Users\c-admin\agent-controller-pilot-225",
+            )
+
+        historical_nonce = HISTORICAL_CONSUMED_RUNNER_NAME.removeprefix(
+            "ac-ci-"
+        )
+        with self.assertRaisesRegex(ValueError, "HISTORICAL"):
+            build_fresh_pilot_identity_freeze(
+                repository="oimus1976/example-private",
+                pull_request_number=4,
+                target_sha="1" * 40,
+                workflow_sha="2" * 40,
+                workflow_path=".github/workflows/private-ci-windows-pilot.yml",
+                nonce=historical_nonce,
+                controller_main_sha="a" * 40,
+                controller_tree=r"C:\Users\c-admin\agent-controller-pilot-225",
+            )
+
     def test_valid_freeze_roundtrips_canonically(self):
         freeze = valid_freeze()
         raw = pilot_identity_freeze_bytes(freeze)
