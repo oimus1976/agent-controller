@@ -230,8 +230,13 @@ foreach ($CommandAst in $CommandAsts) {
         $LowerName = $LowerName.Substring($LastSlash + 1)
     }
 
-    if ($LowerName -in @('write-output', 'write-host')) {
+    if ($LowerName -in @('write-output', 'write-host', 'get-date', 'start-sleep')) {
         continue
+    }
+    elseif ($LowerName -eq 'start-process') {
+        if (-not $ObservedEffects.Contains('PROCESS_LAUNCH')) {
+            $ObservedEffects.Add('PROCESS_LAUNCH')
+        }
     }
     elseif ($LowerName -in @('remove-item', 'del', 'erase', 'rd', 'rmdir')) {
         if (-not $ObservedEffects.Contains('FILESYSTEM_DESTRUCTIVE_MUTATION')) {
@@ -319,6 +324,175 @@ $ForbiddenConveniencePaths = New-Object System.Collections.Generic.List[string]
 foreach ($ForbiddenText in @('%TEMP%', '$env:TEMP', '$pwd', 'Get-Location')) {
     if ($CandidateText.IndexOf($ForbiddenText, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         $ForbiddenConveniencePaths.Add($ForbiddenText)
+    }
+}
+
+$ChildProcessAssigned = $false
+$ChildExitCodeAssigned = $false
+$StartedAtAssigned = $false
+foreach ($AssignmentAst in $AssignmentAsts) {
+    if (
+        $AssignmentAst.Left -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
+        ($RootStatements -notcontains $AssignmentAst)
+    ) {
+        continue
+    }
+
+    $LeftName = Get-NormalizedVariableUserPath -UserPath $AssignmentAst.Left.VariablePath.UserPath
+    if ($LeftName -ieq 'BridgeChild') {
+        $StartProcessCommands = @($AssignmentAst.Right.FindAll({
+            param($Node)
+            if ($Node -isnot [System.Management.Automation.Language.CommandAst]) {
+                return $false
+            }
+            $Name = $Node.GetCommandName()
+            return (-not [string]::IsNullOrWhiteSpace($Name)) -and ($Name -ieq 'Start-Process')
+        }, $true))
+        if ($StartProcessCommands.Count -eq 1) {
+            $HasPassThru = $false
+            foreach ($Element in $StartProcessCommands[0].CommandElements) {
+                if (
+                    $Element -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    $Element.ParameterName -ieq 'PassThru'
+                ) {
+                    $HasPassThru = $true
+                }
+            }
+            if ($HasPassThru) {
+                $ChildProcessAssigned = $true
+            }
+        }
+    }
+    elseif ($LeftName -ieq 'BridgeStartedAt') {
+        $GetDateCommands = @($AssignmentAst.Right.FindAll({
+            param($Node)
+            if ($Node -isnot [System.Management.Automation.Language.CommandAst]) {
+                return $false
+            }
+            $Name = $Node.GetCommandName()
+            return (-not [string]::IsNullOrWhiteSpace($Name)) -and ($Name -ieq 'Get-Date')
+        }, $true))
+        if ($GetDateCommands.Count -eq 1) {
+            $StartedAtAssigned = $true
+        }
+    }
+    elseif ($LeftName -ieq 'BridgeChildExitCode') {
+        if ($AssignmentAst.Right.Extent.Text -match '(?i)^\s*\$BridgeChild\.ExitCode\s*
+    runtime = 'Windows PowerShell 5.1'
+    parser = 'System.Management.Automation.Language.Parser'
+    candidate_sha256 = $CandidateSha256
+    spec_sha256 = $SpecSha256
+    parsed = ($StructuralErrorCount -eq 0)
+    error_count = $StructuralErrorCount
+    repository = [string]$Bindings['BridgeRepository']
+    pull_request_number = [int]$Bindings['BridgePullRequestNumber']
+    target_sha = [string]$Bindings['BridgeTargetSha']
+    target_host_role = [string]$Bindings['BridgeTargetHostRole']
+    required_identity = [string]$Bindings['BridgeRequiredIdentity']
+    evidence_root = [string]$Bindings['BridgeEvidenceRoot']
+    transcript_filename = [string]$Bindings['BridgeTranscriptFilename']
+    expected_success_marker = [string]$Bindings['BridgeExpectedSuccessMarker']
+    observed_effect_families = @($ObservedEffects)
+    automatic_variable_collisions = @($AutomaticVariableCollisions)
+    unresolved_placeholders = @($UnresolvedPlaceholders)
+    forbidden_convenience_paths = @($ForbiddenConveniencePaths)
+    self_declared_gate_authority = ($CandidateText -match '(?im)^\s*(Write-Output|Write-Host)\s+["'']?PASS_TO_OPERATOR["'']?\s*$')
+    heartbeat_or_progress_proven = $HeartbeatOrProgressProven
+    child_exit_code_proven = $ChildExitCodeProven
+    fail_fast_proven = $FailFastProven
+}
+
+$Result | ConvertTo-Json -Depth 5 -Compress
+) {
+            $ChildExitCodeAssigned = $true
+        }
+    }
+}
+
+$HeartbeatOrProgressProven = $false
+if ($ChildProcessAssigned -and $StartedAtAssigned) {
+    $WhileAsts = $Ast.FindAll({
+        param($Node)
+        $Node -is [System.Management.Automation.Language.WhileStatementAst]
+    }, $true)
+    foreach ($WhileAst in $WhileAsts) {
+        $ConditionText = $WhileAst.Condition.Extent.Text
+        $BodyText = $WhileAst.Body.Extent.Text
+        if ($ConditionText -notmatch '(?i)-not\s+\$BridgeChild\.HasExited') {
+            continue
+        }
+        if (
+            $BodyText -notmatch '(?i)heartbeat' -or
+            $BodyText -notmatch '(?i)phase=' -or
+            $BodyText -notmatch '(?i)elapsed_seconds=' -or
+            $BodyText -notmatch '(?i)\$BridgeElapsedSeconds'
+        ) {
+            continue
+        }
+
+        $ElapsedAssignmentProven = $false
+        $BodyAssignments = $WhileAst.Body.FindAll({
+            param($Node)
+            $Node -is [System.Management.Automation.Language.AssignmentStatementAst]
+        }, $true)
+        foreach ($BodyAssignment in $BodyAssignments) {
+            if ($BodyAssignment.Left -isnot [System.Management.Automation.Language.VariableExpressionAst]) {
+                continue
+            }
+            $BodyLeftName = Get-NormalizedVariableUserPath -UserPath $BodyAssignment.Left.VariablePath.UserPath
+            if ($BodyLeftName -ine 'BridgeElapsedSeconds') {
+                continue
+            }
+            $RightText = $BodyAssignment.Right.Extent.Text
+            if (
+                $RightText -match '(?i)Get-Date' -and
+                $RightText -match '(?i)\$BridgeStartedAt' -and
+                $RightText -match '(?i)\.TotalSeconds'
+            ) {
+                $ElapsedAssignmentProven = $true
+            }
+        }
+        if (-not $ElapsedAssignmentProven) {
+            continue
+        }
+
+        $SleepSeconds = $null
+        $SleepMatch = [regex]::Match(
+            $BodyText,
+            '(?i)Start-Sleep\s+-Seconds\s+([0-9]+)'
+        )
+        if ($SleepMatch.Success) {
+            $SleepSeconds = [int]$SleepMatch.Groups[1].Value
+        }
+        if ($null -eq $SleepSeconds -or $SleepSeconds -lt 1 -or $SleepSeconds -gt 60) {
+            continue
+        }
+
+        $HeartbeatOrProgressProven = $true
+        break
+    }
+}
+
+$ChildExitCodeProven = $ChildProcessAssigned -and $ChildExitCodeAssigned
+$FailFastProven = $false
+if ($ChildExitCodeProven) {
+    $IfAsts = $Ast.FindAll({
+        param($Node)
+        $Node -is [System.Management.Automation.Language.IfStatementAst]
+    }, $true)
+    foreach ($IfAst in $IfAsts) {
+        $IfText = $IfAst.Extent.Text
+        $ThrowAsts = @($IfAst.FindAll({
+            param($Node)
+            $Node -is [System.Management.Automation.Language.ThrowStatementAst]
+        }, $true))
+        if (
+            $IfText -match '(?is)^\s*if\s*\(\s*\$BridgeChildExitCode\s*-ne\s*0\s*\)' -and
+            $ThrowAsts.Count -gt 0
+        ) {
+            $FailFastProven = $true
+            break
+        }
     }
 }
 
