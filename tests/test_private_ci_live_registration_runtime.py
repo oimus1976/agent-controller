@@ -701,6 +701,186 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
                 POST_REGISTRATION_READBACK_MAX_ELAPSED_SECONDS,
             )
 
+    def test_post_registration_deadline_is_rechecked_after_snapshot_processing(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding = self.binding_for(temporary_directory)
+            root = Path(binding.runner_root)
+            root.mkdir(parents=True)
+            (root / ".runner").write_text(
+                json.dumps(
+                    {
+                        "AgentName": binding.runner_name,
+                        "WorkFolder": binding.work_folder,
+                        "Ephemeral": True,
+                        "DisableUpdate": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            now = [0.0]
+            gh_calls = []
+
+            def clock():
+                return now[0]
+
+            def command_runner(*command, **kwargs):
+                gh_calls.append(command)
+                payload = {
+                    "total_count": 1,
+                    "runners": [
+                        {
+                            "id": 21,
+                            "name": binding.runner_name,
+                            "status": "offline",
+                            "busy": False,
+                            "labels": [{"name": binding.runner_label}],
+                        }
+                    ],
+                }
+                if len(gh_calls) == 2:
+                    now[0] = 2.1
+                return completed(command, stdout=json.dumps(payload))
+
+            runtime = WindowsEphemeralRegistrationRuntime(
+                binding,
+                command_runner=command_runner,
+                monotonic_clock=clock,
+                sleeper=lambda seconds: None,
+            )
+            with mock.patch(
+                "agent_controller.private_ci_live_registration_runtime."
+                "POST_REGISTRATION_READBACK_MAX_ELAPSED_SECONDS",
+                2.0,
+            ):
+                with self.assertRaises(RunnerReadbackFailure) as raised:
+                    runtime.read_runners(binding.repository)
+
+            self.assertEqual(
+                raised.exception.reason_code,
+                "RUNNER_READBACK_TIME_BUDGET_EXHAUSTED",
+            )
+            self.assertEqual(runtime.last_readback_attempts, 1)
+            self.assertEqual(len(gh_calls), 2)
+
+    def test_post_registration_deadline_is_rechecked_after_local_acceptance_read(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding = self.binding_for(temporary_directory)
+            root = Path(binding.runner_root)
+            root.mkdir(parents=True)
+            (root / ".runner").write_text(
+                json.dumps(
+                    {
+                        "AgentName": binding.runner_name,
+                        "WorkFolder": binding.work_folder,
+                        "Ephemeral": True,
+                        "DisableUpdate": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            now = [0.0]
+
+            def clock():
+                return now[0]
+
+            def command_runner(*command, **kwargs):
+                return completed(
+                    command,
+                    stdout=json.dumps(
+                        {
+                            "total_count": 1,
+                            "runners": [
+                                {
+                                    "id": 21,
+                                    "name": binding.runner_name,
+                                    "status": "offline",
+                                    "busy": False,
+                                    "labels": [{"name": binding.runner_label}],
+                                }
+                            ],
+                        }
+                    ),
+                )
+
+            runtime = WindowsEphemeralRegistrationRuntime(
+                binding,
+                command_runner=command_runner,
+                monotonic_clock=clock,
+                sleeper=lambda seconds: None,
+            )
+            original_local_read = runtime._local_runner_settings
+            local_reads = [0]
+
+            def local_read():
+                local_reads[0] += 1
+                result = original_local_read()
+                if local_reads[0] == 2:
+                    now[0] = 2.1
+                return result
+
+            with (
+                mock.patch.object(runtime, "_local_runner_settings", side_effect=local_read),
+                mock.patch(
+                    "agent_controller.private_ci_live_registration_runtime."
+                    "POST_REGISTRATION_READBACK_MAX_ELAPSED_SECONDS",
+                    2.0,
+                ),
+            ):
+                with self.assertRaises(RunnerReadbackFailure) as raised:
+                    runtime.read_runners(binding.repository)
+
+            self.assertEqual(
+                raised.exception.reason_code,
+                "RUNNER_READBACK_TIME_BUDGET_EXHAUSTED",
+            )
+            self.assertEqual(runtime.last_readback_attempts, 1)
+            self.assertEqual(local_reads[0], 2)
+
+    def test_post_registration_attempt_not_counted_before_first_request_launch(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding = self.binding_for(temporary_directory)
+            root = Path(binding.runner_root)
+            root.mkdir(parents=True)
+            (root / ".runner").write_text(
+                json.dumps(
+                    {
+                        "AgentName": binding.runner_name,
+                        "WorkFolder": binding.work_folder,
+                        "Ephemeral": True,
+                        "DisableUpdate": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            clock_values = iter((0.0, 0.0, 16.0))
+            command_calls = []
+
+            def clock():
+                return next(clock_values)
+
+            def command_runner(*command, **kwargs):
+                command_calls.append(command)
+                return completed(
+                    command,
+                    stdout=json.dumps({"total_count": 0, "runners": []}),
+                )
+
+            runtime = WindowsEphemeralRegistrationRuntime(
+                binding,
+                command_runner=command_runner,
+                monotonic_clock=clock,
+                sleeper=lambda seconds: None,
+            )
+            with self.assertRaises(RunnerReadbackFailure) as raised:
+                runtime.read_runners(binding.repository)
+
+            self.assertEqual(
+                raised.exception.reason_code,
+                "RUNNER_READBACK_TIME_BUDGET_EXHAUSTED",
+            )
+            self.assertEqual(runtime.last_readback_attempts, 0)
+            self.assertEqual(command_calls, [])
+
     def test_post_registration_stable_zero_exhausts_visibility_bound(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             binding = self.binding_for(temporary_directory)
