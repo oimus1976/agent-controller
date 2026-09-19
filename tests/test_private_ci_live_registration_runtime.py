@@ -570,6 +570,130 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             self.assertEqual(runtime.last_readback_attempts, 2)
             self.assertEqual(len(gh_calls), 4)
 
+    def test_post_registration_returns_only_exact_eligible_runner(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding = self.binding_for(temporary_directory)
+            root = Path(binding.runner_root)
+            root.mkdir(parents=True)
+            (root / ".runner").write_text(
+                json.dumps(
+                    {
+                        "AgentName": binding.runner_name,
+                        "WorkFolder": binding.work_folder,
+                        "Ephemeral": True,
+                        "DisableUpdate": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def command_runner(*command, **kwargs):
+                return completed(
+                    command,
+                    stdout=json.dumps(
+                        {
+                            "total_count": 2,
+                            "runners": [
+                                {
+                                    "id": 99,
+                                    "name": "unrelated",
+                                    "status": "online",
+                                    "busy": True,
+                                    "labels": [{"name": "other-label"}],
+                                },
+                                {
+                                    "id": 21,
+                                    "name": binding.runner_name,
+                                    "status": "offline",
+                                    "busy": False,
+                                    "labels": [{"name": binding.runner_label}],
+                                },
+                            ],
+                        }
+                    ),
+                )
+
+            runtime = WindowsEphemeralRegistrationRuntime(
+                binding,
+                command_runner=command_runner,
+                sleeper=lambda seconds: None,
+            )
+            runners = runtime.read_runners(binding.repository)
+
+            self.assertEqual(len(runners), 1)
+            self.assertEqual(runners[0].runner_id, 21)
+            self.assertEqual(runners[0].name, binding.runner_name)
+
+    def test_post_registration_deadline_is_rechecked_after_readback_construction(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding = self.binding_for(temporary_directory)
+            root = Path(binding.runner_root)
+            root.mkdir(parents=True)
+            (root / ".runner").write_text(
+                json.dumps(
+                    {
+                        "AgentName": binding.runner_name,
+                        "WorkFolder": binding.work_folder,
+                        "Ephemeral": True,
+                        "DisableUpdate": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            now = [0.0]
+
+            def clock():
+                return now[0]
+
+            def command_runner(*command, **kwargs):
+                return completed(
+                    command,
+                    stdout=json.dumps(
+                        {
+                            "total_count": 1,
+                            "runners": [
+                                {
+                                    "id": 21,
+                                    "name": binding.runner_name,
+                                    "status": "offline",
+                                    "busy": False,
+                                    "labels": [{"name": binding.runner_label}],
+                                }
+                            ],
+                        }
+                    ),
+                )
+
+            runtime = WindowsEphemeralRegistrationRuntime(
+                binding,
+                command_runner=command_runner,
+                monotonic_clock=clock,
+                sleeper=lambda seconds: None,
+            )
+            original_convert = runtime._runner_readbacks
+
+            def convert(items, observed_binding):
+                result = original_convert(items, observed_binding)
+                now[0] = 2.1
+                return result
+
+            with (
+                mock.patch.object(runtime, "_runner_readbacks", side_effect=convert),
+                mock.patch(
+                    "agent_controller.private_ci_live_registration_runtime."
+                    "POST_REGISTRATION_READBACK_MAX_ELAPSED_SECONDS",
+                    2.0,
+                ),
+            ):
+                with self.assertRaises(RunnerReadbackFailure) as raised:
+                    runtime.read_runners(binding.repository)
+
+            self.assertEqual(
+                raised.exception.reason_code,
+                "RUNNER_READBACK_TIME_BUDGET_EXHAUSTED",
+            )
+            self.assertEqual(runtime.last_readback_attempts, 1)
+
     def test_post_registration_sweep_instability_exhausts_bounded_attempts(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             binding = self.binding_for(temporary_directory)
