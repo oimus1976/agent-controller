@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import unittest
 import zipfile
+from types import SimpleNamespace
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
@@ -19,7 +20,9 @@ from agent_controller.private_ci_live_registration_runtime import (
     POST_REGISTRATION_READBACK_MAX_ATTEMPTS,
     POST_REGISTRATION_READBACK_MAX_DELAY_SECONDS,
     POST_REGISTRATION_READBACK_MAX_ELAPSED_SECONDS,
+    RESULT_SCHEMA,
     WindowsEphemeralRegistrationRuntime,
+    result_payload,
 )
 
 
@@ -60,6 +63,41 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             frozen_live_registration_binding(),
             runner_root=str(Path(root) / "generation" / "runner"),
         )
+
+    def test_result_payload_records_readback_attempts_and_v2_schema(self):
+        binding = frozen_live_registration_binding()
+        plan = SimpleNamespace(binding=binding)
+        result = SimpleNamespace(
+            candidate_sha256="c" * 64,
+            status=SimpleNamespace(value="REGISTERED"),
+            reason_codes=(),
+            child_exit_code=0,
+            runner_id=21,
+            stdout="",
+            stderr="",
+        )
+
+        payload = result_payload(
+            plan=plan,
+            plan_sha256_value="p" * 64,
+            result=result,
+            runner_readback_attempts=2,
+        )
+
+        self.assertEqual(
+            RESULT_SCHEMA,
+            "agent-controller.private-ci-live-registration-result.v2",
+        )
+        self.assertEqual(payload["schema"], RESULT_SCHEMA)
+        self.assertEqual(payload["runner_readback_attempts"], 2)
+
+        with self.assertRaisesRegex(ValueError, "readback attempts"):
+            result_payload(
+                plan=plan,
+                plan_sha256_value="p" * 64,
+                result=result,
+                runner_readback_attempts=POST_REGISTRATION_READBACK_MAX_ATTEMPTS + 1,
+            )
 
     def test_prepare_runner_uses_fresh_root_pinned_package_and_zero_eligible_precheck(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
