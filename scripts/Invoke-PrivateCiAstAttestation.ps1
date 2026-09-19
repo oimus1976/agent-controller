@@ -287,6 +287,14 @@ foreach ($CommandAst in $CommandAsts) {
             $ObservedEffects.Add('ACL_MUTATION')
         }
     }
+    elseif ($LowerName -eq 'invoke-cimmethod') {
+        $CommandText = $CommandAst.Extent.Text
+        if ($CommandText -notmatch '(?i)-MethodName\s+GetOwner\b') {
+            if (-not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+                $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+            }
+        }
+    }
     elseif ($LowerName -in @('invoke-restmethod', 'invoke-webrequest', 'curl', 'wget')) {
         if (-not $ObservedEffects.Contains('HTTP_API_ACCESS')) {
             $ObservedEffects.Add('HTTP_API_ACCESS')
