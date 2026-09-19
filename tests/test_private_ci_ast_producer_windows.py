@@ -300,6 +300,23 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
                 report, _ = self.run_producer(self.bound_candidate(candidate_body))
                 self.assertFalse(report["heartbeat_or_progress_proven"])
 
+
+    def test_exact_workflow_dispatch_read_shape_is_classified_read_only(self):
+        command = (
+            "gh.exe api "
+            "-H 'X-GitHub-Api-Version: 2026-03-10' "
+            "'repos/oimus1976/example/actions/workflows/pilot.yml/runs?event=workflow_dispatch&branch=main&per_page=100'"
+        )
+        report, _ = self.run_producer(self.bound_candidate(command))
+        self.assertIn(
+            "HTTP_API_ACCESS",
+            report["observed_effect_families"],
+        )
+        self.assertNotIn(
+            "DYNAMIC_OR_UNKNOWN_COMMAND",
+            report["observed_effect_families"],
+        )
+
     def test_exact_workflow_dispatch_shape_is_classified(self):
         command = (
             "gh.exe api --method POST "
@@ -320,6 +337,15 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
     def test_other_gh_api_shapes_remain_unknown(self):
         cases = (
             "gh.exe api repos/oimus1976/example",
+            (
+                "gh.exe api "
+                "'repos/oimus1976/example/actions/workflows/pilot.yml/runs?event=workflow_dispatch&branch=main&per_page=100'"
+            ),
+            (
+                "gh.exe api "
+                "-H 'X-GitHub-Api-Version: 2026-03-10' "
+                "'repos/oimus1976/example/actions/workflows/pilot.yml/runs?event=workflow_dispatch&branch=other&per_page=100'"
+            ),
             (
                 "gh.exe api --method POST "
                 "'repos/oimus1976/example/actions/workflows/pilot.yml/dispatches'"
