@@ -13,6 +13,7 @@ from agent_controller.private_ci_live_registration import (
     FROZEN_RUNNER_NAME,
     FROZEN_RUNNER_ROOT,
     FROZEN_TARGET_SHA,
+    FROZEN_WORKFLOW_PATH,
     FROZEN_WORKFLOW_SHA,
 )
 from agent_controller.private_ci_phase0_collector import (
@@ -70,6 +71,20 @@ class FakeRunner:
         if command[:3] == (
             "gh.exe",
             "api",
+            (
+                f"repos/{FROZEN_REPOSITORY}/contents/{FROZEN_WORKFLOW_PATH}"
+                f"?ref={FROZEN_WORKFLOW_SHA}"
+            ),
+        ):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps({"type": "file", "path": FROZEN_WORKFLOW_PATH}),
+                "",
+            )
+        if command[:3] == (
+            "gh.exe",
+            "api",
             f"repos/{FROZEN_REPOSITORY}/actions/runners?per_page=100",
         ):
             return subprocess.CompletedProcess(
@@ -95,6 +110,7 @@ class Phase0CollectorTests(unittest.TestCase):
         self.assertEqual(evidence.repository, FROZEN_REPOSITORY)
         self.assertEqual(evidence.pull_request_head_sha, FROZEN_TARGET_SHA)
         self.assertEqual(evidence.workflow_sha, FROZEN_WORKFLOW_SHA)
+        self.assertEqual(evidence.workflow_path, FROZEN_WORKFLOW_PATH)
         self.assertEqual(evidence.runner_name, FROZEN_RUNNER_NAME)
         self.assertEqual(evidence.runner_label, FROZEN_RUNNER_LABEL)
         self.assertEqual(evidence.environment_generation, FROZEN_ENVIRONMENT_GENERATION)
