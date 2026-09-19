@@ -306,7 +306,7 @@ foreach ($CommandAst in $CommandAsts) {
             $CommandText -match '(?i)^\s*gh\.exe\s+api\b' -and
             $CommandText -notmatch '(?i)--method\b' -and
             $CommandText -match '(?i)-H\s+[''"]X-GitHub-Api-Version:\s*2026-03-10[''"]' -and
-            $CommandText -match '(?i)repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/workflows/[A-Za-z0-9_.-]+\.ya?ml/runs\?event=workflow_dispatch&branch=main&status=(queued|in_progress)&per_page=100'
+            $CommandText -match '(?i)repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/workflows/[A-Za-z0-9_.-]+\.ya?ml/runs\?event=workflow_dispatch&branch=main&status=(queued|in_progress|requested|waiting|pending)&per_page=100'
         )
         $IsRunnerInventoryRead = (
             $CommandText -match '(?i)^\s*gh\.exe\s+api\b' -and
