@@ -56,6 +56,7 @@ def phase4_evidence():
         target_probe_result_sha256="7" * 64,
         target_probe_stdout_sha256="8" * 64,
         target_probe_stderr_sha256="9" * 64,
+        runner_generation_snapshot_sha256="a" * 64,
         status=PHASE4_RESULT_STATUS,
         completed_at="2026-09-19T13:00:00+00:00",
     )
