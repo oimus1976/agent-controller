@@ -53,9 +53,10 @@ RESULT_SCHEMA = "agent-controller.private-ci-live-registration-result.v2"
 
 POST_REGISTRATION_READBACK_MAX_ATTEMPTS = 6
 POST_REGISTRATION_READBACK_DELAY_SECONDS = 1.0
-POST_REGISTRATION_READBACK_MAX_WAIT_SECONDS = (
+POST_REGISTRATION_READBACK_MAX_DELAY_SECONDS = (
     POST_REGISTRATION_READBACK_MAX_ATTEMPTS - 1
 ) * POST_REGISTRATION_READBACK_DELAY_SECONDS
+POST_REGISTRATION_READBACK_MAX_ELAPSED_SECONDS = 15.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +190,7 @@ def validate_frozen_plan(
 Downloader = Callable[[str, Path], None]
 CommandRunner = Callable[..., subprocess.CompletedProcess[bytes | str]]
 Sleeper = Callable[[float], None]
+MonotonicClock = Callable[[], float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,12 +307,14 @@ class WindowsEphemeralRegistrationRuntime:
         command_runner: CommandRunner = _default_command_runner,
         downloader: Downloader = _default_downloader,
         sleeper: Sleeper = time.sleep,
+        monotonic_clock: MonotonicClock = time.monotonic,
     ) -> None:
         self.binding = binding
         self.gh_executable = gh_executable
         self.command_runner = command_runner
         self.downloader = downloader
         self.sleeper = sleeper
+        self.monotonic_clock = monotonic_clock
         self._last_readback_attempts = 0
 
     @property
@@ -327,12 +331,14 @@ class WindowsEphemeralRegistrationRuntime:
         cwd: Optional[Path] = None,
         env=None,
         redact_secrets: tuple[str, ...] = (),
+        timeout: Optional[float] = None,
     ) -> NativeTextResult:
         completed = self.command_runner(
             *command,
             cwd=None if cwd is None else str(cwd),
             env=env,
             capture_output=True,
+            timeout=timeout,
         )
         raw_stdout, stdout_secret_redacted = _redact_native_stream(
             completed.stdout,
@@ -462,12 +468,34 @@ $RunnerTasks = @(
         if payload.get("runner_task_count") != 0:
             raise RuntimeError("runner task drift detected")
 
-    def _github_runner_items(self, repository: str) -> tuple[dict[str, object], ...]:
+    def _github_runner_items(
+        self,
+        repository: str,
+        *,
+        deadline: Optional[float] = None,
+    ) -> tuple[dict[str, object], ...]:
         base = f"repos/{repository}/actions/runners?per_page=100"
 
         def fetch_page(page: int) -> object:
             endpoint = base if page == 1 else f"{base}&page={page}"
-            completed = self._run_text(self.gh_executable, "api", endpoint)
+            timeout: Optional[float] = None
+            if deadline is not None:
+                timeout = deadline - self.monotonic_clock()
+                if timeout <= 0:
+                    raise RunnerReadbackFailure(
+                        "RUNNER_READBACK_TIME_BUDGET_EXHAUSTED"
+                    )
+            try:
+                completed = self._run_text(
+                    self.gh_executable,
+                    "api",
+                    endpoint,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise RunnerReadbackFailure(
+                    "RUNNER_READBACK_TIME_BUDGET_EXHAUSTED"
+                ) from error
             self._require_decoded(completed, "GitHub runner readback")
             if completed.returncode != 0:
                 raise RuntimeError("GitHub runner readback failed")
@@ -718,17 +746,34 @@ $RunnerTasks = @(
             raise RuntimeError("runner readback repository mismatch")
         self._local_runner_settings()
         self._last_readback_attempts = 0
+        deadline = (
+            self.monotonic_clock()
+            + POST_REGISTRATION_READBACK_MAX_ELAPSED_SECONDS
+        )
+
+        def sleep_before_retry() -> None:
+            remaining = deadline - self.monotonic_clock()
+            if remaining <= 0:
+                raise RunnerReadbackFailure(
+                    "RUNNER_READBACK_TIME_BUDGET_EXHAUSTED"
+                )
+            self.sleeper(
+                min(POST_REGISTRATION_READBACK_DELAY_SECONDS, remaining)
+            )
 
         for attempt in range(1, POST_REGISTRATION_READBACK_MAX_ATTEMPTS + 1):
             self._last_readback_attempts = attempt
             try:
-                items = self._github_runner_items(repository)
+                items = self._github_runner_items(
+                    repository,
+                    deadline=deadline,
+                )
             except RunnerSetChangedAcrossSweeps:
                 if attempt == POST_REGISTRATION_READBACK_MAX_ATTEMPTS:
                     raise RunnerReadbackFailure(
                         "RUNNER_READBACK_STABILIZATION_EXHAUSTED"
                     )
-                self.sleeper(POST_REGISTRATION_READBACK_DELAY_SECONDS)
+                sleep_before_retry()
                 continue
 
             if self._post_registration_items_are_exact(items):
@@ -738,7 +783,7 @@ $RunnerTasks = @(
                 raise RunnerReadbackFailure(
                     "RUNNER_VISIBILITY_STABILIZATION_EXHAUSTED"
                 )
-            self.sleeper(POST_REGISTRATION_READBACK_DELAY_SECONDS)
+            sleep_before_retry()
 
         raise AssertionError("post-registration readback loop escaped safety bound")
 
