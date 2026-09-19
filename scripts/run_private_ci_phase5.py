@@ -64,6 +64,9 @@ from agent_controller.private_ci_phase5_runtime import (
     validate_frozen_phase5_plan,
 )
 from agent_controller.private_ci_runner_readback import read_all_runner_items
+from agent_controller.private_ci_runner_tree_snapshot import (
+    runner_generation_snapshot_sha256,
+)
 
 
 PHASE4_RESULT_FILENAME = "issue225-phase4-result.json"
@@ -727,6 +730,18 @@ def _write_attempt_transcript(
     _write_exclusive(path, "\n".join(lines).encode("utf-8"))
 
 
+
+def _require_phase4_generation_snapshot_exact(phase4) -> str:
+    runner_root = Path(phase4.binding.runner_root)
+    observed = runner_generation_snapshot_sha256(
+        generation_root=runner_root.parent,
+        runner_root=runner_root,
+        work_folder=phase4.binding.work_folder,
+    )
+    if observed != phase4.runner_generation_snapshot_sha256:
+        raise RuntimeError("Phase 5 runner generation snapshot drift")
+    return observed
+
 def command_plan() -> int:
     phase4_path = authoritative_path(PHASE4_RESULT_FILENAME)
     candidate_path = authoritative_path(PHASE5_CANDIDATE_FILENAME)
@@ -740,6 +755,7 @@ def command_plan() -> int:
     phase4_raw = phase4_path.read_bytes()
     phase4 = parse_phase4_result_bytes(phase4_raw)
     phase4_sha = hashlib.sha256(phase4_raw).hexdigest()
+    _require_phase4_generation_snapshot_exact(phase4)
     _require_non_elevated_broker(phase4.binding)
     _require_controller_source_exact(phase4.binding)
     _require_local_runner_exact(phase4.binding)
@@ -825,6 +841,7 @@ def command_apply(expected_plan_sha256: str) -> int:
     _require_controller_source_exact(plan.binding)
     _require_local_runner_exact(plan.binding)
     _require_remote_binding_exact(plan.binding)
+    _require_phase4_generation_snapshot_exact(phase4)
     approval_raw, approval_sha = _require_phase5_approval(
         plan_sha,
         plan.binding,
@@ -897,6 +914,7 @@ def command_apply(expected_plan_sha256: str) -> int:
         _require_controller_source_exact(plan.binding)
         _require_local_runner_exact(plan.binding)
         _require_remote_binding_exact(plan.binding)
+        _require_phase4_generation_snapshot_exact(phase4)
 
         completed = _completed(
             "powershell.exe",
