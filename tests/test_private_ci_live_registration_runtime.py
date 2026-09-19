@@ -99,6 +99,14 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
                 runner_readback_attempts=POST_REGISTRATION_READBACK_MAX_ATTEMPTS + 1,
             )
 
+        with self.assertRaisesRegex(ValueError, "requires readback attempt"):
+            result_payload(
+                plan=plan,
+                plan_sha256_value="p" * 64,
+                result=result,
+                runner_readback_attempts=0,
+            )
+
     def test_prepare_runner_uses_fresh_root_pinned_package_and_zero_eligible_precheck(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             binding = self.binding_for(temporary_directory)
