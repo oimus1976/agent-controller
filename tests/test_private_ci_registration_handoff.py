@@ -1,8 +1,6 @@
 import hashlib
 import json
 import unittest
-from dataclasses import replace
-from datetime import datetime, timezone
 
 from agent_controller.operator_step_gate import operator_step_spec_sha256
 from agent_controller.private_ci_consumption_marker import (
@@ -44,7 +42,6 @@ from agent_controller.private_ci_registration_handoff import (
 )
 
 
-NOW = datetime(2026, 9, 19, 12, 30, tzinfo=timezone.utc)
 GENERATION = "ac-pilot-0123456789abcdef"
 RUNNER_NAME = "ac-ci-0123456789abcdef"
 REPOSITORY = "oimus1976/example-private"
@@ -224,7 +221,6 @@ class PrivateCiRegistrationHandoffBuilderTests(unittest.TestCase):
             registration_consumption_bytes=artifacts[3],
             registration_result_bytes=artifacts[4],
             local_runner_settings_bytes=artifacts[5],
-            now=lambda: NOW,
         )
 
         self.assertEqual(handoff.registration_status, "REGISTERED")
@@ -250,8 +246,7 @@ class PrivateCiRegistrationHandoffBuilderTests(unittest.TestCase):
                 registration_consumption_bytes=artifacts[3],
                 registration_result_bytes=artifacts[4],
                 local_runner_settings_bytes=artifacts[5],
-                now=lambda: NOW,
-            )
+                )
 
     def test_stale_registration_approval_cannot_create_handoff(self):
         raw_phase0 = phase0_bytes()
@@ -279,8 +274,7 @@ class PrivateCiRegistrationHandoffBuilderTests(unittest.TestCase):
                     approval_sha,
                 ),
                 local_runner_settings_bytes=local_runner_bytes(),
-                now=lambda: NOW,
-            )
+                )
 
     def test_result_binding_mismatch_cannot_create_handoff(self):
         artifacts = list(self.artifacts())
@@ -299,8 +293,7 @@ class PrivateCiRegistrationHandoffBuilderTests(unittest.TestCase):
                 registration_consumption_bytes=artifacts[3],
                 registration_result_bytes=artifacts[4],
                 local_runner_settings_bytes=artifacts[5],
-                now=lambda: NOW,
-            )
+                )
 
 
 if __name__ == "__main__":
