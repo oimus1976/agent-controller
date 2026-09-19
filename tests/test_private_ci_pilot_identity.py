@@ -17,6 +17,7 @@ from agent_controller.private_ci_pilot_identity import (
     parse_pilot_identity_freeze_bytes,
     pilot_identity_freeze_bytes,
     pilot_identity_freeze_reason_codes,
+    validate_pilot_workflow_runner_exclusivity,
 )
 
 
@@ -44,6 +45,70 @@ def valid_freeze():
 
 class PrivateCiPilotIdentityFreezeTests(unittest.TestCase):
 
+
+
+
+    def test_workflow_runner_exclusivity_accepts_only_one_static_pilot_binding(self):
+        validate_pilot_workflow_runner_exclusivity(
+            {
+                ".github/workflows/private-ci-windows-pilot.yml": (
+                    "jobs:\n"
+                    "  pilot:\n"
+                    "    runs-on: private-ci-windows-pilot\n"
+                ),
+                ".github/workflows/project-ci.yml": (
+                    "jobs:\n"
+                    "  test:\n"
+                    "    runs-on: ubuntu-latest\n"
+                    "    steps:\n"
+                    "      - run: echo 'runs-on: private-ci-windows-pilot'\n"
+                ),
+            },
+            trusted_workflow_path=(
+                ".github/workflows/private-ci-windows-pilot.yml"
+            ),
+        )
+
+    def test_workflow_runner_exclusivity_rejects_competing_or_dynamic_runner(self):
+        trusted = (
+            "jobs:\n"
+            "  pilot:\n"
+            "    runs-on: private-ci-windows-pilot\n"
+        )
+        bad_sources = (
+            {
+                ".github/workflows/private-ci-windows-pilot.yml": trusted,
+                ".github/workflows/other.yml": (
+                    "jobs:\n"
+                    "  other:\n"
+                    "    runs-on: private-ci-windows-pilot\n"
+                ),
+            },
+            {
+                ".github/workflows/private-ci-windows-pilot.yml": trusted,
+                ".github/workflows/other.yml": (
+                    "jobs:\n"
+                    "  other:\n"
+                    "    runs-on: ${{ matrix.runner }}\n"
+                ),
+            },
+            {
+                ".github/workflows/private-ci-windows-pilot.yml": (
+                    "jobs:\n"
+                    "  pilot:\n"
+                    "    runs-on: ubuntu-latest\n"
+                ),
+            },
+        )
+        for sources in bad_sources:
+            with self.subTest(sources=sources):
+                with self.assertRaises(ValueError):
+                    validate_pilot_workflow_runner_exclusivity(
+                        sources,
+                        trusted_workflow_path=(
+                            ".github/workflows/private-ci-windows-pilot.yml"
+                        ),
+                    )
 
     def test_fresh_builder_derives_runner_and_generation_from_nonce(self):
         freeze = build_fresh_pilot_identity_freeze(
