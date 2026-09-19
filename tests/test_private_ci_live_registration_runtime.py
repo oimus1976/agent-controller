@@ -331,6 +331,66 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             self.assertTrue(execution.output_decoding_uncertain)
             self.assertEqual(execution.stdout, "\\x81")
 
+    def test_native_output_redacts_secret_bytes_before_multibyte_decode(self):
+        binding = frozen_live_registration_binding()
+        secret = "Asecret-token"
+
+        def command_runner(*command, **kwargs):
+            return completed(
+                command,
+                stdout=b"\x81" + secret.encode("ascii") + b"\r\n",
+                stderr=b"",
+            )
+
+        runtime = WindowsEphemeralRegistrationRuntime(
+            binding,
+            command_runner=command_runner,
+        )
+        with mock.patch(
+            "agent_controller.private_ci_live_registration_runtime.locale.getpreferredencoding",
+            return_value="cp932",
+        ):
+            result = runtime._run_text(
+                "fake-native.exe",
+                redact_secrets=(secret,),
+            )
+
+        self.assertTrue(result.secret_output_redacted)
+        self.assertNotIn(secret, result.stdout)
+        self.assertNotIn("secret-token", result.stdout)
+        self.assertIn("***", result.stdout)
+
+    def test_registration_propagates_predecode_secret_redaction_as_leak_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding = self.binding_for(temporary_directory)
+            root = Path(binding.runner_root)
+            root.mkdir(parents=True)
+            (root / "config.cmd").write_text("@echo off\n", encoding="utf-8")
+
+            def command_runner(*command, **kwargs):
+                self.assertEqual(command[0], "cmd.exe")
+                return completed(
+                    command,
+                    returncode=0,
+                    stdout=b"\x81" + TOKEN.encode("ascii"),
+                    stderr=b"",
+                )
+
+            runtime = WindowsEphemeralRegistrationRuntime(
+                binding,
+                command_runner=command_runner,
+            )
+            with mock.patch(
+                "agent_controller.private_ci_live_registration_runtime.locale.getpreferredencoding",
+                return_value="cp932",
+            ):
+                execution = runtime.run_registration(binding, TOKEN)
+
+            self.assertEqual(execution.exit_code, 0)
+            self.assertTrue(execution.secret_output_redacted)
+            self.assertNotIn(TOKEN, execution.stdout)
+            self.assertIn("***", execution.stdout)
+
     def test_credential_handoff_scan_detects_plaintext_token(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             binding = self.binding_for(temporary_directory)
