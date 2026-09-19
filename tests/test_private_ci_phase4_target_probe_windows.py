@@ -17,7 +17,7 @@ class PrivateCiPhase4TargetProbeWindowsTests(unittest.TestCase):
 $Tokens = $null
 $Errors = $null
 [System.Management.Automation.Language.Parser]::ParseFile(
-    $args[0],
+    $env:PHASE4_PROBE_PATH,
     [ref]$Tokens,
     [ref]$Errors
 ) | Out-Null
@@ -27,6 +27,8 @@ if ($Errors.Count -ne 0) {
 }
 exit 0
 """.strip()
+        environment = os.environ.copy()
+        environment["PHASE4_PROBE_PATH"] = str(self.probe)
         completed = subprocess.run(
             [
                 "powershell.exe",
@@ -35,9 +37,9 @@ exit 0
                 "Bypass",
                 "-Command",
                 script,
-                str(self.probe),
             ],
             check=False,
+            env=environment,
             capture_output=True,
             text=True,
             encoding="utf-8",
