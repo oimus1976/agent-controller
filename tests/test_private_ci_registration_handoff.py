@@ -40,6 +40,9 @@ from agent_controller.private_ci_registration_handoff import (
     HUMAN_AUTHORIZATION_METHOD,
     build_registration_handoff_evidence,
 )
+from agent_controller.private_ci_runner_tree_snapshot import (
+    RUNNER_GENERATION_SNAPSHOT_SCHEMA,
+)
 
 
 GENERATION = "ac-pilot-0123456789abcdef"
@@ -185,6 +188,32 @@ def local_runner_bytes(*, runner_id=23, runner_name=RUNNER_NAME):
     ).encode("utf-8")
 
 
+def runner_snapshot_bytes(*, work_folder=PRIVATE_CI_WORK_FOLDER):
+    payload = {
+        "schema": RUNNER_GENERATION_SNAPSHOT_SCHEMA,
+        "runner_directory": "runner",
+        "work_folder": work_folder,
+        "entries": [
+            {"kind": "directory", "path": "runner"},
+            {
+                "kind": "file",
+                "path": "runner/.runner",
+                "sha256": "9" * 64,
+                "size": 1,
+            },
+        ],
+    }
+    return (
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
 class PrivateCiRegistrationHandoffBuilderTests(unittest.TestCase):
     def artifacts(self):
         raw_phase0 = phase0_bytes()
@@ -203,6 +232,7 @@ class PrivateCiRegistrationHandoffBuilderTests(unittest.TestCase):
             approval_sha,
         )
         raw_runner = local_runner_bytes()
+        raw_snapshot = runner_snapshot_bytes()
         return (
             raw_phase0,
             raw_plan,
@@ -210,6 +240,7 @@ class PrivateCiRegistrationHandoffBuilderTests(unittest.TestCase):
             raw_consumption,
             raw_result,
             raw_runner,
+            raw_snapshot,
         )
 
     def test_exact_artifact_chain_builds_secret_free_handoff(self):
@@ -221,6 +252,7 @@ class PrivateCiRegistrationHandoffBuilderTests(unittest.TestCase):
             registration_consumption_bytes=artifacts[3],
             registration_result_bytes=artifacts[4],
             local_runner_settings_bytes=artifacts[5],
+            runner_generation_snapshot_bytes=artifacts[6],
         )
 
         self.assertEqual(handoff.registration_status, "REGISTERED")
@@ -234,6 +266,25 @@ class PrivateCiRegistrationHandoffBuilderTests(unittest.TestCase):
             handoff.registration_result_sha256,
             hashlib.sha256(artifacts[4]).hexdigest(),
         )
+        self.assertEqual(
+            handoff.runner_generation_snapshot_sha256,
+            hashlib.sha256(artifacts[6]).hexdigest(),
+        )
+
+
+    def test_snapshot_work_folder_mismatch_cannot_create_handoff(self):
+        artifacts = list(self.artifacts())
+        artifacts[6] = runner_snapshot_bytes(work_folder="other-work")
+        with self.assertRaisesRegex(ValueError, "snapshot work folder mismatch"):
+            build_registration_handoff_evidence(
+                phase0_evidence_bytes=artifacts[0],
+                registration_plan_bytes=artifacts[1],
+                human_approval_bytes=artifacts[2],
+                registration_consumption_bytes=artifacts[3],
+                registration_result_bytes=artifacts[4],
+                local_runner_settings_bytes=artifacts[5],
+                runner_generation_snapshot_bytes=artifacts[6],
+            )
 
     def test_local_agent_id_must_match_remote_runner_id(self):
         artifacts = list(self.artifacts())
@@ -246,6 +297,7 @@ class PrivateCiRegistrationHandoffBuilderTests(unittest.TestCase):
                 registration_consumption_bytes=artifacts[3],
                 registration_result_bytes=artifacts[4],
                 local_runner_settings_bytes=artifacts[5],
+                runner_generation_snapshot_bytes=artifacts[6],
                 )
 
     def test_stale_registration_approval_cannot_create_handoff(self):
@@ -274,6 +326,7 @@ class PrivateCiRegistrationHandoffBuilderTests(unittest.TestCase):
                     approval_sha,
                 ),
                 local_runner_settings_bytes=local_runner_bytes(),
+                runner_generation_snapshot_bytes=runner_snapshot_bytes(),
                 )
 
     def test_result_binding_mismatch_cannot_create_handoff(self):
@@ -293,6 +346,7 @@ class PrivateCiRegistrationHandoffBuilderTests(unittest.TestCase):
                 registration_consumption_bytes=artifacts[3],
                 registration_result_bytes=artifacts[4],
                 local_runner_settings_bytes=artifacts[5],
+                runner_generation_snapshot_bytes=artifacts[6],
                 )
 
 
