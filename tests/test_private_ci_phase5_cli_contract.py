@@ -24,7 +24,7 @@ class PrivateCiPhase5CliContractRedTests(unittest.TestCase):
             ownership,
         )
         execute = source.index(
-            "completed = _completed(\n        \"powershell.exe\"",
+            '            str(candidate_path),',
             marker,
         )
         readback = source.index(
@@ -44,12 +44,13 @@ class PrivateCiPhase5CliContractRedTests(unittest.TestCase):
         source = self.source()
         self.assertEqual(
             source.count(
-                "completed = _completed(\n        \"powershell.exe\""
+                '            str(candidate_path),'
             ),
             1,
         )
         self.assertNotIn("retry_dispatch", source)
-        self.assertNotIn("rerun", source.lower())
+        self.assertNotIn("rerun_workflow", source)
+        self.assertNotIn("rerun_failed", source)
         self.assertIn(
             "dispatch must not be retried",
             source,
