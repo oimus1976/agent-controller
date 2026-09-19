@@ -195,7 +195,7 @@ def validate_pilot_workflow_runner_exclusivity(
 
         for value in runs_on:
             if (
-                "\${{" in value
+                "${{" in value
                 or value == PRIVATE_CI_RUNNER_LABEL
                 or _GITHUB_HOSTED_RUNNER.fullmatch(value) is None
             ):
