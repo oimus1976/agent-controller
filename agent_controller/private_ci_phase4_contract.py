@@ -25,6 +25,8 @@ class PrivateCiPilotBinding:
     repository: str
     pull_request_number: int
     target_sha: str
+    controller_main_sha: str
+    controller_tree: str
     workflow_sha: str
     workflow_path: str
     runner_id: int
@@ -106,6 +108,10 @@ def pilot_binding_reason_codes(binding: object) -> tuple[str, ...]:
         reasons.append("PILOT_BINDING_PR_NUMBER_INVALID")
     if not _full_lower_sha(binding.target_sha):
         reasons.append("PILOT_BINDING_TARGET_SHA_INVALID")
+    if not _full_lower_sha(binding.controller_main_sha):
+        reasons.append("PILOT_BINDING_CONTROLLER_MAIN_SHA_INVALID")
+    if not _windows_root_valid(binding.controller_tree):
+        reasons.append("PILOT_BINDING_CONTROLLER_TREE_INVALID")
     if not _full_lower_sha(binding.workflow_sha):
         reasons.append("PILOT_BINDING_WORKFLOW_SHA_INVALID")
     if not _workflow_path_valid(binding.workflow_path):
