@@ -300,6 +300,49 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
                 report, _ = self.run_producer(self.bound_candidate(candidate_body))
                 self.assertFalse(report["heartbeat_or_progress_proven"])
 
+    def test_exact_workflow_dispatch_shape_is_classified(self):
+        command = (
+            "gh.exe api --method POST "
+            "-H 'X-GitHub-Api-Version: 2026-03-10' "
+            "'repos/oimus1976/example/actions/workflows/pilot.yml/dispatches' "
+            "-F 'return_run_details=true' "
+            "-f 'ref=main'"
+        )
+        report, _ = self.run_producer(self.bound_candidate(command))
+        self.assertIn(
+            "WORKFLOW_DISPATCH",
+            report["observed_effect_families"],
+        )
+        self.assertNotIn(
+            "DYNAMIC_OR_UNKNOWN_COMMAND",
+            report["observed_effect_families"],
+        )
+
+    def test_other_gh_api_shapes_remain_unknown(self):
+        cases = (
+            "gh.exe api repos/oimus1976/example",
+            (
+                "gh.exe api --method POST "
+                "'repos/oimus1976/example/actions/workflows/pilot.yml/dispatches'"
+            ),
+            (
+                "gh.exe api --method POST "
+                "'repos/oimus1976/example/issues' "
+                "-F 'return_run_details=true'"
+            ),
+        )
+        for command in cases:
+            with self.subTest(command=command):
+                report, _ = self.run_producer(self.bound_candidate(command))
+                self.assertIn(
+                    "DYNAMIC_OR_UNKNOWN_COMMAND",
+                    report["observed_effect_families"],
+                )
+                self.assertNotIn(
+                    "WORKFLOW_DISPATCH",
+                    report["observed_effect_families"],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
