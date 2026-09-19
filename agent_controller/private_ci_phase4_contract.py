@@ -151,7 +151,7 @@ def pilot_binding_reason_codes(binding: object) -> tuple[str, ...]:
     return tuple(reasons)
 
 
-REGISTRATION_HANDOFF_SCHEMA = "agent-controller.private-ci-registration-handoff.v1"
+REGISTRATION_HANDOFF_SCHEMA = "agent-controller.private-ci-registration-handoff.v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +170,7 @@ class RegistrationHandoffEvidence:
     registration_consumption_sha256: str
     registration_result_sha256: str
     local_runner_settings_sha256: str
+    runner_generation_snapshot_sha256: str
     registration_status: str
 
 
@@ -221,6 +222,10 @@ def registration_handoff_reason_codes(
             "REGISTRATION_HANDOFF_LOCAL_SETTINGS_SHA256_INVALID",
             evidence.local_runner_settings_sha256,
         ),
+        (
+            "REGISTRATION_HANDOFF_RUNNER_SNAPSHOT_SHA256_INVALID",
+            evidence.runner_generation_snapshot_sha256,
+        ),
     )
     for reason, value in digest_fields:
         if not _sha256_digest(value):
@@ -244,6 +249,7 @@ def _registration_handoff_payload(
         "registration_consumption_sha256": evidence.registration_consumption_sha256,
         "registration_result_sha256": evidence.registration_result_sha256,
         "local_runner_settings_sha256": evidence.local_runner_settings_sha256,
+        "runner_generation_snapshot_sha256": evidence.runner_generation_snapshot_sha256,
         "registration_status": evidence.registration_status,
     }
 
@@ -286,6 +292,7 @@ def parse_registration_handoff_bytes(
         "registration_consumption_sha256",
         "registration_result_sha256",
         "local_runner_settings_sha256",
+        "runner_generation_snapshot_sha256",
         "registration_status",
     }
     if type(payload) is not dict or set(payload) != required:
@@ -311,6 +318,9 @@ def parse_registration_handoff_bytes(
             registration_result_sha256=payload["registration_result_sha256"],
             local_runner_settings_sha256=payload[
                 "local_runner_settings_sha256"
+            ],
+            runner_generation_snapshot_sha256=payload[
+                "runner_generation_snapshot_sha256"
             ],
             registration_status=payload["registration_status"],
         )
