@@ -22,7 +22,8 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 ### Added / changed
 
 - #216のfirst human-authorized private-CI live registrationで、runner登録child自体はexit 0かつGitHub/local runner identityも一致した一方、post-registration readbackが`UnicodeDecodeError`でfail closedした実機事象を根拠に、Windows native process output captureをbytes-firstへ変更。
-- UTF-8 strict decodeを優先し、失敗時のみWindows preferred encodingへstrict fallbackする。どちらでもdecodeできないbyte列は明示的uncertaintyとして扱い、printableなescaped formへ変換してsecret redactionを維持する。
+- UTF-8 strict decodeを優先し、失敗時のみWindows preferred encodingへstrict fallbackする。どちらでもdecodeできないbyte列は明示的uncertaintyとして扱う。
+- Ready後Codex reviewで判明したCP932 multibyte境界のtoken-redaction bypassを受け、registration tokenはnative outputのraw bytes段階でdecoderより先に検出・置換し、その検出事実を別フラグで保持して必ずFAILEDへ分類する。decode後の文字列redactionもdefense in depthとして維持する。
 - registration childのnative output decodeがuncertainでもchild exit codeを保持し、remote runner mutationが観測された場合はそのrunner idを記録したFAILED resultを返す。registrationの自動retryは行わない。
 - CP932 fallback、完全にundecodableなnative output、decode uncertainty後のobserved mutation / no-retryを回帰テストへ追加。
 
