@@ -29,6 +29,9 @@ from agent_controller.private_ci_registration_handoff import (
     build_registration_handoff_evidence,
 )
 from agent_controller.private_ci_runner_readback import read_all_runner_items
+from agent_controller.private_ci_runner_tree_snapshot import (
+    runner_generation_snapshot_bytes,
+)
 
 
 PHASE0_FILENAME = "issue216-phase0-canonical.json"
@@ -357,6 +360,13 @@ def main() -> int:
             "local runner settings",
         )
         runner_settings_raw = runner_settings_path.read_bytes()
+        runner_root = Path(plan.binding.runner_root)
+        generation_root = runner_root.parent
+        generation_snapshot_raw = runner_generation_snapshot_bytes(
+            generation_root=generation_root,
+            runner_root=runner_root,
+            work_folder=plan.binding.work_folder,
+        )
 
         evidence = build_registration_handoff_evidence(
             phase0_evidence_bytes=phase0_raw,
@@ -365,6 +375,7 @@ def main() -> int:
             registration_consumption_bytes=marker_path.read_bytes(),
             registration_result_bytes=result_raw,
             local_runner_settings_bytes=runner_settings_raw,
+            runner_generation_snapshot_bytes=generation_snapshot_raw,
         )
         _require_host_identity(evidence.binding)
         _require_controller_source_exact(evidence.binding)
