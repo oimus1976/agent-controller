@@ -15,6 +15,29 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-19 — Real Actions Runner `.runner` schema contract（Issue #223）
+
+関連: Issue #223, Issue #216, Issue #221, PR #222
+
+### Added / changed
+
+- #216の2回目のhuman-authorized live registrationで、`config.cmd`がexit 0かつ`Runner successfully added` / `Settings Saved.`を返した後、`runner_readback_attempts=0`のままgeneric `RUNNER_READBACK_FAILED`となった実機事象を根拠にlocal `.runner` validation contractを修正。
+- owner-machine read-only characterizationでActions Runner 2.337.0が生成した実ファイルを確認し、authoritative keysが`agentName` / `workFolder` / `ephemeral` / `disableUpdate`のlower camelCaseであることを確定。従来runtimeとdeterministic testsは存在しないPascalCase `AgentName` / `WorkFolder` / `Ephemeral` / `DisableUpdate`を相互に正当化していた。
+- runtime validatorを実schemaへ合わせ、wrong name / wrong work folder / non-ephemeral / disable-update missingのfail-closed invariantは維持。
+- runtime test fixturesを実schemaへ更新し、旧PascalCase fixtureが再び正当なrunner stateとして通らないregressionを追加。
+
+### Safety / authority boundary
+
+- remote runner stabilization (#221) のbounded retry / wall-clock / attempt evidence contractは変更しない。
+- consumed #216 plan/approvalの再利用やregistration retryを許可しない。次回live pilotにはremote runner id 22とlocal generationのhuman-authorized cleanup、merge後のfresh Phase 0 / plan / human approvalが必要。
+- Ready / mergeはADR #90によりhuman-finalのまま。
+
+### Validation status
+
+- このentryはIssue #223 Draft実装の一部。exact-head CIとindependent rereviewが完了するまでhuman Ready judgmentへ進まない。
+
+---
+
 ## 2026-09-19 — Bounded post-registration runner readback stabilization（Issue #221）
 
 関連: Issue #221, Issue #216, Issue #219, PR #220, Issue #195

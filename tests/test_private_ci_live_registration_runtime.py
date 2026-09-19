@@ -477,10 +477,10 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             (root / ".runner").write_text(
                 json.dumps(
                     {
-                        "AgentName": binding.runner_name,
-                        "WorkFolder": binding.work_folder,
-                        "Ephemeral": True,
-                        "DisableUpdate": True,
+                        "agentName": binding.runner_name,
+                        "workFolder": binding.work_folder,
+                        "ephemeral": True,
+                        "disableUpdate": True,
                     }
                 ),
                 encoding="utf-8",
@@ -528,10 +528,10 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             root.mkdir(parents=True)
             settings_path = root / ".runner"
             settings = {
-                "AgentName": binding.runner_name,
-                "WorkFolder": binding.work_folder,
-                "Ephemeral": True,
-                "DisableUpdate": True,
+                "agentName": binding.runner_name,
+                "workFolder": binding.work_folder,
+                "ephemeral": True,
+                "disableUpdate": True,
             }
             settings_path.write_text(json.dumps(settings), encoding="utf-8")
             gh_calls = []
@@ -556,7 +556,7 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
                 return completed(command, stdout=json.dumps(payload))
 
             def sleeper(seconds):
-                settings["AgentName"] = "drifted-name"
+                settings["agentName"] = "drifted-name"
                 settings_path.write_text(json.dumps(settings), encoding="utf-8")
 
             runtime = WindowsEphemeralRegistrationRuntime(
@@ -578,10 +578,10 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             (root / ".runner").write_text(
                 json.dumps(
                     {
-                        "AgentName": binding.runner_name,
-                        "WorkFolder": binding.work_folder,
-                        "Ephemeral": True,
-                        "DisableUpdate": True,
+                        "agentName": binding.runner_name,
+                        "workFolder": binding.work_folder,
+                        "ephemeral": True,
+                        "disableUpdate": True,
                     }
                 ),
                 encoding="utf-8",
@@ -632,10 +632,10 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             (root / ".runner").write_text(
                 json.dumps(
                     {
-                        "AgentName": binding.runner_name,
-                        "WorkFolder": binding.work_folder,
-                        "Ephemeral": True,
-                        "DisableUpdate": True,
+                        "agentName": binding.runner_name,
+                        "workFolder": binding.work_folder,
+                        "ephemeral": True,
+                        "disableUpdate": True,
                     }
                 ),
                 encoding="utf-8",
@@ -702,10 +702,10 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             (root / ".runner").write_text(
                 json.dumps(
                     {
-                        "AgentName": binding.runner_name,
-                        "WorkFolder": binding.work_folder,
-                        "Ephemeral": True,
-                        "DisableUpdate": True,
+                        "agentName": binding.runner_name,
+                        "workFolder": binding.work_folder,
+                        "ephemeral": True,
+                        "disableUpdate": True,
                     }
                 ),
                 encoding="utf-8",
@@ -771,10 +771,10 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             (root / ".runner").write_text(
                 json.dumps(
                     {
-                        "AgentName": binding.runner_name,
-                        "WorkFolder": binding.work_folder,
-                        "Ephemeral": True,
-                        "DisableUpdate": True,
+                        "agentName": binding.runner_name,
+                        "workFolder": binding.work_folder,
+                        "ephemeral": True,
+                        "disableUpdate": True,
                     }
                 ),
                 encoding="utf-8",
@@ -833,10 +833,10 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             (root / ".runner").write_text(
                 json.dumps(
                     {
-                        "AgentName": binding.runner_name,
-                        "WorkFolder": binding.work_folder,
-                        "Ephemeral": True,
-                        "DisableUpdate": True,
+                        "agentName": binding.runner_name,
+                        "workFolder": binding.work_folder,
+                        "ephemeral": True,
+                        "disableUpdate": True,
                     }
                 ),
                 encoding="utf-8",
@@ -894,10 +894,10 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             (root / ".runner").write_text(
                 json.dumps(
                     {
-                        "AgentName": binding.runner_name,
-                        "WorkFolder": binding.work_folder,
-                        "Ephemeral": True,
-                        "DisableUpdate": True,
+                        "agentName": binding.runner_name,
+                        "workFolder": binding.work_folder,
+                        "ephemeral": True,
+                        "disableUpdate": True,
                     }
                 ),
                 encoding="utf-8",
@@ -968,10 +968,10 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             (root / ".runner").write_text(
                 json.dumps(
                     {
-                        "AgentName": binding.runner_name,
-                        "WorkFolder": binding.work_folder,
-                        "Ephemeral": True,
-                        "DisableUpdate": True,
+                        "agentName": binding.runner_name,
+                        "workFolder": binding.work_folder,
+                        "ephemeral": True,
+                        "disableUpdate": True,
                     }
                 ),
                 encoding="utf-8",
@@ -1013,10 +1013,10 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             (root / ".runner").write_text(
                 json.dumps(
                     {
-                        "AgentName": binding.runner_name,
-                        "WorkFolder": binding.work_folder,
-                        "Ephemeral": True,
-                        "DisableUpdate": True,
+                        "agentName": binding.runner_name,
+                        "workFolder": binding.work_folder,
+                        "ephemeral": True,
+                        "disableUpdate": True,
                     }
                 ),
                 encoding="utf-8",
@@ -1058,10 +1058,10 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             (root / ".runner").write_text(
                 json.dumps(
                     {
-                        "AgentName": binding.runner_name,
-                        "WorkFolder": binding.work_folder,
-                        "Ephemeral": True,
-                        "DisableUpdate": True,
+                        "agentName": binding.runner_name,
+                        "workFolder": binding.work_folder,
+                        "ephemeral": True,
+                        "disableUpdate": True,
                     }
                 ),
                 encoding="utf-8",
@@ -1113,10 +1113,10 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             (root / ".runner").write_text(
                 json.dumps(
                     {
-                        "AgentName": binding.runner_name,
-                        "WorkFolder": binding.work_folder,
-                        "Ephemeral": True,
-                        "DisableUpdate": True,
+                        "agentName": binding.runner_name,
+                        "workFolder": binding.work_folder,
+                        "ephemeral": True,
+                        "disableUpdate": True,
                     }
                 ),
                 encoding="utf-8",
@@ -1180,13 +1180,20 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             binding = self.binding_for(temporary_directory)
             root = Path(binding.runner_root)
             root.mkdir(parents=True)
-            settings = {
-                "AgentName": binding.runner_name,
-                "WorkFolder": binding.work_folder,
-                "Ephemeral": True,
-                "DisableUpdate": True,
+            settings_path = root / ".runner"
+            valid_settings = {
+                "agentName": binding.runner_name,
+                "workFolder": binding.work_folder,
+                "ephemeral": True,
+                "disableUpdate": True,
             }
-            (root / ".runner").write_text(json.dumps(settings), encoding="utf-8")
+
+            def write_settings(**overrides):
+                settings = dict(valid_settings)
+                settings.update(overrides)
+                settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+            write_settings()
 
             def command_runner(*command, **kwargs):
                 if command[0:2] == ("gh.exe", "api"):
@@ -1214,10 +1221,37 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             self.assertEqual(len(runners), 1)
             self.assertTrue(runners[0].ephemeral)
 
-            settings["Ephemeral"] = False
-            (root / ".runner").write_text(json.dumps(settings), encoding="utf-8")
-            with self.assertRaisesRegex(RuntimeError, "not ephemeral"):
-                runtime.read_runners(binding.repository)
+            invalid_cases = (
+                ({"agentName": "wrong-runner"}, "local runner name mismatch"),
+                ({"workFolder": "_wrong"}, "local runner work folder mismatch"),
+                ({"ephemeral": False}, "local runner is not ephemeral"),
+                ({"disableUpdate": False}, "local runner update disablement missing"),
+            )
+            for overrides, message in invalid_cases:
+                with self.subTest(overrides=overrides):
+                    write_settings(**overrides)
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        runtime.read_runners(binding.repository)
+
+    def test_local_runner_settings_reject_pascal_case_fixture_schema(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding = self.binding_for(temporary_directory)
+            root = Path(binding.runner_root)
+            root.mkdir(parents=True)
+            legacy_test_fixture = {
+                "AgentName": binding.runner_name,
+                "WorkFolder": binding.work_folder,
+                "Ephemeral": True,
+                "DisableUpdate": True,
+            }
+            (root / ".runner").write_text(
+                json.dumps(legacy_test_fixture),
+                encoding="utf-8",
+            )
+            runtime = WindowsEphemeralRegistrationRuntime(binding)
+
+            with self.assertRaisesRegex(RuntimeError, "local runner name mismatch"):
+                runtime._local_runner_settings()
 
     def test_package_path_traversal_is_blocked(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
