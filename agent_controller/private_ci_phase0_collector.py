@@ -6,22 +6,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from agent_controller.private_ci_live_registration import (
-    FROZEN_ENVIRONMENT_GENERATION,
-    FROZEN_PR_NUMBER,
-    FROZEN_REPOSITORY,
-    FROZEN_RUNNER_LABEL,
-    FROZEN_RUNNER_NAME,
-    FROZEN_RUNNER_ROOT,
-    FROZEN_TARGET_SHA,
-    FROZEN_WORKFLOW_PATH,
-    FROZEN_WORKFLOW_SHA,
-)
 from agent_controller.private_ci_phase0_evidence import (
-    EXPECTED_TARGET_IDENTITY,
     PHASE0_EVIDENCE_SCHEMA,
     Phase0Evidence,
+    phase0_freeze_mismatch_reason_codes,
     phase0_reason_codes,
+)
+from agent_controller.private_ci_pilot_identity import (
+    PrivateCiPilotIdentityFreeze,
+    pilot_identity_freeze_reason_codes,
 )
 from agent_controller.private_ci_runner_readback import read_all_runner_items
 
@@ -66,10 +59,14 @@ def _json_output(completed: subprocess.CompletedProcess[str], label: str) -> obj
         raise ValueError(f"phase0 collection invalid JSON: {label}") from error
 
 
-def _local_probe(command_runner: CommandRunner) -> dict[str, object]:
-    script = r"""
+def _local_probe(
+    command_runner: CommandRunner,
+    target_identity: str,
+) -> dict[str, object]:
+    quoted_target = target_identity.replace("'", "''")
+    script = rf"""
 $ErrorActionPreference = 'Stop'
-$TargetName = 'ac-runner'
+$TargetName = '{quoted_target}'
 $Target = Get-LocalUser -Name $TargetName -ErrorAction SilentlyContinue
 $TargetEnabled = $false
 $TargetAdmin = $false
@@ -133,8 +130,11 @@ def _gh_json(command_runner: CommandRunner, endpoint: str) -> object:
     )
 
 
-def _runner_items(command_runner: CommandRunner) -> tuple[dict[str, object], ...]:
-    base = f"repos/{FROZEN_REPOSITORY}/actions/runners?per_page=100"
+def _runner_items(
+    command_runner: CommandRunner,
+    repository: str,
+) -> tuple[dict[str, object], ...]:
+    base = f"repos/{repository}/actions/runners?per_page=100"
 
     def fetch_page(page: int) -> object:
         endpoint = base if page == 1 else f"{base}&page={page}"
@@ -143,7 +143,12 @@ def _runner_items(command_runner: CommandRunner) -> tuple[dict[str, object], ...
     return read_all_runner_items(fetch_page)
 
 
-def _matching_runner_count(items: tuple[dict[str, object], ...]) -> int:
+def _matching_runner_count(
+    items: tuple[dict[str, object], ...],
+    *,
+    runner_name: str,
+    runner_label: str,
+) -> int:
     count = 0
     for item in items:
         if type(item.get("labels")) is not list:
@@ -153,7 +158,7 @@ def _matching_runner_count(items: tuple[dict[str, object], ...]) -> int:
             for label in item["labels"]
             if type(label) is dict and type(label.get("name")) is str
         }
-        if item.get("name") == FROZEN_RUNNER_NAME or FROZEN_RUNNER_LABEL in labels:
+        if item.get("name") == runner_name or runner_label in labels:
             count += 1
     return count
 
@@ -161,11 +166,19 @@ def _matching_runner_count(items: tuple[dict[str, object], ...]) -> int:
 def collect_phase0_evidence(
     controller_tree: Path,
     *,
+    pilot_freeze: PrivateCiPilotIdentityFreeze,
     command_runner: CommandRunner = _default_command_runner,
     path_exists: PathExists = _default_path_exists,
     now: Now = _default_now,
 ) -> Phase0Evidence:
+    freeze_reasons = pilot_identity_freeze_reason_codes(pilot_freeze)
+    if freeze_reasons:
+        raise ValueError(
+            "phase0 pilot freeze blocked: " + ",".join(freeze_reasons)
+        )
     tree = str(controller_tree)
+    if tree.casefold() != pilot_freeze.controller_tree.casefold():
+        raise ValueError("phase0 controller tree differs from pilot freeze")
     local_head = _require_success(
         command_runner("git.exe", "-C", tree, "rev-parse", "HEAD"),
         "controller-head",
@@ -191,8 +204,12 @@ def collect_phase0_evidence(
     )
     remote_parts = remote_line.split()
     remote_main = remote_parts[0] if remote_parts else ""
+    if remote_main != pilot_freeze.controller_main_sha:
+        raise ValueError("phase0 controller main differs from pilot freeze")
+    if local_head != pilot_freeze.controller_main_sha:
+        raise ValueError("phase0 controller tree HEAD differs from pilot freeze")
 
-    local = _local_probe(command_runner)
+    local = _local_probe(command_runner, pilot_freeze.target_identity)
 
     python = command_runner(PYTHON_EXECUTABLE, "--version")
     if python.returncode != 0:
@@ -200,36 +217,36 @@ def collect_phase0_evidence(
     python_text = (python.stdout or python.stderr).strip()
     python_version = python_text.removeprefix("Python ").strip()
 
-    repository = _gh_json(command_runner, f"repos/{FROZEN_REPOSITORY}")
+    repository = _gh_json(command_runner, f"repos/{pilot_freeze.repository}")
     if type(repository) is not dict:
         raise ValueError("phase0 collection invalid repository readback")
 
-    pr = _gh_json(command_runner, f"repos/{FROZEN_REPOSITORY}/pulls/{FROZEN_PR_NUMBER}")
+    pr = _gh_json(command_runner, f"repos/{pilot_freeze.repository}/pulls/{pilot_freeze.pull_request_number}")
     if type(pr) is not dict or type(pr.get("head")) is not dict or type(pr.get("base")) is not dict:
         raise ValueError("phase0 collection invalid PR readback")
     head_repo = pr["head"].get("repo")
     if type(head_repo) is not dict:
         raise ValueError("phase0 collection invalid PR head repository")
 
-    branch = _gh_json(command_runner, f"repos/{FROZEN_REPOSITORY}/branches/main")
+    branch = _gh_json(command_runner, f"repos/{pilot_freeze.repository}/branches/main")
     if type(branch) is not dict or type(branch.get("commit")) is not dict:
         raise ValueError("phase0 collection invalid workflow branch readback")
     observed_workflow_sha = str(branch["commit"].get("sha", ""))
     workflow_file = _gh_json(
         command_runner,
         (
-            f"repos/{FROZEN_REPOSITORY}/contents/{FROZEN_WORKFLOW_PATH}"
+            f"repos/{pilot_freeze.repository}/contents/{pilot_freeze.workflow_path}"
             f"?ref={observed_workflow_sha}"
         ),
     )
     if (
         type(workflow_file) is not dict
         or workflow_file.get("type") != "file"
-        or workflow_file.get("path") != FROZEN_WORKFLOW_PATH
+        or workflow_file.get("path") != pilot_freeze.workflow_path
     ):
         raise ValueError("phase0 collection invalid workflow path readback")
 
-    runners = _runner_items(command_runner)
+    runners = _runner_items(command_runner, pilot_freeze.repository)
 
     return Phase0Evidence(
         schema=PHASE0_EVIDENCE_SCHEMA,
@@ -241,26 +258,31 @@ def collect_phase0_evidence(
         controller_tree_clean=not bool(status.stdout.strip()),
         host=str(local.get("host", "")),
         broker_identity=str(local.get("broker_identity", "")),
-        target_identity=EXPECTED_TARGET_IDENTITY,
+        target_identity=pilot_freeze.target_identity,
         target_identity_enabled=local.get("target_identity_enabled") is True,
         target_identity_admin=local.get("target_identity_admin") is True,
-        repository=FROZEN_REPOSITORY,
+        repository=pilot_freeze.repository,
         repository_visibility=str(repository.get("visibility", "")),
         default_branch=str(repository.get("default_branch", "")),
-        pull_request_number=FROZEN_PR_NUMBER,
+        pull_request_number=pilot_freeze.pull_request_number,
         pull_request_state=str(pr.get("state", "")),
         pull_request_draft=pr.get("draft") is True,
         pull_request_head_repository=str(head_repo.get("full_name", "")),
         pull_request_head_sha=str(pr["head"].get("sha", "")),
         pull_request_base=str(pr["base"].get("ref", "")),
         workflow_sha=observed_workflow_sha,
-        workflow_path=FROZEN_WORKFLOW_PATH,
-        runner_name=FROZEN_RUNNER_NAME,
-        runner_label=FROZEN_RUNNER_LABEL,
-        environment_generation=FROZEN_ENVIRONMENT_GENERATION,
-        runner_root=FROZEN_RUNNER_ROOT,
-        runner_root_exists=path_exists(Path(FROZEN_RUNNER_ROOT)),
-        matching_pilot_runner_count=_matching_runner_count(runners),
+        workflow_path=pilot_freeze.workflow_path,
+        runner_name=pilot_freeze.runner_name,
+        runner_label=pilot_freeze.runner_label,
+        environment_generation=pilot_freeze.environment_generation,
+        runner_root=pilot_freeze.runner_root,
+        work_folder=pilot_freeze.work_folder,
+        runner_root_exists=path_exists(Path(pilot_freeze.runner_root)),
+        matching_pilot_runner_count=_matching_runner_count(
+            runners,
+            runner_name=pilot_freeze.runner_name,
+            runner_label=pilot_freeze.runner_label,
+        ),
         runner_process_count=int(local.get("runner_process_count", -1)),
         runner_service_count=int(local.get("runner_service_count", -1)),
         runner_task_count=int(local.get("runner_task_count", -1)),
@@ -272,17 +294,22 @@ def collect_phase0_evidence(
 def collect_validated_phase0_evidence(
     controller_tree: Path,
     *,
+    pilot_freeze: PrivateCiPilotIdentityFreeze,
     command_runner: CommandRunner = _default_command_runner,
     path_exists: PathExists = _default_path_exists,
     now: Now = _default_now,
 ) -> Phase0Evidence:
     evidence = collect_phase0_evidence(
         controller_tree,
+        pilot_freeze=pilot_freeze,
         command_runner=command_runner,
         path_exists=path_exists,
         now=now,
     )
-    reasons = phase0_reason_codes(evidence)
+    reasons = (
+        phase0_reason_codes(evidence)
+        + phase0_freeze_mismatch_reason_codes(evidence, pilot_freeze)
+    )
     if reasons:
         raise ValueError("phase0 evidence blocked: " + ",".join(reasons))
     return evidence
