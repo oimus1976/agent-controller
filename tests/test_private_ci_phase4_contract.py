@@ -1,7 +1,5 @@
 import importlib
 import unittest
-from dataclasses import replace
-
 
 MODULE_NAME = "agent_controller.private_ci_phase4_contract"
 
