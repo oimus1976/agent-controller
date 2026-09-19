@@ -595,6 +595,7 @@ def command_apply(expected_plan_sha256: str) -> int:
         plan=plan,
         plan_sha256_value=actual_plan_sha,
         result=result,
+        runner_readback_attempts=runtime.last_readback_attempts,
     )
     payload["started_at"] = started_at
     payload["ended_at"] = ended_at
@@ -615,6 +616,7 @@ def command_apply(expected_plan_sha256: str) -> int:
         f"reason_codes={','.join(result.reason_codes)}\n"
         f"child_exit_code={result.child_exit_code}\n"
         f"runner_id={result.runner_id}\n"
+        f"runner_readback_attempts={runtime.last_readback_attempts}\n"
         f"human_authorization={HUMAN_AUTHORIZATION_METHOD}\n"
         "registration_token_recorded=false\n"
         "--- child stdout (redacted) ---\n"

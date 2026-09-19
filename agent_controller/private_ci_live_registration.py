@@ -227,6 +227,14 @@ class RunnerReadback:
     ephemeral: Optional[bool] = None
 
 
+class RunnerReadbackFailure(RuntimeError):
+    def __init__(self, reason_code: str) -> None:
+        if type(reason_code) is not str or not reason_code:
+            raise ValueError("runner readback failure reason code invalid")
+        self.reason_code = reason_code
+        super().__init__(reason_code)
+
+
 class LiveRegistrationStatus(str, Enum):
     BLOCKED = "BLOCKED"
     FAILED = "FAILED"
@@ -520,6 +528,9 @@ def execute_live_registration(
         observed_runner_id: Optional[int] = None
         try:
             decode_failure_runners = read_runners(binding.repository)
+        except RunnerReadbackFailure as error:
+            reasons.append("RUNNER_READBACK_UNCERTAIN_AFTER_DECODE_FAILURE")
+            reasons.append(error.reason_code)
         except Exception:
             reasons.append("RUNNER_READBACK_UNCERTAIN_AFTER_DECODE_FAILURE")
         else:
@@ -548,6 +559,9 @@ def execute_live_registration(
         observed_runner_id: Optional[int] = None
         try:
             failure_runners = read_runners(binding.repository)
+        except RunnerReadbackFailure as error:
+            reasons.append("RUNNER_READBACK_UNCERTAIN_AFTER_CHILD_FAILURE")
+            reasons.append(error.reason_code)
         except Exception:
             reasons.append("RUNNER_READBACK_UNCERTAIN_AFTER_CHILD_FAILURE")
         else:
@@ -584,6 +598,16 @@ def execute_live_registration(
 
     try:
         runners = read_runners(binding.repository)
+    except RunnerReadbackFailure as error:
+        return LiveRegistrationResult(
+            LiveRegistrationStatus.FAILED,
+            ("RUNNER_READBACK_FAILED", error.reason_code),
+            gate.candidate_sha256,
+            execution.exit_code,
+            stdout,
+            stderr,
+            None,
+        )
     except Exception:
         return LiveRegistrationResult(
             LiveRegistrationStatus.FAILED,

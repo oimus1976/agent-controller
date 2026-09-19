@@ -6,6 +6,7 @@ import locale
 import os
 import shutil
 import subprocess
+import time
 import urllib.request
 import zipfile
 from dataclasses import asdict, dataclass
@@ -23,6 +24,7 @@ from agent_controller.private_ci_live_registration import (
     LiveRegistrationResult,
     RegistrationExecution,
     RunnerReadback,
+    RunnerReadbackFailure,
     build_live_registration_spec,
     frozen_live_registration_binding,
     phase0_evidence_sha256,
@@ -33,7 +35,10 @@ from agent_controller.private_ci_phase0_evidence import (
     EXPECTED_BROKER_IDENTITY,
     EXPECTED_HOST,
 )
-from agent_controller.private_ci_runner_readback import read_all_runner_items
+from agent_controller.private_ci_runner_readback import (
+    RunnerSetChangedAcrossSweeps,
+    read_all_runner_items,
+)
 
 RUNNER_VERSION = "2.337.0"
 RUNNER_PACKAGE_URL = (
@@ -44,7 +49,14 @@ RUNNER_PACKAGE_SHA256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d
 RUNNER_PACKAGE_FILENAME = f"actions-runner-win-x64-{RUNNER_VERSION}.zip"
 
 PLAN_SCHEMA = "agent-controller.private-ci-live-registration-plan.v1"
-RESULT_SCHEMA = "agent-controller.private-ci-live-registration-result.v1"
+RESULT_SCHEMA = "agent-controller.private-ci-live-registration-result.v2"
+
+POST_REGISTRATION_READBACK_MAX_ATTEMPTS = 6
+POST_REGISTRATION_READBACK_DELAY_SECONDS = 1.0
+POST_REGISTRATION_READBACK_MAX_DELAY_SECONDS = (
+    POST_REGISTRATION_READBACK_MAX_ATTEMPTS - 1
+) * POST_REGISTRATION_READBACK_DELAY_SECONDS
+POST_REGISTRATION_READBACK_MAX_ELAPSED_SECONDS = 15.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +189,8 @@ def validate_frozen_plan(
 
 Downloader = Callable[[str, Path], None]
 CommandRunner = Callable[..., subprocess.CompletedProcess[bytes | str]]
+Sleeper = Callable[[float], None]
+MonotonicClock = Callable[[], float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,15 +306,24 @@ class WindowsEphemeralRegistrationRuntime:
         gh_executable: str = "gh.exe",
         command_runner: CommandRunner = _default_command_runner,
         downloader: Downloader = _default_downloader,
+        sleeper: Sleeper = time.sleep,
+        monotonic_clock: MonotonicClock = time.monotonic,
     ) -> None:
         self.binding = binding
         self.gh_executable = gh_executable
         self.command_runner = command_runner
         self.downloader = downloader
+        self.sleeper = sleeper
+        self.monotonic_clock = monotonic_clock
+        self._last_readback_attempts = 0
 
     @property
     def runner_root(self) -> Path:
         return Path(self.binding.runner_root)
+
+    @property
+    def last_readback_attempts(self) -> int:
+        return self._last_readback_attempts
 
     def _run_text(
         self,
@@ -308,12 +331,14 @@ class WindowsEphemeralRegistrationRuntime:
         cwd: Optional[Path] = None,
         env=None,
         redact_secrets: tuple[str, ...] = (),
+        timeout: Optional[float] = None,
     ) -> NativeTextResult:
         completed = self.command_runner(
             *command,
             cwd=None if cwd is None else str(cwd),
             env=env,
             capture_output=True,
+            timeout=timeout,
         )
         raw_stdout, stdout_secret_redacted = _redact_native_stream(
             completed.stdout,
@@ -443,12 +468,39 @@ $RunnerTasks = @(
         if payload.get("runner_task_count") != 0:
             raise RuntimeError("runner task drift detected")
 
-    def _github_runner_items(self, repository: str) -> tuple[dict[str, object], ...]:
+    def _github_runner_items(
+        self,
+        repository: str,
+        *,
+        deadline: Optional[float] = None,
+    ) -> tuple[dict[str, object], ...]:
         base = f"repos/{repository}/actions/runners?per_page=100"
+        attempt_started = False
 
         def fetch_page(page: int) -> object:
+            nonlocal attempt_started
             endpoint = base if page == 1 else f"{base}&page={page}"
-            completed = self._run_text(self.gh_executable, "api", endpoint)
+            timeout: Optional[float] = None
+            if deadline is not None:
+                timeout = deadline - self.monotonic_clock()
+                if timeout <= 0:
+                    raise RunnerReadbackFailure(
+                        "RUNNER_READBACK_TIME_BUDGET_EXHAUSTED"
+                    )
+                if not attempt_started:
+                    self._last_readback_attempts += 1
+                    attempt_started = True
+            try:
+                completed = self._run_text(
+                    self.gh_executable,
+                    "api",
+                    endpoint,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise RunnerReadbackFailure(
+                    "RUNNER_READBACK_TIME_BUDGET_EXHAUSTED"
+                ) from error
             self._require_decoded(completed, "GitHub runner readback")
             if completed.returncode != 0:
                 raise RuntimeError("GitHub runner readback failed")
@@ -630,12 +682,46 @@ $RunnerTasks = @(
             raise RuntimeError("local runner update disablement missing")
         return payload
 
-    def read_runners(self, repository: str) -> tuple[RunnerReadback, ...]:
-        if repository != self.binding.repository:
-            raise RuntimeError("runner readback repository mismatch")
-        self._local_runner_settings()
+    def _post_registration_exact_item(
+        self,
+        items: tuple[dict[str, object], ...],
+    ) -> Optional[dict[str, object]]:
+        eligible: list[tuple[dict[str, object], tuple[str, ...]]] = []
+        for raw in items:
+            labels = raw.get("labels")
+            if type(labels) is not list:
+                raise RuntimeError("GitHub runner labels shape invalid")
+            label_names = tuple(
+                item["name"]
+                for item in labels
+                if type(item) is dict and type(item.get("name")) is str
+            )
+            if (
+                raw.get("name") == self.binding.runner_name
+                or self.binding.runner_label in label_names
+            ):
+                eligible.append((raw, label_names))
+
+        if not eligible:
+            return None
+        if len(eligible) != 1:
+            raise RunnerReadbackFailure("RUNNER_READBACK_ELIGIBLE_COUNT_UNSAFE")
+
+        raw, label_names = eligible[0]
+        if (
+            raw.get("name") != self.binding.runner_name
+            or self.binding.runner_label not in label_names
+        ):
+            raise RunnerReadbackFailure("RUNNER_READBACK_IDENTITY_MISMATCH")
+        return raw
+
+    @staticmethod
+    def _runner_readbacks(
+        items: tuple[dict[str, object], ...],
+        binding: LiveRegistrationBinding,
+    ) -> tuple[RunnerReadback, ...]:
         result: list[RunnerReadback] = []
-        for raw in self._github_runner_items(repository):
+        for raw in items:
             labels = raw.get("labels")
             if type(labels) is not list:
                 raise RuntimeError("GitHub runner labels shape invalid")
@@ -653,12 +739,77 @@ $RunnerTasks = @(
                     labels=label_names,
                     ephemeral=(
                         True
-                        if raw.get("name") == self.binding.runner_name
+                        if raw.get("name") == binding.runner_name
                         else None
                     ),
                 )
             )
         return tuple(result)
+
+    def read_runners(self, repository: str) -> tuple[RunnerReadback, ...]:
+        if repository != self.binding.repository:
+            raise RuntimeError("runner readback repository mismatch")
+        self._last_readback_attempts = 0
+        self._local_runner_settings()
+        deadline = (
+            self.monotonic_clock()
+            + POST_REGISTRATION_READBACK_MAX_ELAPSED_SECONDS
+        )
+
+        def require_time_budget() -> None:
+            if deadline - self.monotonic_clock() <= 0:
+                raise RunnerReadbackFailure(
+                    "RUNNER_READBACK_TIME_BUDGET_EXHAUSTED"
+                )
+
+        def sleep_before_retry() -> None:
+            remaining = deadline - self.monotonic_clock()
+            if remaining <= 0:
+                raise RunnerReadbackFailure(
+                    "RUNNER_READBACK_TIME_BUDGET_EXHAUSTED"
+                )
+            self.sleeper(
+                min(POST_REGISTRATION_READBACK_DELAY_SECONDS, remaining)
+            )
+
+        for attempt in range(1, POST_REGISTRATION_READBACK_MAX_ATTEMPTS + 1):
+            require_time_budget()
+            try:
+                items = self._github_runner_items(
+                    repository,
+                    deadline=deadline,
+                )
+            except RunnerSetChangedAcrossSweeps:
+                if attempt == POST_REGISTRATION_READBACK_MAX_ATTEMPTS:
+                    raise RunnerReadbackFailure(
+                        "RUNNER_READBACK_STABILIZATION_EXHAUSTED"
+                    )
+                sleep_before_retry()
+                continue
+
+            require_time_budget()
+            exact_item = self._post_registration_exact_item(items)
+            if exact_item is not None:
+                # The remote runner may become visible after several seconds.
+                # Re-prove the local binding at the acceptance boundary, reduce
+                # the stable remote snapshot to the single exact eligible runner,
+                # construct the returned readback, and only then perform the
+                # final deadline check before acceptance.
+                self._local_runner_settings()
+                readbacks = self._runner_readbacks(
+                    (exact_item,),
+                    self.binding,
+                )
+                require_time_budget()
+                return readbacks
+
+            if attempt == POST_REGISTRATION_READBACK_MAX_ATTEMPTS:
+                raise RunnerReadbackFailure(
+                    "RUNNER_VISIBILITY_STABILIZATION_EXHAUSTED"
+                )
+            sleep_before_retry()
+
+        raise AssertionError("post-registration readback loop escaped safety bound")
 
 
 def result_payload(
@@ -666,7 +817,16 @@ def result_payload(
     plan: LiveRegistrationPlan,
     plan_sha256_value: str,
     result: LiveRegistrationResult,
+    runner_readback_attempts: int,
 ) -> dict[str, object]:
+    if (
+        type(runner_readback_attempts) is not int
+        or runner_readback_attempts < 0
+        or runner_readback_attempts > POST_REGISTRATION_READBACK_MAX_ATTEMPTS
+    ):
+        raise ValueError("runner readback attempts invalid")
+    if result.runner_id is not None and runner_readback_attempts == 0:
+        raise ValueError("observed runner requires readback attempt evidence")
     return {
         "schema": RESULT_SCHEMA,
         "plan_sha256": plan_sha256_value,
@@ -682,6 +842,7 @@ def result_payload(
         "reason_codes": list(result.reason_codes),
         "child_exit_code": result.child_exit_code,
         "runner_id": result.runner_id,
+        "runner_readback_attempts": runner_readback_attempts,
         "stdout": result.stdout,
         "stderr": result.stderr,
     }

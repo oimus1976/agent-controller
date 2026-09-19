@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Callable
 
+
+class RunnerSetChangedAcrossSweeps(RuntimeError):
+    """Strict snapshot could not prove the same runner set across two sweeps."""
+
+
 from agent_controller.private_ci_live_registration import (
     FROZEN_RUNNER_LABEL,
     FROZEN_RUNNER_NAME,
@@ -104,5 +109,5 @@ def read_all_runner_items(fetch_page: RunnerPageFetcher) -> tuple[dict[str, obje
     first = _read_runner_sweep(fetch_page)
     second = _read_runner_sweep(fetch_page)
     if _runner_set_fingerprint(first) != _runner_set_fingerprint(second):
-        raise RuntimeError("GitHub runner set changed across sweeps")
+        raise RunnerSetChangedAcrossSweeps("GitHub runner set changed across sweeps")
     return second
