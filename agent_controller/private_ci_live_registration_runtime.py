@@ -682,10 +682,10 @@ $RunnerTasks = @(
             raise RuntimeError("local runner update disablement missing")
         return payload
 
-    def _post_registration_items_are_exact(
+    def _post_registration_exact_item(
         self,
         items: tuple[dict[str, object], ...],
-    ) -> bool:
+    ) -> Optional[dict[str, object]]:
         eligible: list[tuple[dict[str, object], tuple[str, ...]]] = []
         for raw in items:
             labels = raw.get("labels")
@@ -703,7 +703,7 @@ $RunnerTasks = @(
                 eligible.append((raw, label_names))
 
         if not eligible:
-            return False
+            return None
         if len(eligible) != 1:
             raise RunnerReadbackFailure("RUNNER_READBACK_ELIGIBLE_COUNT_UNSAFE")
 
@@ -713,7 +713,7 @@ $RunnerTasks = @(
             or self.binding.runner_label not in label_names
         ):
             raise RunnerReadbackFailure("RUNNER_READBACK_IDENTITY_MISMATCH")
-        return True
+        return raw
 
     @staticmethod
     def _runner_readbacks(
@@ -788,14 +788,20 @@ $RunnerTasks = @(
                 continue
 
             require_time_budget()
-            if self._post_registration_items_are_exact(items):
+            exact_item = self._post_registration_exact_item(items)
+            if exact_item is not None:
                 # The remote runner may become visible after several seconds.
-                # Re-prove the local binding at the acceptance boundary rather
-                # than relying on the pre-loop read, then prove the time budget
-                # again before emitting a successful snapshot.
+                # Re-prove the local binding at the acceptance boundary, reduce
+                # the stable remote snapshot to the single exact eligible runner,
+                # construct the returned readback, and only then perform the
+                # final deadline check before acceptance.
                 self._local_runner_settings()
+                readbacks = self._runner_readbacks(
+                    (exact_item,),
+                    self.binding,
+                )
                 require_time_budget()
-                return self._runner_readbacks(items, self.binding)
+                return readbacks
 
             if attempt == POST_REGISTRATION_READBACK_MAX_ATTEMPTS:
                 raise RunnerReadbackFailure(
