@@ -762,6 +762,10 @@ $RunnerTasks = @(
             )
 
         for attempt in range(1, POST_REGISTRATION_READBACK_MAX_ATTEMPTS + 1):
+            if deadline - self.monotonic_clock() <= 0:
+                raise RunnerReadbackFailure(
+                    "RUNNER_READBACK_TIME_BUDGET_EXHAUSTED"
+                )
             self._last_readback_attempts = attempt
             try:
                 items = self._github_runner_items(
