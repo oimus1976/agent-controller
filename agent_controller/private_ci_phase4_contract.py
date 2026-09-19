@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import asdict, dataclass
 from pathlib import PurePosixPath, PureWindowsPath
 
 
@@ -126,3 +127,175 @@ def pilot_binding_reason_codes(binding: object) -> tuple[str, ...]:
         reasons.append("PILOT_BINDING_IDENTITY_SEPARATION_INVALID")
 
     return tuple(reasons)
+
+
+REGISTRATION_HANDOFF_SCHEMA = "agent-controller.private-ci-registration-handoff.v1"
+
+
+@dataclass(frozen=True, slots=True)
+class RegistrationHandoffEvidence:
+    """Canonical secret-free digest bridge from registration to Phase 4.
+
+    This is evidence, not authority. Phase 4 must authenticate and durably
+    consume the exact handoff before any live effect is authorized.
+    """
+
+    schema: str
+    binding: PrivateCiPilotBinding
+    phase0_evidence_sha256: str
+    registration_plan_sha256: str
+    human_approval_sha256: str
+    registration_consumption_sha256: str
+    registration_result_sha256: str
+    local_runner_settings_sha256: str
+    registration_status: str
+
+
+def _sha256_digest(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def registration_handoff_reason_codes(
+    evidence: object,
+) -> tuple[str, ...]:
+    if type(evidence) is not RegistrationHandoffEvidence:
+        return ("REGISTRATION_HANDOFF_TYPE_INVALID",)
+
+    reasons: list[str] = []
+    if evidence.schema != REGISTRATION_HANDOFF_SCHEMA:
+        reasons.append("REGISTRATION_HANDOFF_SCHEMA_INVALID")
+    binding_reasons = pilot_binding_reason_codes(evidence.binding)
+    reasons.extend(
+        f"REGISTRATION_HANDOFF_{reason}"
+        for reason in binding_reasons
+    )
+
+    digest_fields = (
+        (
+            "REGISTRATION_HANDOFF_PHASE0_SHA256_INVALID",
+            evidence.phase0_evidence_sha256,
+        ),
+        (
+            "REGISTRATION_HANDOFF_PLAN_SHA256_INVALID",
+            evidence.registration_plan_sha256,
+        ),
+        (
+            "REGISTRATION_HANDOFF_APPROVAL_SHA256_INVALID",
+            evidence.human_approval_sha256,
+        ),
+        (
+            "REGISTRATION_HANDOFF_CONSUMPTION_SHA256_INVALID",
+            evidence.registration_consumption_sha256,
+        ),
+        (
+            "REGISTRATION_HANDOFF_RESULT_SHA256_INVALID",
+            evidence.registration_result_sha256,
+        ),
+        (
+            "REGISTRATION_HANDOFF_LOCAL_SETTINGS_SHA256_INVALID",
+            evidence.local_runner_settings_sha256,
+        ),
+    )
+    for reason, value in digest_fields:
+        if not _sha256_digest(value):
+            reasons.append(reason)
+
+    if evidence.registration_status != "REGISTERED":
+        reasons.append("REGISTRATION_HANDOFF_STATUS_NOT_REGISTERED")
+
+    return tuple(reasons)
+
+
+def _registration_handoff_payload(
+    evidence: RegistrationHandoffEvidence,
+) -> dict[str, object]:
+    return {
+        "schema": evidence.schema,
+        "binding": asdict(evidence.binding),
+        "phase0_evidence_sha256": evidence.phase0_evidence_sha256,
+        "registration_plan_sha256": evidence.registration_plan_sha256,
+        "human_approval_sha256": evidence.human_approval_sha256,
+        "registration_consumption_sha256": evidence.registration_consumption_sha256,
+        "registration_result_sha256": evidence.registration_result_sha256,
+        "local_runner_settings_sha256": evidence.local_runner_settings_sha256,
+        "registration_status": evidence.registration_status,
+    }
+
+
+def registration_handoff_bytes(
+    evidence: RegistrationHandoffEvidence,
+) -> bytes:
+    reasons = registration_handoff_reason_codes(evidence)
+    if reasons:
+        raise ValueError(
+            "registration handoff invalid: " + ",".join(reasons)
+        )
+    return (
+        json.dumps(
+            _registration_handoff_payload(evidence),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def parse_registration_handoff_bytes(
+    raw: bytes,
+) -> RegistrationHandoffEvidence:
+    if type(raw) is not bytes:
+        raise ValueError("registration handoff must be exact bytes")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("registration handoff JSON invalid") from error
+
+    required = {
+        "schema",
+        "binding",
+        "phase0_evidence_sha256",
+        "registration_plan_sha256",
+        "human_approval_sha256",
+        "registration_consumption_sha256",
+        "registration_result_sha256",
+        "local_runner_settings_sha256",
+        "registration_status",
+    }
+    if type(payload) is not dict or set(payload) != required:
+        raise ValueError("registration handoff shape invalid")
+    binding_payload = payload.get("binding")
+    if type(binding_payload) is not dict:
+        raise ValueError("registration handoff binding invalid")
+    expected_binding_fields = set(PrivateCiPilotBinding.__dataclass_fields__)
+    if set(binding_payload) != expected_binding_fields:
+        raise ValueError("registration handoff binding shape invalid")
+
+    try:
+        binding = PrivateCiPilotBinding(**binding_payload)
+        evidence = RegistrationHandoffEvidence(
+            schema=payload["schema"],
+            binding=binding,
+            phase0_evidence_sha256=payload["phase0_evidence_sha256"],
+            registration_plan_sha256=payload["registration_plan_sha256"],
+            human_approval_sha256=payload["human_approval_sha256"],
+            registration_consumption_sha256=payload[
+                "registration_consumption_sha256"
+            ],
+            registration_result_sha256=payload["registration_result_sha256"],
+            local_runner_settings_sha256=payload[
+                "local_runner_settings_sha256"
+            ],
+            registration_status=payload["registration_status"],
+        )
+    except TypeError as error:
+        raise ValueError("registration handoff field types invalid") from error
+
+    canonical = registration_handoff_bytes(evidence)
+    if raw != canonical:
+        raise ValueError("registration handoff is not canonical")
+    return evidence
