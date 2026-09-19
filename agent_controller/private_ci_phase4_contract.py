@@ -561,7 +561,7 @@ def render_phase4_target_environment_candidate(
         "        Stop-Process -Id $BridgeChild.Id -Force -ErrorAction Stop",
         "        throw 'Phase 4 target probe timeout'",
         "    }",
-        "    Start-Sleep -Seconds $BridgeHeartbeatSeconds",
+        "    Start-Sleep -Seconds 5",
         "}",
         "$BridgeChildExitCode = $BridgeChild.ExitCode",
         "if ($BridgeChildExitCode -ne 0) { throw 'Phase 4 target probe failed' }",
