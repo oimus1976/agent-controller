@@ -1,4 +1,5 @@
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,6 +55,77 @@ class PrivateCiRunnerTreeSnapshotRedTests(unittest.TestCase):
                     for entry in parsed["entries"]
                 )
             )
+
+
+
+    def test_parser_rejects_traversal_case_collision_and_work_folder(self):
+        m = self.module()
+
+        def raw(entries, work_folder="_work"):
+            payload = {
+                "schema": m.RUNNER_GENERATION_SNAPSHOT_SCHEMA,
+                "runner_directory": "runner",
+                "work_folder": work_folder,
+                "entries": entries,
+            }
+            return (
+                json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                )
+                + "\n"
+            ).encode("utf-8")
+
+        base_root = {"kind": "directory", "path": "runner"}
+        bad_cases = (
+            [
+                base_root,
+                {
+                    "kind": "file",
+                    "path": "runner/../escape",
+                    "sha256": "1" * 64,
+                    "size": 1,
+                },
+            ],
+            [
+                base_root,
+                {"kind": "directory", "path": "runner/Bin"},
+                {"kind": "directory", "path": "runner/bin"},
+            ],
+            [
+                base_root,
+                {"kind": "directory", "path": "runner/_work"},
+            ],
+        )
+        for entries in bad_cases:
+            with self.subTest(entries=entries):
+                with self.assertRaises(ValueError):
+                    m.parse_runner_generation_snapshot_bytes(raw(entries))
+
+    def test_parser_rejects_unsorted_entries(self):
+        m = self.module()
+        payload = {
+            "schema": m.RUNNER_GENERATION_SNAPSHOT_SCHEMA,
+            "runner_directory": "runner",
+            "work_folder": "_work",
+            "entries": [
+                {"kind": "directory", "path": "runner/z"},
+                {"kind": "directory", "path": "runner"},
+            ],
+        }
+        raw = (
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+        with self.assertRaisesRegex(ValueError, "sorted"):
+            m.parse_runner_generation_snapshot_bytes(raw)
 
     def test_file_content_or_added_sibling_changes_digest(self):
         m = self.module()
