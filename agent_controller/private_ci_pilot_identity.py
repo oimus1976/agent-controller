@@ -152,6 +152,58 @@ def pilot_identity_freeze_reason_codes(
 
 
 
+
+_RUNS_ON_LINE = re.compile(r"(?m)^    runs-on:[ \t]*([^#\r\n]+?)[ \t]*$")
+_GITHUB_HOSTED_RUNNER = re.compile(
+    r"^(ubuntu|windows|macos)-[A-Za-z0-9._-]+$"
+)
+
+
+def validate_pilot_workflow_runner_exclusivity(
+    workflow_sources: dict[str, str],
+    *,
+    trusted_workflow_path: str,
+) -> None:
+    if (
+        type(workflow_sources) is not dict
+        or not workflow_sources
+        or trusted_workflow_path not in workflow_sources
+    ):
+        raise ValueError("pilot workflow inventory invalid")
+
+    for path, source in workflow_sources.items():
+        if (
+            type(path) is not str
+            or type(source) is not str
+            or not path.startswith(".github/workflows/")
+            or not path.endswith((".yml", ".yaml"))
+        ):
+            raise ValueError("pilot workflow inventory entry invalid")
+        runs_on = tuple(
+            match.group(1).strip().strip("'\"")
+            for match in _RUNS_ON_LINE.finditer(source)
+        )
+        if not runs_on:
+            raise ValueError(f"pilot workflow has no static job runner: {path}")
+
+        if path == trusted_workflow_path:
+            if runs_on != (PRIVATE_CI_RUNNER_LABEL,):
+                raise ValueError(
+                    "trusted pilot workflow runner binding is not exclusive"
+                )
+            continue
+
+        for value in runs_on:
+            if (
+                "\${{" in value
+                or value == PRIVATE_CI_RUNNER_LABEL
+                or _GITHUB_HOSTED_RUNNER.fullmatch(value) is None
+            ):
+                raise ValueError(
+                    "non-target workflow runner binding is not provably "
+                    f"GitHub-hosted: {path}"
+                )
+
 def build_fresh_pilot_identity_freeze(
     *,
     repository: str,
