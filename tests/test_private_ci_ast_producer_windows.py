@@ -351,6 +351,26 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
             unsafe_report["observed_effect_families"],
         )
 
+
+    def test_all_active_workflow_run_status_reads_are_classified_read_only(self):
+        for status in ("queued", "in_progress", "requested", "waiting", "pending"):
+            with self.subTest(status=status):
+                command = (
+                    "gh.exe api "
+                    "-H 'X-GitHub-Api-Version: 2026-03-10' "
+                    f"'repos/oimus1976/example/actions/workflows/pilot.yml/runs?"
+                    f"event=workflow_dispatch&branch=main&status={status}&per_page=100'"
+                )
+                report, _ = self.run_producer(self.bound_candidate(command))
+                self.assertIn(
+                    "HTTP_API_ACCESS",
+                    report["observed_effect_families"],
+                )
+                self.assertNotIn(
+                    "DYNAMIC_OR_UNKNOWN_COMMAND",
+                    report["observed_effect_families"],
+                )
+
     def test_exact_workflow_dispatch_read_shape_is_classified_read_only(self):
         command = (
             "gh.exe api "
