@@ -151,6 +151,46 @@ def pilot_identity_freeze_reason_codes(
     return tuple(reasons)
 
 
+
+def build_fresh_pilot_identity_freeze(
+    *,
+    repository: str,
+    pull_request_number: int,
+    target_sha: str,
+    workflow_sha: str,
+    workflow_path: str,
+    nonce: str,
+    controller_main_sha: str,
+    controller_tree: str,
+) -> PrivateCiPilotIdentityFreeze:
+    if type(nonce) is not str or re.fullmatch(r"[0-9a-f]{16}", nonce) is None:
+        raise ValueError("pilot nonce invalid")
+    generation = f"ac-pilot-{nonce}"
+    freeze = PrivateCiPilotIdentityFreeze(
+        schema=PILOT_IDENTITY_FREEZE_SCHEMA,
+        repository=repository,
+        pull_request_number=pull_request_number,
+        target_sha=target_sha,
+        workflow_sha=workflow_sha,
+        workflow_path=workflow_path,
+        runner_name=f"ac-ci-{nonce}",
+        runner_label=PRIVATE_CI_RUNNER_LABEL,
+        environment_generation=generation,
+        runner_root=canonical_runner_root(generation),
+        work_folder=PRIVATE_CI_WORK_FOLDER,
+        controller_main_sha=controller_main_sha,
+        controller_tree=controller_tree,
+        host=PRIVATE_CI_HOST,
+        broker_identity=PRIVATE_CI_BROKER_IDENTITY,
+        target_identity=PRIVATE_CI_TARGET_IDENTITY,
+    )
+    reasons = pilot_identity_freeze_reason_codes(freeze)
+    if reasons:
+        raise ValueError(
+            "fresh pilot identity freeze invalid: " + ",".join(reasons)
+        )
+    return freeze
+
 def pilot_identity_freeze_bytes(
     freeze: PrivateCiPilotIdentityFreeze,
 ) -> bytes:
