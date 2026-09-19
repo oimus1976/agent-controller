@@ -323,6 +323,34 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
             unsafe_report["observed_effect_families"],
         )
 
+
+    def test_exact_runner_inventory_read_is_classified_read_only(self):
+        command = (
+            "gh.exe api "
+            "-H 'X-GitHub-Api-Version: 2026-03-10' "
+            "'repos/oimus1976/example/actions/runners?per_page=100'"
+        )
+        report, _ = self.run_producer(self.bound_candidate(command))
+        self.assertIn(
+            "HTTP_API_ACCESS",
+            report["observed_effect_families"],
+        )
+        self.assertNotIn(
+            "DYNAMIC_OR_UNKNOWN_COMMAND",
+            report["observed_effect_families"],
+        )
+
+        unsafe = (
+            "gh.exe api "
+            "-H 'X-GitHub-Api-Version: 2026-03-10' "
+            "'repos/oimus1976/example/actions/runners?per_page=50'"
+        )
+        unsafe_report, _ = self.run_producer(self.bound_candidate(unsafe))
+        self.assertIn(
+            "DYNAMIC_OR_UNKNOWN_COMMAND",
+            unsafe_report["observed_effect_families"],
+        )
+
     def test_exact_workflow_dispatch_read_shape_is_classified_read_only(self):
         command = (
             "gh.exe api "
