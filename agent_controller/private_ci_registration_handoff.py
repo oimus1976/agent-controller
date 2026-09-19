@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
-from typing import Callable
+from datetime import datetime
 
 from agent_controller.private_ci_consumption_marker import (
     parse_consumption_marker_bytes,
@@ -33,9 +32,6 @@ from agent_controller.private_ci_phase4_contract import (
 
 
 HUMAN_AUTHORIZATION_METHOD = "uac-elevated-acl-protected-approval-v1"
-Now = Callable[[], datetime]
-
-
 def _sha256(raw: bytes) -> str:
     if type(raw) is not bytes:
         raise ValueError("artifact must be exact bytes")
@@ -157,7 +153,6 @@ def build_registration_handoff_evidence(
     registration_consumption_bytes: bytes,
     registration_result_bytes: bytes,
     local_runner_settings_bytes: bytes,
-    now: Now | None = None,
 ) -> RegistrationHandoffEvidence:
     phase0 = validate_phase0_evidence_bytes(phase0_evidence_bytes)
     phase0_sha = _sha256(phase0_evidence_bytes)
@@ -175,23 +170,28 @@ def build_registration_handoff_evidence(
     if plan.binding != expected_binding:
         raise ValueError("registration plan binding mismatch")
 
-    approval = parse_approval_bytes(
-        human_approval_bytes,
-        expected_plan_sha256=plan_sha,
-        now=now,
-    )
     approval_sha = approval_sha256(human_approval_bytes)
-    if approval.host != phase0.host:
-        raise ValueError("registration approval host mismatch")
-    if approval.approver_identity != phase0.broker_identity:
-        raise ValueError("registration approval identity mismatch")
-
-    parse_consumption_marker_bytes(
+    consumption = parse_consumption_marker_bytes(
         registration_consumption_bytes,
         expected_plan_sha256=plan_sha,
         expected_phase0_evidence_sha256=phase0_sha,
         expected_human_approval_sha256=approval_sha,
     )
+    try:
+        consumed_at = datetime.fromisoformat(
+            consumption.consumed_at.replace("Z", "+00:00")
+        )
+    except ValueError as error:
+        raise ValueError("registration consumption timestamp invalid") from error
+    approval = parse_approval_bytes(
+        human_approval_bytes,
+        expected_plan_sha256=plan_sha,
+        now=lambda: consumed_at,
+    )
+    if approval.host != phase0.host:
+        raise ValueError("registration approval host mismatch")
+    if approval.approver_identity != phase0.broker_identity:
+        raise ValueError("registration approval identity mismatch")
     consumption_sha = _sha256(registration_consumption_bytes)
 
     result = _parse_registration_result(
