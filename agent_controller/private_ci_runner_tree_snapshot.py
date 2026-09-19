@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 RUNNER_GENERATION_SNAPSHOT_SCHEMA = (
@@ -124,7 +124,13 @@ def runner_generation_snapshot_bytes(
 ) -> bytes:
     if not isinstance(generation_root, Path) or not isinstance(runner_root, Path):
         raise ValueError("runner snapshot paths must be Path")
-    if type(work_folder) is not str or not work_folder:
+    if (
+        type(work_folder) is not str
+        or not work_folder
+        or work_folder in (".", "..")
+        or "/" in work_folder
+        or "\\" in work_folder
+    ):
         raise ValueError("runner snapshot work folder invalid")
 
     _require_plain_directory(generation_root, "generation root")
@@ -222,13 +228,22 @@ def parse_runner_generation_snapshot_bytes(
         raise ValueError("runner generation snapshot schema invalid")
     if payload["runner_directory"] != "runner":
         raise ValueError("runner generation snapshot runner directory invalid")
-    if type(payload["work_folder"]) is not str or not payload["work_folder"]:
+    work_folder = payload["work_folder"]
+    if (
+        type(work_folder) is not str
+        or not work_folder
+        or work_folder in (".", "..")
+        or "/" in work_folder
+        or "\\" in work_folder
+    ):
         raise ValueError("runner generation snapshot work folder invalid")
     entries = payload["entries"]
     if type(entries) is not list or not entries:
         raise ValueError("runner generation snapshot entries invalid")
 
     seen: set[str] = set()
+    seen_casefold: set[str] = set()
+    sort_keys: list[tuple[str, str, str]] = []
     for entry in entries:
         if type(entry) is not dict:
             raise ValueError("runner generation snapshot entry invalid")
@@ -236,9 +251,27 @@ def parse_runner_generation_snapshot_bytes(
         path = entry.get("path")
         if type(path) is not str or not path or "\\" in path:
             raise ValueError("runner generation snapshot path invalid")
-        if path in seen:
+        pure = PurePosixPath(path)
+        if (
+            pure.is_absolute()
+            or ".." in pure.parts
+            or "." in pure.parts
+            or not pure.parts
+            or pure.parts[0] != "runner"
+            or str(pure) != path
+        ):
+            raise ValueError("runner generation snapshot path invalid")
+        if (
+            len(pure.parts) >= 2
+            and pure.parts[1] == work_folder
+        ):
+            raise ValueError("runner generation snapshot contains work folder")
+        folded = path.casefold()
+        if path in seen or folded in seen_casefold:
             raise ValueError("runner generation snapshot duplicate path")
         seen.add(path)
+        seen_casefold.add(folded)
+        sort_keys.append((folded, path, str(kind)))
         if kind == "directory":
             if set(entry) != {"kind", "path"}:
                 raise ValueError(
@@ -264,6 +297,15 @@ def parse_runner_generation_snapshot_bytes(
                 )
         else:
             raise ValueError("runner generation snapshot kind invalid")
+
+    expected_sort_keys = sorted(sort_keys)
+    if sort_keys != expected_sort_keys:
+        raise ValueError("runner generation snapshot entries not sorted")
+    if not any(
+        entry.get("kind") == "directory" and entry.get("path") == "runner"
+        for entry in entries
+    ):
+        raise ValueError("runner generation snapshot runner root missing")
 
     canonical = (
         json.dumps(
