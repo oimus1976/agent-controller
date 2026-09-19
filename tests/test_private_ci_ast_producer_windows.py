@@ -208,6 +208,70 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
         self.assertFalse(report["child_exit_code_proven"])
         self.assertFalse(report["fail_fast_proven"])
 
+    def test_bounded_child_process_shape_proves_progress_exit_and_fail_fast(self):
+        candidate = self.bound_candidate(
+            "$BridgeStartedAt = Get-Date\n"
+            "$BridgeChild = Start-Process -FilePath 'powershell.exe' "
+            "-ArgumentList @('-NoProfile', '-Command', 'exit 0') -PassThru\n"
+            "while (-not $BridgeChild.HasExited) {\n"
+            "  $BridgeElapsedSeconds = [int]((Get-Date) - $BridgeStartedAt).TotalSeconds\n"
+            "  Write-Host (\"heartbeat phase=phase4 elapsed_seconds={0}\" -f $BridgeElapsedSeconds)\n"
+            "  Start-Sleep -Seconds 5\n"
+            "}\n"
+            "$BridgeChildExitCode = $BridgeChild.ExitCode\n"
+            "if ($BridgeChildExitCode -ne 0) { throw 'child failed' }"
+        )
+        report, _ = self.run_producer(candidate)
+        self.assertTrue(report["parsed"])
+        self.assertIn("PROCESS_LAUNCH", report["observed_effect_families"])
+        self.assertTrue(report["heartbeat_or_progress_proven"])
+        self.assertTrue(report["child_exit_code_proven"])
+        self.assertTrue(report["fail_fast_proven"])
+
+    def test_child_exit_proof_requires_passthru_process_exitcode(self):
+        cases = (
+            "$BridgeChild = Start-Process powershell.exe\n"
+            "$BridgeChildExitCode = 0\n"
+            "if ($BridgeChildExitCode -ne 0) { throw 'failed' }",
+            "$BridgeChild = Start-Process powershell.exe -PassThru\n"
+            "$BridgeChildExitCode = 0\n"
+            "if ($BridgeChildExitCode -ne 0) { throw 'failed' }",
+        )
+        for candidate_body in cases:
+            with self.subTest(candidate_body=candidate_body):
+                report, _ = self.run_producer(self.bound_candidate(candidate_body))
+                self.assertFalse(report["child_exit_code_proven"])
+
+    def test_fail_fast_proof_requires_nonzero_exit_guard_with_throw(self):
+        cases = (
+            "$BridgeChild = Start-Process powershell.exe -PassThru\n"
+            "$BridgeChildExitCode = $BridgeChild.ExitCode",
+            "$BridgeChild = Start-Process powershell.exe -PassThru\n"
+            "$BridgeChildExitCode = $BridgeChild.ExitCode\n"
+            "if ($BridgeChildExitCode -eq 0) { throw 'wrong guard' }",
+            "$BridgeChild = Start-Process powershell.exe -PassThru\n"
+            "$BridgeChildExitCode = $BridgeChild.ExitCode\n"
+            "if ($BridgeChildExitCode -ne 0) { Write-Host 'failed' }",
+        )
+        for candidate_body in cases:
+            with self.subTest(candidate_body=candidate_body):
+                report, _ = self.run_producer(self.bound_candidate(candidate_body))
+                self.assertFalse(report["fail_fast_proven"])
+
+    def test_heartbeat_proof_requires_process_liveness_loop_and_bounded_sleep(self):
+        cases = (
+            "Write-Host 'heartbeat phase=phase4 elapsed_seconds=0'\nStart-Sleep -Seconds 5",
+            "$BridgeChild = Start-Process powershell.exe -PassThru\n"
+            "while (-not $BridgeChild.HasExited) { Write-Host 'working'; Start-Sleep -Seconds 5 }",
+            "$BridgeChild = Start-Process powershell.exe -PassThru\n"
+            "while (-not $BridgeChild.HasExited) { "
+            "Write-Host 'heartbeat phase=phase4 elapsed_seconds=0'; Start-Sleep -Seconds 120 }",
+        )
+        for candidate_body in cases:
+            with self.subTest(candidate_body=candidate_body):
+                report, _ = self.run_producer(self.bound_candidate(candidate_body))
+                self.assertFalse(report["heartbeat_or_progress_proven"])
+
 
 if __name__ == "__main__":
     unittest.main()
