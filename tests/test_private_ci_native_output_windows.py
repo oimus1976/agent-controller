@@ -33,6 +33,31 @@ class WindowsNativeOutputRegressionTests(unittest.TestCase):
         self.assertEqual(result.stderr, "警告")
         self.assertEqual(result.decoding_errors, ())
 
+    def test_real_subprocess_redacts_token_bytes_before_cp932_decode(self):
+        secret = "Asecret-token"
+        script = (
+            "import os;"
+            "os.write(1, b'\\x81' + "
+            + repr(secret.encode("ascii"))
+            + ")"
+        )
+        with mock.patch(
+            "agent_controller.private_ci_live_registration_runtime.locale.getpreferredencoding",
+            return_value="cp932",
+        ):
+            result = self.runtime._run_text(
+                sys.executable,
+                "-c",
+                script,
+                redact_secrets=(secret,),
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(result.secret_output_redacted)
+        self.assertNotIn(secret, result.stdout)
+        self.assertNotIn("secret-token", result.stdout)
+        self.assertIn("***", result.stdout)
+
     def test_real_subprocess_undecodable_output_keeps_exact_exit_code_and_uncertainty(self):
         script = "import os,sys;os.write(1,b'\\x81');sys.exit(37)"
         with mock.patch(
