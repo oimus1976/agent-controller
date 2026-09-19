@@ -521,6 +521,55 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             self.assertEqual(len(runners), 1)
             self.assertEqual(runners[0].runner_id, 21)
 
+    def test_post_registration_revalidates_local_binding_before_acceptance(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            binding = self.binding_for(temporary_directory)
+            root = Path(binding.runner_root)
+            root.mkdir(parents=True)
+            settings_path = root / ".runner"
+            settings = {
+                "AgentName": binding.runner_name,
+                "WorkFolder": binding.work_folder,
+                "Ephemeral": True,
+                "DisableUpdate": True,
+            }
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+            gh_calls = []
+
+            def command_runner(*command, **kwargs):
+                gh_calls.append(command)
+                if len(gh_calls) <= 2:
+                    payload = {"total_count": 0, "runners": []}
+                else:
+                    payload = {
+                        "total_count": 1,
+                        "runners": [
+                            {
+                                "id": 21,
+                                "name": binding.runner_name,
+                                "status": "offline",
+                                "busy": False,
+                                "labels": [{"name": binding.runner_label}],
+                            }
+                        ],
+                    }
+                return completed(command, stdout=json.dumps(payload))
+
+            def sleeper(seconds):
+                settings["AgentName"] = "drifted-name"
+                settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+            runtime = WindowsEphemeralRegistrationRuntime(
+                binding,
+                command_runner=command_runner,
+                sleeper=sleeper,
+            )
+            with self.assertRaisesRegex(RuntimeError, "local runner name mismatch"):
+                runtime.read_runners(binding.repository)
+
+            self.assertEqual(runtime.last_readback_attempts, 2)
+            self.assertEqual(len(gh_calls), 4)
+
     def test_post_registration_sweep_instability_exhausts_bounded_attempts(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             binding = self.binding_for(temporary_directory)
