@@ -26,7 +26,7 @@ from agent_controller.private_ci_live_registration import (
     RunnerReadback,
     RunnerReadbackFailure,
     build_live_registration_spec,
-    frozen_live_registration_binding,
+    live_registration_binding_from_phase0_evidence_bytes,
     phase0_evidence_sha256,
     plan_live_registration,
     render_live_registration_candidate,
@@ -105,7 +105,9 @@ def build_reviewed_plan(
     phase0_evidence_bytes: bytes,
     ast_attestation: AuthenticatedAstAttestation,
 ) -> LiveRegistrationPlan:
-    binding = frozen_live_registration_binding()
+    binding = live_registration_binding_from_phase0_evidence_bytes(
+        phase0_evidence_bytes
+    )
     candidate = render_live_registration_candidate(binding)
     planned = plan_live_registration(
         binding,
@@ -163,7 +165,9 @@ def validate_frozen_plan(
     phase0_evidence_bytes: bytes,
 ) -> tuple[str, ...]:
     reasons: list[str] = []
-    binding = frozen_live_registration_binding()
+    binding = live_registration_binding_from_phase0_evidence_bytes(
+        phase0_evidence_bytes
+    )
     if plan.binding != binding:
         reasons.append("PLAN_BINDING_MISMATCH")
     evidence_sha = phase0_evidence_sha256(phase0_evidence_bytes)
