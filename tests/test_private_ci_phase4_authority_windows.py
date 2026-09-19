@@ -11,6 +11,11 @@ class PrivateCiPhase4AuthorityWindowsTests(unittest.TestCase):
         cls.repo_root = Path(__file__).resolve().parents[1]
         cls.approval = cls.repo_root / "scripts" / "Approve-PrivateCiPhase4.ps1"
         cls.consume = cls.repo_root / "scripts" / "Consume-PrivateCiPhase4Approval.ps1"
+        cls.handoff_publisher = (
+            cls.repo_root
+            / "scripts"
+            / "Publish-PrivateCiRegistrationHandoff.ps1"
+        )
 
     def assert_parses(self, path):
         environment = os.environ.copy()
@@ -49,6 +54,7 @@ exit 0
     def test_phase4_authority_scripts_parse(self):
         self.assert_parses(self.approval)
         self.assert_parses(self.consume)
+        self.assert_parses(self.handoff_publisher)
 
     def test_approval_is_phase4_specific_and_does_not_authorize_phase5(self):
         source = self.approval.read_text(encoding="utf-8")
@@ -79,6 +85,18 @@ exit 0
         self.assertNotIn("workflow run", source)
         self.assertNotIn("run.cmd", source)
 
+
+    def test_registration_handoff_publisher_only_protects_exact_bytes(self):
+        source = self.handoff_publisher.read_text(encoding="utf-8")
+        self.assertIn("issue225-registration-handoff.pending.json", source)
+        self.assertIn("issue225-registration-handoff.json", source)
+        self.assertIn("ExpectedHandoffSha256", source)
+        self.assertIn("[System.IO.FileMode]::CreateNew", source)
+        self.assertIn("SetAccessRuleProtection($true, $false)", source)
+        self.assertNotIn("config.cmd", source)
+        self.assertNotIn("run.cmd", source)
+        self.assertNotIn("/dispatches", source)
+        self.assertNotIn("workflow run", source)
 
 if __name__ == "__main__":
     unittest.main()
