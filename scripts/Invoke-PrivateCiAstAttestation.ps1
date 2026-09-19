@@ -292,6 +292,22 @@ foreach ($CommandAst in $CommandAsts) {
             $ObservedEffects.Add('HTTP_API_ACCESS')
         }
     }
+    elseif ($LowerName -eq 'gh.exe') {
+        $CommandText = $CommandAst.Extent.Text
+        $IsWorkflowDispatch = (
+            $CommandText -match '(?i)^\s*gh\.exe\s+api\s+--method\s+POST\b' -and
+            $CommandText -match '(?i)repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/workflows/[A-Za-z0-9_.-]+\.ya?ml/dispatches' -and
+            $CommandText -match '(?i)-F\s+[''"]return_run_details=true[''"]'
+        )
+        if ($IsWorkflowDispatch) {
+            if (-not $ObservedEffects.Contains('WORKFLOW_DISPATCH')) {
+                $ObservedEffects.Add('WORKFLOW_DISPATCH')
+            }
+        }
+        elseif (-not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+            $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+        }
+    }
     elseif ($LowerName -in @('config.cmd')) {
         if (-not $ObservedEffects.Contains('RUNNER_REGISTRATION')) {
             $ObservedEffects.Add('RUNNER_REGISTRATION')
