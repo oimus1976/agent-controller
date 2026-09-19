@@ -20,6 +20,53 @@ class PrivateCiPhase4CliContractTests(unittest.TestCase):
         ast.parse(self.phase4_source, filename=str(self.phase4_path))
         ast.parse(self.handoff_source, filename=str(self.handoff_path))
 
+
+
+    def test_handoff_freezes_generation_snapshot_before_publication(self):
+        source = self.handoff_source
+        snapshot = source.index("generation_snapshot_raw = runner_generation_snapshot_bytes(")
+        build = source.index("evidence = build_registration_handoff_evidence(", snapshot)
+        self.assertLess(snapshot, build)
+        region = source[snapshot:build + 500]
+        self.assertIn(
+            "runner_generation_snapshot_bytes=generation_snapshot_raw",
+            region,
+        )
+
+    def test_phase4_plan_and_apply_require_exact_generation_snapshot(self):
+        source = self.phase4_source
+        plan_start = source.index("def command_plan()")
+        apply_start = source.index("def command_apply(", plan_start)
+        plan_region = source[plan_start:apply_start]
+        self.assertIn("_require_generation_snapshot_exact(handoff)", plan_region)
+
+        approval = source.index(
+            "approval_raw, approval_sha = _require_phase4_approval(",
+            apply_start,
+        )
+        before_approval = source.rfind(
+            "_require_generation_snapshot_exact(handoff)",
+            apply_start,
+            approval,
+        )
+        self.assertGreater(before_approval, apply_start)
+
+        consume = source.index(
+            "consumption_raw, consumption_sha = _validate_phase4_consumption(",
+            approval,
+        )
+        execute = source.index(
+            '"-File",\n        str(candidate_path),',
+            consume,
+        )
+        after_consume = source.index(
+            "_require_generation_snapshot_exact(",
+            consume,
+            execute,
+        )
+        self.assertLess(consume, after_consume)
+        self.assertLess(after_consume, execute)
+
     def test_phase4_harness_has_no_phase5_listener_or_dispatch_surface(self):
         forbidden = (
             '"run.cmd"',
