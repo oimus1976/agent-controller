@@ -125,7 +125,6 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
             "-LoadUserProfile",
             "-PassThru",
             "gh.exe api --method POST",
-            "return_run_details=true",
             "inputs[pr_number]=4",
             f"inputs[expected_sha]={evidence.binding.target_sha}",
             (
@@ -146,6 +145,7 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
                 self.assertIn(fragment, candidate)
 
         self.assertEqual(candidate.count("gh.exe api --method POST"), 1)
+        self.assertNotIn("return_run_details", candidate)
         self.assertNotIn("SELF_HOSTED_PRIVATE_CI_PASS", candidate)
         self.assertNotIn("-UseNewEnvironment", candidate)
 
