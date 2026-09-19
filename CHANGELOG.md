@@ -15,6 +15,36 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-19 — Phase 4/5 gated private-CI harness foundation（Issue #225 / Draft PR #226）
+
+関連: Issue #225, Issue #216, Issue #207, Issue #195, PR #226
+
+### Added / changed
+
+- #216の実機pilotでPhase 3 registration PASS後にPhase 4/5のcontroller-owned live harnessが存在しないことが判明したため、Requirement -> AC -> planned testsのtraceability baselineをIssue #225へ固定。
+- Phase 3 -> Phase 4 -> Phase 5で共有するcross-phase pilot bindingの最初のcontractを追加し、repository / PR / target SHA / trusted workflow SHA+path / runner id-name-label / environment generation / runner root-work folder / host / broker identity / target identityを明示的に保持する。
+- bindingはconsumed済みhistorical #216 runner/generationへ固定せず、invalid SHA、runner id、identity collision、workflow path traversal、relative runner root等をdeterministicにrejectする。
+- successful registrationからPhase 4へ渡すsecret-free canonical registration handoff evidenceを追加し、Phase 0 / registration plan / human approval / protected consumption / registration result / local runner settingsのSHA-256とREGISTERED statusをhash-chainとして保持する。
+- handoff document自体はauthorityではないことを明示。次段でauthenticated exact-byte evidence + restart-safe durable consumptionへ接続する。
+- #202のWOBBUFFET実測を再確認し、将来のtarget-identity launchはcharacterized `Start-Process -Credential -LoadUserProfile -WorkingDirectory`系を基準とし、同hostで失敗済みの`-UseNewEnvironment`を初期実装へ持ち込まない方針をIssue #225へ記録。
+
+### Safety / authority boundary
+
+- 本段階はcontract/canonical evidenceのみ。runner start、workflow dispatch、target checkout/job、owner-machine mutationは実装・実行していない。
+- raw handoff JSONはPhase 4 authorityではなく、registration approvalやhistorical consumed authorityの再利用も許可しない。
+- public `agent-controller`はGitHub-hosted onlyのまま。
+- Ready / merge / live dispatch / target executionはADR #90によりhuman-final。
+
+### Validation status
+
+- Initial RED run #617: expected 4 failures because Phase 4 contract module was absent.
+- Cross-phase binding implementation run #618: SUCCESS.
+- Registration handoff RED run #619: expected handoff API-only failures.
+- Canonical handoff implementation run #620: SUCCESS.
+- このentryはDraft PR #226の途中記録。Phase 4/5 runtime、durable consumption、exactly-one dispatch、adversarial reviewは未完了。
+
+---
+
 ## 2026-09-19 — Real Actions Runner `.runner` schema contract（Issue #223）
 
 関連: Issue #223, Issue #216, Issue #221, PR #222
