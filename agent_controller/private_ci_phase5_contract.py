@@ -114,6 +114,9 @@ def render_phase5_exactly_one_job_candidate(
         f"{workflow_filename}/runs"
         "?event=workflow_dispatch&branch=main&per_page=100"
     )
+    runners_endpoint = (
+        f"repos/{binding.repository}/actions/runners?per_page=100"
+    )
     qualified_target = f"{binding.host}\\{binding.target_identity}"
     runner_command = str(PureWindowsPath(binding.runner_root) / "run.cmd")
     runner_stdout = str(
@@ -129,6 +132,11 @@ def render_phase5_exactly_one_job_candidate(
         "gh.exe api "
         f"-H {_ps_single_quoted('X-GitHub-Api-Version: ' + GITHUB_API_VERSION)} "
         f"{_ps_single_quoted(dispatch_runs_endpoint)}"
+    )
+    runner_read_command = (
+        "gh.exe api "
+        f"-H {_ps_single_quoted('X-GitHub-Api-Version: ' + GITHUB_API_VERSION)} "
+        f"{_ps_single_quoted(runners_endpoint)}"
     )
 
     dispatch_command = (
@@ -171,6 +179,7 @@ def render_phase5_exactly_one_job_candidate(
         f"$BridgeRunnerStderrPath = {_ps_single_quoted(runner_stderr)}",
         f"$BridgeDispatchEndpoint = {_ps_single_quoted(dispatch_endpoint)}",
         f"$BridgeDispatchRunsEndpoint = {_ps_single_quoted(dispatch_runs_endpoint)}",
+        f"$BridgeRunnersEndpoint = {_ps_single_quoted(runners_endpoint)}",
         f"$BridgeRunnerTimeoutSeconds = {PHASE5_RUNNER_TIMEOUT_SECONDS}",
         "$ErrorActionPreference = 'Stop'",
         "",
@@ -223,6 +232,29 @@ def render_phase5_exactly_one_job_candidate(
         "if ($BridgeListenerQualifiedOwner -ine $BridgeQualifiedTargetIdentity) { throw 'Phase 5 runner listener owner mismatch' }",
         "Write-Output (\"PHASE5_RUNNER_PROCESS_ID={0}\" -f $BridgeListenerProcess.ProcessId)",
         "Write-Output (\"PHASE5_RUNNER_PROCESS_OWNER={0}\" -f $BridgeListenerQualifiedOwner)",
+        "",
+        f"$BridgeRunnerReadJson = {runner_read_command}",
+        "$BridgeRunnerReadExitCode = $LASTEXITCODE",
+        "if ($BridgeRunnerReadExitCode -ne 0) { throw 'Phase 5 pre-dispatch runner readback failed; dispatch must not be attempted' }",
+        "if (-not $BridgeRunnerReadJson) { throw 'Phase 5 pre-dispatch runner readback was empty; dispatch must not be attempted' }",
+        "$BridgeRunnerRead = $BridgeRunnerReadJson | ConvertFrom-Json",
+        "if ($null -eq $BridgeRunnerRead.total_count -or $null -eq $BridgeRunnerRead.runners) { throw 'Phase 5 pre-dispatch runner readback shape invalid; dispatch must not be attempted' }",
+        "$BridgeRunnerItems = @($BridgeRunnerRead.runners)",
+        "if ([int]$BridgeRunnerRead.total_count -gt $BridgeRunnerItems.Count) { throw 'Phase 5 pre-dispatch runner readback incomplete; dispatch must not be attempted' }",
+        "$BridgeEligibleRunners = @($BridgeRunnerItems | Where-Object {",
+        "    $BridgeObservedLabels = @($_.labels | ForEach-Object { $_.name })",
+        "    $_.id -eq $BridgeRunnerId -or",
+        "    $_.name -eq $BridgeRunnerName -or",
+        "    $BridgeObservedLabels -contains $BridgeRunnerLabel",
+        "})",
+        "if ($BridgeEligibleRunners.Count -ne 1) { throw 'Phase 5 pre-dispatch eligible runner cardinality invalid' }",
+        "$BridgeRemoteRunner = $BridgeEligibleRunners[0]",
+        "$BridgeRemoteLabels = @($BridgeRemoteRunner.labels | ForEach-Object { $_.name })",
+        "if ([long]$BridgeRemoteRunner.id -ne $BridgeRunnerId) { throw 'Phase 5 pre-dispatch runner id mismatch' }",
+        "if ($BridgeRemoteRunner.name -cne $BridgeRunnerName) { throw 'Phase 5 pre-dispatch runner name mismatch' }",
+        "if ($BridgeRemoteLabels -notcontains $BridgeRunnerLabel) { throw 'Phase 5 pre-dispatch runner label mismatch' }",
+        "if ($BridgeRemoteRunner.status -cne 'online') { throw 'Phase 5 pre-dispatch runner is not online' }",
+        "if ([bool]$BridgeRemoteRunner.busy) { throw 'Phase 5 pre-dispatch runner is busy' }",
         "",
         f"$BridgePriorRunsJson = {dispatch_read_command}",
         "$BridgePriorRunsExitCode = $LASTEXITCODE",
