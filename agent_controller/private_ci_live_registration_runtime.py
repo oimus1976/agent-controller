@@ -744,8 +744,8 @@ $RunnerTasks = @(
     def read_runners(self, repository: str) -> tuple[RunnerReadback, ...]:
         if repository != self.binding.repository:
             raise RuntimeError("runner readback repository mismatch")
-        self._local_runner_settings()
         self._last_readback_attempts = 0
+        self._local_runner_settings()
         deadline = (
             self.monotonic_clock()
             + POST_REGISTRATION_READBACK_MAX_ELAPSED_SECONDS
@@ -797,7 +797,7 @@ def result_payload(
     plan: LiveRegistrationPlan,
     plan_sha256_value: str,
     result: LiveRegistrationResult,
-    runner_readback_attempts: int = 0,
+    runner_readback_attempts: int,
 ) -> dict[str, object]:
     if (
         type(runner_readback_attempts) is not int
@@ -805,6 +805,8 @@ def result_payload(
         or runner_readback_attempts > POST_REGISTRATION_READBACK_MAX_ATTEMPTS
     ):
         raise ValueError("runner readback attempts invalid")
+    if result.runner_id is not None and runner_readback_attempts == 0:
+        raise ValueError("observed runner requires readback attempt evidence")
     return {
         "schema": RESULT_SCHEMA,
         "plan_sha256": plan_sha256_value,
