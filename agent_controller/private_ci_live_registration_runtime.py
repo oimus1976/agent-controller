@@ -672,13 +672,13 @@ $RunnerTasks = @(
         payload = json.loads(settings_path.read_text(encoding="utf-8-sig"))
         if type(payload) is not dict:
             raise RuntimeError("local runner settings shape invalid")
-        if payload.get("AgentName") != self.binding.runner_name:
+        if payload.get("agentName") != self.binding.runner_name:
             raise RuntimeError("local runner name mismatch")
-        if payload.get("WorkFolder") != self.binding.work_folder:
+        if payload.get("workFolder") != self.binding.work_folder:
             raise RuntimeError("local runner work folder mismatch")
-        if payload.get("Ephemeral") is not True:
+        if payload.get("ephemeral") is not True:
             raise RuntimeError("local runner is not ephemeral")
-        if payload.get("DisableUpdate") is not True:
+        if payload.get("disableUpdate") is not True:
             raise RuntimeError("local runner update disablement missing")
         return payload
 
