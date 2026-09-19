@@ -428,6 +428,33 @@ class PrivateCiLiveRegistrationTests(unittest.TestCase):
         self.assertNotIn(REGISTRATION_TOKEN, result.stdout)
         self.assertIn("***", result.stdout)
 
+    def test_predecode_secret_redaction_flag_fails_closed(self):
+        evidence = authenticated_phase0_evidence(self.binding)
+        result = execute_live_registration(
+            self.binding,
+            phase0_evidence_bytes=PHASE0_EVIDENCE,
+            candidate=self.candidate,
+            ast_attestation=self.ast,
+            prior_evidence_capability=evidence,
+            prepare_runner=lambda binding: None,
+            acquire_registration_token=lambda repo: REGISTRATION_TOKEN,
+            run_registration=lambda binding, token: RegistrationExecution(
+                0,
+                "***",
+                "",
+                secret_output_redacted=True,
+            ),
+            credential_handoff_cleared=lambda binding, token: True,
+            read_runners=lambda repo: self.fail("readback must not run after token leak"),
+        )
+        self.assertEqual(result.status, LiveRegistrationStatus.FAILED)
+        self.assertEqual(
+            result.reason_codes,
+            ("REGISTRATION_TOKEN_LEAKED_TO_CHILD_OUTPUT",),
+        )
+        self.assertEqual(result.child_exit_code, 0)
+        self.assertNotIn(REGISTRATION_TOKEN, result.stdout)
+
     def test_duplicate_wrong_or_non_ephemeral_runner_readback_blocks(self):
         cases = (
             (
