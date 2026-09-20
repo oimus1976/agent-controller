@@ -55,6 +55,35 @@ class PrivateCiPhase5CliContractRedTests(unittest.TestCase):
         self.assertLess(consume, after_consume)
         self.assertLess(after_consume, execute)
 
+
+    def test_candidate_contract_requires_security_probe_evidence_before_listener(self):
+        contract = (
+            self.repo_root
+            / "agent_controller"
+            / "private_ci_phase5_contract.py"
+        ).read_text(encoding="utf-8")
+        probe = contract.index(
+            '"$BridgeSecurityProbeChild = Start-Process'
+        )
+        probe_pass = contract.index(
+            "PHASE5_SECURITY_CONTEXT_REVALIDATED",
+            probe,
+        )
+        listener = contract.index(
+            '"$BridgeChild = Start-Process -FilePath \'cmd.exe\'",
+            probe_pass,
+        )
+        self.assertLess(probe, probe_pass)
+        self.assertLess(probe_pass, listener)
+        self.assertIn(
+            "BridgePhase5AuthorityMarkerPath",
+            contract[probe:listener],
+        )
+        self.assertIn(
+            "BridgeSecurityProbeResult",
+            contract[probe:listener],
+        )
+
     def test_apply_consumes_durable_authority_before_single_candidate_execution(self):
         source = self.source()
         ownership = source.index("_acquire_phase5_ownership(")
