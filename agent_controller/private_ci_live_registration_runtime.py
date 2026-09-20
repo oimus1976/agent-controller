@@ -26,7 +26,7 @@ from agent_controller.private_ci_live_registration import (
     RunnerReadback,
     RunnerReadbackFailure,
     build_live_registration_spec,
-    frozen_live_registration_binding,
+    live_registration_binding_from_phase0_evidence_bytes,
     phase0_evidence_sha256,
     plan_live_registration,
     render_live_registration_candidate,
@@ -48,8 +48,8 @@ RUNNER_PACKAGE_URL = (
 RUNNER_PACKAGE_SHA256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
 RUNNER_PACKAGE_FILENAME = f"actions-runner-win-x64-{RUNNER_VERSION}.zip"
 
-PLAN_SCHEMA = "agent-controller.private-ci-live-registration-plan.v1"
-RESULT_SCHEMA = "agent-controller.private-ci-live-registration-result.v2"
+PLAN_SCHEMA = "agent-controller.private-ci-live-registration-plan.v2"
+RESULT_SCHEMA = "agent-controller.private-ci-live-registration-result.v3"
 
 POST_REGISTRATION_READBACK_MAX_ATTEMPTS = 6
 POST_REGISTRATION_READBACK_DELAY_SECONDS = 1.0
@@ -105,7 +105,9 @@ def build_reviewed_plan(
     phase0_evidence_bytes: bytes,
     ast_attestation: AuthenticatedAstAttestation,
 ) -> LiveRegistrationPlan:
-    binding = frozen_live_registration_binding()
+    binding = live_registration_binding_from_phase0_evidence_bytes(
+        phase0_evidence_bytes
+    )
     candidate = render_live_registration_candidate(binding)
     planned = plan_live_registration(
         binding,
@@ -163,7 +165,9 @@ def validate_frozen_plan(
     phase0_evidence_bytes: bytes,
 ) -> tuple[str, ...]:
     reasons: list[str] = []
-    binding = frozen_live_registration_binding()
+    binding = live_registration_binding_from_phase0_evidence_bytes(
+        phase0_evidence_bytes
+    )
     if plan.binding != binding:
         reasons.append("PLAN_BINDING_MISMATCH")
     evidence_sha = phase0_evidence_sha256(phase0_evidence_bytes)
@@ -834,6 +838,7 @@ def result_payload(
         "pull_request_number": plan.binding.pull_request_number,
         "target_sha": plan.binding.target_sha,
         "workflow_sha": plan.binding.workflow_sha,
+        "workflow_path": plan.binding.workflow_path,
         "runner_name": plan.binding.runner_name,
         "runner_label": plan.binding.runner_label,
         "environment_generation": plan.binding.environment_generation,

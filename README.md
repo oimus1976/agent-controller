@@ -12,11 +12,14 @@ The repository is currently undergoing a public-readiness audit. See [`docs/PUBL
 
 ## Validation
 
-The deterministic test suite uses Python 3.12:
+The deterministic test suite uses Python 3.12. Install the pinned runtime/test dependencies first:
 
 ```text
+python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
 ```
+
+The workflow-aware private-CI authority checks use the pinned PyYAML dependency from `requirements.txt`; owner-machine Phase 0/5 tooling must use the same dependency set.
 
 The Windows junction containment regression is also run separately in GitHub Actions on `windows-latest`.
 

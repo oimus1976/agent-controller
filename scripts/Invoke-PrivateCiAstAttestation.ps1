@@ -186,20 +186,43 @@ $AutomaticVariableNames = @(
     'myinvocation', 'psboundparameters', 'pwd', 'host', 'executioncontext'
 )
 $AutomaticVariableCollisions = New-Object System.Collections.Generic.List[string]
-$VariableAsts = $Ast.FindAll({
-    param($Node)
-    $Node -is [System.Management.Automation.Language.VariableExpressionAst]
-}, $true)
-foreach ($VariableAst in $VariableAsts) {
-    $UserPath = $VariableAst.VariablePath.UserPath
+
+function Add-AutomaticVariableCollision {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$UserPath
+    )
+
     if ([string]::IsNullOrWhiteSpace($UserPath)) {
-        continue
+        return
     }
     $NormalizedName = (Get-NormalizedVariableUserPath -UserPath $UserPath).ToLowerInvariant()
-    if ($AutomaticVariableNames -contains $NormalizedName) {
-        if (-not $AutomaticVariableCollisions.Contains($NormalizedName)) {
-            $AutomaticVariableCollisions.Add($NormalizedName)
-        }
+    if (
+        $AutomaticVariableNames -contains $NormalizedName -and
+        -not $AutomaticVariableCollisions.Contains($NormalizedName)
+    ) {
+        $AutomaticVariableCollisions.Add($NormalizedName)
+    }
+}
+
+foreach ($AssignmentAst in $AssignmentAsts) {
+    if ($AssignmentAst.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
+        Add-AutomaticVariableCollision -UserPath $AssignmentAst.Left.VariablePath.UserPath
+        continue
+    }
+    foreach ($VariableNode in $AssignmentAst.Left.FindAll({
+        param($Node)
+        $Node -is [System.Management.Automation.Language.VariableExpressionAst]
+    }, $true)) {
+        Add-AutomaticVariableCollision -UserPath $VariableNode.VariablePath.UserPath
+    }
+}
+foreach ($ParameterAst in $ParameterAsts) {
+    Add-AutomaticVariableCollision -UserPath $ParameterAst.Name.VariablePath.UserPath
+}
+foreach ($ForEachAst in $ForEachAsts) {
+    if ($null -ne $ForEachAst.Variable) {
+        Add-AutomaticVariableCollision -UserPath $ForEachAst.Variable.VariablePath.UserPath
     }
 }
 
@@ -230,22 +253,86 @@ foreach ($CommandAst in $CommandAsts) {
         $LowerName = $LowerName.Substring($LastSlash + 1)
     }
 
-    if ($LowerName -in @('write-output', 'write-host')) {
+    if ($LowerName -in @(
+        'write-output', 'write-host', 'get-date', 'start-sleep',
+        'hostname.exe', 'whoami.exe', 'get-localuser', 'get-localgroupmember',
+        'test-path', 'get-item', 'get-childitem', 'get-ciminstance',
+        'get-scheduledtask', 'get-filehash', 'get-credential', 'get-content',
+        'convertfrom-json', 'select-object', 'where-object'
+    )) {
         continue
+    }
+    elseif ($LowerName -eq 'start-process') {
+        if (-not $ObservedEffects.Contains('PROCESS_LAUNCH')) {
+            $ObservedEffects.Add('PROCESS_LAUNCH')
+        }
+    }
+    elseif ($LowerName -eq 'stop-process') {
+        if (-not $ObservedEffects.Contains('PROCESS_CONTROL')) {
+            $ObservedEffects.Add('PROCESS_CONTROL')
+        }
+    }
+    elseif ($LowerName -eq 'copy-item') {
+        if (-not $ObservedEffects.Contains('FILESYSTEM_WRITE_MUTATION')) {
+            $ObservedEffects.Add('FILESYSTEM_WRITE_MUTATION')
+        }
     }
     elseif ($LowerName -in @('remove-item', 'del', 'erase', 'rd', 'rmdir')) {
         if (-not $ObservedEffects.Contains('FILESYSTEM_DESTRUCTIVE_MUTATION')) {
             $ObservedEffects.Add('FILESYSTEM_DESTRUCTIVE_MUTATION')
         }
     }
-    elseif ($LowerName -in @('set-acl', 'icacls')) {
+    elseif ($LowerName -in @('set-acl', 'icacls', 'icacls.exe')) {
         if (-not $ObservedEffects.Contains('ACL_MUTATION')) {
             $ObservedEffects.Add('ACL_MUTATION')
+        }
+    }
+    elseif ($LowerName -eq 'invoke-cimmethod') {
+        $CommandText = $CommandAst.Extent.Text
+        if ($CommandText -notmatch '(?i)-MethodName\s+GetOwner\b') {
+            if (-not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+                $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+            }
         }
     }
     elseif ($LowerName -in @('invoke-restmethod', 'invoke-webrequest', 'curl', 'wget')) {
         if (-not $ObservedEffects.Contains('HTTP_API_ACCESS')) {
             $ObservedEffects.Add('HTTP_API_ACCESS')
+        }
+    }
+    elseif ($LowerName -eq 'gh.exe') {
+        $CommandText = $CommandAst.Extent.Text
+        $IsWorkflowDispatchRead = (
+            $CommandText -match '(?i)^\s*gh\.exe\s+api\b' -and
+            $CommandText -notmatch '(?i)--method\b' -and
+            $CommandText -match '(?i)-H\s+[''"]X-GitHub-Api-Version:\s*2026-03-10[''"]' -and
+            $CommandText -match '(?i)repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/workflows/[A-Za-z0-9_.-]+\.ya?ml/runs\?event=workflow_dispatch&branch=main&status=(queued|in_progress|requested|waiting|pending)&per_page=100'
+        )
+        $IsRunnerInventoryRead = (
+            $CommandText -match '(?i)^\s*gh\.exe\s+api\b' -and
+            $CommandText -notmatch '(?i)--method\b' -and
+            $CommandText -match '(?i)-H\s+[''"]X-GitHub-Api-Version:\s*2026-03-10[''"]' -and
+            $CommandText -match '(?i)repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runners\?per_page=100'
+        )
+        $IsWorkflowDispatch = (
+            $CommandText -match '(?i)^\s*gh\.exe\s+api\s+--method\s+POST\b' -and
+            $CommandText -match '(?i)-H\s+[''"]X-GitHub-Api-Version:\s*2026-03-10[''"]' -and
+            $CommandText -match '(?i)repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/workflows/[A-Za-z0-9_.-]+\.ya?ml/dispatches' -and
+            $CommandText -match '(?i)-f\s+[''"]ref=main[''"]' -and
+            $CommandText -notmatch '(?i)return_run_details'
+        )
+        if ($IsWorkflowDispatchRead -or $IsRunnerInventoryRead) {
+            if (-not $ObservedEffects.Contains('HTTP_API_ACCESS')) {
+                $ObservedEffects.Add('HTTP_API_ACCESS')
+            }
+        }
+        elseif ($IsWorkflowDispatch) {
+            if (-not $ObservedEffects.Contains('WORKFLOW_DISPATCH')) {
+                $ObservedEffects.Add('WORKFLOW_DISPATCH')
+            }
+        }
+        elseif (-not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+            $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
         }
     }
     elseif ($LowerName -in @('config.cmd')) {
@@ -322,6 +409,149 @@ foreach ($ForbiddenText in @('%TEMP%', '$env:TEMP', '$pwd', 'Get-Location')) {
     }
 }
 
+$ChildProcessAssigned = $false
+$ChildExitCodeAssigned = $false
+$StartedAtAssigned = $false
+foreach ($AssignmentAst in $AssignmentAsts) {
+    if (
+        $AssignmentAst.Left -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
+        ($RootStatements -notcontains $AssignmentAst)
+    ) {
+        continue
+    }
+
+    $LeftName = Get-NormalizedVariableUserPath -UserPath $AssignmentAst.Left.VariablePath.UserPath
+    if ($LeftName -ieq 'BridgeChild') {
+        $StartProcessCommands = @($AssignmentAst.Right.FindAll({
+            param($Node)
+            if ($Node -isnot [System.Management.Automation.Language.CommandAst]) {
+                return $false
+            }
+            $Name = $Node.GetCommandName()
+            return (-not [string]::IsNullOrWhiteSpace($Name)) -and ($Name -ieq 'Start-Process')
+        }, $true))
+        if ($StartProcessCommands.Count -eq 1) {
+            $HasPassThru = $false
+            foreach ($Element in $StartProcessCommands[0].CommandElements) {
+                if (
+                    $Element -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    $Element.ParameterName -ieq 'PassThru'
+                ) {
+                    $HasPassThru = $true
+                }
+            }
+            if ($HasPassThru) {
+                $ChildProcessAssigned = $true
+            }
+        }
+    }
+    elseif ($LeftName -ieq 'BridgeStartedAt') {
+        $GetDateCommands = @($AssignmentAst.Right.FindAll({
+            param($Node)
+            if ($Node -isnot [System.Management.Automation.Language.CommandAst]) {
+                return $false
+            }
+            $Name = $Node.GetCommandName()
+            return (-not [string]::IsNullOrWhiteSpace($Name)) -and ($Name -ieq 'Get-Date')
+        }, $true))
+        if ($GetDateCommands.Count -eq 1) {
+            $StartedAtAssigned = $true
+        }
+    }
+    elseif ($LeftName -ieq 'BridgeChildExitCode') {
+        if ($AssignmentAst.Right.Extent.Text -match '(?i)^\s*\$BridgeChild\.ExitCode\s*$') {
+            $ChildExitCodeAssigned = $true
+        }
+    }
+}
+
+$HeartbeatOrProgressProven = $false
+if ($ChildProcessAssigned -and $StartedAtAssigned) {
+    $WhileAsts = $Ast.FindAll({
+        param($Node)
+        $Node -is [System.Management.Automation.Language.WhileStatementAst]
+    }, $true)
+    foreach ($WhileAst in $WhileAsts) {
+        $ConditionText = $WhileAst.Condition.Extent.Text
+        $BodyText = $WhileAst.Body.Extent.Text
+        if ($ConditionText -notmatch '(?i)-not\s+\$BridgeChild\.HasExited') {
+            continue
+        }
+        if (
+            $BodyText -notmatch '(?i)heartbeat' -or
+            $BodyText -notmatch '(?i)phase=' -or
+            $BodyText -notmatch '(?i)elapsed_seconds=' -or
+            $BodyText -notmatch '(?i)\$BridgeElapsedSeconds'
+        ) {
+            continue
+        }
+
+        $ElapsedAssignmentProven = $false
+        $BodyAssignments = @($WhileAst.Body.FindAll({
+            param($Node)
+            $Node -is [System.Management.Automation.Language.AssignmentStatementAst]
+        }, $true))
+        foreach ($BodyAssignment in $BodyAssignments) {
+            if ($BodyAssignment.Left -isnot [System.Management.Automation.Language.VariableExpressionAst]) {
+                continue
+            }
+            $BodyLeftName = Get-NormalizedVariableUserPath -UserPath $BodyAssignment.Left.VariablePath.UserPath
+            if ($BodyLeftName -ine 'BridgeElapsedSeconds') {
+                continue
+            }
+            $RightText = $BodyAssignment.Right.Extent.Text
+            if (
+                $RightText -match '(?i)Get-Date' -and
+                $RightText -match '(?i)\$BridgeStartedAt' -and
+                $RightText -match '(?i)\.TotalSeconds'
+            ) {
+                $ElapsedAssignmentProven = $true
+            }
+        }
+        if (-not $ElapsedAssignmentProven) {
+            continue
+        }
+
+        $SleepMatch = [regex]::Match(
+            $BodyText,
+            '(?i)Start-Sleep\s+-Seconds\s+([0-9]+)'
+        )
+        if (-not $SleepMatch.Success) {
+            continue
+        }
+        $SleepSeconds = [int]$SleepMatch.Groups[1].Value
+        if ($SleepSeconds -lt 1 -or $SleepSeconds -gt 60) {
+            continue
+        }
+
+        $HeartbeatOrProgressProven = $true
+        break
+    }
+}
+
+$ChildExitCodeProven = $ChildProcessAssigned -and $ChildExitCodeAssigned
+$FailFastProven = $false
+if ($ChildExitCodeProven) {
+    $IfAsts = @($Ast.FindAll({
+        param($Node)
+        $Node -is [System.Management.Automation.Language.IfStatementAst]
+    }, $true))
+    foreach ($IfAst in $IfAsts) {
+        $IfText = $IfAst.Extent.Text
+        $ThrowAsts = @($IfAst.FindAll({
+            param($Node)
+            $Node -is [System.Management.Automation.Language.ThrowStatementAst]
+        }, $true))
+        if (
+            $IfText -match '(?is)^\s*if\s*\(\s*\$BridgeChildExitCode\s*-ne\s*0\s*\)' -and
+            $ThrowAsts.Count -gt 0
+        ) {
+            $FailFastProven = $true
+            break
+        }
+    }
+}
+
 $StructuralErrorCount = [int]$ParseErrors.Count + [int]$BindingProblems.Count
 $Result = [ordered]@{
     runtime = 'Windows PowerShell 5.1'
@@ -343,9 +573,9 @@ $Result = [ordered]@{
     unresolved_placeholders = @($UnresolvedPlaceholders)
     forbidden_convenience_paths = @($ForbiddenConveniencePaths)
     self_declared_gate_authority = ($CandidateText -match '(?im)^\s*(Write-Output|Write-Host)\s+["'']?PASS_TO_OPERATOR["'']?\s*$')
-    heartbeat_or_progress_proven = $false
-    child_exit_code_proven = $false
-    fail_fast_proven = $false
+    heartbeat_or_progress_proven = $HeartbeatOrProgressProven
+    child_exit_code_proven = $ChildExitCodeProven
+    fail_fast_proven = $FailFastProven
 }
 
 $Result | ConvertTo-Json -Depth 5 -Compress
