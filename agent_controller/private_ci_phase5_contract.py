@@ -247,7 +247,7 @@ def render_phase5_exactly_one_job_candidate(
         "$BridgeSecurityProbeObservedSha = (Get-FileHash -LiteralPath $BridgeSecurityProbePath -Algorithm SHA256).Hash",
         "if ($BridgeSecurityProbeObservedSha -ine $BridgeSecurityProbeSha256) { throw 'Phase 5 security probe hash mismatch' }",
         "if (-not (Test-Path -LiteralPath $BridgePhase5AuthorityMarkerPath -PathType Leaf)) { throw 'Phase 5 durable authority marker missing' }",
-        "foreach ($BridgeFreshPath in @($BridgeRunnerStdoutPath, $BridgeRunnerStderrPath, $BridgeSecurityProbeResultPath, $BridgeSecurityProbeStdoutPath, $BridgeSecurityProbeStderrPath)) {
+        "foreach ($BridgeFreshPath in @($BridgeRunnerStdoutPath, $BridgeRunnerStderrPath, $BridgeSecurityProbeResultPath, $BridgeSecurityProbeStdoutPath, $BridgeSecurityProbeStderrPath)) {",
         "    if (Test-Path -LiteralPath $BridgeFreshPath) { throw 'Phase 5 runner output path already exists' }",
         "}",
         "$BridgeForbiddenBrokerEnvironment = @(Get-ChildItem Env: | Where-Object {",
