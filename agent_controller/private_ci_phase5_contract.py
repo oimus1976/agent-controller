@@ -288,6 +288,8 @@ def render_phase5_exactly_one_job_candidate(
         "$BridgeTargetCredential = Get-Credential -UserName $BridgeQualifiedTargetIdentity -Message 'Enter the local ac-runner credential for the reviewed Phase 5 plan.'",
         "if ($null -eq $BridgeTargetCredential) { throw 'Phase 5 target credential was not supplied' }",
         "if ($BridgeTargetCredential.UserName -ine $BridgeQualifiedTargetIdentity) { throw 'Phase 5 target credential identity mismatch' }",
+        "$BridgeSecurityProbePrelaunchSha = (Get-FileHash -LiteralPath $BridgeSecurityProbePath -Algorithm SHA256).Hash",
+        "if ($BridgeSecurityProbePrelaunchSha -ine $BridgeSecurityProbeSha256) { throw 'Phase 5 security probe drift before launch' }",
         "",
         "$BridgeSecurityProbeStartedAt = Get-Date",
         "$BridgeSecurityProbeChild = Start-Process -FilePath 'powershell.exe' -ArgumentList @(",
