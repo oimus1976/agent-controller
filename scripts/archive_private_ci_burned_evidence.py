@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ from agent_controller.private_ci_burned_evidence_archive import (
     apply_archive_plan,
     archive_plan_bytes,
     build_archive_plan,
+    parse_archive_plan_bytes,
 )
 
 
@@ -50,6 +52,48 @@ def _require_success(
             f"{completed.stderr.strip()}"
         )
     return completed.stdout.strip()
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _python_binding() -> tuple[str, str]:
+    path = Path(sys.executable).resolve(strict=True)
+    stat_result = path.lstat()
+    if path.is_symlink() or (
+        getattr(stat_result, "st_file_attributes", 0) & 0x400
+    ):
+        raise RuntimeError("Python executable is symlink or reparse point")
+    if not path.is_file():
+        raise RuntimeError("Python executable is not regular file")
+    return str(path), _file_sha256(path)
+
+
+def _decode_reviewed_plan(
+    expected_plan_sha256: str,
+    expected_plan_base64: str,
+):
+    expected = _require_digest(expected_plan_sha256)
+    if type(expected_plan_base64) is not str or not expected_plan_base64:
+        raise ValueError("expected archive plan base64 invalid")
+    try:
+        raw = base64.b64decode(
+            expected_plan_base64.encode("ascii"),
+            validate=True,
+        )
+    except (UnicodeEncodeError, ValueError) as error:
+        raise ValueError("expected archive plan base64 invalid") from error
+    if hashlib.sha256(raw).hexdigest() != expected:
+        raise RuntimeError("reviewed archive plan bytes SHA-256 mismatch")
+    return expected, parse_archive_plan_bytes(raw)
 
 
 def _require_digest(value: str) -> str:
@@ -148,10 +192,13 @@ def _require_windows_elevated_boundary() -> None:
 def command_plan() -> int:
     controller_main_sha, controller_tree = _require_controller_source_exact()
     evidence_root = Path(AUTHORITATIVE_EVIDENCE_ROOT)
+    python_executable, python_sha256 = _python_binding()
     plan = build_archive_plan(
         evidence_root=evidence_root,
         controller_main_sha=controller_main_sha,
         controller_tree=str(controller_tree),
+        python_executable=python_executable,
+        python_sha256=python_sha256,
     )
     if plan is None:
         print("BURNED_CANONICAL_ARCHIVE_NOT_REQUIRED")
@@ -161,6 +208,7 @@ def command_plan() -> int:
 
     raw = archive_plan_bytes(plan)
     digest = hashlib.sha256(raw).hexdigest()
+    plan_base64 = base64.b64encode(raw).decode("ascii")
     apply_script = (
         controller_tree
         / "scripts"
@@ -169,12 +217,16 @@ def command_plan() -> int:
     quoted_script = str(apply_script).replace("'", "''")
     uac_argument = (
         "-NoProfile -ExecutionPolicy Bypass -File "
-        f"'{quoted_script}' -ExpectedPlanSha256 '{digest}'"
+        f"'{quoted_script}' "
+        f"-ExpectedPlanSha256 '{digest}' "
+        f"-ExpectedPlanBase64 '{plan_base64}'"
     )
 
     print("BURNED_CANONICAL_ARCHIVE_PLAN_READY")
     print(f"archive_plan_sha256={digest}")
     print(f"archive_directory={plan.archive_directory}")
+    print(f"python_executable={plan.python_executable}")
+    print(f"python_sha256={plan.python_sha256}")
     print(f"artifact_count={len(plan.items)}")
     for item in plan.items:
         print(
@@ -191,24 +243,29 @@ def command_plan() -> int:
     return 0
 
 
-def command_apply_internal(expected_plan_sha256: str) -> int:
-    expected = _require_digest(expected_plan_sha256)
-    _require_windows_elevated_boundary()
-    controller_main_sha, controller_tree = _require_controller_source_exact()
-    evidence_root = Path(AUTHORITATIVE_EVIDENCE_ROOT)
-    plan = build_archive_plan(
-        evidence_root=evidence_root,
-        controller_main_sha=controller_main_sha,
-        controller_tree=str(controller_tree),
+def command_apply_internal(
+    expected_plan_sha256: str,
+    expected_plan_base64: str,
+) -> int:
+    expected, plan = _decode_reviewed_plan(
+        expected_plan_sha256,
+        expected_plan_base64,
     )
-    if plan is None:
-        raise RuntimeError(
-            "reviewed archive plan no longer has canonical sources"
-        )
-    observed = hashlib.sha256(archive_plan_bytes(plan)).hexdigest()
-    if observed != expected:
-        raise RuntimeError("reviewed archive plan drift before apply")
+    _require_windows_elevated_boundary()
 
+    controller_main_sha, controller_tree = _require_controller_source_exact()
+    if controller_main_sha != plan.controller_main_sha:
+        raise RuntimeError("reviewed archive controller main drift")
+    if str(controller_tree) != plan.controller_tree:
+        raise RuntimeError("reviewed archive controller tree drift")
+
+    python_executable, python_sha256 = _python_binding()
+    if python_executable.casefold() != plan.python_executable.casefold():
+        raise RuntimeError("reviewed archive Python executable drift")
+    if python_sha256 != plan.python_sha256:
+        raise RuntimeError("reviewed archive Python SHA-256 drift")
+
+    evidence_root = Path(AUTHORITATIVE_EVIDENCE_ROOT)
     result = apply_archive_plan(
         evidence_root=evidence_root,
         plan=plan,
@@ -226,7 +283,6 @@ def command_apply_internal(expected_plan_sha256: str) -> int:
     print("NO_RUNNER_OR_GITHUB_LIVE_EFFECT_PERFORMED")
     return 0
 
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -238,13 +294,17 @@ def main() -> int:
     subparsers.add_parser("plan")
     apply_parser = subparsers.add_parser("apply-internal")
     apply_parser.add_argument("--expected-plan-sha256", required=True)
+    apply_parser.add_argument("--expected-plan-base64", required=True)
     options = parser.parse_args()
 
     try:
         if options.command == "plan":
             return command_plan()
         if options.command == "apply-internal":
-            return command_apply_internal(options.expected_plan_sha256)
+            return command_apply_internal(
+                options.expected_plan_sha256,
+                options.expected_plan_base64,
+            )
         raise RuntimeError("unsupported command")
     except Exception as error:
         print(f"BLOCKED: {error}", file=sys.stderr)
