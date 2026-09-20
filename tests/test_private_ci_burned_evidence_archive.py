@@ -127,6 +127,29 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
                 controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
             )
 
+
+    def test_existing_archive_directory_blocks_replanning(self):
+        m = self.module()
+        tmp, root = self.make_root()
+        self.addCleanup(tmp.cleanup)
+        self.write(root, "issue216-phase0-canonical.json", b"phase0\n")
+        first = m.build_archive_plan(
+            evidence_root=root,
+            controller_main_sha="a" * 40,
+            controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+        )
+        archive_path = root.joinpath(
+            *Path(first.archive_directory).parts
+        )
+        archive_path.mkdir(parents=True)
+
+        with self.assertRaisesRegex(RuntimeError, "manual recovery"):
+            m.build_archive_plan(
+                evidence_root=root,
+                controller_main_sha="a" * 40,
+                controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+            )
+
     def test_hash_drift_blocks_before_archive_creation(self):
         m = self.module()
         tmp, root = self.make_root()
