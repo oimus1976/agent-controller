@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 ARCHIVE_PLAN_SCHEMA = (
@@ -21,6 +22,7 @@ ARCHIVE_RETIREMENT_SCHEMA = (
 ARCHIVE_COPIES_VERIFIED = "ARCHIVE_COPIES_VERIFIED_PENDING_RETIREMENT"
 ARCHIVE_RETIREMENT_PASS = "BURNED_CANONICAL_EVIDENCE_ARCHIVED"
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+HELPER_ARCHIVE_NAME_RE = re.compile(r"^issue216-burned-[0-9a-f]{16}$")
 
 CANONICAL_RESTART_BLOCKING_FILENAMES = (
     "issue216-pilot-identity-freeze.json",
@@ -55,6 +57,8 @@ class ArchivePlan:
     evidence_root: str
     controller_main_sha: str
     controller_tree: str
+    python_executable: str
+    python_sha256: str
     inventory_sha256: str
     archive_directory: str
     items: tuple[ArchiveItem, ...]
@@ -210,6 +214,153 @@ def _validate_items(items: tuple[ArchiveItem, ...]) -> None:
         raise ValueError("archive items not in canonical allowlist order")
 
 
+def _validate_python_binding(
+    python_executable: object,
+    python_sha256: object,
+) -> None:
+    if type(python_executable) is not str or not python_executable:
+        raise ValueError("archive plan Python executable invalid")
+    pure = PureWindowsPath(python_executable)
+    if (
+        not pure.is_absolute()
+        or pure.suffix.casefold() != ".exe"
+        or ".." in pure.parts
+    ):
+        raise ValueError("archive plan Python executable must be absolute exe")
+    if not _valid_sha256(python_sha256):
+        raise ValueError("archive plan Python SHA-256 invalid")
+
+
+def _payload_items(payload: object, description: str) -> tuple[ArchiveItem, ...]:
+    if type(payload) is not list:
+        raise RuntimeError(f"{description} items invalid")
+    parsed = []
+    for item in payload:
+        if (
+            type(item) is not dict
+            or set(item) != {"filename", "sha256", "size"}
+        ):
+            raise RuntimeError(f"{description} item shape invalid")
+        parsed.append(
+            ArchiveItem(
+                filename=item["filename"],
+                sha256=item["sha256"],
+                size=item["size"],
+            )
+        )
+    items = tuple(parsed)
+    _validate_items(items)
+    return items
+
+
+def _validate_completed_helper_archive(
+    evidence_root: Path,
+    archive_path: Path,
+) -> None:
+    _require_plain_directory(archive_path, "prior helper archive")
+    expected_relative = f"archive/{archive_path.name}"
+    manifest_path = archive_path / "manifest.json"
+    result_path = archive_path / "retirement-complete.json"
+    _require_regular_nonreparse_file(
+        manifest_path, "prior helper archive manifest"
+    )
+    _require_regular_nonreparse_file(
+        result_path, "prior helper retirement result"
+    )
+    manifest_raw = manifest_path.read_bytes()
+    result_raw = result_path.read_bytes()
+    try:
+        manifest = json.loads(manifest_raw.decode("utf-8"))
+        result = json.loads(result_raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("prior helper archive JSON invalid") from error
+
+    if type(manifest) is not dict or set(manifest) != {
+        "schema",
+        "plan_sha256",
+        "evidence_root",
+        "controller_main_sha",
+        "controller_tree",
+        "archive_directory",
+        "items",
+        "copies_verified_at",
+        "status",
+    }:
+        raise RuntimeError("prior helper archive manifest shape invalid")
+    if manifest["schema"] != ARCHIVE_MANIFEST_SCHEMA:
+        raise RuntimeError("prior helper archive manifest schema invalid")
+    if manifest["status"] != ARCHIVE_COPIES_VERIFIED:
+        raise RuntimeError("prior helper archive manifest status invalid")
+    if manifest["evidence_root"] != str(evidence_root):
+        raise RuntimeError("prior helper archive evidence root mismatch")
+    if manifest["archive_directory"] != expected_relative:
+        raise RuntimeError("prior helper archive directory mismatch")
+    if not _valid_sha256(manifest["plan_sha256"]):
+        raise RuntimeError("prior helper archive plan SHA invalid")
+    manifest_items = _payload_items(
+        manifest["items"], "prior helper archive manifest"
+    )
+
+    if type(result) is not dict or set(result) != {
+        "schema",
+        "plan_sha256",
+        "manifest_sha256",
+        "archive_directory",
+        "items",
+        "completed_at",
+        "status",
+    }:
+        raise RuntimeError("prior helper retirement result shape invalid")
+    if result["schema"] != ARCHIVE_RETIREMENT_SCHEMA:
+        raise RuntimeError("prior helper retirement result schema invalid")
+    if result["status"] != ARCHIVE_RETIREMENT_PASS:
+        raise RuntimeError("prior helper retirement result status invalid")
+    if result["archive_directory"] != expected_relative:
+        raise RuntimeError("prior helper retirement directory mismatch")
+    if result["plan_sha256"] != manifest["plan_sha256"]:
+        raise RuntimeError("prior helper plan binding mismatch")
+    if result["manifest_sha256"] != _sha256_bytes(manifest_raw):
+        raise RuntimeError("prior helper manifest SHA mismatch")
+    result_items = _payload_items(
+        result["items"], "prior helper retirement result"
+    )
+    if result_items != manifest_items:
+        raise RuntimeError("prior helper archive item binding mismatch")
+
+    for item in manifest_items:
+        _require_item_exact(
+            archive_path / item.filename,
+            item,
+            "prior helper archive copy",
+        )
+
+
+def _validate_no_incomplete_helper_archive_residue(
+    evidence_root: Path,
+) -> None:
+    archive_parent = evidence_root / "archive"
+    if not archive_parent.exists() and not archive_parent.is_symlink():
+        return
+    _require_plain_directory(archive_parent, "archive parent")
+    try:
+        children = sorted(
+            archive_parent.iterdir(),
+            key=lambda path: path.name.casefold(),
+        )
+    except OSError as error:
+        raise RuntimeError("archive parent inventory read failed") from error
+    for child in children:
+        if HELPER_ARCHIVE_NAME_RE.fullmatch(child.name) is None:
+            continue
+        try:
+            _validate_completed_helper_archive(evidence_root, child)
+        except Exception as error:
+            raise RuntimeError(
+                "incomplete prior helper archive residue requires "
+                f"manual recovery: {child}"
+            ) from error
+
+
 def _inventory_bytes(items: tuple[ArchiveItem, ...]) -> bytes:
     _validate_items(items)
     return _canonical_json_bytes(
@@ -225,6 +376,8 @@ def build_archive_plan(
     evidence_root: Path,
     controller_main_sha: str,
     controller_tree: str,
+    python_executable: str,
+    python_sha256: str,
 ) -> ArchivePlan | None:
     if not isinstance(evidence_root, Path):
         raise ValueError("evidence root must be Path")
@@ -233,6 +386,8 @@ def build_archive_plan(
         raise ValueError("controller main SHA invalid")
     if type(controller_tree) is not str or not controller_tree.strip():
         raise ValueError("controller tree invalid")
+    _validate_python_binding(python_executable, python_sha256)
+    _validate_no_incomplete_helper_archive_residue(evidence_root)
 
     items = []
     for filename in CANONICAL_RESTART_BLOCKING_FILENAMES:
@@ -262,6 +417,8 @@ def build_archive_plan(
         evidence_root=str(evidence_root),
         controller_main_sha=controller_main_sha,
         controller_tree=controller_tree,
+        python_executable=python_executable,
+        python_sha256=python_sha256,
         inventory_sha256=inventory_sha,
         archive_directory=archive_directory,
         items=frozen_items,
@@ -281,6 +438,7 @@ def archive_plan_bytes(plan: ArchivePlan) -> bytes:
         raise ValueError("archive plan controller main SHA invalid")
     if type(plan.controller_tree) is not str or not plan.controller_tree:
         raise ValueError("archive plan controller tree invalid")
+    _validate_python_binding(plan.python_executable, plan.python_sha256)
     _validate_items(plan.items)
     observed_inventory = _sha256_bytes(_inventory_bytes(plan.items))
     if plan.inventory_sha256 != observed_inventory:
@@ -306,6 +464,8 @@ def archive_plan_bytes(plan: ArchivePlan) -> bytes:
             "evidence_root": plan.evidence_root,
             "controller_main_sha": plan.controller_main_sha,
             "controller_tree": plan.controller_tree,
+            "python_executable": plan.python_executable,
+            "python_sha256": plan.python_sha256,
             "inventory_sha256": plan.inventory_sha256,
             "archive_directory": plan.archive_directory,
             "items": [_item_payload(item) for item in plan.items],
@@ -329,6 +489,8 @@ def parse_archive_plan_bytes(raw: bytes) -> ArchivePlan:
         "evidence_root",
         "controller_main_sha",
         "controller_tree",
+        "python_executable",
+        "python_sha256",
         "inventory_sha256",
         "archive_directory",
         "items",
@@ -356,6 +518,8 @@ def parse_archive_plan_bytes(raw: bytes) -> ArchivePlan:
         evidence_root=payload["evidence_root"],
         controller_main_sha=payload["controller_main_sha"],
         controller_tree=payload["controller_tree"],
+        python_executable=payload["python_executable"],
+        python_sha256=payload["python_sha256"],
         inventory_sha256=payload["inventory_sha256"],
         archive_directory=payload["archive_directory"],
         items=items,
@@ -499,6 +663,8 @@ def apply_archive_plan(
         evidence_root=evidence_root,
         controller_main_sha=plan.controller_main_sha,
         controller_tree=plan.controller_tree,
+        python_executable=plan.python_executable,
+        python_sha256=plan.python_sha256,
     )
     if current is None or archive_plan_bytes(current) != exact_plan_raw:
         raise RuntimeError("burned canonical evidence drift before archival")
