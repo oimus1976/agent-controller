@@ -247,6 +247,16 @@ def build_archive_plan(
     archive_directory = (
         "archive/issue216-burned-" + inventory_sha[:16]
     )
+    archive_parent = evidence_root / "archive"
+    if archive_parent.exists() or archive_parent.is_symlink():
+        _require_plain_directory(archive_parent, "archive parent")
+    archive_path = evidence_root / "archive" / (
+        "issue216-burned-" + inventory_sha[:16]
+    )
+    if archive_path.exists() or archive_path.is_symlink():
+        raise RuntimeError(
+            "archive directory already exists; manual recovery is required"
+        )
     plan = ArchivePlan(
         schema=ARCHIVE_PLAN_SCHEMA,
         evidence_root=str(evidence_root),
@@ -544,7 +554,13 @@ def apply_archive_plan(
         )
 
     for item in plan.items:
-        _remove_source_file(evidence_root / item.filename)
+        source = evidence_root / item.filename
+        _require_item_exact(
+            source,
+            item,
+            "canonical archive source immediately before retirement",
+        )
+        _remove_source_file(source)
 
     for item in plan.items:
         source = evidence_root / item.filename
