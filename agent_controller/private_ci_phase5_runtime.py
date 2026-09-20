@@ -140,6 +140,7 @@ def validate_frozen_phase5_plan(
     expected_candidate = render_phase5_exactly_one_job_candidate(
         phase4.binding,
         phase4_result_sha256=phase4_sha,
+        target_probe_sha256=phase4.target_probe_sha256,
     )
     if plan.candidate != expected_candidate:
         reasons.append("PHASE5_PLAN_CANDIDATE_MISMATCH")
@@ -152,6 +153,7 @@ def validate_frozen_phase5_plan(
     spec = build_phase5_exactly_one_job_spec(
         phase4.binding,
         phase4_result_sha256=phase4_sha,
+        target_probe_sha256=phase4.target_probe_sha256,
     )
     if plan.spec_sha256 != operator_step_spec_sha256(spec):
         reasons.append("PHASE5_PLAN_SPEC_SHA_MISMATCH")
@@ -168,11 +170,13 @@ def build_reviewed_phase5_plan(
     candidate = render_phase5_exactly_one_job_candidate(
         phase4.binding,
         phase4_result_sha256=phase4_sha,
+        target_probe_sha256=phase4.target_probe_sha256,
     )
     candidate_sha = _candidate_sha256(candidate)
     spec = build_phase5_exactly_one_job_spec(
         phase4.binding,
         phase4_result_sha256=phase4_sha,
+        target_probe_sha256=phase4.target_probe_sha256,
     )
 
     spec_reasons = _spec_reason_codes(spec)
