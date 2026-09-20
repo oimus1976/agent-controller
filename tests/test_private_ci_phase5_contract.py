@@ -110,6 +110,7 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
             m.render_phase5_exactly_one_job_candidate(
                 evidence.binding,
                 phase4_result_sha256=digest,
+                target_probe_sha256=evidence.target_probe_sha256,
             ),
         )
         required = (
