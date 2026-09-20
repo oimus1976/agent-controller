@@ -202,6 +202,7 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
         self.assertIn("Phase 5 broker credential isolation failed", candidate)
         self.assertIn("Phase 5 security probe admin status unsafe", candidate)
         self.assertIn("Phase 5 durable authority isolation failed", candidate)
+        self.assertIn("Phase 5 security probe drift before launch", candidate)
 
     def test_candidate_rejects_invalid_security_probe_digest(self):
         m = module()
