@@ -78,7 +78,6 @@ class PrivateCiPhase5PlanRedTests(unittest.TestCase):
         spec = build_phase5_exactly_one_job_spec(
             binding(),
             phase4_result_sha256=phase4_sha,
-            target_probe_sha256=phase4_result().target_probe_sha256,
         )
         return module.Phase5Plan(
             schema=module.PHASE5_PLAN_SCHEMA,
