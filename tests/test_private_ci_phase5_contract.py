@@ -103,6 +103,7 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
         candidate = m.render_phase5_exactly_one_job_candidate(
             evidence.binding,
             phase4_result_sha256=digest,
+            target_probe_sha256=evidence.target_probe_sha256,
         )
         self.assertEqual(
             candidate,
@@ -170,11 +171,52 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
         self.assertNotIn("SELF_HOSTED_PRIVATE_CI_PASS", candidate)
         self.assertNotIn("-UseNewEnvironment", candidate)
 
+
+    def test_candidate_revalidates_target_security_context_before_listener(self):
+        m = module()
+        evidence = phase4_evidence()
+        raw = phase4_result_bytes(evidence)
+        digest = hashlib.sha256(raw).hexdigest()
+        candidate = m.render_phase5_exactly_one_job_candidate(
+            evidence.binding,
+            phase4_result_sha256=digest,
+            target_probe_sha256=evidence.target_probe_sha256,
+        )
+        probe = candidate.index("$BridgeSecurityProbeChild = Start-Process")
+        probe_pass = candidate.index(
+            "PHASE5_SECURITY_CONTEXT_REVALIDATED",
+            probe,
+        )
+        listener = candidate.index(
+            "$BridgeChild = Start-Process -FilePath 'cmd.exe'",
+            probe_pass,
+        )
+        self.assertLess(probe, probe_pass)
+        self.assertLess(probe_pass, listener)
+        self.assertIn(
+            "issue225-phase5-result-" + digest + ".consumed.json",
+            candidate,
+        )
+        self.assertIn("Phase 5 target gh authentication isolation failed", candidate)
+        self.assertIn("Phase 5 broker credential isolation failed", candidate)
+        self.assertIn("Phase 5 security probe admin status unsafe", candidate)
+        self.assertIn("Phase 5 durable authority isolation failed", candidate)
+
+    def test_candidate_rejects_invalid_security_probe_digest(self):
+        m = module()
+        with self.assertRaisesRegex(ValueError, "target probe SHA-256"):
+            m.render_phase5_exactly_one_job_candidate(
+                binding(),
+                phase4_result_sha256="a" * 64,
+                target_probe_sha256="short",
+            )
+
     def test_candidate_requires_dispatch_response_with_positive_run_id(self):
         m = module()
         candidate = m.render_phase5_exactly_one_job_candidate(
             binding(),
             phase4_result_sha256="a" * 64,
+            target_probe_sha256="b" * 64,
         )
         self.assertIn("ConvertFrom-Json", candidate)
         self.assertIn("workflow_run_id", candidate)
@@ -199,6 +241,7 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
             m.render_phase5_exactly_one_job_candidate(
                 binding(),
                 phase4_result_sha256="short",
+                target_probe_sha256="b" * 64,
             )
 
 
