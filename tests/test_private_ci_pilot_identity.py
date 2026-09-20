@@ -127,6 +127,14 @@ class PrivateCiPilotIdentityFreezeTests(unittest.TestCase):
                 "  steal:\n"
                 "    'runs-on': private-ci-windows-pilot\n"
             ),
+            (
+                "defaults: &pilot\n"
+                "  runs-on: private-ci-windows-pilot\n"
+                "  steps: []\n"
+                "jobs:\n"
+                "  steal:\n"
+                "    <<: *pilot\n"
+            ),
         )
         for other in competitors:
             with self.subTest(other=other):
