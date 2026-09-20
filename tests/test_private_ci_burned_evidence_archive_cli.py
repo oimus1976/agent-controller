@@ -42,6 +42,14 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertIn("_require_windows_elevated_boundary()", source)
         self.assertIn("apply_archive_plan(", source)
 
+
+    def test_plan_carries_reviewed_plan_bytes_across_uac_boundary(self):
+        source = self.cli_path.read_text(encoding="utf-8")
+        self.assertIn("plan_base64 = base64.b64encode(raw)", source)
+        self.assertIn("-ExpectedPlanBase64", source)
+        self.assertIn("_decode_reviewed_plan(", source)
+        self.assertIn("parse_archive_plan_bytes(raw)", source)
+
     def test_cli_has_no_caller_supplied_source_path(self):
         source = self.cli_path.read_text(encoding="utf-8")
         self.assertNotIn("--source", source)
@@ -51,11 +59,16 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
     def test_powershell_wrapper_is_only_uac_apply_bridge(self):
         source = self.ps_path.read_text(encoding="utf-8")
         self.assertIn("ExpectedPlanSha256", source)
+        self.assertIn("ExpectedPlanBase64", source)
         self.assertIn("RunAsAdministrator", source)
+        self.assertIn("$Plan.python_executable", source)
+        self.assertIn("$Plan.python_sha256", source)
+        self.assertIn("[IO.FileShare]::Read", source)
         self.assertIn(
-            "python.exe -m scripts.archive_private_ci_burned_evidence",
+            "& $PythonPath -m scripts.archive_private_ci_burned_evidence",
             source,
         )
+        self.assertNotIn("& python.exe", source)
         for forbidden in (
             "registration-token",
             "/dispatches",
