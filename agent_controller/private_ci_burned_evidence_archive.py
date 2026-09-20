@@ -672,7 +672,48 @@ def apply_archive_plan(
     archive_relative = PurePosixPath(plan.archive_directory)
     archive_parent = evidence_root / archive_relative.parts[0]
     archive_path = evidence_root.joinpath(*archive_relative.parts)
+    timestamp = _isoformat(completed_at, "archive completion time")
 
+    manifest = ArchiveManifest(
+        schema=ARCHIVE_MANIFEST_SCHEMA,
+        plan_sha256=observed_plan_sha,
+        evidence_root=plan.evidence_root,
+        controller_main_sha=plan.controller_main_sha,
+        controller_tree=plan.controller_tree,
+        archive_directory=plan.archive_directory,
+        items=plan.items,
+        copies_verified_at=timestamp,
+        status=ARCHIVE_COPIES_VERIFIED,
+    )
+    manifest_raw = _manifest_bytes(manifest)
+    result = ArchiveRetirementResult(
+        schema=ARCHIVE_RETIREMENT_SCHEMA,
+        plan_sha256=observed_plan_sha,
+        manifest_sha256=_sha256_bytes(manifest_raw),
+        archive_directory=plan.archive_directory,
+        items=plan.items,
+        completed_at=timestamp,
+        status=ARCHIVE_RETIREMENT_PASS,
+    )
+    result_raw = _retirement_result_bytes(result)
+
+    if os.name == "nt":
+        from agent_controller.private_ci_windows_atomic_archive import (
+            apply_windows_archive_transaction,
+        )
+
+        apply_windows_archive_transaction(
+            evidence_root=evidence_root,
+            archive_path=archive_path,
+            items=plan.items,
+            manifest_raw=manifest_raw,
+            result_raw=result_raw,
+        )
+        return result
+
+    # Portable transaction used only by deterministic non-Windows contract
+    # tests. The live #216 apply path is Windows-only and always uses the
+    # handle-locked backend above.
     if archive_parent.exists() or archive_parent.is_symlink():
         _require_plain_directory(archive_parent, "archive parent")
     else:
@@ -693,25 +734,10 @@ def apply_archive_plan(
 
     _verify_archive_items(archive_path, plan.items)
 
-    timestamp = _isoformat(completed_at, "archive completion time")
-    manifest = ArchiveManifest(
-        schema=ARCHIVE_MANIFEST_SCHEMA,
-        plan_sha256=observed_plan_sha,
-        evidence_root=plan.evidence_root,
-        controller_main_sha=plan.controller_main_sha,
-        controller_tree=plan.controller_tree,
-        archive_directory=plan.archive_directory,
-        items=plan.items,
-        copies_verified_at=timestamp,
-        status=ARCHIVE_COPIES_VERIFIED,
-    )
-    manifest_raw = _manifest_bytes(manifest)
     manifest_path = archive_path / "manifest.json"
     _write_exclusive(manifest_path, manifest_raw)
     _verify_archive_manifest(manifest_path, manifest_raw)
 
-    # Revalidate every canonical source after all archive copies and the
-    # manifest are verified. No source deletion is permitted before this point.
     for item in plan.items:
         _require_item_exact(
             evidence_root / item.filename,
@@ -738,18 +764,9 @@ def apply_archive_plan(
     _verify_archive_items(archive_path, plan.items)
     _verify_archive_manifest(manifest_path, manifest_raw)
 
-    result = ArchiveRetirementResult(
-        schema=ARCHIVE_RETIREMENT_SCHEMA,
-        plan_sha256=observed_plan_sha,
-        manifest_sha256=_sha256_bytes(manifest_raw),
-        archive_directory=plan.archive_directory,
-        items=plan.items,
-        completed_at=timestamp,
-        status=ARCHIVE_RETIREMENT_PASS,
-    )
-    result_raw = _retirement_result_bytes(result)
     result_path = archive_path / "retirement-complete.json"
     _write_exclusive(result_path, result_raw)
     if result_path.read_bytes() != result_raw:
         raise RuntimeError("archive retirement result changed after write")
     return result
+
