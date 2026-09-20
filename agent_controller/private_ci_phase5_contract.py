@@ -11,6 +11,10 @@ from agent_controller.operator_step_gate import (
     PriorEvidenceRequirement,
 )
 from agent_controller.private_ci_phase4_contract import (
+    PHASE4_AUTHORITY_ROOT,
+    PHASE4_TARGET_PROBE_COPY_FILENAME,
+    PHASE4_TARGET_TIMEOUT_SECONDS,
+    PHASE4_TRUSTED_GH_PATH,
     PrivateCiPilotBinding,
     pilot_binding_reason_codes,
 )
@@ -30,6 +34,9 @@ PHASE5_EFFECTS = (
 )
 PHASE5_RUNNER_STDOUT_FILENAME = "issue225-phase5-runner-stdout.log"
 PHASE5_RUNNER_STDERR_FILENAME = "issue225-phase5-runner-stderr.log"
+PHASE5_SECURITY_PROBE_RESULT_FILENAME = "issue225-phase5-security-probe-result.json"
+PHASE5_SECURITY_PROBE_STDOUT_FILENAME = "issue225-phase5-security-probe-stdout.log"
+PHASE5_SECURITY_PROBE_STDERR_FILENAME = "issue225-phase5-security-probe-stderr.log"
 PHASE5_HEARTBEAT_SECONDS = 5
 PHASE5_RUNNER_TIMEOUT_SECONDS = 660
 PHASE4_RESULT_PRODUCER_OPERATION_ID = "issue225-phase4-target-environment"
@@ -95,6 +102,7 @@ def render_phase5_exactly_one_job_candidate(
     binding: PrivateCiPilotBinding,
     *,
     phase4_result_sha256: str,
+    target_probe_sha256: str,
 ) -> str:
     binding_reasons = pilot_binding_reason_codes(binding)
     if binding_reasons:
@@ -103,6 +111,8 @@ def render_phase5_exactly_one_job_candidate(
         )
     if not _digest(phase4_result_sha256):
         raise ValueError("Phase 4 result SHA-256 invalid")
+    if not _digest(target_probe_sha256):
+        raise ValueError("Phase 4 target probe SHA-256 invalid")
 
     workflow_filename = PurePosixPath(binding.workflow_path).name
     dispatch_endpoint = (
@@ -136,6 +146,30 @@ def render_phase5_exactly_one_job_candidate(
     runner_stderr = str(
         PureWindowsPath(binding.runner_root)
         / PHASE5_RUNNER_STDERR_FILENAME
+    )
+    security_probe = str(
+        PureWindowsPath(binding.runner_root)
+        / PHASE4_TARGET_PROBE_COPY_FILENAME
+    )
+    security_probe_result = str(
+        PureWindowsPath(binding.runner_root)
+        / PHASE5_SECURITY_PROBE_RESULT_FILENAME
+    )
+    security_probe_stdout = str(
+        PureWindowsPath(binding.runner_root)
+        / PHASE5_SECURITY_PROBE_STDOUT_FILENAME
+    )
+    security_probe_stderr = str(
+        PureWindowsPath(binding.runner_root)
+        / PHASE5_SECURITY_PROBE_STDERR_FILENAME
+    )
+    phase5_authority_marker = str(
+        PureWindowsPath(PHASE4_AUTHORITY_ROOT)
+        / (
+            "issue225-phase5-result-"
+            + phase4_result_sha256
+            + ".consumed.json"
+        )
     )
 
     active_read_commands = {
@@ -187,6 +221,14 @@ def render_phase5_exactly_one_job_candidate(
         f"$BridgeTargetIdentity = {_ps_single_quoted(binding.target_identity)}",
         f"$BridgeQualifiedTargetIdentity = {_ps_single_quoted(qualified_target)}",
         f"$BridgePhase4ResultSha256 = {_ps_single_quoted(phase4_result_sha256)}",
+        f"$BridgeSecurityProbePath = {_ps_single_quoted(security_probe)}",
+        f"$BridgeSecurityProbeSha256 = {_ps_single_quoted(target_probe_sha256)}",
+        f"$BridgeSecurityProbeResultPath = {_ps_single_quoted(security_probe_result)}",
+        f"$BridgeSecurityProbeStdoutPath = {_ps_single_quoted(security_probe_stdout)}",
+        f"$BridgeSecurityProbeStderrPath = {_ps_single_quoted(security_probe_stderr)}",
+        f"$BridgePhase5AuthorityMarkerPath = {_ps_single_quoted(phase5_authority_marker)}",
+        f"$BridgeTrustedGhPath = {_ps_single_quoted(PHASE4_TRUSTED_GH_PATH)}",
+        f"$BridgeSecurityProbeTimeoutSeconds = {PHASE4_TARGET_TIMEOUT_SECONDS}",
         f"$BridgeRunnerCommand = {_ps_single_quoted(runner_command)}",
         f"$BridgeRunnerStdoutPath = {_ps_single_quoted(runner_stdout)}",
         f"$BridgeRunnerStderrPath = {_ps_single_quoted(runner_stderr)}",
@@ -201,7 +243,11 @@ def render_phase5_exactly_one_job_candidate(
         "$ErrorActionPreference = 'Stop'",
         "",
         "if (-not (Test-Path -LiteralPath $BridgeRunnerCommand -PathType Leaf)) { throw 'Phase 5 run.cmd missing' }",
-        "foreach ($BridgeFreshPath in @($BridgeRunnerStdoutPath, $BridgeRunnerStderrPath)) {",
+        "if (-not (Test-Path -LiteralPath $BridgeSecurityProbePath -PathType Leaf)) { throw 'Phase 5 security probe missing' }",
+        "$BridgeSecurityProbeObservedSha = (Get-FileHash -LiteralPath $BridgeSecurityProbePath -Algorithm SHA256).Hash",
+        "if ($BridgeSecurityProbeObservedSha -ine $BridgeSecurityProbeSha256) { throw 'Phase 5 security probe hash mismatch' }",
+        "if (-not (Test-Path -LiteralPath $BridgePhase5AuthorityMarkerPath -PathType Leaf)) { throw 'Phase 5 durable authority marker missing' }",
+        "foreach ($BridgeFreshPath in @($BridgeRunnerStdoutPath, $BridgeRunnerStderrPath, $BridgeSecurityProbeResultPath, $BridgeSecurityProbeStdoutPath, $BridgeSecurityProbeStderrPath)) {
         "    if (Test-Path -LiteralPath $BridgeFreshPath) { throw 'Phase 5 runner output path already exists' }",
         "}",
         "$BridgeForbiddenBrokerEnvironment = @(Get-ChildItem Env: | Where-Object {",
@@ -242,6 +288,41 @@ def render_phase5_exactly_one_job_candidate(
         "$BridgeTargetCredential = Get-Credential -UserName $BridgeQualifiedTargetIdentity -Message 'Enter the local ac-runner credential for the reviewed Phase 5 plan.'",
         "if ($null -eq $BridgeTargetCredential) { throw 'Phase 5 target credential was not supplied' }",
         "if ($BridgeTargetCredential.UserName -ine $BridgeQualifiedTargetIdentity) { throw 'Phase 5 target credential identity mismatch' }",
+        "",
+        "$BridgeSecurityProbeStartedAt = Get-Date",
+        "$BridgeSecurityProbeChild = Start-Process -FilePath 'powershell.exe' -ArgumentList @(",
+        "    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',",
+        "    '-File', $BridgeSecurityProbePath,",
+        "    '-ExpectedHost', $BridgeHost,",
+        "    '-ExpectedIdentity', $BridgeQualifiedTargetIdentity,",
+        "    '-AuthorityMarkerPath', $BridgePhase5AuthorityMarkerPath,",
+        "    '-ResultPath', $BridgeSecurityProbeResultPath,",
+        "    '-TrustedGhPath', $BridgeTrustedGhPath",
+        ") -Credential $BridgeTargetCredential -LoadUserProfile -WorkingDirectory $BridgeRunnerRoot -RedirectStandardOutput $BridgeSecurityProbeStdoutPath -RedirectStandardError $BridgeSecurityProbeStderrPath -PassThru",
+        "while (-not $BridgeSecurityProbeChild.HasExited) {",
+        "    $BridgeSecurityProbeElapsedSeconds = [int]((Get-Date) - $BridgeSecurityProbeStartedAt).TotalSeconds",
+        '    Write-Host ("heartbeat phase=phase5-security elapsed_seconds={0}" -f $BridgeSecurityProbeElapsedSeconds)',
+        "    if ($BridgeSecurityProbeElapsedSeconds -ge $BridgeSecurityProbeTimeoutSeconds) {",
+        "        Stop-Process -Id $BridgeSecurityProbeChild.Id -Force -ErrorAction Stop",
+        "        throw 'Phase 5 security probe timeout; dispatch must not be attempted'",
+        "    }",
+        "    Start-Sleep -Seconds 1",
+        "}",
+        "$BridgeSecurityProbeExitCode = $BridgeSecurityProbeChild.ExitCode",
+        "if ($BridgeSecurityProbeExitCode -ne 0) { throw 'Phase 5 security probe failed; dispatch must not be attempted' }",
+        "if (-not (Test-Path -LiteralPath $BridgeSecurityProbeResultPath -PathType Leaf)) { throw 'Phase 5 security probe result missing' }",
+        "$BridgeSecurityProbeResult = Get-Content -LiteralPath $BridgeSecurityProbeResultPath -Raw -Encoding UTF8 | ConvertFrom-Json",
+        "if ($BridgeSecurityProbeResult.schema -cne 'agent-controller.private-ci-phase4-target-probe.v1') { throw 'Phase 5 security probe schema mismatch' }",
+        "if ($BridgeSecurityProbeResult.status -cne 'TARGET_PROBE_PASS') { throw 'Phase 5 security probe did not pass' }",
+        "if ($BridgeSecurityProbeResult.host -ine $BridgeHost) { throw 'Phase 5 security probe host mismatch' }",
+        "if ($BridgeSecurityProbeResult.identity -ine $BridgeQualifiedTargetIdentity) { throw 'Phase 5 security probe identity mismatch' }",
+        "if ($BridgeSecurityProbeResult.admin_sid_present -ne $false) { throw 'Phase 5 security probe admin status unsafe' }",
+        "if ($BridgeSecurityProbeResult.high_integrity_present -ne $false) { throw 'Phase 5 security probe integrity unsafe' }",
+        "if ($BridgeSecurityProbeResult.forbidden_environment_count -ne 0) { throw 'Phase 5 security probe environment unsafe' }",
+        "if ($BridgeSecurityProbeResult.broker_credential_roots_readable -ne 0) { throw 'Phase 5 broker credential isolation failed' }",
+        "if ($BridgeSecurityProbeResult.gh_authenticated -ne $false) { throw 'Phase 5 target gh authentication isolation failed' }",
+        "if ($BridgeSecurityProbeResult.authority_marker_write_denied -ne $true) { throw 'Phase 5 durable authority isolation failed' }",
+        "Write-Output 'PHASE5_SECURITY_CONTEXT_REVALIDATED'",
         "",
         "$BridgeStartedAt = Get-Date",
         "$BridgeChild = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d','/s','/c','run.cmd') -Credential $BridgeTargetCredential -LoadUserProfile -WorkingDirectory $BridgeRunnerRoot -RedirectStandardOutput $BridgeRunnerStdoutPath -RedirectStandardError $BridgeRunnerStderrPath -PassThru",
