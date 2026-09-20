@@ -110,6 +110,92 @@ class PrivateCiPilotIdentityFreezeTests(unittest.TestCase):
                         ),
                     )
 
+
+    def test_workflow_runner_exclusivity_rejects_inline_and_quoted_competitors(self):
+        trusted = (
+            "jobs:\n"
+            "  pilot:\n"
+            "    runs-on: private-ci-windows-pilot\n"
+        )
+        competitors = (
+            (
+                "jobs:\n"
+                "  steal: { runs-on: private-ci-windows-pilot, steps: [] }\n"
+            ),
+            (
+                "jobs:\n"
+                "  steal:\n"
+                "    'runs-on': private-ci-windows-pilot\n"
+            ),
+        )
+        for other in competitors:
+            with self.subTest(other=other):
+                with self.assertRaises(ValueError):
+                    validate_pilot_workflow_runner_exclusivity(
+                        {
+                            ".github/workflows/private-ci-windows-pilot.yml": trusted,
+                            ".github/workflows/other.yml": other,
+                        },
+                        trusted_workflow_path=(
+                            ".github/workflows/private-ci-windows-pilot.yml"
+                        ),
+                    )
+
+    def test_workflow_runner_exclusivity_rejects_duplicate_dynamic_and_unsupported_jobs(self):
+        trusted = (
+            "jobs:\n"
+            "  pilot:\n"
+            "    runs-on: private-ci-windows-pilot\n"
+        )
+        bad = (
+            (
+                "jobs:\n"
+                "  test:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    runs-on: private-ci-windows-pilot\n"
+            ),
+            (
+                "jobs:\n"
+                "  test:\n"
+                "    runs-on: [self-hosted, private-ci-windows-pilot]\n"
+            ),
+            (
+                "jobs:\n"
+                "  test:\n"
+                "    uses: owner/repo/.github/workflows/reusable.yml@main\n"
+            ),
+        )
+        for other in bad:
+            with self.subTest(other=other):
+                with self.assertRaises(ValueError):
+                    validate_pilot_workflow_runner_exclusivity(
+                        {
+                            ".github/workflows/private-ci-windows-pilot.yml": trusted,
+                            ".github/workflows/other.yml": other,
+                        },
+                        trusted_workflow_path=(
+                            ".github/workflows/private-ci-windows-pilot.yml"
+                        ),
+                    )
+
+    def test_trusted_workflow_must_have_exactly_one_static_pilot_job(self):
+        multiple = (
+            "jobs:\n"
+            "  first:\n"
+            "    runs-on: private-ci-windows-pilot\n"
+            "  second:\n"
+            "    runs-on: private-ci-windows-pilot\n"
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one job"):
+            validate_pilot_workflow_runner_exclusivity(
+                {
+                    ".github/workflows/private-ci-windows-pilot.yml": multiple,
+                },
+                trusted_workflow_path=(
+                    ".github/workflows/private-ci-windows-pilot.yml"
+                ),
+            )
+
     def test_fresh_builder_derives_runner_and_generation_from_nonce(self):
         freeze = build_fresh_pilot_identity_freeze(
             repository="oimus1976/example-private",
