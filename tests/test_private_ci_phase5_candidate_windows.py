@@ -60,6 +60,7 @@ class PrivateCiPhase5CandidateWindowsTests(unittest.TestCase):
         candidate = render_phase5_exactly_one_job_candidate(
             binding,
             phase4_result_sha256=phase4_sha,
+            target_probe_sha256="c" * 64,
         )
 
         with tempfile.TemporaryDirectory() as temporary_directory:
