@@ -131,6 +131,8 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
                 evidence_root=root,
                 controller_main_sha="a" * 40,
                 controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+                python_executable=r"C:\Python312\python.exe",
+                python_sha256="b" * 64,
             )
 
 
@@ -156,6 +158,8 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
                 evidence_root=root,
                 controller_main_sha="a" * 40,
                 controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+                python_executable=r"C:\Python312\python.exe",
+                python_sha256="b" * 64,
             )
 
 
