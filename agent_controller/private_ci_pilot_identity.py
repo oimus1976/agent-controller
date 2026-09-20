@@ -5,6 +5,9 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import PurePosixPath, PureWindowsPath
 
+import yaml
+from yaml.resolver import BaseResolver
+
 
 PILOT_IDENTITY_FREEZE_SCHEMA = "agent-controller.private-ci-pilot-identity-freeze.v1"
 PRIVATE_CI_RUNNER_ROOT_PARENT = r"C:\ProgramData\agent-controller\private-ci"
@@ -153,10 +156,89 @@ def pilot_identity_freeze_reason_codes(
 
 
 
-_RUNS_ON_LINE = re.compile(r"(?m)^    runs-on:[ \t]*([^#\r\n]+?)[ \t]*$")
 _GITHUB_HOSTED_RUNNER = re.compile(
     r"^(ubuntu|windows|macos)-[A-Za-z0-9._-]+$"
 )
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeySafeLoader,
+    node: yaml.nodes.MappingNode,
+    deep: bool = False,
+) -> dict[object, object]:
+    loader.flatten_mapping(node)
+    mapping: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as error:
+            raise ValueError("workflow YAML mapping key is not scalar/hashable") from error
+        if duplicate:
+            raise ValueError(f"workflow YAML duplicate key: {key!r}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeySafeLoader.add_constructor(
+    BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
+def _parse_workflow_jobs(path: str, source: str) -> dict[str, dict[str, object]]:
+    try:
+        payload = yaml.load(source, Loader=_UniqueKeySafeLoader)
+    except (yaml.YAMLError, ValueError) as error:
+        raise ValueError(f"workflow YAML invalid: {path}") from error
+    if type(payload) is not dict:
+        raise ValueError(f"workflow root must be mapping: {path}")
+    jobs = payload.get("jobs")
+    if type(jobs) is not dict or not jobs:
+        raise ValueError(f"workflow jobs mapping missing: {path}")
+
+    parsed: dict[str, dict[str, object]] = {}
+    for job_name, job in jobs.items():
+        if type(job_name) is not str or not job_name:
+            raise ValueError(f"workflow job name invalid: {path}")
+        if type(job) is not dict:
+            raise ValueError(f"workflow job shape invalid: {path}:{job_name}")
+        parsed[job_name] = job
+    return parsed
+
+
+def _static_runs_on(
+    *,
+    workflow_path: str,
+    job_name: str,
+    job: dict[str, object],
+) -> str:
+    if "uses" in job:
+        raise ValueError(
+            f"reusable workflow job unsupported at pilot boundary: "
+            f"{workflow_path}:{job_name}"
+        )
+    if "runs-on" not in job:
+        raise ValueError(
+            f"workflow job runs-on missing: {workflow_path}:{job_name}"
+        )
+    runs_on = job["runs-on"]
+    if type(runs_on) is not str or not runs_on.strip():
+        raise ValueError(
+            f"workflow job runs-on must be static scalar: "
+            f"{workflow_path}:{job_name}"
+        )
+    value = runs_on.strip()
+    if "${{" in value:
+        raise ValueError(
+            f"workflow job runs-on expression unsupported: "
+            f"{workflow_path}:{job_name}"
+        )
+    return value
 
 
 def validate_pilot_workflow_runner_exclusivity(
@@ -179,30 +261,39 @@ def validate_pilot_workflow_runner_exclusivity(
             or not path.endswith((".yml", ".yaml"))
         ):
             raise ValueError("pilot workflow inventory entry invalid")
-        runs_on = tuple(
-            match.group(1).strip().strip("'\"")
-            for match in _RUNS_ON_LINE.finditer(source)
-        )
-        if not runs_on:
-            raise ValueError(f"pilot workflow has no static job runner: {path}")
 
+        jobs = _parse_workflow_jobs(path, source)
         if path == trusted_workflow_path:
-            if runs_on != (PRIVATE_CI_RUNNER_LABEL,):
+            if len(jobs) != 1:
+                raise ValueError(
+                    "trusted pilot workflow must contain exactly one job"
+                )
+            job_name, job = next(iter(jobs.items()))
+            if _static_runs_on(
+                workflow_path=path,
+                job_name=job_name,
+                job=job,
+            ) != PRIVATE_CI_RUNNER_LABEL:
                 raise ValueError(
                     "trusted pilot workflow runner binding is not exclusive"
                 )
             continue
 
-        for value in runs_on:
+        for job_name, job in jobs.items():
+            value = _static_runs_on(
+                workflow_path=path,
+                job_name=job_name,
+                job=job,
+            )
             if (
-                "${{" in value
-                or value == PRIVATE_CI_RUNNER_LABEL
+                value == PRIVATE_CI_RUNNER_LABEL
                 or _GITHUB_HOSTED_RUNNER.fullmatch(value) is None
             ):
                 raise ValueError(
                     "non-target workflow runner binding is not provably "
-                    f"GitHub-hosted: {path}"
+                    f"GitHub-hosted: {path}:{job_name}"
                 )
+
 
 def build_fresh_pilot_identity_freeze(
     *,
