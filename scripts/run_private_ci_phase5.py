@@ -35,7 +35,10 @@ from agent_controller.private_ci_human_approval import (
     validate_approval_acl_state,
 )
 from agent_controller.private_ci_live_registration_runtime import authoritative_path
-from agent_controller.private_ci_phase4_result import parse_phase4_result_bytes
+from agent_controller.private_ci_phase4_result import (
+    parse_phase4_result_bytes,
+    parse_target_probe_result_bytes,
+)
 from agent_controller.private_ci_phase5_authority import (
     parse_phase5_consumption_marker_bytes,
     phase5_approval_filename,
@@ -47,6 +50,9 @@ from agent_controller.private_ci_phase5_contract import (
     PHASE4_RESULT_PRODUCER_STEP_ID,
     PHASE5_RUNNER_STDERR_FILENAME,
     PHASE5_RUNNER_STDOUT_FILENAME,
+    PHASE5_SECURITY_PROBE_RESULT_FILENAME,
+    PHASE5_SECURITY_PROBE_STDERR_FILENAME,
+    PHASE5_SECURITY_PROBE_STDOUT_FILENAME,
     build_phase5_exactly_one_job_spec,
     render_phase5_exactly_one_job_candidate,
 )
@@ -685,6 +691,15 @@ def _runner_output_paths(binding) -> tuple[Path, Path]:
     )
 
 
+def _security_probe_paths(binding) -> tuple[Path, Path, Path]:
+    root = Path(binding.runner_root)
+    return (
+        root / PHASE5_SECURITY_PROBE_RESULT_FILENAME,
+        root / PHASE5_SECURITY_PROBE_STDOUT_FILENAME,
+        root / PHASE5_SECURITY_PROBE_STDERR_FILENAME,
+    )
+
+
 def _write_attempt_transcript(
     *,
     path: Path,
@@ -974,6 +989,23 @@ def command_apply(expected_plan_sha256: str) -> int:
         _require_controller_source_exact(plan.binding)
         _require_repository_pr_workflow_exact(plan.binding)
 
+        security_result_path, security_stdout_path, security_stderr_path = (
+            _security_probe_paths(plan.binding)
+        )
+        for path, description in (
+            (security_result_path, "Phase 5 security probe result"),
+            (security_stdout_path, "Phase 5 security probe stdout"),
+            (security_stderr_path, "Phase 5 security probe stderr"),
+        ):
+            _require_regular_nonreparse_file(path, description)
+        security_result_raw = security_result_path.read_bytes()
+        parse_target_probe_result_bytes(
+            security_result_raw,
+            binding=plan.binding,
+        )
+        security_stdout_raw = security_stdout_path.read_bytes()
+        security_stderr_raw = security_stderr_path.read_bytes()
+
         runner_stdout_path, runner_stderr_path = _runner_output_paths(
             plan.binding
         )
@@ -1005,6 +1037,16 @@ def command_apply(expected_plan_sha256: str) -> int:
             runner_process_id=runner_process_id,
             runner_process_owner=runner_process_owner,
             runner_child_exit_code=child_exit_code,
+            security_probe_sha256=phase4.target_probe_sha256,
+            security_probe_result_sha256=hashlib.sha256(
+                security_result_raw
+            ).hexdigest(),
+            security_probe_stdout_sha256=hashlib.sha256(
+                security_stdout_raw
+            ).hexdigest(),
+            security_probe_stderr_sha256=hashlib.sha256(
+                security_stderr_raw
+            ).hexdigest(),
             runner_stdout_sha256=hashlib.sha256(
                 runner_stdout_raw
             ).hexdigest(),
