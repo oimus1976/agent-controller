@@ -61,7 +61,7 @@ class PrivateCiPilotIdentityFreezeTests(unittest.TestCase):
                     "  test:\n"
                     "    runs-on: ubuntu-latest\n"
                     "    steps:\n"
-                    "      - run: echo 'runs-on: private-ci-windows-pilot'\n"
+                    "      - run: \"echo 'runs-on: private-ci-windows-pilot'\"\n"
                 ),
             },
             trusted_workflow_path=(
