@@ -764,6 +764,7 @@ def command_plan() -> int:
     candidate = render_phase5_exactly_one_job_candidate(
         phase4.binding,
         phase4_result_sha256=phase4_sha,
+        target_probe_sha256=phase4.target_probe_sha256,
     )
     _write_exclusive(candidate_path, candidate.encode("utf-8"))
     spec = build_phase5_exactly_one_job_spec(
