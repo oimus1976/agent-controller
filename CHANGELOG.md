@@ -32,6 +32,8 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - GitHub.com REST API `2026-03-10`の現行workflow-dispatch contractへ更新。旧`return_run_details` parameterを削除し、POSTのHTTP 200 responseが返すexact `workflow_run_id`だけをrun/job correlationに使用する。
 - Phase 5はactual runner listener PID/owner=`WOBBUFFET\\ac-runner`、GitHub runner id/name/label唯一性、online/idle状態、prior exact workflow dispatch 0件をdispatch直前にfresh rereadする。その後exactly one POSTだけを許可し、returned run idに対してrun_attempt=1、trusted workflow SHA/path、actor/triggering actor、exactly one expected job、runner binding、expected metadata-only stepsのterminal successをauthoritativeにread backする。
 - Phase 5 resultはconsole markerだけではPASSせず、real child exit、runner stdout/stderr hashes、local runner process identity、workflow run/job bindingをcanonical evidenceへ保持する。
+- exact-head `01a39ca...` に対するCodex independent reviewでP1を2件受領し、remediationを実装。workflow runner-label exclusivityは行指向regexを廃止し、pinned PyYAML + duplicate-key rejectionで全workflow/jobを構造解析する。inline/quoted/merge-anchor/duplicate/list/dynamic/reusable-workflow jobを含むunsupported shapeはfail closedする。
+- Phase 5はPhase 4後のtarget security-context driftを許容しない。Phase 5 durable authority consumption後、同じ`ac-runner` credential/profileでPhase 4のhash-bound security probeをlistener起動直前に再実行し、admin/high-integrity/environment/broker-credential/gh-auth/durable-authority isolationをfreshに再確認する。probe hashはcredential入力後にも再確認し、controller側もresultを独立parseしてprobe/result/stdout/stderr hashesをcanonical Phase 5 evidenceへ記録する。
 
 ### Safety / authority boundary
 
@@ -46,7 +48,9 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - Initial RED run #617からRequirement/ACごとのRED -> implementationを継続。
 - Phase 5 API/authority/runtime実装後、run #735でLinux deterministic suiteとWindows PowerShell 5.1 AST / Phase 4 / Phase 5 candidate / authority regressionsがSUCCESS。
 - generation snapshot追加後のrun #749ではWindows laneはSUCCESS、LinuxはPath concrete-type判定だけがREDとなり、`isinstance(..., Path)`へ修正済み。
-- 最新exact-head CIは継続確認中。adversarial review / remediation loop / human Ready / mergeは未完了であり、#216 live pilotは再開していない。
+- exact-head `01a39ca2c1fc97c7e1804d7131d67e0941923b47` / run #774 はLinux/WindowsともSUCCESS。そのheadへのCodex independent reviewでP1 2件（workflow YAML runner-label exclusivity、Phase 5 pre-launch target security revalidation）を受領した。
+- P1 remediation後のexact head `ad741ef4c20a8d610687256633fadb3e413fa197` / run #800 はLinux/WindowsともSUCCESS。review threadへ修正根拠を返信済み。追加の記録更新後にnew exact-head CIとCodex rereviewを行う。
+- PR #226はDraftのまま。human Ready / mergeは未実施で、#216 live pilotは再開していない。
 
 ---
 ## 2026-09-19 — Real Actions Runner `.runner` schema contract（Issue #223）
