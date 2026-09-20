@@ -57,6 +57,8 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             evidence_root=root,
             controller_main_sha="a" * 40,
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+            python_executable=r"C:\Python312\python.exe",
+            python_sha256="b" * 64,
         )
         self.assertIsNone(plan)
 
@@ -76,6 +78,8 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             evidence_root=root,
             controller_main_sha="a" * 40,
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+            python_executable=r"C:\Python312\python.exe",
+            python_sha256="b" * 64,
         )
         self.assertIsNotNone(plan)
         self.assertEqual(
@@ -94,6 +98,8 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             evidence_root=root,
             controller_main_sha="a" * 40,
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+            python_executable=r"C:\Python312\python.exe",
+            python_sha256="b" * 64,
         )
         raw = m.archive_plan_bytes(plan)
         parsed = m.parse_archive_plan_bytes(raw)
@@ -137,6 +143,8 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             evidence_root=root,
             controller_main_sha="a" * 40,
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+            python_executable=r"C:\Python312\python.exe",
+            python_sha256="b" * 64,
         )
         archive_path = root.joinpath(
             *Path(first.archive_directory).parts
@@ -150,6 +158,80 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
                 controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
             )
 
+
+    def test_incomplete_prior_helper_archive_blocks_even_when_sources_are_empty(self):
+        m = self.module()
+        tmp, root = self.make_root()
+        self.addCleanup(tmp.cleanup)
+        residue = root / "archive" / "issue216-burned-" + "1" * 16
+        residue.mkdir(parents=True)
+        (residue / "manifest.json").write_bytes(b"{}\n")
+
+        with self.assertRaisesRegex(RuntimeError, "manual recovery"):
+            m.build_archive_plan(
+                evidence_root=root,
+                controller_main_sha="a" * 40,
+                controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+                python_executable=r"C:\Python312\python.exe",
+                python_sha256="b" * 64,
+            )
+
+    def test_partial_prior_retirement_residue_blocks_new_inventory_plan(self):
+        m = self.module()
+        tmp, root = self.make_root()
+        self.addCleanup(tmp.cleanup)
+        first = self.write(
+            root, "issue216-phase0-canonical.json", b"phase0\n"
+        )
+        self.write(
+            root, "issue217-live-registration-plan.json", b"plan\n"
+        )
+        original = m.build_archive_plan(
+            evidence_root=root,
+            controller_main_sha="a" * 40,
+            controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+            python_executable=r"C:\Python312\python.exe",
+            python_sha256="b" * 64,
+        )
+        residue = root.joinpath(*Path(original.archive_directory).parts)
+        residue.mkdir(parents=True)
+        (residue / "manifest.json").write_bytes(b"{}\n")
+        first.unlink()
+
+        with self.assertRaisesRegex(RuntimeError, "manual recovery"):
+            m.build_archive_plan(
+                evidence_root=root,
+                controller_main_sha="a" * 40,
+                controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+                python_executable=r"C:\Python312\python.exe",
+                python_sha256="b" * 64,
+            )
+
+    def test_python_interpreter_binding_is_canonical_plan_authority(self):
+        m = self.module()
+        tmp, root = self.make_root()
+        self.addCleanup(tmp.cleanup)
+        self.write(root, "issue216-phase0-canonical.json", b"phase0\n")
+        plan = m.build_archive_plan(
+            evidence_root=root,
+            controller_main_sha="a" * 40,
+            controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+            python_executable=r"C:\Python312\python.exe",
+            python_sha256="b" * 64,
+        )
+        raw = m.archive_plan_bytes(plan)
+        self.assertIn(b'"python_executable":"C:\\\\Python312\\\\python.exe"', raw)
+        self.assertIn(b'"python_sha256":"' + b"b" * 64 + b'"', raw)
+
+        with self.assertRaisesRegex(ValueError, "absolute exe"):
+            m.build_archive_plan(
+                evidence_root=root,
+                controller_main_sha="a" * 40,
+                controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+                python_executable="python.exe",
+                python_sha256="b" * 64,
+            )
+
     def test_hash_drift_blocks_before_archive_creation(self):
         m = self.module()
         tmp, root = self.make_root()
@@ -161,6 +243,8 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             evidence_root=root,
             controller_main_sha="a" * 40,
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+            python_executable=r"C:\Python312\python.exe",
+            python_sha256="b" * 64,
         )
         digest = m.archive_plan_sha256(plan)
         source.write_bytes(b"phase0-drift\n")
@@ -189,6 +273,8 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             evidence_root=root,
             controller_main_sha="a" * 40,
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+            python_executable=r"C:\Python312\python.exe",
+            python_sha256="b" * 64,
         )
         digest = m.archive_plan_sha256(plan)
 
@@ -225,6 +311,8 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             evidence_root=root,
             controller_main_sha="a" * 40,
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+            python_executable=r"C:\Python312\python.exe",
+            python_sha256="b" * 64,
         )
         digest = m.archive_plan_sha256(plan)
 
@@ -281,6 +369,8 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             evidence_root=root,
             controller_main_sha="a" * 40,
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
+            python_executable=r"C:\Python312\python.exe",
+            python_sha256="b" * 64,
         )
         result = m.apply_archive_plan(
             evidence_root=root,
