@@ -49,6 +49,10 @@ class Phase5ResultEvidence:
     runner_process_id: int
     runner_process_owner: str
     runner_child_exit_code: int
+    security_probe_sha256: str
+    security_probe_result_sha256: str
+    security_probe_stdout_sha256: str
+    security_probe_stderr_sha256: str
     runner_stdout_sha256: str
     runner_stderr_sha256: str
     status: str
@@ -248,6 +252,22 @@ def phase5_result_reason_codes(
             evidence.candidate_sha256,
         ),
         (
+            "PHASE5_RESULT_SECURITY_PROBE_SHA_INVALID",
+            evidence.security_probe_sha256,
+        ),
+        (
+            "PHASE5_RESULT_SECURITY_PROBE_RESULT_SHA_INVALID",
+            evidence.security_probe_result_sha256,
+        ),
+        (
+            "PHASE5_RESULT_SECURITY_PROBE_STDOUT_SHA_INVALID",
+            evidence.security_probe_stdout_sha256,
+        ),
+        (
+            "PHASE5_RESULT_SECURITY_PROBE_STDERR_SHA_INVALID",
+            evidence.security_probe_stderr_sha256,
+        ),
+        (
             "PHASE5_RESULT_RUNNER_STDOUT_SHA_INVALID",
             evidence.runner_stdout_sha256,
         ),
@@ -355,6 +375,16 @@ def parse_phase5_result_bytes(raw: bytes) -> Phase5ResultEvidence:
             runner_process_id=payload["runner_process_id"],
             runner_process_owner=payload["runner_process_owner"],
             runner_child_exit_code=payload["runner_child_exit_code"],
+            security_probe_sha256=payload["security_probe_sha256"],
+            security_probe_result_sha256=payload[
+                "security_probe_result_sha256"
+            ],
+            security_probe_stdout_sha256=payload[
+                "security_probe_stdout_sha256"
+            ],
+            security_probe_stderr_sha256=payload[
+                "security_probe_stderr_sha256"
+            ],
             runner_stdout_sha256=payload["runner_stdout_sha256"],
             runner_stderr_sha256=payload["runner_stderr_sha256"],
             status=payload["status"],
