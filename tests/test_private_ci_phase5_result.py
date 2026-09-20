@@ -160,6 +160,14 @@ class PrivateCiPhase5ReadbackRedTests(unittest.TestCase):
                 )
             )
 
+        with self.assertRaisesRegex(ValueError, "SECURITY_PROBE_RESULT"):
+            m.phase5_result_bytes(
+                replace(
+                    result_evidence(),
+                    security_probe_result_sha256="short",
+                )
+            )
+
     def test_workflow_path_api_ref_suffix_is_accepted_only_for_main(self):
         m = self.module()
         observed = m.validate_phase5_run_job_readback(
