@@ -70,7 +70,7 @@ class PrivateCiPhase5CliContractRedTests(unittest.TestCase):
             probe,
         )
         listener = contract.index(
-            "\"$BridgeChild = Start-Process -FilePath 'cmd.exe'\"",
+            "\"$BridgeChild = Start-Process -FilePath 'cmd.exe'",
             probe_pass,
         )
         self.assertLess(probe, probe_pass)
