@@ -104,6 +104,11 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertIn("hash-object", region)
         self.assertIn("canonical_blob_ids", region)
         self.assertIn("_trusted_git_environment()", region)
+        self.assertIn('"GIT_NO_REPLACE_OBJECTS": "1"', source)
+        self.assertGreaterEqual(
+            region.count('"--no-replace-objects"'),
+            4,
+        )
         self.assertIn("_require_plain_path_chain(", region)
         self.assertIn("cwd=trusted_cwd", region)
 
