@@ -56,6 +56,17 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertIn("_decode_reviewed_plan(", source)
         self.assertIn("parse_archive_plan_bytes(raw)", source)
 
+    def test_encoded_bootstrap_uses_plan_bound_source_bytes(self):
+        source = self.cli_path.read_text(encoding="utf-8")
+        plan_start = source.index("def command_plan")
+        apply_start = source.index("def command_apply_internal", plan_start)
+        region = source[plan_start:apply_start]
+        self.assertIn("bootstrap_binding = plan.controller_sources[0]", region)
+        self.assertIn("_read_bound_controller_source(", region)
+        self.assertIn("bootstrap_binding", region)
+        self.assertNotIn("bootstrap_path.read_text", region)
+        self.assertNotIn("Archive-PrivateCiBurnedEvidence.ps1\").read_text", region)
+
     def test_elevated_apply_does_not_rerun_mutable_checkout_git_or_powershell(self):
         source = self.cli_path.read_text(encoding="utf-8")
         apply_start = source.index("def command_apply_internal")
