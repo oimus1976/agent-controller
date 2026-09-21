@@ -414,10 +414,10 @@ def command_plan() -> int:
         controller_sources=archive_sources,
     )
     if plan is None:
-        print("BURNED_CANONICAL_ARCHIVE_NOT_REQUIRED")
-        print("canonical_restart_blocking_artifacts=0")
-        print("NO_MUTATION_PERFORMED")
-        return 0
+        raise RuntimeError(
+            "empty canonical inventory cannot be proven atomically in "
+            "read-only plan mode; require locked authoritative readback"
+        )
 
     raw = archive.archive_plan_bytes(plan)
     digest = hashlib.sha256(raw).hexdigest()
