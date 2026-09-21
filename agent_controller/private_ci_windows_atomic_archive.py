@@ -457,24 +457,16 @@ def _process_is_protected(process: int) -> bool:
     return int(info.ProtectionLevel) != PROTECTION_LEVEL_NONE
 
 
-def _entry_still_present(
-    expected: SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX,
-) -> bool:
-    expected_pid = int(expected.UniqueProcessId)
-    expected_handle = int(expected.HandleValue)
-    expected_object = int(expected.Object or 0)
-    expected_type = int(expected.ObjectTypeIndex)
-    expected_access = int(expected.GrantedAccess)
-    for current in _system_handle_entries():
-        if (
-            int(current.UniqueProcessId) == expected_pid
-            and int(current.HandleValue) == expected_handle
-            and int(current.Object or 0) == expected_object
-            and int(current.ObjectTypeIndex) == expected_type
-            and int(current.GrantedAccess) == expected_access
-        ):
-            return True
-    return False
+def _handle_entry_key(
+    entry: SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX,
+) -> tuple[int, int, int, int, int]:
+    return (
+        int(entry.UniqueProcessId),
+        int(entry.HandleValue),
+        int(entry.Object or 0),
+        int(entry.ObjectTypeIndex),
+        int(entry.GrantedAccess),
+    )
 
 
 def _require_no_external_mutation_handles(
@@ -512,6 +504,19 @@ def _require_no_external_mutation_handles(
             continue
         candidates_by_pid.setdefault(pid, []).append(entry)
 
+    refreshed_keys: set[tuple[int, int, int, int, int]] | None = None
+
+    def candidate_is_still_live(
+        entry: SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX,
+    ) -> bool:
+        nonlocal refreshed_keys
+        if refreshed_keys is None:
+            refreshed_keys = {
+                _handle_entry_key(current)
+                for current in _system_handle_entries()
+            }
+        return _handle_entry_key(entry) in refreshed_keys
+
     current_process = _kernel32.GetCurrentProcess()
     matching_pids: set[int] = set()
 
@@ -522,6 +527,14 @@ def _require_no_external_mutation_handles(
             pid,
         )
         if not process:
+            live = [
+                entry
+                for entry in candidates
+                if candidate_is_still_live(entry)
+            ]
+            if not live:
+                continue
+
             query_process = _kernel32.OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION,
                 False,
@@ -559,6 +572,8 @@ def _require_no_external_mutation_handles(
                     False,
                     DUPLICATE_SAME_ACCESS,
                 ):
+                    if not candidate_is_still_live(entry):
+                        continue
                     raise RuntimeError(
                         f"{description} has unduplicable external mutation "
                         f"handle: pid={pid} "
