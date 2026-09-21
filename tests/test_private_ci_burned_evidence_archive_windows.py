@@ -112,20 +112,72 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
             finally:
                 first.close()
 
-    def test_locked_directory_cannot_be_swapped(self):
+    def test_relative_destination_stays_under_locked_directory_after_rename(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
         with tempfile.TemporaryDirectory() as tmp:
             parent = Path(tmp)
-            child = parent / "archive"
-            renamed = parent / "archive-renamed"
-            child.mkdir()
-            handle = m._open_locked_directory(child)
+            root_handle = m._open_locked_directory(parent)
             try:
-                with self.assertRaises(OSError):
-                    os.replace(child, renamed)
+                archive_handle = m._create_relative_directory(
+                    root_handle, "archive"
+                )
+                try:
+                    renamed = parent / "archive-renamed"
+                    os.replace(parent / "archive", renamed)
+                    (parent / "archive").mkdir()
+
+                    destination = m._create_locked_destination_relative(
+                        archive_handle,
+                        "evidence.bin",
+                    )
+                    try:
+                        m._write_all(destination, b"locked-destination")
+                    finally:
+                        destination.close()
+
+                    self.assertEqual(
+                        (renamed / "evidence.bin").read_bytes(),
+                        b"locked-destination",
+                    )
+                    self.assertFalse(
+                        (parent / "archive" / "evidence.bin").exists()
+                    )
+                finally:
+                    archive_handle.close()
             finally:
-                handle.close()
+                root_handle.close()
+
+    def test_relative_source_open_stays_bound_to_evidence_root_handle(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outer = Path(tmp)
+            evidence = outer / "evidence"
+            evidence.mkdir()
+            source = evidence / "source.bin"
+            raw = b"relative-source"
+            source.write_bytes(raw)
+
+            root_handle = m._open_locked_directory(evidence)
+            try:
+                renamed = outer / "evidence-renamed"
+                os.replace(evidence, renamed)
+                evidence.mkdir()
+                (evidence / "source.bin").write_bytes(b"replacement")
+
+                handle = m._open_locked_source_relative(
+                    root_handle,
+                    "source.bin",
+                    expected_sha256=hashlib.sha256(raw).hexdigest(),
+                    expected_size=len(raw),
+                )
+                try:
+                    self.assertEqual(m._hash_handle(handle), hashlib.sha256(raw).hexdigest())
+                finally:
+                    handle.close()
+            finally:
+                root_handle.close()
 
 
 if __name__ == "__main__":
