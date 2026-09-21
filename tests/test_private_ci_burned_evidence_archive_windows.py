@@ -154,7 +154,7 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
             def staged_absence(parent, name):
                 nonlocal calls
                 calls += 1
-                if calls == 1:
+                if calls <= 2:
                     return True
                 return False
 
@@ -175,6 +175,10 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
                         evidence_root=root,
                         archive_path=archive,
                         items=(item,),
+                        canonical_names=(
+                            item.filename,
+                            "issue225-phase5-plan.json",
+                        ),
                         manifest_raw=b"manifest",
                         result_raw=b"result",
                     )
