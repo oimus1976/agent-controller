@@ -129,8 +129,12 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         restore = source.index(
             "Set-Acl -LiteralPath $EvidenceRoot -AclObject $OriginalEvidenceAcl"
         )
+        path_sanitize = source.index("$env:PATH = ($TrustedPathParts -join ';')")
+        location_sanitize = source.index("Set-Location -LiteralPath $SnapshotRoot")
         self.assertLess(runtime_gate, child)
         self.assertLess(namespace_lock, child)
+        self.assertLess(path_sanitize, child)
+        self.assertLess(location_sanitize, child)
         self.assertGreater(restore, child)
         self.assertIn(
             "Elevated Python runtime is not under trusted Program Files.",
@@ -138,6 +142,9 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         )
         self.assertIn("Get-ChildItem -LiteralPath $RuntimeRoot -Recurse", source)
         self.assertIn("$ExpectedEvidenceRoot", source)
+        self.assertIn("restore PATH failed", source)
+        self.assertIn("evidence ACL restore failed", source)
+        self.assertIn("Burned evidence archive cleanup incomplete", source)
 
     def test_cli_has_no_caller_supplied_source_path(self):
         source = self.cli_path.read_text(encoding="utf-8")
