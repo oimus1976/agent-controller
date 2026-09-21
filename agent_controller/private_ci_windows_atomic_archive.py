@@ -842,6 +842,26 @@ def _open_locked_directory(path: Path) -> LockedHandle:
     return handle
 
 
+def _open_namespace_guard_directory(path: Path) -> LockedHandle:
+    # FILE_SHARE_READ only is the transaction boundary for the authoritative
+    # evidence-root namespace. Any pre-existing handle with write/delete
+    # access makes this open fail with a sharing violation, and while this
+    # handle remains open no new write/delete handle can be opened.
+    handle = _create_file(
+        path,
+        desired_access=FILE_READ_ATTRIBUTES,
+        share_mode=FILE_SHARE_READ,
+        creation_disposition=OPEN_EXISTING,
+        flags=FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+    )
+    try:
+        _require_plain_directory_handle(handle)
+    except Exception:
+        handle.close()
+        raise
+    return handle
+
+
 def _open_or_create_relative_directory(
     parent: LockedHandle,
     name: str,
@@ -1172,18 +1192,13 @@ def apply_windows_archive_transaction(
     archive_parent = archive_path.parent
     with ExitStack() as stack:
         root_handle = stack.enter_context(
-            _open_locked_directory(evidence_root)
+            _open_namespace_guard_directory(evidence_root)
         )
         _require_path_directory_identity(
             evidence_root,
             root_handle,
             "authoritative evidence root",
         )
-        _require_no_external_mutation_handles(
-            root_handle,
-            "authoritative evidence root",
-        )
-
         parent_handle = stack.enter_context(
             _open_or_create_relative_directory(root_handle, "archive")
         )
