@@ -13,6 +13,7 @@ from typing import Iterable
 GENERIC_READ = 0x80000000
 GENERIC_WRITE = 0x40000000
 DELETE = 0x00010000
+SYNCHRONIZE = 0x00100000
 FILE_READ_ATTRIBUTES = 0x00000080
 FILE_SHARE_READ = 0x00000001
 FILE_SHARE_WRITE = 0x00000002
@@ -22,6 +23,7 @@ NT_FILE_OPEN = 1
 NT_FILE_CREATE = 2
 NT_FILE_OPEN_IF = 3
 FILE_DIRECTORY_FILE = 0x00000001
+FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
 FILE_NON_DIRECTORY_FILE = 0x00000040
 NT_FILE_OPEN_REPARSE_POINT = 0x00200000
 OBJ_CASE_INSENSITIVE = 0x00000040
@@ -261,14 +263,16 @@ def _nt_create_relative(
     result_handle = wintypes.HANDLE()
     status = _ntdll.NtCreateFile(
         ctypes.byref(result_handle),
-        desired_access,
+        desired_access | SYNCHRONIZE,
         ctypes.byref(attributes),
         ctypes.byref(iosb),
         None,
         file_attributes,
         share_mode,
         create_disposition,
-        create_options | NT_FILE_OPEN_REPARSE_POINT,
+        create_options
+        | NT_FILE_OPEN_REPARSE_POINT
+        | FILE_SYNCHRONOUS_IO_NONALERT,
         None,
         0,
     )
