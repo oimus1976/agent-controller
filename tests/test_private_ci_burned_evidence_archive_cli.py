@@ -66,6 +66,22 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertIn("_require_windows_elevated_boundary()", apply_region)
 
 
+    def test_bootstrap_verifies_reviewed_sources_before_elevated_python(self):
+        source = self.ps_path.read_text(encoding="utf-8")
+        source_hash = source.index(
+            "Reviewed controller source SHA mismatch"
+        )
+        snapshot_hash = source.index("Snapshot source SHA mismatch")
+        child = source.index("& $PythonPath -I -S -B -c")
+        self.assertLess(source_hash, snapshot_hash)
+        self.assertLess(snapshot_hash, child)
+        self.assertIn(
+            "[Environment]::GetFolderPath",
+            source,
+        )
+        self.assertNotIn("$env:WINDIR", source)
+        self.assertNotIn("$env:COMPUTERNAME", source)
+
     def test_cli_has_no_caller_supplied_source_path(self):
         source = self.cli_path.read_text(encoding="utf-8")
         self.assertNotIn("--source", source)
@@ -81,7 +97,7 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertIn("[IO.FileShare]::Read", source)
         self.assertIn("Snapshot source SHA mismatch", source)
         self.assertIn("runpy.run_path", source)
-        self.assertIn("-I -B -c", source)
+        self.assertIn("-I -S -B -c", source)
         self.assertNotIn("& python.exe", source)
         self.assertNotIn("-m scripts.archive_private_ci_burned_evidence", source)
         for forbidden in (
