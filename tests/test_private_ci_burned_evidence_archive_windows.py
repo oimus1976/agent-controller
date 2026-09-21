@@ -115,7 +115,7 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
             finally:
                 first.close()
 
-    def test_namespace_guard_blocks_existing_and_future_mutation_handles(self):
+    def test_external_evidence_root_handle_blocks_quiescence(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -169,8 +169,18 @@ finally:
             )
             try:
                 self.assertEqual(child.stdout.readline().strip(), "READY")
-                with self.assertRaises(OSError):
-                    m._open_namespace_guard_directory(root)
+                handle = m._open_locked_directory(root)
+                try:
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "pre-existing external mutation handles",
+                    ):
+                        m._require_no_external_mutation_handles(
+                            handle,
+                            "authoritative evidence root",
+                        )
+                finally:
+                    handle.close()
             finally:
                 child.terminate()
                 child.wait(timeout=10)
@@ -179,24 +189,16 @@ finally:
                 if child.stderr is not None:
                     child.stderr.close()
 
-            guard = m._open_namespace_guard_directory(root)
+            handle = m._open_locked_directory(root)
             try:
-                with self.assertRaises(OSError):
-                    candidate = m._create_file(
-                        root,
-                        desired_access=0x00000002 | 0x00000004,
-                        share_mode=(
-                            m.FILE_SHARE_READ
-                            | m.FILE_SHARE_WRITE
-                        ),
-                        creation_disposition=m.OPEN_EXISTING,
-                        flags=m.FILE_FLAG_BACKUP_SEMANTICS,
-                    )
-                    candidate.close()
+                m._require_no_external_mutation_handles(
+                    handle,
+                    "authoritative evidence root",
+                )
             finally:
-                guard.close()
+                handle.close()
 
-    def test_archive_transaction_uses_namespace_guard_not_handle_enumeration(self):
+    def test_quiescence_enables_debug_and_fails_closed_on_hidden_live_handles(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
         module_path = (
@@ -205,10 +207,121 @@ finally:
             / "private_ci_windows_atomic_archive.py"
         )
         source = module_path.read_text(encoding="utf-8")
+        start = source.index("def _require_no_external_mutation_handles(")
+        end = source.index("\ndef _create_file(", start)
+        region = source[start:end]
+        debug = region.index("_enable_debug_privilege()")
+        open_process = region.index("OpenProcess(")
+        duplicate = region.index("DuplicateHandle(")
+        self.assertLess(debug, open_process)
+        self.assertLess(open_process, duplicate)
+        self.assertIn("PROCESS_DUP_HANDLE", region)
+        self.assertIn("PROCESS_QUERY_LIMITED_INFORMATION", region)
+        self.assertIn("_entry_still_present(entry)", region)
+        self.assertIn("_process_is_protected", region)
+        self.assertIn("uninspectable external mutation handle", region)
+        self.assertIn("unduplicable external mutation handle", region)
+
+    def test_debug_privilege_is_mandatory_for_quiescence(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        module_path = (
+            self.repo_root
+            / "agent_controller"
+            / "private_ci_windows_atomic_archive.py"
+        )
+        source = module_path.read_text(encoding="utf-8")
+        self.assertIn('"SeDebugPrivilege"', source)
+        self.assertIn("AdjustTokenPrivileges", source)
+        self.assertIn("ERROR_NOT_ALL_ASSIGNED", source)
+
+        with mock.patch.object(
+            m,
+            "_enable_debug_privilege",
+            side_effect=RuntimeError("synthetic debug privilege failure"),
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                handle = m._open_locked_directory(root)
+                try:
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "synthetic debug privilege failure",
+                    ):
+                        m._require_no_external_mutation_handles(
+                            handle,
+                            "authoritative evidence root",
+                        )
+                finally:
+                    handle.close()
+
+    def test_live_unduplicable_candidate_handle_blocks_instead_of_being_ignored(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handle = m._open_locked_directory(root)
+            try:
+                own = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                own.UniqueProcessId = os.getpid()
+                own.HandleValue = int(handle.handle)
+                own.Object = 0x11111111
+                own.ObjectTypeIndex = 7
+                own.GrantedAccess = 0
+
+                external = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                external.UniqueProcessId = os.getpid() + 1000
+                external.HandleValue = 0x77
+                external.Object = 0x22222222
+                external.ObjectTypeIndex = 7
+                external.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+
+                fake_kernel32 = SimpleNamespace(
+                    GetCurrentProcess=lambda: 1,
+                    OpenProcess=lambda *args: 0,
+                    CloseHandle=lambda *args: 1,
+                )
+                with mock.patch.object(
+                    m,
+                    "_enable_debug_privilege",
+                    return_value=None,
+                ), mock.patch.object(
+                    m,
+                    "_system_handle_entries",
+                    return_value=(own, external),
+                ), mock.patch.object(
+                    m,
+                    "_entry_still_present",
+                    return_value=True,
+                ), mock.patch.object(
+                    m,
+                    "_kernel32",
+                    fake_kernel32,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "uninspectable external mutation handle",
+                    ):
+                        m._require_no_external_mutation_handles(
+                            handle,
+                            "authoritative evidence root",
+                        )
+            finally:
+                handle.close()
+
+    def test_archive_transaction_runs_quiescence_at_start_and_before_pass(self):
+        module_path = (
+            self.repo_root
+            / "agent_controller"
+            / "private_ci_windows_atomic_archive.py"
+        )
+        source = module_path.read_text(encoding="utf-8")
         start = source.index("def apply_windows_archive_transaction(")
         region = source[start:]
-        self.assertIn("_open_namespace_guard_directory(evidence_root)", region)
-        self.assertNotIn("_require_no_external_mutation_handles(", region)
+        self.assertGreaterEqual(
+            region.count("_require_no_external_mutation_handles("),
+            2,
+        )
 
     def test_trusted_icacls_ignores_inherited_windir(self):
         from agent_controller import private_ci_windows_atomic_archive as m
