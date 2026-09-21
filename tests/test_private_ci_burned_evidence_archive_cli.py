@@ -43,12 +43,28 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertIn("apply_archive_plan(", source)
 
 
-    def test_plan_carries_reviewed_plan_bytes_across_uac_boundary(self):
+    def test_plan_carries_reviewed_plan_and_encoded_bootstrap_across_uac_boundary(self):
         source = self.cli_path.read_text(encoding="utf-8")
         self.assertIn("plan_base64 = base64.b64encode(raw)", source)
-        self.assertIn("-ExpectedPlanBase64", source)
+        self.assertIn("encoded_bootstrap = base64.b64encode(", source)
+        self.assertIn("-EncodedCommand", source)
+        self.assertIn(
+            "AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64",
+            source,
+        )
+        self.assertNotIn(" -File ", source)
         self.assertIn("_decode_reviewed_plan(", source)
         self.assertIn("parse_archive_plan_bytes(raw)", source)
+
+    def test_elevated_apply_does_not_rerun_mutable_checkout_git_or_powershell(self):
+        source = self.cli_path.read_text(encoding="utf-8")
+        apply_start = source.index("def command_apply_internal")
+        apply_region = source[apply_start:]
+        self.assertNotIn("_require_controller_source_exact()", apply_region)
+        self.assertNotIn('"git.exe"', apply_region)
+        self.assertNotIn('"powershell.exe"', apply_region)
+        self.assertIn("_require_windows_elevated_boundary()", apply_region)
+
 
     def test_cli_has_no_caller_supplied_source_path(self):
         source = self.cli_path.read_text(encoding="utf-8")
@@ -56,19 +72,18 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertNotIn("--path", source)
         self.assertNotIn("--filename", source)
 
-    def test_powershell_wrapper_is_only_uac_apply_bridge(self):
+    def test_powershell_bootstrap_snapshots_reviewed_sources_before_python_import(self):
         source = self.ps_path.read_text(encoding="utf-8")
-        self.assertIn("ExpectedPlanSha256", source)
-        self.assertIn("ExpectedPlanBase64", source)
-        self.assertIn("RunAsAdministrator", source)
-        self.assertIn("$Plan.python_executable", source)
-        self.assertIn("$Plan.python_sha256", source)
+        self.assertIn("__EXPECTED_PLAN_SHA256__", source)
+        self.assertIn("AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64", source)
+        self.assertIn("$Plan.controller_sources", source)
+        self.assertIn("$ExpectedSourcePaths", source)
         self.assertIn("[IO.FileShare]::Read", source)
-        self.assertIn(
-            "& $PythonPath -m scripts.archive_private_ci_burned_evidence",
-            source,
-        )
+        self.assertIn("Snapshot source SHA mismatch", source)
+        self.assertIn("runpy.run_path", source)
+        self.assertIn("-I -B -c", source)
         self.assertNotIn("& python.exe", source)
+        self.assertNotIn("-m scripts.archive_private_ci_burned_evidence", source)
         for forbidden in (
             "registration-token",
             "/dispatches",
