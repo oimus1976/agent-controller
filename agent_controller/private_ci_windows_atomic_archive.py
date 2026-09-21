@@ -31,6 +31,15 @@ STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034
 STATUS_OBJECT_PATH_NOT_FOUND = 0xC000003A
 STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
 SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
+PROCESS_DUP_HANDLE = 0x0040
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+DUPLICATE_SAME_ACCESS = 0x00000002
+TOKEN_ADJUST_PRIVILEGES = 0x0020
+TOKEN_QUERY = 0x0008
+SE_PRIVILEGE_ENABLED = 0x00000002
+ERROR_NOT_ALL_ASSIGNED = 1300
+PROCESS_PROTECTION_LEVEL_INFO_CLASS = 7
+PROTECTION_LEVEL_NONE = 0xFFFFFFFE
 FILE_ADD_FILE = 0x00000002
 FILE_ADD_SUBDIRECTORY = 0x00000004
 FILE_DELETE_CHILD = 0x00000040
@@ -114,6 +123,31 @@ class SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX(ctypes.Structure):
     ]
 
 
+class LUID(ctypes.Structure):
+    _fields_ = [
+        ("LowPart", wintypes.DWORD),
+        ("HighPart", wintypes.LONG),
+    ]
+
+
+class LUID_AND_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [
+        ("Luid", LUID),
+        ("Attributes", wintypes.DWORD),
+    ]
+
+
+class TOKEN_PRIVILEGES_ONE(ctypes.Structure):
+    _fields_ = [
+        ("PrivilegeCount", wintypes.DWORD),
+        ("Privileges", LUID_AND_ATTRIBUTES * 1),
+    ]
+
+
+class PROCESS_PROTECTION_LEVEL_INFORMATION(ctypes.Structure):
+    _fields_ = [("ProtectionLevel", wintypes.DWORD)]
+
+
 class LockedHandle:
     def __init__(self, handle: int, path: Path):
         self.handle = handle
@@ -139,6 +173,7 @@ class LockedHandle:
 if os.name == "nt":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _ntdll = ctypes.WinDLL("ntdll")
+    _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 
     _ntdll.NtCreateFile.argtypes = [
         ctypes.POINTER(wintypes.HANDLE),
@@ -176,6 +211,59 @@ if os.name == "nt":
 
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     _kernel32.CloseHandle.restype = wintypes.BOOL
+
+    _kernel32.OpenProcess.argtypes = [
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+
+    _kernel32.GetCurrentProcess.argtypes = []
+    _kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+
+    _kernel32.DuplicateHandle.argtypes = [
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    _kernel32.DuplicateHandle.restype = wintypes.BOOL
+
+    _kernel32.GetProcessInformation.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    _kernel32.GetProcessInformation.restype = wintypes.BOOL
+
+    _advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    _advapi32.OpenProcessToken.restype = wintypes.BOOL
+
+    _advapi32.LookupPrivilegeValueW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        ctypes.POINTER(LUID),
+    ]
+    _advapi32.LookupPrivilegeValueW.restype = wintypes.BOOL
+
+    _advapi32.AdjustTokenPrivileges.argtypes = [
+        wintypes.HANDLE,
+        wintypes.BOOL,
+        ctypes.POINTER(TOKEN_PRIVILEGES_ONE),
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+    ]
+    _advapi32.AdjustTokenPrivileges.restype = wintypes.BOOL
 
 
     _kernel32.GetFileInformationByHandle.argtypes = [
@@ -230,10 +318,16 @@ if os.name == "nt":
 else:
     _kernel32 = None
     _ntdll = None
+    _advapi32 = None
 
 
 def _require_windows() -> None:
-    if os.name != "nt" or _kernel32 is None or _ntdll is None:
+    if (
+        os.name != "nt"
+        or _kernel32 is None
+        or _ntdll is None
+        or _advapi32 is None
+    ):
         raise RuntimeError("Windows atomic archive backend requires Windows")
 
 
@@ -307,46 +401,177 @@ def _same_file_identity(
     )
 
 
+def _enable_debug_privilege() -> None:
+    _require_windows()
+    token = wintypes.HANDLE()
+    current_process = _kernel32.GetCurrentProcess()
+    if not _advapi32.OpenProcessToken(
+        current_process,
+        TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+        ctypes.byref(token),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        luid = LUID()
+        if not _advapi32.LookupPrivilegeValueW(
+            None,
+            "SeDebugPrivilege",
+            ctypes.byref(luid),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        privileges = TOKEN_PRIVILEGES_ONE()
+        privileges.PrivilegeCount = 1
+        privileges.Privileges[0].Luid = luid
+        privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
+
+        ctypes.set_last_error(0)
+        if not _advapi32.AdjustTokenPrivileges(
+            token,
+            False,
+            ctypes.byref(privileges),
+            0,
+            None,
+            None,
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        error = ctypes.get_last_error()
+        if error == ERROR_NOT_ALL_ASSIGNED:
+            raise RuntimeError(
+                "SeDebugPrivilege is unavailable to the elevated archive broker"
+            )
+        if error != 0:
+            raise ctypes.WinError(error)
+    finally:
+        _kernel32.CloseHandle(token)
+
+
+def _process_is_protected(process: int) -> bool:
+    info = PROCESS_PROTECTION_LEVEL_INFORMATION()
+    if not _kernel32.GetProcessInformation(
+        process,
+        PROCESS_PROTECTION_LEVEL_INFO_CLASS,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(info.ProtectionLevel) != PROTECTION_LEVEL_NONE
+
+
+def _entry_still_present(
+    expected: SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX,
+) -> bool:
+    expected_pid = int(expected.UniqueProcessId)
+    expected_handle = int(expected.HandleValue)
+    expected_object = int(expected.Object or 0)
+    expected_type = int(expected.ObjectTypeIndex)
+    expected_access = int(expected.GrantedAccess)
+    for current in _system_handle_entries():
+        if (
+            int(current.UniqueProcessId) == expected_pid
+            and int(current.HandleValue) == expected_handle
+            and int(current.Object or 0) == expected_object
+            and int(current.ObjectTypeIndex) == expected_type
+            and int(current.GrantedAccess) == expected_access
+        ):
+            return True
+    return False
+
+
 def _require_no_external_mutation_handles(
     handle: LockedHandle,
     description: str,
 ) -> None:
+    _enable_debug_privilege()
     entries = _system_handle_entries()
     current_pid = os.getpid()
     handle_value = int(handle.handle)
 
-    own_entry = None
+    own_type_index = None
     for entry in entries:
         if (
             int(entry.UniqueProcessId) == current_pid
             and int(entry.HandleValue) == handle_value
         ):
-            own_entry = entry
+            own_type_index = int(entry.ObjectTypeIndex)
             break
-    if own_entry is None:
+    if own_type_index is None:
         raise RuntimeError(
-            f"{description} handle not found in system table"
+            f"{description} handle type not found in system table"
         )
 
-    own_type_index = int(own_entry.ObjectTypeIndex)
-    own_object = int(own_entry.Object)
-    if own_object == 0:
-        raise RuntimeError(
-            f"{description} kernel object identity unavailable"
-        )
-
+    current_process = _kernel32.GetCurrentProcess()
     matching_pids: set[int] = set()
+
     for entry in entries:
         pid = int(entry.UniqueProcessId)
         if pid == current_pid:
             continue
         if int(entry.ObjectTypeIndex) != own_type_index:
             continue
-        if int(entry.Object) != own_object:
-            continue
         if int(entry.GrantedAccess) & DIRECTORY_MUTATION_ACCESS == 0:
             continue
-        matching_pids.add(pid)
+
+        process = _kernel32.OpenProcess(
+            PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            pid,
+        )
+        if not process:
+            # A closed/reused handle is a normal race. If the exact entry is
+            # still live, inspect protection level through the documented
+            # limited-information right. Protected/PPL processes are outside
+            # the low-privilege writer boundary and Windows itself forbids
+            # PROCESS_DUP_HANDLE to them.
+            if not _entry_still_present(entry):
+                continue
+            query_process = _kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION,
+                False,
+                pid,
+            )
+            if not query_process:
+                if pid in (0, 4):
+                    continue
+                raise RuntimeError(
+                    f"{description} has uninspectable external mutation "
+                    f"handle: pid={pid} handle={int(entry.HandleValue)}"
+                )
+            try:
+                if _process_is_protected(query_process):
+                    continue
+            finally:
+                _kernel32.CloseHandle(query_process)
+            raise RuntimeError(
+                f"{description} has uninspectable external mutation "
+                f"handle: pid={pid} handle={int(entry.HandleValue)}"
+            )
+
+        try:
+            duplicate = wintypes.HANDLE()
+            if not _kernel32.DuplicateHandle(
+                process,
+                wintypes.HANDLE(int(entry.HandleValue)),
+                current_process,
+                ctypes.byref(duplicate),
+                0,
+                False,
+                DUPLICATE_SAME_ACCESS,
+            ):
+                if not _entry_still_present(entry):
+                    continue
+                if _process_is_protected(process):
+                    continue
+                raise RuntimeError(
+                    f"{description} has unduplicable external mutation "
+                    f"handle: pid={pid} handle={int(entry.HandleValue)}"
+                )
+            try:
+                if _same_file_identity(handle, int(duplicate.value)):
+                    matching_pids.add(pid)
+            finally:
+                _kernel32.CloseHandle(duplicate)
+        finally:
+            _kernel32.CloseHandle(process)
 
     if matching_pids:
         raise RuntimeError(
