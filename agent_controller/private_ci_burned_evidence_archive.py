@@ -24,6 +24,14 @@ ARCHIVE_RETIREMENT_PASS = "BURNED_CANONICAL_EVIDENCE_ARCHIVED"
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 HELPER_ARCHIVE_NAME_RE = re.compile(r"^issue216-burned-[0-9a-f]{16}$")
 
+REVIEWED_CONTROLLER_SOURCE_PATHS = (
+    "scripts/Archive-PrivateCiBurnedEvidence.ps1",
+    "scripts/archive_private_ci_burned_evidence.py",
+    "agent_controller/__init__.py",
+    "agent_controller/private_ci_burned_evidence_archive.py",
+    "agent_controller/private_ci_windows_atomic_archive.py",
+)
+
 CANONICAL_RESTART_BLOCKING_FILENAMES = (
     "issue216-pilot-identity-freeze.json",
     "issue216-phase0-canonical.json",
@@ -45,6 +53,13 @@ CANONICAL_RESTART_BLOCKING_FILENAMES = (
 
 
 @dataclass(frozen=True, slots=True)
+class ControllerSourceBinding:
+    relative_path: str
+    sha256: str
+    size: int
+
+
+@dataclass(frozen=True, slots=True)
 class ArchiveItem:
     filename: str
     sha256: str
@@ -59,6 +74,7 @@ class ArchivePlan:
     controller_tree: str
     python_executable: str
     python_sha256: str
+    controller_sources: tuple[ControllerSourceBinding, ...]
     inventory_sha256: str
     archive_directory: str
     items: tuple[ArchiveItem, ...]
@@ -231,6 +247,62 @@ def _validate_python_binding(
         raise ValueError("archive plan Python SHA-256 invalid")
 
 
+def _validate_controller_sources(
+    sources: tuple[ControllerSourceBinding, ...],
+) -> None:
+    if type(sources) is not tuple or len(sources) != len(
+        REVIEWED_CONTROLLER_SOURCE_PATHS
+    ):
+        raise ValueError("archive plan controller source set invalid")
+    for expected_path, source in zip(
+        REVIEWED_CONTROLLER_SOURCE_PATHS,
+        sources,
+        strict=True,
+    ):
+        if type(source) is not ControllerSourceBinding:
+            raise ValueError("archive plan controller source type invalid")
+        if source.relative_path != expected_path:
+            raise ValueError("archive plan controller source path invalid")
+        if not _valid_sha256(source.sha256):
+            raise ValueError("archive plan controller source SHA-256 invalid")
+        if type(source.size) is not int or source.size < 0:
+            raise ValueError("archive plan controller source size invalid")
+
+
+def _source_payload(
+    source: ControllerSourceBinding,
+) -> dict[str, object]:
+    return {
+        "relative_path": source.relative_path,
+        "sha256": source.sha256,
+        "size": source.size,
+    }
+
+
+def _payload_sources(
+    payload: object,
+) -> tuple[ControllerSourceBinding, ...]:
+    if type(payload) is not list:
+        raise ValueError("archive plan controller sources invalid")
+    parsed = []
+    for item in payload:
+        if (
+            type(item) is not dict
+            or set(item) != {"relative_path", "sha256", "size"}
+        ):
+            raise ValueError("archive plan controller source shape invalid")
+        parsed.append(
+            ControllerSourceBinding(
+                relative_path=item["relative_path"],
+                sha256=item["sha256"],
+                size=item["size"],
+            )
+        )
+    sources = tuple(parsed)
+    _validate_controller_sources(sources)
+    return sources
+
+
 def _payload_items(payload: object, description: str) -> tuple[ArchiveItem, ...]:
     if type(payload) is not list:
         raise RuntimeError(f"{description} items invalid")
@@ -378,6 +450,7 @@ def build_archive_plan(
     controller_tree: str,
     python_executable: str,
     python_sha256: str,
+    controller_sources: tuple[ControllerSourceBinding, ...],
 ) -> ArchivePlan | None:
     if not isinstance(evidence_root, Path):
         raise ValueError("evidence root must be Path")
@@ -387,6 +460,7 @@ def build_archive_plan(
     if type(controller_tree) is not str or not controller_tree.strip():
         raise ValueError("controller tree invalid")
     _validate_python_binding(python_executable, python_sha256)
+    _validate_controller_sources(controller_sources)
     _validate_no_incomplete_helper_archive_residue(evidence_root)
 
     items = []
@@ -419,6 +493,7 @@ def build_archive_plan(
         controller_tree=controller_tree,
         python_executable=python_executable,
         python_sha256=python_sha256,
+        controller_sources=controller_sources,
         inventory_sha256=inventory_sha,
         archive_directory=archive_directory,
         items=frozen_items,
@@ -439,6 +514,7 @@ def archive_plan_bytes(plan: ArchivePlan) -> bytes:
     if type(plan.controller_tree) is not str or not plan.controller_tree:
         raise ValueError("archive plan controller tree invalid")
     _validate_python_binding(plan.python_executable, plan.python_sha256)
+    _validate_controller_sources(plan.controller_sources)
     _validate_items(plan.items)
     observed_inventory = _sha256_bytes(_inventory_bytes(plan.items))
     if plan.inventory_sha256 != observed_inventory:
@@ -466,6 +542,10 @@ def archive_plan_bytes(plan: ArchivePlan) -> bytes:
             "controller_tree": plan.controller_tree,
             "python_executable": plan.python_executable,
             "python_sha256": plan.python_sha256,
+            "controller_sources": [
+                _source_payload(source)
+                for source in plan.controller_sources
+            ],
             "inventory_sha256": plan.inventory_sha256,
             "archive_directory": plan.archive_directory,
             "items": [_item_payload(item) for item in plan.items],
@@ -491,6 +571,7 @@ def parse_archive_plan_bytes(raw: bytes) -> ArchivePlan:
         "controller_tree",
         "python_executable",
         "python_sha256",
+        "controller_sources",
         "inventory_sha256",
         "archive_directory",
         "items",
@@ -498,6 +579,7 @@ def parse_archive_plan_bytes(raw: bytes) -> ArchivePlan:
         raise ValueError("archive plan shape invalid")
     if type(payload["items"]) is not list:
         raise ValueError("archive plan items invalid")
+    controller_sources = _payload_sources(payload["controller_sources"])
     try:
         items = tuple(
             ArchiveItem(
@@ -520,6 +602,7 @@ def parse_archive_plan_bytes(raw: bytes) -> ArchivePlan:
         controller_tree=payload["controller_tree"],
         python_executable=payload["python_executable"],
         python_sha256=payload["python_sha256"],
+        controller_sources=controller_sources,
         inventory_sha256=payload["inventory_sha256"],
         archive_directory=payload["archive_directory"],
         items=items,
@@ -665,6 +748,7 @@ def apply_archive_plan(
         controller_tree=plan.controller_tree,
         python_executable=plan.python_executable,
         python_sha256=plan.python_sha256,
+        controller_sources=plan.controller_sources,
     )
     if current is None or archive_plan_bytes(current) != exact_plan_raw:
         raise RuntimeError("burned canonical evidence drift before archival")
