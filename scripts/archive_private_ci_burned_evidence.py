@@ -41,10 +41,15 @@ def _controller_repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _completed(*command: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def _completed(
+    *command: str,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(command),
         cwd=None if cwd is None else str(cwd),
+        env=env,
         check=False,
         capture_output=True,
         text=True,
@@ -239,6 +244,102 @@ def _archive_bindings(module, records: tuple[ReviewedSource, ...]):
     )
 
 
+def _trusted_shell_folder(csidl: int, description: str) -> Path:
+    if os.name != "nt":
+        raise RuntimeError(f"{description} requires Windows")
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    get_folder = shell32.SHGetFolderPathW
+    get_folder.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint,
+        ctypes.c_wchar_p,
+    ]
+    get_folder.restype = ctypes.c_long
+    buffer = ctypes.create_unicode_buffer(32768)
+    result = get_folder(None, csidl, None, 0, buffer)
+    if result != 0:
+        raise OSError(result, f"{description} lookup failed")
+    return Path(buffer.value)
+
+
+def _trusted_program_files_directory() -> Path:
+    return _trusted_shell_folder(0x26, "Program Files")
+
+
+def _trusted_user_profile_directory() -> Path:
+    return _trusted_shell_folder(0x28, "user profile")
+
+
+def _require_plain_path_chain(
+    path: Path,
+    trusted_root: Path,
+    description: str,
+) -> None:
+    resolved_root = trusted_root.resolve(strict=True)
+    resolved_path = path.resolve(strict=True)
+    try:
+        relative = resolved_path.relative_to(resolved_root)
+    except ValueError as error:
+        raise RuntimeError(
+            f"{description} is outside trusted root"
+        ) from error
+
+    current = resolved_root
+    for part in relative.parts:
+        current = current / part
+        stat_result = current.lstat()
+        if current.is_symlink() or (
+            getattr(stat_result, "st_file_attributes", 0) & 0x400
+        ):
+            raise RuntimeError(
+                f"{description} contains symlink/reparse: {current}"
+            )
+
+
+def _trusted_git_path() -> Path:
+    program_files = _trusted_program_files_directory()
+    candidates = (
+        program_files / "Git" / "cmd" / "git.exe",
+        program_files / "Git" / "bin" / "git.exe",
+    )
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        _require_plain_path_chain(
+            candidate,
+            program_files,
+            "trusted Git path",
+        )
+        stat_result = candidate.lstat()
+        if not stat.S_ISREG(stat_result.st_mode):
+            continue
+        return candidate
+    raise RuntimeError("trusted Program Files Git executable missing")
+
+
+def _trusted_git_environment() -> dict[str, str]:
+    system_directory = _trusted_system_directory()
+    system_root = system_directory.parent
+    environment = {
+        "SystemRoot": str(system_root),
+        "SYSTEMROOT": str(system_root),
+        "PATH": str(system_directory),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "NUL",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GCM_INTERACTIVE": "Never",
+    }
+    temp = os.environ.get("TEMP")
+    tmp = os.environ.get("TMP")
+    if temp:
+        environment["TEMP"] = temp
+    if tmp:
+        environment["TMP"] = tmp
+    return environment
+
+
 def _trusted_system_directory() -> Path:
     if os.name != "nt":
         raise RuntimeError("trusted system directory requires Windows")
@@ -302,17 +403,40 @@ def _require_digest(value: str) -> str:
 
 def _require_controller_source_exact() -> tuple[str, Path]:
     root = _controller_repo_root()
+    trusted_profile = _trusted_user_profile_directory()
+    _require_plain_path_chain(
+        root,
+        trusted_profile,
+        "controller execution tree",
+    )
+
+    git = _trusted_git_path()
+    git_env = _trusted_git_environment()
+    git_dir = root / ".git"
+    if not git_dir.is_dir():
+        raise RuntimeError("controller .git directory missing")
+
     local_head = _require_success(
-        _completed("git.exe", "-C", str(root), "rev-parse", "HEAD"),
+        _completed(
+            str(git),
+            f"--git-dir={git_dir}",
+            f"--work-tree={root}",
+            "rev-parse",
+            "HEAD",
+            cwd=root,
+            env=git_env,
+        ),
         "controller HEAD readback",
     )
     status = _completed(
-        "git.exe",
-        "-C",
-        str(root),
+        str(git),
+        f"--git-dir={git_dir}",
+        f"--work-tree={root}",
         "status",
         "--porcelain=v1",
         "--untracked-files=all",
+        cwd=root,
+        env=git_env,
     )
     if status.returncode != 0:
         raise RuntimeError("controller tree status readback failed")
@@ -321,10 +445,12 @@ def _require_controller_source_exact() -> tuple[str, Path]:
 
     remote_line = _require_success(
         _completed(
-            "git.exe",
+            str(git),
             "ls-remote",
             CONTROLLER_REPOSITORY_URL,
             "refs/heads/main",
+            cwd=_trusted_system_directory(),
+            env=git_env,
         ),
         "controller main readback",
     )
@@ -332,8 +458,46 @@ def _require_controller_source_exact() -> tuple[str, Path]:
     remote_main = fields[0] if fields else ""
     if local_head != remote_main:
         raise RuntimeError("controller HEAD is not current canonical main")
-    return local_head, root
 
+    # Authenticate every executable/reviewed source against the canonical
+    # remote-main tree object rather than trusting status/index alone.
+    for relative_path in REVIEWED_CONTROLLER_SOURCE_PATHS:
+        tree_line = _require_success(
+            _completed(
+                str(git),
+                f"--git-dir={git_dir}",
+                "ls-tree",
+                remote_main,
+                "--",
+                relative_path,
+                cwd=root,
+                env=git_env,
+            ),
+            f"controller tree object readback: {relative_path}",
+        )
+        parts = tree_line.split()
+        if len(parts) < 4 or parts[1] != "blob":
+            raise RuntimeError(
+                f"reviewed source not canonical blob: {relative_path}"
+            )
+        expected_blob = parts[2]
+        observed_blob = _require_success(
+            _completed(
+                str(git),
+                "hash-object",
+                "--no-filters",
+                str(root.joinpath(*PurePosixPath(relative_path).parts)),
+                cwd=_trusted_system_directory(),
+                env=git_env,
+            ),
+            f"reviewed source blob hash: {relative_path}",
+        )
+        if observed_blob != expected_blob:
+            raise RuntimeError(
+                f"reviewed source differs from canonical main: {relative_path}"
+            )
+
+    return local_head, root
 
 def _windows_boundary_state() -> dict[str, object]:
     if os.name != "nt":
