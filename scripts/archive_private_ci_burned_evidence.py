@@ -87,22 +87,33 @@ def _controller_source_bindings(
     for relative_path in REVIEWED_CONTROLLER_SOURCE_PATHS:
         pure = PurePosixPath(relative_path)
         path = root.joinpath(*pure.parts)
-        stat_result = path.lstat()
-        if path.is_symlink() or (
-            getattr(stat_result, "st_file_attributes", 0) & 0x400
-        ):
+        with path.open("rb") as handle:
+            stat_result = os.fstat(handle.fileno())
+            digest = hashlib.sha256()
+            size = 0
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                size += len(chunk)
+        if getattr(stat_result, "st_file_attributes", 0) & 0x400:
             raise RuntimeError(
-                f"reviewed controller source is symlink/reparse: {relative_path}"
+                f"reviewed controller source is reparse: {relative_path}"
             )
-        if not path.is_file():
+        if not os.path.isfile(path):
             raise RuntimeError(
                 f"reviewed controller source is not file: {relative_path}"
+            )
+        if size != stat_result.st_size:
+            raise RuntimeError(
+                f"reviewed controller source size drift: {relative_path}"
             )
         bindings.append(
             ControllerSourceBinding(
                 relative_path=relative_path,
-                sha256=_file_sha256(path),
-                size=stat_result.st_size,
+                sha256=digest.hexdigest(),
+                size=size,
             )
         )
     return tuple(bindings)
@@ -286,6 +297,9 @@ def command_plan() -> int:
     evidence_root = Path(AUTHORITATIVE_EVIDENCE_ROOT)
     python_executable, python_sha256 = _python_binding()
     controller_sources = _controller_source_bindings(controller_tree)
+    confirm_main_sha, confirm_tree = _require_controller_source_exact()
+    if confirm_main_sha != controller_main_sha or confirm_tree != controller_tree:
+        raise RuntimeError("controller source drift during archive planning")
     plan = build_archive_plan(
         evidence_root=evidence_root,
         controller_main_sha=controller_main_sha,
