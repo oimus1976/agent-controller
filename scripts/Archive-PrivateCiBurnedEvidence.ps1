@@ -52,7 +52,7 @@ function Assert-PlainDirectory {
     if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Directory is a reparse point: $LiteralPath" }
 }
 
-$ObservedHost = $env:COMPUTERNAME
+$ObservedHost = [Environment]::MachineName
 $ObservedIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 if ($ObservedHost -ine $ExpectedHost) { throw "Burned evidence archive host mismatch: expected=$ExpectedHost actual=$ObservedHost" }
 if ($ObservedIdentity -ine $ExpectedIdentity) { throw "Burned evidence archive identity mismatch: expected=$ExpectedIdentity actual=$ObservedIdentity" }
@@ -140,7 +140,7 @@ try {
         if ((Get-StreamSha256 -Stream $DestinationLock) -cne $ExpectedSourceSha) { throw "Snapshot source SHA mismatch: $ExpectedRelative" }
     }
 
-    $Loader = 'import sys; sys.path.insert(0, sys.argv.pop(1)); import scripts.archive_private_ci_burned_evidence as m; raise SystemExit(m.main())'
+    $Loader = 'import runpy,sys; root=sys.argv.pop(1); sys.path.insert(0,root); runpy.run_path(root + r"\scripts\archive_private_ci_burned_evidence.py", run_name="__main__")'
     & $PythonPath -I -B -c $Loader $SnapshotRoot apply-internal --expected-plan-sha256 $ExpectedPlanSha256 --expected-plan-base64 $ExpectedPlanBase64
     $ChildExitCode = $LASTEXITCODE
     if ($ChildExitCode -ne 0) { throw "Burned evidence archive apply failed with exit=$ChildExitCode" }
