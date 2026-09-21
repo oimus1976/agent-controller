@@ -29,6 +29,8 @@ NT_FILE_OPEN_REPARSE_POINT = 0x00200000
 OBJ_CASE_INSENSITIVE = 0x00000040
 STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034
 STATUS_OBJECT_PATH_NOT_FOUND = 0xC000003A
+STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
+SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
 FILE_ATTRIBUTE_NORMAL = 0x00000080
 FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
@@ -86,6 +88,19 @@ class IO_STATUS_BLOCK(ctypes.Structure):
     ]
 
 
+class SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX(ctypes.Structure):
+    _fields_ = [
+        ("Object", wintypes.LPVOID),
+        ("UniqueProcessId", ctypes.c_size_t),
+        ("HandleValue", ctypes.c_size_t),
+        ("GrantedAccess", wintypes.ULONG),
+        ("CreatorBackTraceIndex", wintypes.USHORT),
+        ("ObjectTypeIndex", wintypes.USHORT),
+        ("HandleAttributes", wintypes.ULONG),
+        ("Reserved", wintypes.ULONG),
+    ]
+
+
 class LockedHandle:
     def __init__(self, handle: int, path: Path):
         self.handle = handle
@@ -126,6 +141,14 @@ if os.name == "nt":
         wintypes.DWORD,
     ]
     _ntdll.NtCreateFile.restype = ctypes.c_long
+
+    _ntdll.NtQuerySystemInformation.argtypes = [
+        wintypes.ULONG,
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        ctypes.POINTER(wintypes.ULONG),
+    ]
+    _ntdll.NtQuerySystemInformation.restype = ctypes.c_long
 
     _kernel32.CreateFileW.argtypes = [
         wintypes.LPCWSTR,
@@ -200,6 +223,90 @@ def _require_windows() -> None:
         raise RuntimeError("Windows atomic archive backend requires Windows")
 
 
+def _ntstatus_code(status: int) -> int:
+    return int(status) & 0xFFFFFFFF
+
+
+def _system_handle_entries() -> tuple[SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX, ...]:
+    _require_windows()
+    size = 1024 * 1024
+    while True:
+        buffer = ctypes.create_string_buffer(size)
+        needed = wintypes.ULONG()
+        status = _ntdll.NtQuerySystemInformation(
+            SYSTEM_EXTENDED_HANDLE_INFORMATION,
+            buffer,
+            size,
+            ctypes.byref(needed),
+        )
+        code = _ntstatus_code(status)
+        if code == 0:
+            break
+        if code != STATUS_INFO_LENGTH_MISMATCH:
+            raise OSError(
+                code,
+                f"NtQuerySystemInformation failed: 0x{code:08x}",
+            )
+        size = max(size * 2, int(needed.value) + 65536)
+        if size > 256 * 1024 * 1024:
+            raise RuntimeError("system handle table unexpectedly large")
+
+    pointer_size = ctypes.sizeof(ctypes.c_size_t)
+    count = ctypes.c_size_t.from_buffer_copy(
+        buffer.raw[:pointer_size]
+    ).value
+    offset = pointer_size * 2
+    entry_size = ctypes.sizeof(SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX)
+    required = offset + count * entry_size
+    if required > len(buffer):
+        raise RuntimeError("system handle table payload truncated")
+
+    entries = []
+    for index in range(count):
+        entry_offset = offset + index * entry_size
+        entries.append(
+            SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX.from_buffer_copy(
+                buffer.raw[entry_offset : entry_offset + entry_size]
+            )
+        )
+    return tuple(entries)
+
+
+def _require_no_external_handles_to_same_object(
+    handle: LockedHandle,
+    description: str,
+) -> None:
+    entries = _system_handle_entries()
+    current_pid = os.getpid()
+    handle_value = int(handle.handle)
+    own_object = None
+    for entry in entries:
+        if (
+            int(entry.UniqueProcessId) == current_pid
+            and int(entry.HandleValue) == handle_value
+        ):
+            own_object = int(entry.Object or 0)
+            break
+    if not own_object:
+        raise RuntimeError(
+            f"{description} handle object not found in system table"
+        )
+
+    external_pids = sorted(
+        {
+            int(entry.UniqueProcessId)
+            for entry in entries
+            if int(entry.Object or 0) == own_object
+            and int(entry.UniqueProcessId) != current_pid
+        }
+    )
+    if external_pids:
+        raise RuntimeError(
+            f"{description} has pre-existing external handles: "
+            + ",".join(str(pid) for pid in external_pids)
+        )
+
+
 def _create_file(
     path: Path,
     *,
@@ -234,10 +341,6 @@ def _relative_component(name: str) -> str:
     ):
         raise ValueError("Windows archive relative component invalid")
     return name
-
-
-def _ntstatus_code(status: int) -> int:
-    return int(status) & 0xFFFFFFFF
 
 
 def _nt_create_relative(
@@ -803,6 +906,10 @@ def apply_windows_archive_transaction(
             root_handle,
             "authoritative evidence root",
         )
+        _require_no_external_handles_to_same_object(
+            root_handle,
+            "authoritative evidence root",
+        )
 
         parent_handle = stack.enter_context(
             _open_or_create_relative_directory(root_handle, "archive")
@@ -961,6 +1068,10 @@ def apply_windows_archive_transaction(
         # low-privilege creation, recheck the complete canonical allowlist.
         _require_path_directory_identity(
             evidence_root,
+            root_handle,
+            "authoritative evidence root before PASS commit",
+        )
+        _require_no_external_handles_to_same_object(
             root_handle,
             "authoritative evidence root before PASS commit",
         )
