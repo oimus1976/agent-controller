@@ -487,36 +487,91 @@ def _require_no_external_mutation_handles(
     handle_value = int(handle.handle)
 
     own_type_index = None
-    own_object = None
     for entry in entries:
         if (
             int(entry.UniqueProcessId) == current_pid
             and int(entry.HandleValue) == handle_value
         ):
             own_type_index = int(entry.ObjectTypeIndex)
-            own_object = int(entry.Object or 0)
             break
     if own_type_index is None:
         raise RuntimeError(
             f"{description} handle type not found in system table"
         )
-    if not own_object:
-        raise RuntimeError(
-            f"{description} kernel object identity unavailable"
-        )
 
+    current_process = _kernel32.GetCurrentProcess()
     matching_pids: set[int] = set()
+
     for entry in entries:
         pid = int(entry.UniqueProcessId)
         if pid == current_pid:
             continue
         if int(entry.ObjectTypeIndex) != own_type_index:
             continue
-        if int(entry.Object or 0) != own_object:
-            continue
         if int(entry.GrantedAccess) & DIRECTORY_MUTATION_ACCESS == 0:
             continue
-        matching_pids.add(pid)
+
+        process = _kernel32.OpenProcess(
+            PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            pid,
+        )
+        if not process:
+            # A closed/reused handle is a normal race. If the exact entry is
+            # still live, inspect protection level through the documented
+            # limited-information right. Protected/PPL processes are outside
+            # the low-privilege writer boundary and Windows itself forbids
+            # PROCESS_DUP_HANDLE to them.
+            if not _entry_still_present(entry):
+                continue
+            query_process = _kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION,
+                False,
+                pid,
+            )
+            if not query_process:
+                if pid in (0, 4):
+                    continue
+                raise RuntimeError(
+                    f"{description} has uninspectable external mutation "
+                    f"handle: pid={pid} handle={int(entry.HandleValue)}"
+                )
+            try:
+                if _process_is_protected(query_process):
+                    continue
+            finally:
+                _kernel32.CloseHandle(query_process)
+            raise RuntimeError(
+                f"{description} has uninspectable external mutation "
+                f"handle: pid={pid} handle={int(entry.HandleValue)}"
+            )
+
+        try:
+            duplicate = wintypes.HANDLE()
+            if not _kernel32.DuplicateHandle(
+                process,
+                wintypes.HANDLE(int(entry.HandleValue)),
+                current_process,
+                ctypes.byref(duplicate),
+                0,
+                False,
+                DUPLICATE_SAME_ACCESS,
+            ):
+                if not _entry_still_present(entry):
+                    continue
+                if _process_is_protected(process):
+                    continue
+                raise RuntimeError(
+                    f"{description} has unduplicable external mutation "
+                    f"handle: pid={pid} handle={int(entry.HandleValue)}"
+                )
+            try:
+                if _same_file_identity(handle, int(duplicate.value)):
+                    matching_pids.add(pid)
+            finally:
+                _kernel32.CloseHandle(duplicate)
+        finally:
+            _kernel32.CloseHandle(process)
 
     if matching_pids:
         raise RuntimeError(
