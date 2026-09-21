@@ -790,6 +790,7 @@ def apply_archive_plan(
             evidence_root=evidence_root,
             archive_path=archive_path,
             items=plan.items,
+            canonical_names=CANONICAL_RESTART_BLOCKING_FILENAMES,
             manifest_raw=manifest_raw,
             result_raw=result_raw,
         )
