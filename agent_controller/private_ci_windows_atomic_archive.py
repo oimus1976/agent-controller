@@ -522,14 +522,6 @@ def _require_no_external_mutation_handles(
             pid,
         )
         if not process:
-            live = [
-                entry
-                for entry in candidates
-                if _entry_still_present(entry)
-            ]
-            if not live:
-                continue
-
             query_process = _kernel32.OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION,
                 False,
@@ -554,6 +546,8 @@ def _require_no_external_mutation_handles(
 
         try:
             protected = _process_is_protected(process)
+            if protected:
+                continue
             for entry in candidates:
                 duplicate = wintypes.HANDLE()
                 if not _kernel32.DuplicateHandle(
@@ -565,10 +559,6 @@ def _require_no_external_mutation_handles(
                     False,
                     DUPLICATE_SAME_ACCESS,
                 ):
-                    if not _entry_still_present(entry):
-                        continue
-                    if protected:
-                        continue
                     raise RuntimeError(
                         f"{description} has unduplicable external mutation "
                         f"handle: pid={pid} "
