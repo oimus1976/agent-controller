@@ -13,6 +13,18 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
         from agent_controller import private_ci_burned_evidence_archive
         return private_ci_burned_evidence_archive
 
+    def source_bindings(self, m):
+        return tuple(
+            m.ControllerSourceBinding(
+                relative_path=path,
+                sha256=(format(index + 1, "x") * 64)[:64],
+                size=index + 1,
+            )
+            for index, path in enumerate(
+                m.REVIEWED_CONTROLLER_SOURCE_PATHS
+            )
+        )
+
     def make_root(self):
         tmp = tempfile.TemporaryDirectory()
         root = Path(tmp.name) / "agent-controller-handoff"
@@ -59,6 +71,7 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
             python_executable=r"C:\Python312\python.exe",
             python_sha256="b" * 64,
+            controller_sources=self.source_bindings(m),
         )
         self.assertIsNone(plan)
 
@@ -80,6 +93,7 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
             python_executable=r"C:\Python312\python.exe",
             python_sha256="b" * 64,
+            controller_sources=self.source_bindings(m),
         )
         self.assertIsNotNone(plan)
         self.assertEqual(
@@ -100,6 +114,7 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
             python_executable=r"C:\Python312\python.exe",
             python_sha256="b" * 64,
+            controller_sources=self.source_bindings(m),
         )
         raw = m.archive_plan_bytes(plan)
         parsed = m.parse_archive_plan_bytes(raw)
@@ -133,6 +148,7 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
                 controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
                 python_executable=r"C:\Python312\python.exe",
                 python_sha256="b" * 64,
+            controller_sources=self.source_bindings(m),
             )
 
 
@@ -147,6 +163,7 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
             python_executable=r"C:\Python312\python.exe",
             python_sha256="b" * 64,
+            controller_sources=self.source_bindings(m),
         )
         archive_path = root.joinpath(
             *Path(first.archive_directory).parts
@@ -160,6 +177,7 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
                 controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
                 python_executable=r"C:\Python312\python.exe",
                 python_sha256="b" * 64,
+            controller_sources=self.source_bindings(m),
             )
 
 
@@ -178,6 +196,7 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
                 controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
                 python_executable=r"C:\Python312\python.exe",
                 python_sha256="b" * 64,
+            controller_sources=self.source_bindings(m),
             )
 
     def test_partial_prior_retirement_residue_blocks_new_inventory_plan(self):
@@ -196,6 +215,7 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
             python_executable=r"C:\Python312\python.exe",
             python_sha256="b" * 64,
+            controller_sources=self.source_bindings(m),
         )
         residue = root.joinpath(*Path(original.archive_directory).parts)
         residue.mkdir(parents=True)
@@ -209,6 +229,7 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
                 controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
                 python_executable=r"C:\Python312\python.exe",
                 python_sha256="b" * 64,
+            controller_sources=self.source_bindings(m),
             )
 
     def test_python_interpreter_binding_is_canonical_plan_authority(self):
@@ -222,6 +243,7 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
             python_executable=r"C:\Python312\python.exe",
             python_sha256="b" * 64,
+            controller_sources=self.source_bindings(m),
         )
         raw = m.archive_plan_bytes(plan)
         self.assertIn(b'"python_executable":"C:\\\\Python312\\\\python.exe"', raw)
@@ -234,6 +256,7 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
                 controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
                 python_executable="python.exe",
                 python_sha256="b" * 64,
+            controller_sources=self.source_bindings(m),
             )
 
     def test_hash_drift_blocks_before_archive_creation(self):
@@ -249,6 +272,7 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
             python_executable=r"C:\Python312\python.exe",
             python_sha256="b" * 64,
+            controller_sources=self.source_bindings(m),
         )
         digest = m.archive_plan_sha256(plan)
         source.write_bytes(b"phase0-drift\n")
@@ -279,6 +303,7 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
             python_executable=r"C:\Python312\python.exe",
             python_sha256="b" * 64,
+            controller_sources=self.source_bindings(m),
         )
         digest = m.archive_plan_sha256(plan)
 
@@ -317,6 +342,7 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
             python_executable=r"C:\Python312\python.exe",
             python_sha256="b" * 64,
+            controller_sources=self.source_bindings(m),
         )
         digest = m.archive_plan_sha256(plan)
 
@@ -375,6 +401,7 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
             controller_tree=r"C:\Users\c-admin\agent-controller-pilot-216",
             python_executable=r"C:\Python312\python.exe",
             python_sha256="b" * 64,
+            controller_sources=self.source_bindings(m),
         )
         result = m.apply_archive_plan(
             evidence_root=root,
