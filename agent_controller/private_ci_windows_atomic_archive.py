@@ -533,11 +533,16 @@ def _open_locked_source_relative(
 def _create_locked_destination_relative(
     parent: LockedHandle,
     name: str,
+    *,
+    allow_delete: bool = False,
 ) -> LockedHandle:
+    desired_access = GENERIC_READ | GENERIC_WRITE
+    if allow_delete:
+        desired_access |= DELETE
     handle = _nt_create_relative(
         parent,
         name,
-        desired_access=GENERIC_READ | GENERIC_WRITE,
+        desired_access=desired_access,
         share_mode=FILE_SHARE_READ,
         create_disposition=NT_FILE_CREATE,
         create_options=FILE_NON_DIRECTORY_FILE,
@@ -881,7 +886,9 @@ def apply_windows_archive_transaction(
 
         result_handle = stack.enter_context(
             _create_locked_destination_relative(
-                archive_handle, "retirement-complete.json"
+                archive_handle,
+                "retirement-complete.json",
+                allow_delete=True,
             )
         )
         _write_all(result_handle, result_raw)
