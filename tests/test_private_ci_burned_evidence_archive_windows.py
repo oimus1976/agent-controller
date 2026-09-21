@@ -217,7 +217,8 @@ finally:
         self.assertLess(open_process, duplicate)
         self.assertIn("PROCESS_DUP_HANDLE", region)
         self.assertIn("PROCESS_QUERY_LIMITED_INFORMATION", region)
-        self.assertIn("_entry_still_present(entry)", region)
+        self.assertEqual(region.count("_system_handle_entries()"), 1)
+        self.assertNotIn("_entry_still_present(entry)", region)
         self.assertIn("_process_is_protected", region)
         self.assertIn("uninspectable external mutation handle", region)
         self.assertIn("unduplicable external mutation handle", region)
@@ -289,10 +290,6 @@ finally:
                     m,
                     "_system_handle_entries",
                     return_value=(own, external),
-                ), mock.patch.object(
-                    m,
-                    "_entry_still_present",
-                    return_value=True,
                 ), mock.patch.object(
                     m,
                     "_kernel32",
