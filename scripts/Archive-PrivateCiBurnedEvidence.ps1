@@ -141,7 +141,7 @@ try {
     }
 
     $Loader = 'import runpy,sys; root=sys.argv.pop(1); sys.path.insert(0,root); runpy.run_path(root + r"\scripts\archive_private_ci_burned_evidence.py", run_name="__main__")'
-    & $PythonPath -I -B -c $Loader $SnapshotRoot apply-internal --expected-plan-sha256 $ExpectedPlanSha256 --expected-plan-base64 $ExpectedPlanBase64
+    & $PythonPath -I -S -B -c $Loader $SnapshotRoot apply-internal --expected-plan-sha256 $ExpectedPlanSha256 --expected-plan-base64 $ExpectedPlanBase64
     $ChildExitCode = $LASTEXITCODE
     if ($ChildExitCode -ne 0) { throw "Burned evidence archive apply failed with exit=$ChildExitCode" }
 }
