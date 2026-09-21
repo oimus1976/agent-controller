@@ -18,6 +18,30 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         source = self.cli_path.read_text(encoding="utf-8")
         ast.parse(source, filename=str(self.cli_path))
 
+    def test_planner_has_no_controller_import_before_source_verification(self):
+        source = self.cli_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(self.cli_path))
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom):
+                self.assertFalse(
+                    (node.module or "").startswith("agent_controller"),
+                    msg=f"top-level controller import: {node.module}",
+                )
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    self.assertFalse(
+                        alias.name.startswith("agent_controller"),
+                        msg=f"top-level controller import: {alias.name}",
+                    )
+
+        plan_start = source.index("def command_plan")
+        apply_start = source.index("def command_apply_internal", plan_start)
+        region = source[plan_start:apply_start]
+        first_verify = region.index("_require_controller_source_exact()")
+        module_load = region.index("_load_bound_archive_module(")
+        self.assertLess(first_verify, module_load)
+        self.assertIn("_read_bound_controller_source(", source)
+
     def test_plan_is_read_only_and_has_no_live_pilot_surface(self):
         source = self.cli_path.read_text(encoding="utf-8")
         plan_start = source.index("def command_plan")
@@ -92,6 +116,28 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         )
         self.assertNotIn("$env:WINDIR", source)
         self.assertNotIn("$env:COMPUTERNAME", source)
+
+    def test_bootstrap_requires_trusted_runtime_and_namespace_lock(self):
+        source = self.ps_path.read_text(encoding="utf-8")
+        runtime_gate = source.index(
+            "Assert-TrustedPythonRuntime -PythonPath $PythonPath"
+        )
+        namespace_lock = source.index(
+            "Set-PrivateDirectoryAcl -LiteralPath $EvidenceRoot"
+        )
+        child = source.index("& $PythonPath -I -S -B -c")
+        restore = source.index(
+            "Set-Acl -LiteralPath $EvidenceRoot -AclObject $OriginalEvidenceAcl"
+        )
+        self.assertLess(runtime_gate, child)
+        self.assertLess(namespace_lock, child)
+        self.assertGreater(restore, child)
+        self.assertIn(
+            "Elevated Python runtime is not under trusted Program Files.",
+            source,
+        )
+        self.assertIn("Get-ChildItem -LiteralPath $RuntimeRoot -Recurse", source)
+        self.assertIn("$ExpectedEvidenceRoot", source)
 
     def test_cli_has_no_caller_supplied_source_path(self):
         source = self.cli_path.read_text(encoding="utf-8")
