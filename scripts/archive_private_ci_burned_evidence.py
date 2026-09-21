@@ -344,6 +344,7 @@ def _trusted_git_environment() -> dict[str, str]:
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "NUL",
         "GIT_TERMINAL_PROMPT": "0",
+        "GIT_NO_REPLACE_OBJECTS": "1",
         "GCM_INTERACTIVE": "Never",
     }
     temp = os.environ.get("TEMP")
@@ -436,6 +437,7 @@ def _require_controller_source_exact(
     local_head = _require_success(
         _completed(
             str(git),
+            "--no-replace-objects",
             f"--git-dir={git_dir}",
             f"--work-tree={root}",
             "rev-parse",
@@ -463,6 +465,7 @@ def _require_controller_source_exact(
     remote_line = _require_success(
         _completed(
             str(git),
+            "--no-replace-objects",
             "ls-remote",
             CONTROLLER_REPOSITORY_URL,
             "refs/heads/main",
@@ -483,6 +486,7 @@ def _require_controller_source_exact(
         tree_line = _require_success(
             _completed(
                 str(git),
+                "--no-replace-objects",
                 f"--git-dir={git_dir}",
                 "ls-tree",
                 remote_main,
@@ -503,6 +507,7 @@ def _require_controller_source_exact(
         observed_blob = _require_success(
             _completed(
                 str(git),
+                "--no-replace-objects",
                 "hash-object",
                 "--no-filters",
                 str(root.joinpath(*PurePosixPath(relative_path).parts)),
