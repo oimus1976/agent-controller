@@ -148,6 +148,28 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
             finally:
                 root_handle.close()
 
+    def test_canonical_root_identity_rejects_path_replacement(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outer = Path(tmp)
+            evidence = outer / "evidence"
+            renamed = outer / "evidence-renamed"
+            evidence.mkdir()
+
+            root_handle = m._open_locked_directory(evidence)
+            try:
+                os.replace(evidence, renamed)
+                evidence.mkdir()
+                with self.assertRaisesRegex(RuntimeError, "identity drift"):
+                    m._require_path_directory_identity(
+                        evidence,
+                        root_handle,
+                        "authoritative evidence root",
+                    )
+            finally:
+                root_handle.close()
+
     def test_relative_source_open_stays_bound_to_evidence_root_handle(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
