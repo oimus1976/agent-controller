@@ -107,8 +107,9 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertIn('"GIT_NO_REPLACE_OBJECTS": "1"', source)
         self.assertGreaterEqual(
             region.count('"--no-replace-objects"'),
-            4,
+            5,
         )
+        self.assertIn('"core.fsmonitor=false"', region)
         self.assertIn("_require_plain_path_chain(", region)
         self.assertIn("cwd=trusted_cwd", region)
 
