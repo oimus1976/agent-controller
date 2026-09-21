@@ -31,8 +31,6 @@ STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034
 STATUS_OBJECT_PATH_NOT_FOUND = 0xC000003A
 STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
 SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
-PROCESS_DUP_HANDLE = 0x0040
-DUPLICATE_SAME_ACCESS = 0x00000002
 FILE_ADD_FILE = 0x00000002
 FILE_ADD_SUBDIRECTORY = 0x00000004
 FILE_DELETE_CHILD = 0x00000040
@@ -179,26 +177,6 @@ if os.name == "nt":
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     _kernel32.CloseHandle.restype = wintypes.BOOL
 
-    _kernel32.OpenProcess.argtypes = [
-        wintypes.DWORD,
-        wintypes.BOOL,
-        wintypes.DWORD,
-    ]
-    _kernel32.OpenProcess.restype = wintypes.HANDLE
-
-    _kernel32.GetCurrentProcess.argtypes = []
-    _kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-
-    _kernel32.DuplicateHandle.argtypes = [
-        wintypes.HANDLE,
-        wintypes.HANDLE,
-        wintypes.HANDLE,
-        ctypes.POINTER(wintypes.HANDLE),
-        wintypes.DWORD,
-        wintypes.BOOL,
-        wintypes.DWORD,
-    ]
-    _kernel32.DuplicateHandle.restype = wintypes.BOOL
 
     _kernel32.GetFileInformationByHandle.argtypes = [
         wintypes.HANDLE,
