@@ -102,8 +102,20 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertIn("ls-remote", region)
         self.assertIn("ls-tree", region)
         self.assertIn("hash-object", region)
+        self.assertIn("canonical_blob_ids", region)
         self.assertIn("_trusted_git_environment()", region)
         self.assertIn("_require_plain_path_chain(", region)
+        self.assertIn("cwd=trusted_cwd", region)
+
+        binding_start = source.index("def _controller_source_bindings")
+        binding_end = source.index(
+            "def _read_bound_controller_source",
+            binding_start,
+        )
+        binding_region = source[binding_start:binding_end]
+        self.assertIn("git_digest", binding_region)
+        self.assertIn("expected_blob = canonical_blob_ids.get", binding_region)
+        self.assertIn("is not canonical blob", binding_region)
 
     def test_elevated_apply_does_not_rerun_mutable_checkout_git_or_powershell(self):
         source = self.cli_path.read_text(encoding="utf-8")
