@@ -31,6 +31,21 @@ STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034
 STATUS_OBJECT_PATH_NOT_FOUND = 0xC000003A
 STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
 SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
+PROCESS_DUP_HANDLE = 0x0040
+DUPLICATE_SAME_ACCESS = 0x00000002
+FILE_ADD_FILE = 0x00000002
+FILE_ADD_SUBDIRECTORY = 0x00000004
+FILE_DELETE_CHILD = 0x00000040
+WRITE_DAC = 0x00040000
+WRITE_OWNER = 0x00080000
+DIRECTORY_MUTATION_ACCESS = (
+    FILE_ADD_FILE
+    | FILE_ADD_SUBDIRECTORY
+    | FILE_DELETE_CHILD
+    | DELETE
+    | WRITE_DAC
+    | WRITE_OWNER
+)
 FILE_ATTRIBUTE_NORMAL = 0x00000080
 FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
@@ -164,6 +179,27 @@ if os.name == "nt":
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     _kernel32.CloseHandle.restype = wintypes.BOOL
 
+    _kernel32.OpenProcess.argtypes = [
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+
+    _kernel32.GetCurrentProcess.argtypes = []
+    _kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+
+    _kernel32.DuplicateHandle.argtypes = [
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    ]
+    _kernel32.DuplicateHandle.restype = wintypes.BOOL
+
     _kernel32.GetFileInformationByHandle.argtypes = [
         wintypes.HANDLE,
         ctypes.POINTER(BY_HANDLE_FILE_INFORMATION),
@@ -272,40 +308,96 @@ def _system_handle_entries() -> tuple[SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX, ...]:
     return tuple(entries)
 
 
-def _require_no_external_handles_to_same_object(
+def _same_file_identity(
+    left: LockedHandle,
+    right_handle: int,
+) -> bool:
+    left_info = _file_info(left)
+    right_info = BY_HANDLE_FILE_INFORMATION()
+    if not _kernel32.GetFileInformationByHandle(
+        right_handle,
+        ctypes.byref(right_info),
+    ):
+        return False
+    return (
+        int(left_info.dwVolumeSerialNumber)
+        == int(right_info.dwVolumeSerialNumber)
+        and int(left_info.nFileIndexHigh)
+        == int(right_info.nFileIndexHigh)
+        and int(left_info.nFileIndexLow)
+        == int(right_info.nFileIndexLow)
+    )
+
+
+def _require_no_external_mutation_handles(
     handle: LockedHandle,
     description: str,
 ) -> None:
     entries = _system_handle_entries()
     current_pid = os.getpid()
     handle_value = int(handle.handle)
-    own_object = None
+
+    own_type_index = None
     for entry in entries:
         if (
             int(entry.UniqueProcessId) == current_pid
             and int(entry.HandleValue) == handle_value
         ):
-            own_object = int(entry.Object or 0)
+            own_type_index = int(entry.ObjectTypeIndex)
             break
-    if not own_object:
+    if own_type_index is None:
         raise RuntimeError(
-            f"{description} handle object not found in system table"
+            f"{description} handle type not found in system table"
         )
 
-    external_pids = sorted(
-        {
-            int(entry.UniqueProcessId)
-            for entry in entries
-            if int(entry.Object or 0) == own_object
-            and int(entry.UniqueProcessId) != current_pid
-        }
-    )
-    if external_pids:
-        raise RuntimeError(
-            f"{description} has pre-existing external handles: "
-            + ",".join(str(pid) for pid in external_pids)
-        )
+    current_process = _kernel32.GetCurrentProcess()
+    matching_pids: set[int] = set()
 
+    for entry in entries:
+        pid = int(entry.UniqueProcessId)
+        if pid == current_pid:
+            continue
+        if int(entry.ObjectTypeIndex) != own_type_index:
+            continue
+        if int(entry.GrantedAccess) & DIRECTORY_MUTATION_ACCESS == 0:
+            continue
+
+        process = _kernel32.OpenProcess(
+            PROCESS_DUP_HANDLE,
+            False,
+            pid,
+        )
+        if not process:
+            # Protected/system processes are outside the low-privilege writer
+            # threat boundary. A normal low-privilege process holding this
+            # directory is duplicable by the elevated broker and is checked.
+            continue
+        try:
+            duplicate = wintypes.HANDLE()
+            if not _kernel32.DuplicateHandle(
+                process,
+                wintypes.HANDLE(int(entry.HandleValue)),
+                current_process,
+                ctypes.byref(duplicate),
+                0,
+                False,
+                DUPLICATE_SAME_ACCESS,
+            ):
+                # The handle may have closed after the system-table snapshot.
+                continue
+            try:
+                if _same_file_identity(handle, int(duplicate.value)):
+                    matching_pids.add(pid)
+            finally:
+                _kernel32.CloseHandle(duplicate)
+        finally:
+            _kernel32.CloseHandle(process)
+
+    if matching_pids:
+        raise RuntimeError(
+            f"{description} has pre-existing external mutation handles: "
+            + ",".join(str(pid) for pid in sorted(matching_pids))
+        )
 
 def _create_file(
     path: Path,
@@ -906,7 +998,7 @@ def apply_windows_archive_transaction(
             root_handle,
             "authoritative evidence root",
         )
-        _require_no_external_handles_to_same_object(
+        _require_no_external_mutation_handles(
             root_handle,
             "authoritative evidence root",
         )
@@ -1071,7 +1163,7 @@ def apply_windows_archive_transaction(
             root_handle,
             "authoritative evidence root before PASS commit",
         )
-        _require_no_external_handles_to_same_object(
+        _require_no_external_mutation_handles(
             root_handle,
             "authoritative evidence root before PASS commit",
         )
