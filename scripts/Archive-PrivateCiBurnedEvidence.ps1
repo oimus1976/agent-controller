@@ -190,6 +190,8 @@ $PythonLock = $null
 $SnapshotRoot = $null
 $OriginalEvidenceAcl = $null
 $EvidenceNamespaceLocked = $false
+$OriginalPath = $null
+$OriginalLocation = $null
 
 try {
     $PythonLock = New-Object IO.FileStream($PythonPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
@@ -246,6 +248,20 @@ try {
     Set-PrivateDirectoryAcl -LiteralPath $EvidenceRoot
     $EvidenceNamespaceLocked = $true
 
+    $RuntimeRoot = Split-Path -Parent $PythonPath
+    $RuntimeDlls = Join-Path $RuntimeRoot 'DLLs'
+    $TrustedSystemDirectory = [Environment]::SystemDirectory
+    Assert-PlainDirectory -LiteralPath $TrustedSystemDirectory
+    $OriginalPath = $env:PATH
+    $OriginalLocation = Get-Location
+    $TrustedPathParts = @($RuntimeRoot, $TrustedSystemDirectory)
+    if (Test-Path -LiteralPath $RuntimeDlls) {
+        Assert-PlainDirectory -LiteralPath $RuntimeDlls
+        $TrustedPathParts = @($RuntimeRoot, $RuntimeDlls, $TrustedSystemDirectory)
+    }
+    $env:PATH = ($TrustedPathParts -join ';')
+    Set-Location -LiteralPath $SnapshotRoot
+
     $Loader = 'import runpy,sys; root=sys.argv.pop(1); sys.path.insert(0,root); runpy.run_path(root + r"\scripts\archive_private_ci_burned_evidence.py", run_name="__main__")'
     & $PythonPath -I -S -B -c $Loader $SnapshotRoot apply-internal --expected-plan-sha256 $ExpectedPlanSha256 --expected-plan-base64 $ExpectedPlanBase64
     $ChildExitCode = $LASTEXITCODE
@@ -254,6 +270,14 @@ try {
 finally {
     for ($Index = $SnapshotLocks.Count - 1; $Index -ge 0; $Index--) { $SnapshotLocks[$Index].Dispose() }
     for ($Index = $SourceLocks.Count - 1; $Index -ge 0; $Index--) { $SourceLocks[$Index].Dispose() }
+    if ($null -ne $OriginalLocation) {
+        Set-Location -LiteralPath $OriginalLocation.Path
+        $OriginalLocation = $null
+    }
+    if ($null -ne $OriginalPath) {
+        $env:PATH = $OriginalPath
+        $OriginalPath = $null
+    }
     if ($null -ne $PythonLock) { $PythonLock.Dispose() }
     if ($null -ne $SnapshotRoot -and (Test-Path -LiteralPath $SnapshotRoot)) { Remove-Item -LiteralPath $SnapshotRoot -Recurse -Force }
     if ($EvidenceNamespaceLocked) {
