@@ -167,7 +167,7 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
         m = self.module()
         tmp, root = self.make_root()
         self.addCleanup(tmp.cleanup)
-        residue = root / "archive" / "issue216-burned-" + "1" * 16
+        residue = root / "archive" / ("issue216-burned-" + "1" * 16)
         residue.mkdir(parents=True)
         (residue / "manifest.json").write_bytes(b"{}\n")
 
