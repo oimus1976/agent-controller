@@ -449,6 +449,9 @@ def _require_controller_source_exact(
     )
     status = _completed(
         str(git),
+        "--no-replace-objects",
+        "-c",
+        "core.fsmonitor=false",
         f"--git-dir={git_dir}",
         f"--work-tree={root}",
         "status",
