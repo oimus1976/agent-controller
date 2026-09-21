@@ -95,6 +95,7 @@ def _python_binding() -> tuple[str, str]:
 
 def _controller_source_bindings(
     root: Path,
+    canonical_blob_ids: dict[str, str],
 ) -> tuple[ReviewedSource, ...]:
     bindings = []
     for relative_path in REVIEWED_CONTROLLER_SOURCE_PATHS:
@@ -103,12 +104,20 @@ def _controller_source_bindings(
         with path.open("rb") as handle:
             stat_result = os.fstat(handle.fileno())
             digest = hashlib.sha256()
+            try:
+                git_digest = hashlib.sha1(usedforsecurity=False)
+            except TypeError:
+                git_digest = hashlib.sha1()
+            git_digest.update(
+                f"blob {stat_result.st_size}\0".encode("ascii")
+            )
             size = 0
             while True:
                 chunk = handle.read(1024 * 1024)
                 if not chunk:
                     break
                 digest.update(chunk)
+                git_digest.update(chunk)
                 size += len(chunk)
         if getattr(stat_result, "st_file_attributes", 0) & 0x400:
             raise RuntimeError(
@@ -121,6 +130,12 @@ def _controller_source_bindings(
         if size != stat_result.st_size:
             raise RuntimeError(
                 f"reviewed controller source size drift: {relative_path}"
+            )
+        expected_blob = canonical_blob_ids.get(relative_path)
+        if not expected_blob or git_digest.hexdigest() != expected_blob:
+            raise RuntimeError(
+                f"reviewed controller source is not canonical blob: "
+                f"{relative_path}"
             )
         bindings.append(
             ReviewedSource(
@@ -401,7 +416,8 @@ def _require_digest(value: str) -> str:
     return value
 
 
-def _require_controller_source_exact() -> tuple[str, Path]:
+def _require_controller_source_exact(
+) -> tuple[str, Path, dict[str, str]]:
     root = _controller_repo_root()
     trusted_profile = _trusted_user_profile_directory()
     _require_plain_path_chain(
@@ -416,6 +432,7 @@ def _require_controller_source_exact() -> tuple[str, Path]:
     if not git_dir.is_dir():
         raise RuntimeError("controller .git directory missing")
 
+    trusted_cwd = _trusted_system_directory()
     local_head = _require_success(
         _completed(
             str(git),
@@ -423,7 +440,7 @@ def _require_controller_source_exact() -> tuple[str, Path]:
             f"--work-tree={root}",
             "rev-parse",
             "HEAD",
-            cwd=root,
+            cwd=trusted_cwd,
             env=git_env,
         ),
         "controller HEAD readback",
@@ -435,7 +452,7 @@ def _require_controller_source_exact() -> tuple[str, Path]:
         "status",
         "--porcelain=v1",
         "--untracked-files=all",
-        cwd=root,
+        cwd=trusted_cwd,
         env=git_env,
     )
     if status.returncode != 0:
@@ -449,7 +466,7 @@ def _require_controller_source_exact() -> tuple[str, Path]:
             "ls-remote",
             CONTROLLER_REPOSITORY_URL,
             "refs/heads/main",
-            cwd=_trusted_system_directory(),
+            cwd=trusted_cwd,
             env=git_env,
         ),
         "controller main readback",
@@ -461,6 +478,7 @@ def _require_controller_source_exact() -> tuple[str, Path]:
 
     # Authenticate every executable/reviewed source against the canonical
     # remote-main tree object rather than trusting status/index alone.
+    canonical_blob_ids: dict[str, str] = {}
     for relative_path in REVIEWED_CONTROLLER_SOURCE_PATHS:
         tree_line = _require_success(
             _completed(
@@ -481,13 +499,14 @@ def _require_controller_source_exact() -> tuple[str, Path]:
                 f"reviewed source not canonical blob: {relative_path}"
             )
         expected_blob = parts[2]
+        canonical_blob_ids[relative_path] = expected_blob
         observed_blob = _require_success(
             _completed(
                 str(git),
                 "hash-object",
                 "--no-filters",
                 str(root.joinpath(*PurePosixPath(relative_path).parts)),
-                cwd=_trusted_system_directory(),
+                cwd=trusted_cwd,
                 env=git_env,
             ),
             f"reviewed source blob hash: {relative_path}",
@@ -497,7 +516,7 @@ def _require_controller_source_exact() -> tuple[str, Path]:
                 f"reviewed source differs from canonical main: {relative_path}"
             )
 
-    return local_head, root
+    return local_head, root, canonical_blob_ids
 
 def _windows_boundary_state() -> dict[str, object]:
     if os.name != "nt":
@@ -557,12 +576,27 @@ def _require_windows_elevated_boundary() -> None:
 
 
 def command_plan() -> int:
-    controller_main_sha, controller_tree = _require_controller_source_exact()
+    (
+        controller_main_sha,
+        controller_tree,
+        canonical_blob_ids,
+    ) = _require_controller_source_exact()
     evidence_root = Path(AUTHORITATIVE_EVIDENCE_ROOT)
     python_executable, python_sha256 = _python_binding()
-    controller_sources = _controller_source_bindings(controller_tree)
-    confirm_main_sha, confirm_tree = _require_controller_source_exact()
-    if confirm_main_sha != controller_main_sha or confirm_tree != controller_tree:
+    controller_sources = _controller_source_bindings(
+        controller_tree,
+        canonical_blob_ids,
+    )
+    (
+        confirm_main_sha,
+        confirm_tree,
+        confirm_blob_ids,
+    ) = _require_controller_source_exact()
+    if (
+        confirm_main_sha != controller_main_sha
+        or confirm_tree != controller_tree
+        or confirm_blob_ids != canonical_blob_ids
+    ):
         raise RuntimeError("controller source drift during archive planning")
     archive = _load_bound_archive_module(
         controller_tree,
