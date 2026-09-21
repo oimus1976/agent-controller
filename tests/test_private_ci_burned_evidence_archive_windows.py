@@ -198,7 +198,7 @@ finally:
             finally:
                 handle.close()
 
-    def test_quiescence_enables_debug_and_fails_closed_on_hidden_live_handles(self):
+    def test_quiescence_uses_kernel_object_identity_without_foreign_process_open(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
         module_path = (
@@ -210,17 +210,14 @@ finally:
         start = source.index("def _require_no_external_mutation_handles(")
         end = source.index("\ndef _create_file(", start)
         region = source[start:end]
-        debug = region.index("_enable_debug_privilege()")
-        open_process = region.index("OpenProcess(")
-        duplicate = region.index("DuplicateHandle(")
-        self.assertLess(debug, open_process)
-        self.assertLess(open_process, duplicate)
-        self.assertIn("PROCESS_DUP_HANDLE", region)
-        self.assertIn("PROCESS_QUERY_LIMITED_INFORMATION", region)
-        self.assertIn("_entry_still_present(entry)", region)
-        self.assertIn("_process_is_protected", region)
-        self.assertIn("uninspectable external mutation handle", region)
-        self.assertIn("unduplicable external mutation handle", region)
+        self.assertIn("_enable_debug_privilege()", region)
+        self.assertIn("_system_handle_entries()", region)
+        self.assertIn("own_object", region)
+        self.assertIn("kernel object identity unavailable", region)
+        self.assertIn("int(entry.Object or 0) != own_object", region)
+        self.assertNotIn("OpenProcess(", region)
+        self.assertNotIn("DuplicateHandle(", region)
+        self.assertNotIn("PROCESS_DUP_HANDLE", region)
 
     def test_debug_privilege_is_mandatory_for_quiescence(self):
         from agent_controller import private_ci_windows_atomic_archive as m
@@ -255,7 +252,7 @@ finally:
                 finally:
                     handle.close()
 
-    def test_live_unduplicable_candidate_handle_blocks_instead_of_being_ignored(self):
+    def test_matching_external_kernel_object_blocks_without_process_access(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -272,15 +269,10 @@ finally:
                 external = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
                 external.UniqueProcessId = os.getpid() + 1000
                 external.HandleValue = 0x77
-                external.Object = 0x22222222
-                external.ObjectTypeIndex = 7
+                external.Object = own.Object
+                external.ObjectTypeIndex = own.ObjectTypeIndex
                 external.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
 
-                fake_kernel32 = SimpleNamespace(
-                    GetCurrentProcess=lambda: 1,
-                    OpenProcess=lambda *args: 0,
-                    CloseHandle=lambda *args: 1,
-                )
                 with mock.patch.object(
                     m,
                     "_enable_debug_privilege",
@@ -289,18 +281,44 @@ finally:
                     m,
                     "_system_handle_entries",
                     return_value=(own, external),
-                ), mock.patch.object(
-                    m,
-                    "_entry_still_present",
-                    return_value=True,
-                ), mock.patch.object(
-                    m,
-                    "_kernel32",
-                    fake_kernel32,
                 ):
                     with self.assertRaisesRegex(
                         RuntimeError,
-                        "uninspectable external mutation handle",
+                        "pre-existing external mutation handles",
+                    ):
+                        m._require_no_external_mutation_handles(
+                            handle,
+                            "authoritative evidence root",
+                        )
+            finally:
+                handle.close()
+
+    def test_missing_kernel_object_identity_fails_closed(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handle = m._open_locked_directory(root)
+            try:
+                own = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                own.UniqueProcessId = os.getpid()
+                own.HandleValue = int(handle.handle)
+                own.Object = 0
+                own.ObjectTypeIndex = 7
+                own.GrantedAccess = 0
+
+                with mock.patch.object(
+                    m,
+                    "_enable_debug_privilege",
+                    return_value=None,
+                ), mock.patch.object(
+                    m,
+                    "_system_handle_entries",
+                    return_value=(own,),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "kernel object identity unavailable",
                     ):
                         m._require_no_external_mutation_handles(
                             handle,
