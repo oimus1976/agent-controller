@@ -108,6 +108,26 @@ def _controller_source_bindings(
     return tuple(bindings)
 
 
+def _read_bound_controller_source(
+    root: Path,
+    binding: ControllerSourceBinding,
+) -> bytes:
+    pure = PurePosixPath(binding.relative_path)
+    path = root.joinpath(*pure.parts)
+    with path.open("rb") as handle:
+        stat_result = os.fstat(handle.fileno())
+        raw = handle.read()
+    if stat_result.st_size != binding.size or len(raw) != binding.size:
+        raise RuntimeError(
+            f"reviewed controller source size drift: {binding.relative_path}"
+        )
+    if hashlib.sha256(raw).hexdigest() != binding.sha256:
+        raise RuntimeError(
+            f"reviewed controller source SHA drift: {binding.relative_path}"
+        )
+    return raw
+
+
 def _trusted_system_directory() -> Path:
     if os.name != "nt":
         raise RuntimeError("trusted system directory requires Windows")
@@ -283,12 +303,22 @@ def command_plan() -> int:
     raw = archive_plan_bytes(plan)
     digest = hashlib.sha256(raw).hexdigest()
     plan_base64 = base64.b64encode(raw).decode("ascii")
-    bootstrap_path = (
-        controller_tree
-        / "scripts"
-        / "Archive-PrivateCiBurnedEvidence.ps1"
+    bootstrap_binding = plan.controller_sources[0]
+    if (
+        bootstrap_binding.relative_path
+        != "scripts/Archive-PrivateCiBurnedEvidence.ps1"
+    ):
+        raise RuntimeError("archive UAC bootstrap source binding invalid")
+    bootstrap_raw = _read_bound_controller_source(
+        controller_tree,
+        bootstrap_binding,
     )
-    bootstrap_template = bootstrap_path.read_text(encoding="utf-8")
+    try:
+        bootstrap_template = bootstrap_raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RuntimeError(
+            "archive UAC bootstrap source is not UTF-8"
+        ) from error
     sha_token = "__EXPECTED_PLAN_SHA256__"
     if bootstrap_template.count(sha_token) != 1:
         raise RuntimeError("archive UAC bootstrap template marker invalid")
