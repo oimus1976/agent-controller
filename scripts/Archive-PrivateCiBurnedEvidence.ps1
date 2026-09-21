@@ -8,6 +8,7 @@ $ExpectedPlanSha256 = '__EXPECTED_PLAN_SHA256__'
 $PlanEnvironmentName = 'AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64'
 $ExpectedHost = 'WOBBUFFET'
 $ExpectedIdentity = 'WOBBUFFET\c-admin'
+$ExpectedEvidenceRoot = 'C:\Users\Public\Documents\agent-controller-handoff'
 $ExpectedSourcePaths = @(
     'scripts/Archive-PrivateCiBurnedEvidence.ps1',
     'scripts/archive_private_ci_burned_evidence.py',
@@ -52,6 +53,101 @@ function Assert-PlainDirectory {
     if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Directory is a reparse point: $LiteralPath" }
 }
 
+function Assert-NoLowPrivilegeWriteAcl {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+    $LowPrivilegeSids = @(
+        'S-1-1-0',
+        'S-1-5-11',
+        'S-1-5-32-545'
+    )
+    try {
+        $TargetSid = (
+            New-Object Security.Principal.NTAccount('WOBBUFFET', 'ac-runner')
+        ).Translate([Security.Principal.SecurityIdentifier]).Value
+        $LowPrivilegeSids += $TargetSid
+    }
+    catch {
+        throw 'Unable to resolve ac-runner SID for runtime ACL validation.'
+    }
+
+    $WriteMask = (
+        [Security.AccessControl.FileSystemRights]::Write -bor
+        [Security.AccessControl.FileSystemRights]::Modify -bor
+        [Security.AccessControl.FileSystemRights]::FullControl -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    )
+    $Acl = Get-Acl -LiteralPath $LiteralPath -ErrorAction Stop
+    foreach ($Rule in @($Acl.Access)) {
+        if (
+            $Rule.AccessControlType -ne
+            [Security.AccessControl.AccessControlType]::Allow
+        ) {
+            continue
+        }
+        try {
+            $Sid = $Rule.IdentityReference.Translate(
+                [Security.Principal.SecurityIdentifier]
+            ).Value
+        }
+        catch {
+            throw "Unable to resolve runtime ACL principal: $LiteralPath"
+        }
+        if (
+            $LowPrivilegeSids -contains $Sid -and
+            (($Rule.FileSystemRights -band $WriteMask) -ne 0)
+        ) {
+            throw "Low-privilege write access on Python runtime: $LiteralPath sid=$Sid"
+        }
+    }
+}
+
+function Assert-TrustedPythonRuntime {
+    param([Parameter(Mandatory = $true)][string]$PythonPath)
+    $ProgramFiles = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::ProgramFiles
+    )
+    if ([string]::IsNullOrWhiteSpace($ProgramFiles)) {
+        throw 'Trusted Program Files path is unavailable.'
+    }
+    $ProgramFilesFull = [IO.Path]::GetFullPath($ProgramFiles).TrimEnd('\')
+    Assert-PlainDirectory -LiteralPath $ProgramFilesFull
+
+    $PythonFull = [IO.Path]::GetFullPath($PythonPath)
+    $Prefix = $ProgramFilesFull + '\'
+    if (-not $PythonFull.StartsWith(
+        $Prefix,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'Elevated Python runtime is not under trusted Program Files.'
+    }
+
+    $RuntimeRoot = Split-Path -Parent $PythonFull
+    Assert-PlainDirectory -LiteralPath $RuntimeRoot
+    Assert-NoLowPrivilegeWriteAcl -LiteralPath $RuntimeRoot
+
+    $Current = Get-Item -LiteralPath $RuntimeRoot -Force -ErrorAction Stop
+    while ($null -ne $Current) {
+        if (($Current.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Python runtime ancestry contains reparse point: $($Current.FullName)"
+        }
+        Assert-NoLowPrivilegeWriteAcl -LiteralPath $Current.FullName
+        if ($Current.FullName -ieq $ProgramFilesFull) { break }
+        $Current = $Current.Parent
+    }
+    if ($null -eq $Current) {
+        throw 'Python runtime ancestry escaped Program Files.'
+    }
+
+    foreach ($Item in Get-ChildItem -LiteralPath $RuntimeRoot -Recurse -Force -ErrorAction Stop) {
+        if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Python runtime contains reparse point: $($Item.FullName)"
+        }
+        Assert-NoLowPrivilegeWriteAcl -LiteralPath $Item.FullName
+    }
+}
+
 $ObservedHost = [Environment]::MachineName
 $ObservedIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 if ($ObservedHost -ine $ExpectedHost) { throw "Burned evidence archive host mismatch: expected=$ExpectedHost actual=$ObservedHost" }
@@ -73,21 +169,27 @@ try { $PlanJson = [Text.Encoding]::UTF8.GetString($PlanBytes); $Plan = $PlanJson
 $PythonPath = [string]$Plan.python_executable
 $PythonSha256 = [string]$Plan.python_sha256
 $ControllerRoot = [string]$Plan.controller_tree
+$EvidenceRoot = [string]$Plan.evidence_root
 $PlanSources = @($Plan.controller_sources)
 if ([string]::IsNullOrWhiteSpace($PythonPath) -or -not [IO.Path]::IsPathRooted($PythonPath)) { throw 'Reviewed archive Python path is not absolute.' }
 if ($PythonSha256 -notmatch '^[0-9a-f]{64}$') { throw 'Reviewed archive Python SHA-256 is invalid.' }
 if ([string]::IsNullOrWhiteSpace($ControllerRoot) -or -not [IO.Path]::IsPathRooted($ControllerRoot)) { throw 'Reviewed controller root is not absolute.' }
+if ($EvidenceRoot -cne $ExpectedEvidenceRoot) { throw 'Reviewed evidence root mismatch.' }
 Assert-PlainDirectory -LiteralPath $ControllerRoot
+Assert-PlainDirectory -LiteralPath $EvidenceRoot
 if ($PlanSources.Count -ne $ExpectedSourcePaths.Count) { throw 'Reviewed controller source count mismatch.' }
 
 $PythonItem = Get-Item -LiteralPath $PythonPath -Force -ErrorAction Stop
 if ($PythonItem.PSIsContainer) { throw 'Reviewed archive Python path is not a file.' }
 if (($PythonItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Reviewed archive Python path is a reparse point.' }
+Assert-TrustedPythonRuntime -PythonPath $PythonPath
 
 $SourceLocks = New-Object Collections.Generic.List[IO.FileStream]
 $SnapshotLocks = New-Object Collections.Generic.List[IO.FileStream]
 $PythonLock = $null
 $SnapshotRoot = $null
+$OriginalEvidenceAcl = $null
+$EvidenceNamespaceLocked = $false
 
 try {
     $PythonLock = New-Object IO.FileStream($PythonPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
@@ -140,6 +242,10 @@ try {
         if ((Get-StreamSha256 -Stream $DestinationLock) -cne $ExpectedSourceSha) { throw "Snapshot source SHA mismatch: $ExpectedRelative" }
     }
 
+    $OriginalEvidenceAcl = Get-Acl -LiteralPath $EvidenceRoot -ErrorAction Stop
+    Set-PrivateDirectoryAcl -LiteralPath $EvidenceRoot
+    $EvidenceNamespaceLocked = $true
+
     $Loader = 'import runpy,sys; root=sys.argv.pop(1); sys.path.insert(0,root); runpy.run_path(root + r"\scripts\archive_private_ci_burned_evidence.py", run_name="__main__")'
     & $PythonPath -I -S -B -c $Loader $SnapshotRoot apply-internal --expected-plan-sha256 $ExpectedPlanSha256 --expected-plan-base64 $ExpectedPlanBase64
     $ChildExitCode = $LASTEXITCODE
@@ -150,6 +256,10 @@ finally {
     for ($Index = $SourceLocks.Count - 1; $Index -ge 0; $Index--) { $SourceLocks[$Index].Dispose() }
     if ($null -ne $PythonLock) { $PythonLock.Dispose() }
     if ($null -ne $SnapshotRoot -and (Test-Path -LiteralPath $SnapshotRoot)) { Remove-Item -LiteralPath $SnapshotRoot -Recurse -Force }
+    if ($EvidenceNamespaceLocked) {
+        Set-Acl -LiteralPath $EvidenceRoot -AclObject $OriginalEvidenceAcl
+        $EvidenceNamespaceLocked = $false
+    }
 }
 
 Write-Output 'BURNED_CANONICAL_ARCHIVE_UAC_BRIDGE_PASS'
