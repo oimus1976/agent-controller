@@ -248,6 +248,10 @@ finally:
                 return_value=None,
             ), mock.patch.object(
                 m,
+                "_require_no_external_mutation_handles",
+                return_value=None,
+            ), mock.patch.object(
+                m,
                 "_relative_path_absent",
                 side_effect=staged_absence,
             ):
@@ -293,6 +297,10 @@ finally:
             with mock.patch.object(
                 m,
                 "_protect_archive_container",
+                return_value=None,
+            ), mock.patch.object(
+                m,
+                "_require_no_external_mutation_handles",
                 return_value=None,
             ):
                 m.apply_windows_archive_transaction(
