@@ -134,7 +134,7 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
             else:
                 os.environ["WINDIR"] = original
 
-    def test_recreated_source_after_result_write_invalidates_pass_result(self):
+    def test_recreated_canonical_name_blocks_authoritative_pass_publication(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -186,6 +186,48 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
             self.assertFalse(
                 (archive / "retirement-complete.json").exists()
             )
+            self.assertTrue(
+                (archive / "retirement-complete.pending.json").exists()
+            )
+
+    def test_retirement_result_is_atomically_published_after_final_gate(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "evidence"
+            archive = root / "archive" / "issue216-burned-test"
+            root.mkdir()
+            source = root / "issue216-phase0-canonical.json"
+            raw = b"phase0"
+            source.write_bytes(raw)
+            item = SimpleNamespace(
+                filename=source.name,
+                sha256=hashlib.sha256(raw).hexdigest(),
+                size=len(raw),
+            )
+
+            with mock.patch.object(
+                m,
+                "_protect_archive_container",
+                return_value=None,
+            ):
+                m.apply_windows_archive_transaction(
+                    evidence_root=root,
+                    archive_path=archive,
+                    items=(item,),
+                    canonical_names=(item.filename,),
+                    manifest_raw=b"manifest",
+                    result_raw=b"result",
+                )
+
+            self.assertFalse(
+                (archive / "retirement-complete.pending.json").exists()
+            )
+            self.assertEqual(
+                (archive / "retirement-complete.json").read_bytes(),
+                b"result",
+            )
+            self.assertFalse(source.exists())
 
     def test_relative_destination_stays_under_locked_directory_after_rename(self):
         from agent_controller import private_ci_windows_atomic_archive as m
