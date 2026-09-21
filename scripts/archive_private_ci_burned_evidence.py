@@ -8,6 +8,7 @@ import ctypes
 import json
 import os
 import subprocess
+import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -101,7 +102,7 @@ def _controller_source_bindings(
             raise RuntimeError(
                 f"reviewed controller source is reparse: {relative_path}"
             )
-        if not os.path.isfile(path):
+        if not stat.S_ISREG(stat_result.st_mode):
             raise RuntimeError(
                 f"reviewed controller source is not file: {relative_path}"
             )
