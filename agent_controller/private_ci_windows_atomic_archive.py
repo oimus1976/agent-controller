@@ -660,13 +660,43 @@ def _create_locked_destination(path: Path) -> LockedHandle:
     return handle
 
 
+def _trusted_system_directory() -> Path:
+    _require_windows()
+    get_system_directory = _kernel32.GetSystemDirectoryW
+    get_system_directory.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+    get_system_directory.restype = wintypes.UINT
+    size = 32768
+    buffer = ctypes.create_unicode_buffer(size)
+    count = get_system_directory(buffer, size)
+    if count == 0 or count >= size:
+        raise ctypes.WinError(ctypes.get_last_error())
+    path = Path(buffer.value)
+    _require_plain_directory_path(path, "trusted Windows system directory")
+    return path
+
+
+def _require_plain_directory_path(path: Path, description: str) -> None:
+    stat_result = path.lstat()
+    if path.is_symlink() or (
+        getattr(stat_result, "st_file_attributes", 0)
+        & FILE_ATTRIBUTE_REPARSE_POINT
+    ):
+        raise RuntimeError(f"{description} is symlink or reparse point")
+    if not path.is_dir():
+        raise RuntimeError(f"{description} is not directory")
+
+
 def _trusted_icacls_path() -> Path:
-    windir = os.environ.get("WINDIR", r"C:\Windows")
-    path = Path(windir) / "System32" / "icacls.exe"
+    path = _trusted_system_directory() / "icacls.exe"
+    stat_result = path.lstat()
+    if path.is_symlink() or (
+        getattr(stat_result, "st_file_attributes", 0)
+        & FILE_ATTRIBUTE_REPARSE_POINT
+    ):
+        raise RuntimeError("trusted icacls.exe is symlink or reparse point")
     if not path.is_file():
         raise RuntimeError("trusted icacls.exe missing")
     return path
-
 
 def _protect_archive_container(path: Path) -> None:
     command = [
@@ -862,3 +892,24 @@ def apply_windows_archive_transaction(
             result_raw
         ).hexdigest():
             raise RuntimeError("archive retirement result hash mismatch")
+
+        # The PASS result is not committed until canonical source names have
+        # been checked again after the result write. If any producer recreated
+        # a restart-blocking canonical name during the post-retirement window,
+        # invalidate the result by deleting it on close and fail closed.
+        _require_path_directory_identity(
+            evidence_root,
+            root_handle,
+            "authoritative evidence root before PASS commit",
+        )
+        recreated = []
+        for item, _ in source_handles:
+            if not _relative_path_absent(root_handle, item.filename):
+                recreated.append(item.filename)
+        if recreated:
+            _mark_delete_on_close(result_handle)
+            result_handle.close()
+            raise RuntimeError(
+                "canonical source recreated before archive PASS commit: "
+                + ",".join(recreated)
+            )
