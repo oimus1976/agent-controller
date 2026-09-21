@@ -2,6 +2,7 @@ import os
 import hashlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -113,6 +114,85 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
                     m._create_locked_destination(destination)
             finally:
                 first.close()
+
+    def test_external_evidence_root_handle_blocks_quiescence(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "evidence"
+            root.mkdir()
+            child_code = r"""
+import ctypes
+import sys
+import time
+from ctypes import wintypes
+
+path = sys.argv[1]
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.CreateFileW.argtypes = [
+    wintypes.LPCWSTR,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    wintypes.LPVOID,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    wintypes.HANDLE,
+]
+kernel32.CreateFileW.restype = wintypes.HANDLE
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.restype = wintypes.BOOL
+
+handle = kernel32.CreateFileW(
+    path,
+    0x00000080,
+    0x00000001 | 0x00000002 | 0x00000004,
+    None,
+    3,
+    0x02000000,
+    None,
+)
+if handle == ctypes.c_void_p(-1).value:
+    raise ctypes.WinError(ctypes.get_last_error())
+print("READY", flush=True)
+try:
+    time.sleep(30)
+finally:
+    kernel32.CloseHandle(handle)
+"""
+            child = subprocess.Popen(
+                [sys.executable, "-c", child_code, str(root)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            try:
+                self.assertEqual(child.stdout.readline().strip(), "READY")
+                handle = m._open_locked_directory(root)
+                try:
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "pre-existing external handles",
+                    ):
+                        m._require_no_external_handles_to_same_object(
+                            handle,
+                            "authoritative evidence root",
+                        )
+                finally:
+                    handle.close()
+            finally:
+                child.terminate()
+                child.wait(timeout=10)
+
+            handle = m._open_locked_directory(root)
+            try:
+                m._require_no_external_handles_to_same_object(
+                    handle,
+                    "authoritative evidence root",
+                )
+            finally:
+                handle.close()
 
     def test_trusted_icacls_ignores_inherited_windir(self):
         from agent_controller import private_ci_windows_atomic_archive as m
