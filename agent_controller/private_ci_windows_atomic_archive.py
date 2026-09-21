@@ -337,67 +337,45 @@ def _require_no_external_mutation_handles(
     current_pid = os.getpid()
     handle_value = int(handle.handle)
 
-    own_type_index = None
+    own_entry = None
     for entry in entries:
         if (
             int(entry.UniqueProcessId) == current_pid
             and int(entry.HandleValue) == handle_value
         ):
-            own_type_index = int(entry.ObjectTypeIndex)
+            own_entry = entry
             break
-    if own_type_index is None:
+    if own_entry is None:
         raise RuntimeError(
-            f"{description} handle type not found in system table"
+            f"{description} handle not found in system table"
         )
 
-    current_process = _kernel32.GetCurrentProcess()
-    matching_pids: set[int] = set()
+    own_type_index = int(own_entry.ObjectTypeIndex)
+    own_object = int(own_entry.Object)
+    if own_object == 0:
+        raise RuntimeError(
+            f"{description} kernel object identity unavailable"
+        )
 
+    matching_pids: set[int] = set()
     for entry in entries:
         pid = int(entry.UniqueProcessId)
         if pid == current_pid:
             continue
         if int(entry.ObjectTypeIndex) != own_type_index:
             continue
+        if int(entry.Object) != own_object:
+            continue
         if int(entry.GrantedAccess) & DIRECTORY_MUTATION_ACCESS == 0:
             continue
-
-        process = _kernel32.OpenProcess(
-            PROCESS_DUP_HANDLE,
-            False,
-            pid,
-        )
-        if not process:
-            # Protected/system processes are outside the low-privilege writer
-            # threat boundary. A normal low-privilege process holding this
-            # directory is duplicable by the elevated broker and is checked.
-            continue
-        try:
-            duplicate = wintypes.HANDLE()
-            if not _kernel32.DuplicateHandle(
-                process,
-                wintypes.HANDLE(int(entry.HandleValue)),
-                current_process,
-                ctypes.byref(duplicate),
-                0,
-                False,
-                DUPLICATE_SAME_ACCESS,
-            ):
-                # The handle may have closed after the system-table snapshot.
-                continue
-            try:
-                if _same_file_identity(handle, int(duplicate.value)):
-                    matching_pids.add(pid)
-            finally:
-                _kernel32.CloseHandle(duplicate)
-        finally:
-            _kernel32.CloseHandle(process)
+        matching_pids.add(pid)
 
     if matching_pids:
         raise RuntimeError(
             f"{description} has pre-existing external mutation handles: "
             + ",".join(str(pid) for pid in sorted(matching_pids))
         )
+
 
 def _create_file(
     path: Path,
