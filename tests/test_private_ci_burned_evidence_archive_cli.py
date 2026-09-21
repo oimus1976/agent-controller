@@ -91,6 +91,20 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertNotIn("bootstrap_path.read_text", region)
         self.assertNotIn("Archive-PrivateCiBurnedEvidence.ps1\").read_text", region)
 
+    def test_planner_uses_trusted_absolute_git_and_canonical_blob_checks(self):
+        source = self.cli_path.read_text(encoding="utf-8")
+        exact_start = source.index("def _require_controller_source_exact")
+        boundary_start = source.index("def _windows_boundary_state", exact_start)
+        region = source[exact_start:boundary_start]
+        self.assertIn("git = _trusted_git_path()", region)
+        self.assertIn("str(git)", region)
+        self.assertNotIn('"git.exe"', region)
+        self.assertIn("ls-remote", region)
+        self.assertIn("ls-tree", region)
+        self.assertIn("hash-object", region)
+        self.assertIn("_trusted_git_environment()", region)
+        self.assertIn("_require_plain_path_chain(", region)
+
     def test_elevated_apply_does_not_rerun_mutable_checkout_git_or_powershell(self):
         source = self.cli_path.read_text(encoding="utf-8")
         apply_start = source.index("def command_apply_internal")
