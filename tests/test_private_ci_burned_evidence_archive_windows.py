@@ -198,6 +198,22 @@ finally:
             finally:
                 handle.close()
 
+    def test_quiescence_uses_kernel_object_identity_not_process_duplication(self):
+        module_path = (
+            self.repo_root
+            / "agent_controller"
+            / "private_ci_windows_atomic_archive.py"
+        )
+        source = module_path.read_text(encoding="utf-8")
+        start = source.index("def _require_no_external_mutation_handles(")
+        end = source.index("\ndef _create_file(", start)
+        region = source[start:end]
+        self.assertIn("own_object = int(own_entry.Object)", region)
+        self.assertIn("int(entry.Object) != own_object", region)
+        self.assertIn("DIRECTORY_MUTATION_ACCESS", region)
+        self.assertNotIn("OpenProcess(", region)
+        self.assertNotIn("DuplicateHandle(", region)
+
     def test_trusted_icacls_ignores_inherited_windir(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
