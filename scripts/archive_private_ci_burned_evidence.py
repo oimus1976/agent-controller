@@ -10,24 +10,31 @@ import os
 import subprocess
 import stat
 import sys
+import types
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-from agent_controller.private_ci_burned_evidence_archive import (
-    ARCHIVE_RETIREMENT_PASS,
-    REVIEWED_CONTROLLER_SOURCE_PATHS,
-    ControllerSourceBinding,
-    apply_archive_plan,
-    archive_plan_bytes,
-    build_archive_plan,
-    parse_archive_plan_bytes,
-)
 
 
 AUTHORITATIVE_EVIDENCE_ROOT = r"C:\Users\Public\Documents\agent-controller-handoff"
 CONTROLLER_REPOSITORY_URL = "https://github.com/oimus1976/agent-controller.git"
 EXPECTED_HOST = "WOBBUFFET"
 EXPECTED_IDENTITY = r"WOBBUFFET\c-admin"
+REVIEWED_CONTROLLER_SOURCE_PATHS = (
+    "scripts/Archive-PrivateCiBurnedEvidence.ps1",
+    "scripts/archive_private_ci_burned_evidence.py",
+    "agent_controller/__init__.py",
+    "agent_controller/private_ci_burned_evidence_archive.py",
+    "agent_controller/private_ci_windows_atomic_archive.py",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewedSource:
+    relative_path: str
+    sha256: str
+    size: int
 
 
 def _controller_repo_root() -> Path:
@@ -83,7 +90,7 @@ def _python_binding() -> tuple[str, str]:
 
 def _controller_source_bindings(
     root: Path,
-) -> tuple[ControllerSourceBinding, ...]:
+) -> tuple[ReviewedSource, ...]:
     bindings = []
     for relative_path in REVIEWED_CONTROLLER_SOURCE_PATHS:
         pure = PurePosixPath(relative_path)
@@ -111,7 +118,7 @@ def _controller_source_bindings(
                 f"reviewed controller source size drift: {relative_path}"
             )
         bindings.append(
-            ControllerSourceBinding(
+            ReviewedSource(
                 relative_path=relative_path,
                 sha256=digest.hexdigest(),
                 size=size,
@@ -122,7 +129,7 @@ def _controller_source_bindings(
 
 def _read_bound_controller_source(
     root: Path,
-    binding: ControllerSourceBinding,
+    binding: ReviewedSource,
 ) -> bytes:
     pure = PurePosixPath(binding.relative_path)
     path = root.joinpath(*pure.parts)
@@ -138,6 +145,98 @@ def _read_bound_controller_source(
             f"reviewed controller source SHA drift: {binding.relative_path}"
         )
     return raw
+
+
+def _validate_reviewed_source_records(
+    records: tuple[ReviewedSource, ...],
+) -> None:
+    if len(records) != len(REVIEWED_CONTROLLER_SOURCE_PATHS):
+        raise RuntimeError("reviewed controller source count invalid")
+    for expected_path, record in zip(
+        REVIEWED_CONTROLLER_SOURCE_PATHS,
+        records,
+        strict=True,
+    ):
+        if record.relative_path != expected_path:
+            raise RuntimeError("reviewed controller source path invalid")
+        if (
+            len(record.sha256) != 64
+            or any(c not in "0123456789abcdef" for c in record.sha256)
+        ):
+            raise RuntimeError("reviewed controller source SHA invalid")
+        if type(record.size) is not int or record.size < 0:
+            raise RuntimeError("reviewed controller source size invalid")
+
+
+def _source_records_from_plan_bytes(raw: bytes) -> tuple[ReviewedSource, ...]:
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("reviewed archive plan JSON invalid") from error
+    if type(payload) is not dict:
+        raise RuntimeError("reviewed archive plan shape invalid")
+    sources = payload.get("controller_sources")
+    if type(sources) is not list:
+        raise RuntimeError("reviewed archive plan controller sources invalid")
+    records = []
+    for item in sources:
+        if (
+            type(item) is not dict
+            or set(item) != {"relative_path", "sha256", "size"}
+        ):
+            raise RuntimeError("reviewed archive plan controller source shape invalid")
+        records.append(
+            ReviewedSource(
+                relative_path=item["relative_path"],
+                sha256=item["sha256"],
+                size=item["size"],
+            )
+        )
+    frozen = tuple(records)
+    _validate_reviewed_source_records(frozen)
+    return frozen
+
+
+def _load_bound_archive_module(
+    root: Path,
+    records: tuple[ReviewedSource, ...],
+):
+    _validate_reviewed_source_records(records)
+    archive_path = "agent_controller/private_ci_burned_evidence_archive.py"
+    binding = next(
+        (record for record in records if record.relative_path == archive_path),
+        None,
+    )
+    if binding is None:
+        raise RuntimeError("reviewed archive module binding missing")
+    raw = _read_bound_controller_source(root, binding)
+    module_name = "_reviewed_private_ci_archive_" + binding.sha256[:16]
+    module = types.ModuleType(module_name)
+    module.__file__ = str(root.joinpath(*PurePosixPath(archive_path).parts))
+    sys.modules[module_name] = module
+    try:
+        exec(
+            compile(raw, module.__file__, "exec"),
+            module.__dict__,
+        )
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    observed_paths = tuple(module.REVIEWED_CONTROLLER_SOURCE_PATHS)
+    if observed_paths != REVIEWED_CONTROLLER_SOURCE_PATHS:
+        raise RuntimeError("reviewed archive module source-set contract drift")
+    return module
+
+
+def _archive_bindings(module, records: tuple[ReviewedSource, ...]):
+    return tuple(
+        module.ControllerSourceBinding(
+            relative_path=record.relative_path,
+            sha256=record.sha256,
+            size=record.size,
+        )
+        for record in records
+    )
 
 
 def _trusted_system_directory() -> Path:
@@ -188,7 +287,7 @@ def _decode_reviewed_plan(
         raise ValueError("expected archive plan base64 invalid") from error
     if hashlib.sha256(raw).hexdigest() != expected:
         raise RuntimeError("reviewed archive plan bytes SHA-256 mismatch")
-    return expected, parse_archive_plan_bytes(raw)
+    return expected, raw
 
 
 def _require_digest(value: str) -> str:
@@ -301,13 +400,18 @@ def command_plan() -> int:
     confirm_main_sha, confirm_tree = _require_controller_source_exact()
     if confirm_main_sha != controller_main_sha or confirm_tree != controller_tree:
         raise RuntimeError("controller source drift during archive planning")
-    plan = build_archive_plan(
+    archive = _load_bound_archive_module(
+        controller_tree,
+        controller_sources,
+    )
+    archive_sources = _archive_bindings(archive, controller_sources)
+    plan = archive.build_archive_plan(
         evidence_root=evidence_root,
         controller_main_sha=controller_main_sha,
         controller_tree=str(controller_tree),
         python_executable=python_executable,
         python_sha256=python_sha256,
-        controller_sources=controller_sources,
+        controller_sources=archive_sources,
     )
     if plan is None:
         print("BURNED_CANONICAL_ARCHIVE_NOT_REQUIRED")
@@ -315,7 +419,7 @@ def command_plan() -> int:
         print("NO_MUTATION_PERFORMED")
         return 0
 
-    raw = archive_plan_bytes(plan)
+    raw = archive.archive_plan_bytes(plan)
     digest = hashlib.sha256(raw).hexdigest()
     plan_base64 = base64.b64encode(raw).decode("ascii")
     bootstrap_binding = plan.controller_sources[0]
@@ -384,15 +488,20 @@ def command_apply_internal(
     expected_plan_sha256: str,
     expected_plan_base64: str,
 ) -> int:
-    expected, plan = _decode_reviewed_plan(
+    expected, raw = _decode_reviewed_plan(
         expected_plan_sha256,
         expected_plan_base64,
     )
     _require_windows_elevated_boundary()
 
     # The elevated process runs only from the reviewed, locked source
-    # snapshot created by the UAC bootstrap. Do not import or execute the
-    # mutable controller checkout after elevation.
+    # snapshot created by the UAC bootstrap. No controller package is
+    # imported before the reviewed plan digest and source bindings are checked.
+    snapshot_root = _controller_repo_root()
+    source_records = _source_records_from_plan_bytes(raw)
+    archive = _load_bound_archive_module(snapshot_root, source_records)
+    plan = archive.parse_archive_plan_bytes(raw)
+
     python_executable, python_sha256 = _python_binding()
     if python_executable.casefold() != plan.python_executable.casefold():
         raise RuntimeError("reviewed archive Python executable drift")
@@ -400,16 +509,16 @@ def command_apply_internal(
         raise RuntimeError("reviewed archive Python SHA-256 drift")
 
     evidence_root = Path(AUTHORITATIVE_EVIDENCE_ROOT)
-    result = apply_archive_plan(
+    result = archive.apply_archive_plan(
         evidence_root=evidence_root,
         plan=plan,
         expected_plan_sha256=expected,
         completed_at=datetime.now(timezone.utc),
     )
-    if result.status != ARCHIVE_RETIREMENT_PASS:
+    if result.status != archive.ARCHIVE_RETIREMENT_PASS:
         raise RuntimeError("archive apply did not reach PASS")
 
-    print(ARCHIVE_RETIREMENT_PASS)
+    print(archive.ARCHIVE_RETIREMENT_PASS)
     print(f"archive_plan_sha256={expected}")
     print(f"archive_directory={result.archive_directory}")
     print(f"artifact_count={len(result.items)}")
