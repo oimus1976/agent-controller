@@ -606,6 +606,18 @@ def _relative_path_absent(parent: LockedHandle, name: str) -> bool:
         return False
 
 
+def _require_path_directory_identity(
+    path: Path,
+    expected: LockedHandle,
+    description: str,
+) -> None:
+    observed = _open_locked_directory(path)
+    try:
+        _require_same_identity(observed, expected, description)
+    finally:
+        observed.close()
+
+
 def _open_locked_source(
     path: Path,
     *,
@@ -696,6 +708,11 @@ def apply_windows_archive_transaction(
         root_handle = stack.enter_context(
             _open_locked_directory(evidence_root)
         )
+        _require_path_directory_identity(
+            evidence_root,
+            root_handle,
+            "authoritative evidence root",
+        )
 
         parent_handle = stack.enter_context(
             _open_or_create_relative_directory(root_handle, "archive")
@@ -769,8 +786,14 @@ def apply_windows_archive_transaction(
             raise RuntimeError("archive manifest hash mismatch")
 
         # Every source remains open without FILE_SHARE_WRITE/DELETE from the
-        # initial hash check until it is retired by handle. A pathname swap
-        # cannot occur between verification and deletion.
+        # initial hash check until it is retired by handle. Reconfirm that the
+        # canonical evidence-root pathname still names the held root before
+        # any source is marked for retirement.
+        _require_path_directory_identity(
+            evidence_root,
+            root_handle,
+            "authoritative evidence root before retirement",
+        )
         for item, source in source_handles:
             if _hash_handle(source) != item.sha256:
                 raise RuntimeError(
@@ -803,6 +826,11 @@ def apply_windows_archive_transaction(
             archive_path.name,
             archive_handle,
             "archive directory after retirement",
+        )
+        _require_path_directory_identity(
+            evidence_root,
+            root_handle,
+            "authoritative evidence root after retirement",
         )
 
         for item, destination in destination_handles:
