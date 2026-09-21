@@ -4,16 +4,18 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import ctypes
 import json
 import os
 import subprocess
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from agent_controller.operator_step_gate import AUTHORITATIVE_EVIDENCE_ROOT
 from agent_controller.private_ci_burned_evidence_archive import (
     ARCHIVE_RETIREMENT_PASS,
+    REVIEWED_CONTROLLER_SOURCE_PATHS,
+    ControllerSourceBinding,
     apply_archive_plan,
     archive_plan_bytes,
     build_archive_plan,
@@ -21,6 +23,7 @@ from agent_controller.private_ci_burned_evidence_archive import (
 )
 
 
+AUTHORITATIVE_EVIDENCE_ROOT = r"C:\Users\Public\Documents\agent-controller-handoff"
 CONTROLLER_REPOSITORY_URL = "https://github.com/oimus1976/agent-controller.git"
 EXPECTED_HOST = "WOBBUFFET"
 EXPECTED_IDENTITY = r"WOBBUFFET\c-admin"
@@ -75,6 +78,66 @@ def _python_binding() -> tuple[str, str]:
     if not path.is_file():
         raise RuntimeError("Python executable is not regular file")
     return str(path), _file_sha256(path)
+
+
+def _controller_source_bindings(
+    root: Path,
+) -> tuple[ControllerSourceBinding, ...]:
+    bindings = []
+    for relative_path in REVIEWED_CONTROLLER_SOURCE_PATHS:
+        pure = PurePosixPath(relative_path)
+        path = root.joinpath(*pure.parts)
+        stat_result = path.lstat()
+        if path.is_symlink() or (
+            getattr(stat_result, "st_file_attributes", 0) & 0x400
+        ):
+            raise RuntimeError(
+                f"reviewed controller source is symlink/reparse: {relative_path}"
+            )
+        if not path.is_file():
+            raise RuntimeError(
+                f"reviewed controller source is not file: {relative_path}"
+            )
+        bindings.append(
+            ControllerSourceBinding(
+                relative_path=relative_path,
+                sha256=_file_sha256(path),
+                size=stat_result.st_size,
+            )
+        )
+    return tuple(bindings)
+
+
+def _trusted_system_directory() -> Path:
+    if os.name != "nt":
+        raise RuntimeError("trusted system directory requires Windows")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_system_directory = kernel32.GetSystemDirectoryW
+    get_system_directory.argtypes = [ctypes.c_wchar_p, ctypes.c_uint]
+    get_system_directory.restype = ctypes.c_uint
+    size = 32768
+    buffer = ctypes.create_unicode_buffer(size)
+    count = get_system_directory(buffer, size)
+    if count == 0 or count >= size:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return Path(buffer.value)
+
+
+def _trusted_windows_powershell_path() -> Path:
+    path = (
+        _trusted_system_directory()
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+    stat_result = path.lstat()
+    if path.is_symlink() or (
+        getattr(stat_result, "st_file_attributes", 0) & 0x400
+    ):
+        raise RuntimeError("trusted Windows PowerShell is reparse point")
+    if not path.is_file():
+        raise RuntimeError("trusted Windows PowerShell missing")
+    return path
 
 
 def _decode_reviewed_plan(
@@ -142,35 +205,44 @@ def _require_controller_source_exact() -> tuple[str, Path]:
 
 
 def _windows_boundary_state() -> dict[str, object]:
-    script = r"""
-$Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
-[ordered]@{
-    host = $env:COMPUTERNAME
-    identity = $Identity.Name
-    elevated = $Principal.IsInRole(
-        [Security.Principal.WindowsBuiltInRole]::Administrator
-    )
-} | ConvertTo-Json -Compress
-""".strip()
-    completed = _completed(
-        "powershell.exe",
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        script,
-    )
-    raw = _require_success(completed, "Windows elevated boundary readback")
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as error:
-        raise RuntimeError("Windows elevated boundary JSON invalid") from error
-    if type(payload) is not dict:
-        raise RuntimeError("Windows elevated boundary shape invalid")
-    return payload
+    if os.name != "nt":
+        raise RuntimeError("Windows boundary requires Windows")
 
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    secur32 = ctypes.WinDLL("secur32", use_last_error=True)
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+
+    computer = ctypes.create_unicode_buffer(256)
+    computer_size = ctypes.c_uint(len(computer))
+    if not kernel32.GetComputerNameW(
+        computer,
+        ctypes.byref(computer_size),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    NameSamCompatible = 2
+    identity_size = ctypes.c_ulong(0)
+    secur32.GetUserNameExW(
+        NameSamCompatible,
+        None,
+        ctypes.byref(identity_size),
+    )
+    if identity_size.value <= 1:
+        raise ctypes.WinError(ctypes.get_last_error())
+    identity = ctypes.create_unicode_buffer(identity_size.value)
+    if not secur32.GetUserNameExW(
+        NameSamCompatible,
+        identity,
+        ctypes.byref(identity_size),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    shell32.IsUserAnAdmin.restype = ctypes.c_bool
+    return {
+        "host": computer.value,
+        "identity": identity.value,
+        "elevated": bool(shell32.IsUserAnAdmin()),
+    }
 
 def _require_windows_elevated_boundary() -> None:
     if os.name != "nt":
@@ -193,12 +265,14 @@ def command_plan() -> int:
     controller_main_sha, controller_tree = _require_controller_source_exact()
     evidence_root = Path(AUTHORITATIVE_EVIDENCE_ROOT)
     python_executable, python_sha256 = _python_binding()
+    controller_sources = _controller_source_bindings(controller_tree)
     plan = build_archive_plan(
         evidence_root=evidence_root,
         controller_main_sha=controller_main_sha,
         controller_tree=str(controller_tree),
         python_executable=python_executable,
         python_sha256=python_sha256,
+        controller_sources=controller_sources,
     )
     if plan is None:
         print("BURNED_CANONICAL_ARCHIVE_NOT_REQUIRED")
@@ -209,17 +283,34 @@ def command_plan() -> int:
     raw = archive_plan_bytes(plan)
     digest = hashlib.sha256(raw).hexdigest()
     plan_base64 = base64.b64encode(raw).decode("ascii")
-    apply_script = (
+    bootstrap_path = (
         controller_tree
         / "scripts"
         / "Archive-PrivateCiBurnedEvidence.ps1"
     )
-    quoted_script = str(apply_script).replace("'", "''")
+    bootstrap_template = bootstrap_path.read_text(encoding="utf-8")
+    sha_token = "__EXPECTED_PLAN_SHA256__"
+    base64_token = "__EXPECTED_PLAN_BASE64__"
+    if (
+        bootstrap_template.count(sha_token) != 1
+        or bootstrap_template.count(base64_token) != 1
+    ):
+        raise RuntimeError("archive UAC bootstrap template markers invalid")
+    rendered_bootstrap = bootstrap_template.replace(
+        sha_token,
+        digest,
+    ).replace(
+        base64_token,
+        plan_base64,
+    )
+    encoded_bootstrap = base64.b64encode(
+        rendered_bootstrap.encode("utf-16-le")
+    ).decode("ascii")
+    powershell_path = _trusted_windows_powershell_path()
+    quoted_powershell = str(powershell_path).replace("'", "''")
     uac_argument = (
-        "-NoProfile -ExecutionPolicy Bypass -File "
-        f"'{quoted_script}' "
-        f"-ExpectedPlanSha256 '{digest}' "
-        f"-ExpectedPlanBase64 '{plan_base64}'"
+        "-NoProfile -NonInteractive -ExecutionPolicy Bypass "
+        f"-EncodedCommand {encoded_bootstrap}"
     )
 
     print("BURNED_CANONICAL_ARCHIVE_PLAN_READY")
@@ -236,7 +327,8 @@ def command_plan() -> int:
     print("archive_plan_json=" + raw.decode("utf-8").rstrip("\n"))
     print(
         "uac_apply_command="
-        "Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList "
+        f"Start-Process '{quoted_powershell}' -Verb RunAs -Wait "
+        "-ArgumentList "
         f"\"{uac_argument}\""
     )
     print("NO_MUTATION_PERFORMED")
@@ -253,12 +345,9 @@ def command_apply_internal(
     )
     _require_windows_elevated_boundary()
 
-    controller_main_sha, controller_tree = _require_controller_source_exact()
-    if controller_main_sha != plan.controller_main_sha:
-        raise RuntimeError("reviewed archive controller main drift")
-    if str(controller_tree) != plan.controller_tree:
-        raise RuntimeError("reviewed archive controller tree drift")
-
+    # The elevated process runs only from the reviewed, locked source
+    # snapshot created by the UAC bootstrap. Do not import or execute the
+    # mutable controller checkout after elevation.
     python_executable, python_sha256 = _python_binding()
     if python_executable.casefold() != plan.python_executable.casefold():
         raise RuntimeError("reviewed archive Python executable drift")
