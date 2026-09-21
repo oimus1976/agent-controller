@@ -36,6 +36,7 @@ FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 FILE_BEGIN = 0
 FILE_DISPOSITION_INFO_CLASS = 4
+MOVEFILE_WRITE_THROUGH = 0x00000008
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 BUFFER_SIZE = 1024 * 1024
 
@@ -182,6 +183,13 @@ if os.name == "nt":
         wintypes.DWORD,
     ]
     _kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+
+    _kernel32.MoveFileExW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+    ]
+    _kernel32.MoveFileExW.restype = wintypes.BOOL
 else:
     _kernel32 = None
     _ntdll = None
@@ -555,6 +563,36 @@ def _create_locked_destination_relative(
     return handle
 
 
+def _open_locked_existing_relative(
+    parent: LockedHandle,
+    name: str,
+    *,
+    expected_sha256: str,
+    expected_size: int,
+) -> LockedHandle:
+    handle = _nt_create_relative(
+        parent,
+        name,
+        desired_access=GENERIC_READ,
+        share_mode=FILE_SHARE_READ,
+        create_disposition=NT_FILE_OPEN,
+        create_options=FILE_NON_DIRECTORY_FILE,
+    )
+    try:
+        _require_plain_single_link_file(
+            handle,
+            expected_size=expected_size,
+        )
+        if _hash_handle(handle) != expected_sha256:
+            raise RuntimeError(
+                f"locked existing file hash drift: {parent.path / name}"
+            )
+    except Exception:
+        handle.close()
+        raise
+    return handle
+
+
 def _open_relative_directory(
     parent: LockedHandle,
     name: str,
@@ -663,6 +701,22 @@ def _create_locked_destination(path: Path) -> LockedHandle:
         handle.close()
         raise
     return handle
+
+
+def _publish_pending_result(
+    archive_path: Path,
+    *,
+    pending_name: str,
+    final_name: str,
+) -> None:
+    pending_path = archive_path / pending_name
+    final_path = archive_path / final_name
+    if not _kernel32.MoveFileExW(
+        str(pending_path),
+        str(final_path),
+        MOVEFILE_WRITE_THROUGH,
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
 
 
 def _trusted_system_directory() -> Path:
@@ -885,26 +939,26 @@ def apply_windows_archive_transaction(
                 "archive manifest changed after source retirement"
             )
 
-        result_handle = stack.enter_context(
+        pending_result_name = "retirement-complete.pending.json"
+        final_result_name = "retirement-complete.json"
+        pending_result_handle = stack.enter_context(
             _create_locked_destination_relative(
                 archive_handle,
-                "retirement-complete.json",
-                allow_delete=True,
+                pending_result_name,
             )
         )
-        _write_all(result_handle, result_raw)
+        _write_all(pending_result_handle, result_raw)
         _require_plain_single_link_file(
-            result_handle, expected_size=len(result_raw)
+            pending_result_handle,
+            expected_size=len(result_raw),
         )
-        if _hash_handle(result_handle) != hashlib.sha256(
-            result_raw
-        ).hexdigest():
-            raise RuntimeError("archive retirement result hash mismatch")
+        result_sha256 = hashlib.sha256(result_raw).hexdigest()
+        if _hash_handle(pending_result_handle) != result_sha256:
+            raise RuntimeError("archive provisional retirement result hash mismatch")
 
-        # The PASS result is not committed until canonical source names have
-        # been checked again after the result write. If any producer recreated
-        # a restart-blocking canonical name during the post-retirement window,
-        # invalidate the result by deleting it on close and fail closed.
+        # The authoritative PASS filename does not exist yet. While the
+        # elevated bootstrap holds the evidence-root namespace against
+        # low-privilege creation, recheck the complete canonical allowlist.
         _require_path_directory_identity(
             evidence_root,
             root_handle,
@@ -916,9 +970,31 @@ def apply_windows_archive_transaction(
             if not _relative_path_absent(root_handle, canonical_name):
                 recreated.append(canonical_name)
         if recreated:
-            _mark_delete_on_close(result_handle)
-            result_handle.close()
             raise RuntimeError(
                 "canonical source recreated before archive PASS commit: "
                 + ",".join(recreated)
             )
+
+        # Close the non-authoritative pending handle, then atomically publish
+        # it to the authoritative final name inside the already protected
+        # archive directory. MoveFileExW is called without REPLACE_EXISTING.
+        pending_result_handle.close()
+        _publish_pending_result(
+            archive_path,
+            pending_name=pending_result_name,
+            final_name=final_result_name,
+        )
+        result_handle = stack.enter_context(
+            _open_locked_existing_relative(
+                archive_handle,
+                final_result_name,
+                expected_sha256=result_sha256,
+                expected_size=len(result_raw),
+            )
+        )
+        _require_relative_directory_identity(
+            parent_handle,
+            archive_path.name,
+            archive_handle,
+            "archive directory after PASS publication",
+        )
