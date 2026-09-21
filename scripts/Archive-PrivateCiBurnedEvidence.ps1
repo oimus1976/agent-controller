@@ -268,21 +268,82 @@ try {
     if ($ChildExitCode -ne 0) { throw "Burned evidence archive apply failed with exit=$ChildExitCode" }
 }
 finally {
-    for ($Index = $SnapshotLocks.Count - 1; $Index -ge 0; $Index--) { $SnapshotLocks[$Index].Dispose() }
-    for ($Index = $SourceLocks.Count - 1; $Index -ge 0; $Index--) { $SourceLocks[$Index].Dispose() }
+    $CleanupErrors = New-Object Collections.Generic.List[string]
+
     if ($null -ne $OriginalLocation) {
-        Set-Location -LiteralPath $OriginalLocation.Path
-        $OriginalLocation = $null
+        try {
+            Set-Location -LiteralPath $OriginalLocation.Path
+        }
+        catch {
+            $CleanupErrors.Add(
+                "restore working directory failed: $($_.Exception.Message)"
+            )
+        }
     }
     if ($null -ne $OriginalPath) {
-        $env:PATH = $OriginalPath
-        $OriginalPath = $null
+        try {
+            $env:PATH = $OriginalPath
+        }
+        catch {
+            $CleanupErrors.Add(
+                "restore PATH failed: $($_.Exception.Message)"
+            )
+        }
     }
-    if ($null -ne $PythonLock) { $PythonLock.Dispose() }
-    if ($null -ne $SnapshotRoot -and (Test-Path -LiteralPath $SnapshotRoot)) { Remove-Item -LiteralPath $SnapshotRoot -Recurse -Force }
+
+    for ($Index = $SnapshotLocks.Count - 1; $Index -ge 0; $Index--) {
+        try { $SnapshotLocks[$Index].Dispose() }
+        catch {
+            $CleanupErrors.Add(
+                "snapshot handle close failed: $($_.Exception.Message)"
+            )
+        }
+    }
+    for ($Index = $SourceLocks.Count - 1; $Index -ge 0; $Index--) {
+        try { $SourceLocks[$Index].Dispose() }
+        catch {
+            $CleanupErrors.Add(
+                "source handle close failed: $($_.Exception.Message)"
+            )
+        }
+    }
+    if ($null -ne $PythonLock) {
+        try { $PythonLock.Dispose() }
+        catch {
+            $CleanupErrors.Add(
+                "Python handle close failed: $($_.Exception.Message)"
+            )
+        }
+    }
+
+    if ($null -ne $SnapshotRoot -and (Test-Path -LiteralPath $SnapshotRoot)) {
+        try {
+            Remove-Item -LiteralPath $SnapshotRoot -Recurse -Force
+        }
+        catch {
+            $CleanupErrors.Add(
+                "snapshot cleanup failed: $($_.Exception.Message)"
+            )
+        }
+    }
+
     if ($EvidenceNamespaceLocked) {
-        Set-Acl -LiteralPath $EvidenceRoot -AclObject $OriginalEvidenceAcl
-        $EvidenceNamespaceLocked = $false
+        try {
+            Set-Acl -LiteralPath $EvidenceRoot -AclObject $OriginalEvidenceAcl
+            $EvidenceNamespaceLocked = $false
+        }
+        catch {
+            $CleanupErrors.Add(
+                "evidence ACL restore failed: $($_.Exception.Message)"
+            )
+        }
+    }
+
+    if ($CleanupErrors.Count -ne 0) {
+        throw (
+            "Burned evidence archive cleanup incomplete: " +
+            ($CleanupErrors -join " | ")
+        )
     }
 }
 
