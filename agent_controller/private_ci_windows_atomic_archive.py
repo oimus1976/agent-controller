@@ -18,6 +18,15 @@ FILE_SHARE_READ = 0x00000001
 FILE_SHARE_WRITE = 0x00000002
 CREATE_NEW = 1
 OPEN_EXISTING = 3
+NT_FILE_OPEN = 1
+NT_FILE_CREATE = 2
+NT_FILE_OPEN_IF = 3
+FILE_DIRECTORY_FILE = 0x00000001
+FILE_NON_DIRECTORY_FILE = 0x00000040
+NT_FILE_OPEN_REPARSE_POINT = 0x00200000
+OBJ_CASE_INSENSITIVE = 0x00000040
+STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034
+STATUS_OBJECT_PATH_NOT_FOUND = 0xC000003A
 FILE_ATTRIBUTE_NORMAL = 0x00000080
 FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
@@ -48,6 +57,32 @@ class FILE_DISPOSITION_INFO(ctypes.Structure):
     _fields_ = [("DeleteFile", wintypes.BOOL)]
 
 
+class UNICODE_STRING(ctypes.Structure):
+    _fields_ = [
+        ("Length", wintypes.USHORT),
+        ("MaximumLength", wintypes.USHORT),
+        ("Buffer", wintypes.LPWSTR),
+    ]
+
+
+class OBJECT_ATTRIBUTES(ctypes.Structure):
+    _fields_ = [
+        ("Length", wintypes.ULONG),
+        ("RootDirectory", wintypes.HANDLE),
+        ("ObjectName", ctypes.POINTER(UNICODE_STRING)),
+        ("Attributes", wintypes.ULONG),
+        ("SecurityDescriptor", wintypes.LPVOID),
+        ("SecurityQualityOfService", wintypes.LPVOID),
+    ]
+
+
+class IO_STATUS_BLOCK(ctypes.Structure):
+    _fields_ = [
+        ("Status", ctypes.c_ssize_t),
+        ("Information", ctypes.c_size_t),
+    ]
+
+
 class LockedHandle:
     def __init__(self, handle: int, path: Path):
         self.handle = handle
@@ -72,6 +107,22 @@ class LockedHandle:
 
 if os.name == "nt":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _ntdll = ctypes.WinDLL("ntdll")
+
+    _ntdll.NtCreateFile.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        ctypes.POINTER(OBJECT_ATTRIBUTES),
+        ctypes.POINTER(IO_STATUS_BLOCK),
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    _ntdll.NtCreateFile.restype = ctypes.c_long
 
     _kernel32.CreateFileW.argtypes = [
         wintypes.LPCWSTR,
@@ -131,10 +182,11 @@ if os.name == "nt":
     _kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
 else:
     _kernel32 = None
+    _ntdll = None
 
 
 def _require_windows() -> None:
-    if os.name != "nt" or _kernel32 is None:
+    if os.name != "nt" or _kernel32 is None or _ntdll is None:
         raise RuntimeError("Windows atomic archive backend requires Windows")
 
 
@@ -159,6 +211,93 @@ def _create_file(
     if handle == INVALID_HANDLE_VALUE:
         raise ctypes.WinError(ctypes.get_last_error())
     return LockedHandle(handle, path)
+
+
+def _relative_component(name: str) -> str:
+    if (
+        type(name) is not str
+        or not name
+        or name in (".", "..")
+        or "\\" in name
+        or "/" in name
+        or ":" in name
+    ):
+        raise ValueError("Windows archive relative component invalid")
+    return name
+
+
+def _ntstatus_code(status: int) -> int:
+    return int(status) & 0xFFFFFFFF
+
+
+def _nt_create_relative(
+    parent: LockedHandle,
+    name: str,
+    *,
+    desired_access: int,
+    share_mode: int,
+    create_disposition: int,
+    create_options: int,
+    file_attributes: int = FILE_ATTRIBUTE_NORMAL,
+) -> LockedHandle:
+    _require_windows()
+    component = _relative_component(name)
+    buffer = ctypes.create_unicode_buffer(component)
+    encoded_length = len(component.encode("utf-16-le"))
+    unicode_name = UNICODE_STRING(
+        encoded_length,
+        encoded_length + 2,
+        ctypes.cast(buffer, wintypes.LPWSTR),
+    )
+    attributes = OBJECT_ATTRIBUTES(
+        ctypes.sizeof(OBJECT_ATTRIBUTES),
+        parent.handle,
+        ctypes.pointer(unicode_name),
+        OBJ_CASE_INSENSITIVE,
+        None,
+        None,
+    )
+    iosb = IO_STATUS_BLOCK()
+    result_handle = wintypes.HANDLE()
+    status = _ntdll.NtCreateFile(
+        ctypes.byref(result_handle),
+        desired_access,
+        ctypes.byref(attributes),
+        ctypes.byref(iosb),
+        None,
+        file_attributes,
+        share_mode,
+        create_disposition,
+        create_options | NT_FILE_OPEN_REPARSE_POINT,
+        None,
+        0,
+    )
+    if status != 0:
+        code = _ntstatus_code(status)
+        raise OSError(
+            code,
+            f"NtCreateFile relative open failed: {component} "
+            f"(NTSTATUS=0x{code:08x})",
+        )
+    return LockedHandle(
+        int(result_handle.value),
+        parent.path / component,
+    )
+
+
+def _file_identity(handle: LockedHandle) -> tuple[int, int]:
+    info = _file_info(handle)
+    index = (int(info.nFileIndexHigh) << 32) | int(info.nFileIndexLow)
+    return int(info.dwVolumeSerialNumber), index
+
+
+def _require_same_identity(
+    left: LockedHandle,
+    right: LockedHandle,
+    description: str,
+) -> None:
+    if _file_identity(left) != _file_identity(right):
+        raise RuntimeError(f"{description} file identity drift")
 
 
 def _file_info(handle: LockedHandle) -> BY_HANDLE_FILE_INFORMATION:
@@ -315,6 +454,154 @@ def _open_locked_directory(path: Path) -> LockedHandle:
     return handle
 
 
+def _open_or_create_relative_directory(
+    parent: LockedHandle,
+    name: str,
+) -> LockedHandle:
+    handle = _nt_create_relative(
+        parent,
+        name,
+        desired_access=FILE_READ_ATTRIBUTES,
+        share_mode=FILE_SHARE_READ | FILE_SHARE_WRITE,
+        create_disposition=NT_FILE_OPEN_IF,
+        create_options=FILE_DIRECTORY_FILE,
+        file_attributes=FILE_ATTRIBUTE_DIRECTORY,
+    )
+    try:
+        _require_plain_directory_handle(handle)
+    except Exception:
+        handle.close()
+        raise
+    return handle
+
+
+def _create_relative_directory(
+    parent: LockedHandle,
+    name: str,
+) -> LockedHandle:
+    handle = _nt_create_relative(
+        parent,
+        name,
+        desired_access=FILE_READ_ATTRIBUTES,
+        share_mode=FILE_SHARE_READ | FILE_SHARE_WRITE,
+        create_disposition=NT_FILE_CREATE,
+        create_options=FILE_DIRECTORY_FILE,
+        file_attributes=FILE_ATTRIBUTE_DIRECTORY,
+    )
+    try:
+        _require_plain_directory_handle(handle)
+    except Exception:
+        handle.close()
+        raise
+    return handle
+
+
+def _open_locked_source_relative(
+    parent: LockedHandle,
+    name: str,
+    *,
+    expected_sha256: str,
+    expected_size: int,
+) -> LockedHandle:
+    handle = _nt_create_relative(
+        parent,
+        name,
+        desired_access=GENERIC_READ | DELETE,
+        share_mode=FILE_SHARE_READ,
+        create_disposition=NT_FILE_OPEN,
+        create_options=FILE_NON_DIRECTORY_FILE,
+    )
+    try:
+        _require_plain_single_link_file(
+            handle, expected_size=expected_size
+        )
+        observed = _hash_handle(handle)
+        if observed != expected_sha256:
+            raise RuntimeError(
+                f"locked source hash drift: {parent.path / name}"
+            )
+    except Exception:
+        handle.close()
+        raise
+    return handle
+
+
+def _create_locked_destination_relative(
+    parent: LockedHandle,
+    name: str,
+) -> LockedHandle:
+    handle = _nt_create_relative(
+        parent,
+        name,
+        desired_access=GENERIC_READ | GENERIC_WRITE,
+        share_mode=FILE_SHARE_READ,
+        create_disposition=NT_FILE_CREATE,
+        create_options=FILE_NON_DIRECTORY_FILE,
+    )
+    try:
+        _require_plain_single_link_file(handle, expected_size=0)
+    except Exception:
+        handle.close()
+        raise
+    return handle
+
+
+def _open_relative_directory(
+    parent: LockedHandle,
+    name: str,
+) -> LockedHandle:
+    handle = _nt_create_relative(
+        parent,
+        name,
+        desired_access=FILE_READ_ATTRIBUTES,
+        share_mode=FILE_SHARE_READ | FILE_SHARE_WRITE,
+        create_disposition=NT_FILE_OPEN,
+        create_options=FILE_DIRECTORY_FILE,
+        file_attributes=FILE_ATTRIBUTE_DIRECTORY,
+    )
+    try:
+        _require_plain_directory_handle(handle)
+    except Exception:
+        handle.close()
+        raise
+    return handle
+
+
+def _require_relative_directory_identity(
+    parent: LockedHandle,
+    name: str,
+    expected: LockedHandle,
+    description: str,
+) -> None:
+    observed = _open_relative_directory(parent, name)
+    try:
+        _require_same_identity(observed, expected, description)
+    finally:
+        observed.close()
+
+
+def _relative_path_absent(parent: LockedHandle, name: str) -> bool:
+    try:
+        handle = _nt_create_relative(
+            parent,
+            name,
+            desired_access=FILE_READ_ATTRIBUTES,
+            share_mode=FILE_SHARE_READ | FILE_SHARE_WRITE,
+            create_disposition=NT_FILE_OPEN,
+            create_options=FILE_NON_DIRECTORY_FILE,
+        )
+    except OSError as error:
+        if error.errno in (
+            STATUS_OBJECT_NAME_NOT_FOUND,
+            STATUS_OBJECT_PATH_NOT_FOUND,
+        ):
+            return True
+        raise
+    else:
+        handle.close()
+        return False
+
+
 def _open_locked_source(
     path: Path,
     *,
@@ -406,36 +693,36 @@ def apply_windows_archive_transaction(
             _open_locked_directory(evidence_root)
         )
 
-        if archive_parent.exists() or archive_parent.is_symlink():
-            parent_handle = stack.enter_context(
-                _open_locked_directory(archive_parent)
-            )
-        else:
-            archive_parent.mkdir()
-            parent_handle = stack.enter_context(
-                _open_locked_directory(archive_parent)
-            )
-
-        # The parent handle excludes FILE_SHARE_DELETE, so the directory cannot
-        # be swapped while its ACL is tightened. After this point ordinary
-        # Users have read/execute only and cannot race child creation.
+        parent_handle = stack.enter_context(
+            _open_or_create_relative_directory(root_handle, "archive")
+        )
         _protect_archive_container(archive_parent)
+        _require_relative_directory_identity(
+            root_handle,
+            "archive",
+            parent_handle,
+            "archive parent",
+        )
 
-        if archive_path.exists() or archive_path.is_symlink():
-            raise RuntimeError("archive directory already exists")
-        archive_path.mkdir()
         archive_handle = stack.enter_context(
-            _open_locked_directory(archive_path)
+            _create_relative_directory(parent_handle, archive_path.name)
         )
         _protect_archive_container(archive_path)
+        _require_relative_directory_identity(
+            parent_handle,
+            archive_path.name,
+            archive_handle,
+            "archive directory",
+        )
 
         source_handles: list[tuple[object, LockedHandle]] = []
         destination_handles: list[tuple[object, LockedHandle]] = []
 
         for item in items:
             source = stack.enter_context(
-                _open_locked_source(
-                    evidence_root / item.filename,
+                _open_locked_source_relative(
+                    root_handle,
+                    item.filename,
                     expected_sha256=item.sha256,
                     expected_size=item.size,
                 )
@@ -444,8 +731,9 @@ def apply_windows_archive_transaction(
 
         for item, source in source_handles:
             destination = stack.enter_context(
-                _create_locked_destination(
-                    archive_path / item.filename
+                _create_locked_destination_relative(
+                    archive_handle,
+                    item.filename,
                 )
             )
             observed = _copy_locked(source, destination)
@@ -463,7 +751,9 @@ def apply_windows_archive_transaction(
             destination_handles.append((item, destination))
 
         manifest_handle = stack.enter_context(
-            _create_locked_destination(archive_path / "manifest.json")
+            _create_locked_destination_relative(
+                archive_handle, "manifest.json"
+            )
         )
         _write_all(manifest_handle, manifest_raw)
         _require_plain_single_link_file(
@@ -492,12 +782,24 @@ def apply_windows_archive_transaction(
             source.close()
 
         for item, _ in source_handles:
-            source_path = evidence_root / item.filename
-            if source_path.exists() or source_path.is_symlink():
+            if not _relative_path_absent(root_handle, item.filename):
                 raise RuntimeError(
                     "canonical source still present after handle retirement: "
                     + item.filename
                 )
+
+        _require_relative_directory_identity(
+            root_handle,
+            "archive",
+            parent_handle,
+            "archive parent after retirement",
+        )
+        _require_relative_directory_identity(
+            parent_handle,
+            archive_path.name,
+            archive_handle,
+            "archive directory after retirement",
+        )
 
         for item, destination in destination_handles:
             _require_plain_single_link_file(
@@ -516,8 +818,8 @@ def apply_windows_archive_transaction(
             )
 
         result_handle = stack.enter_context(
-            _create_locked_destination(
-                archive_path / "retirement-complete.json"
+            _create_locked_destination_relative(
+                archive_handle, "retirement-complete.json"
             )
         )
         _write_all(result_handle, result_raw)
