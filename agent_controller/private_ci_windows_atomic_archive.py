@@ -733,6 +733,7 @@ def apply_windows_archive_transaction(
     evidence_root: Path,
     archive_path: Path,
     items: tuple[object, ...],
+    canonical_names: tuple[str, ...],
     manifest_raw: bytes,
     result_raw: bytes,
 ) -> None:
@@ -910,9 +911,10 @@ def apply_windows_archive_transaction(
             "authoritative evidence root before PASS commit",
         )
         recreated = []
-        for item, _ in source_handles:
-            if not _relative_path_absent(root_handle, item.filename):
-                recreated.append(item.filename)
+        for canonical_name in canonical_names:
+            _relative_component(canonical_name)
+            if not _relative_path_absent(root_handle, canonical_name):
+                recreated.append(canonical_name)
         if recreated:
             _mark_delete_on_close(result_handle)
             result_handle.close()
