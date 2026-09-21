@@ -61,6 +61,28 @@ class PrivateCiBurnedEvidenceArchiveTests(unittest.TestCase):
         self.assertNotIn("approval", joined)
         self.assertNotIn("consumed", joined)
 
+    def test_reviewed_controller_source_set_is_exact_and_ordered(self):
+        m = self.module()
+        sources = self.source_bindings(m)
+        m._validate_controller_sources(sources)
+
+        with self.assertRaisesRegex(ValueError, "source set"):
+            m._validate_controller_sources(sources[:-1])
+
+        swapped = list(sources)
+        swapped[0], swapped[1] = swapped[1], swapped[0]
+        with self.assertRaisesRegex(ValueError, "source path"):
+            m._validate_controller_sources(tuple(swapped))
+
+        bad_hash = list(sources)
+        bad_hash[0] = m.ControllerSourceBinding(
+            relative_path=bad_hash[0].relative_path,
+            sha256="g" * 64,
+            size=bad_hash[0].size,
+        )
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            m._validate_controller_sources(tuple(bad_hash))
+
     def test_empty_inventory_returns_no_plan(self):
         m = self.module()
         tmp, root = self.make_root()
