@@ -146,6 +146,22 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertIn("evidence ACL restore failed", source)
         self.assertIn("Burned evidence archive cleanup incomplete", source)
 
+    def test_read_only_empty_inventory_never_reports_success(self):
+        source = self.cli_path.read_text(encoding="utf-8")
+        plan_start = source.index("def command_plan")
+        apply_start = source.index("def command_apply_internal", plan_start)
+        region = source[plan_start:apply_start]
+        self.assertNotIn("BURNED_CANONICAL_ARCHIVE_NOT_REQUIRED", region)
+        self.assertNotIn("canonical_restart_blocking_artifacts=0", region)
+        self.assertIn(
+            "empty canonical inventory cannot be proven atomically",
+            region,
+        )
+        self.assertIn(
+            "require locked authoritative readback",
+            region,
+        )
+
     def test_cli_has_no_caller_supplied_source_path(self):
         source = self.cli_path.read_text(encoding="utf-8")
         self.assertNotIn("--source", source)
