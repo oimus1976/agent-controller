@@ -4,6 +4,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 from pathlib import Path
 
 
@@ -111,6 +113,75 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
                     m._create_locked_destination(destination)
             finally:
                 first.close()
+
+    def test_trusted_icacls_ignores_inherited_windir(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        original = os.environ.get("WINDIR")
+        try:
+            os.environ["WINDIR"] = r"C:\attacker-controlled-windir"
+            observed = m._trusted_icacls_path()
+            system_directory = m._trusted_system_directory()
+            self.assertEqual(observed.parent, system_directory)
+            self.assertEqual(observed.name.casefold(), "icacls.exe")
+            self.assertNotIn(
+                "attacker-controlled-windir",
+                str(observed).casefold(),
+            )
+        finally:
+            if original is None:
+                os.environ.pop("WINDIR", None)
+            else:
+                os.environ["WINDIR"] = original
+
+    def test_recreated_source_after_result_write_invalidates_pass_result(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "evidence"
+            archive = root / "archive" / "issue216-burned-test"
+            root.mkdir()
+            source = root / "issue216-phase0-canonical.json"
+            raw = b"phase0"
+            source.write_bytes(raw)
+            item = SimpleNamespace(
+                filename=source.name,
+                sha256=hashlib.sha256(raw).hexdigest(),
+                size=len(raw),
+            )
+            calls = 0
+
+            def staged_absence(parent, name):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return True
+                return False
+
+            with mock.patch.object(
+                m,
+                "_protect_archive_container",
+                return_value=None,
+            ), mock.patch.object(
+                m,
+                "_relative_path_absent",
+                side_effect=staged_absence,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "recreated before archive PASS commit",
+                ):
+                    m.apply_windows_archive_transaction(
+                        evidence_root=root,
+                        archive_path=archive,
+                        items=(item,),
+                        manifest_raw=b"manifest",
+                        result_raw=b"result",
+                    )
+
+            self.assertFalse(
+                (archive / "retirement-complete.json").exists()
+            )
 
     def test_relative_destination_stays_under_locked_directory_after_rename(self):
         from agent_controller import private_ci_windows_atomic_archive as m
