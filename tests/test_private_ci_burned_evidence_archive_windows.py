@@ -144,7 +144,7 @@ kernel32.CloseHandle.restype = wintypes.BOOL
 
 handle = kernel32.CreateFileW(
     path,
-    0x00000080,
+    0x00000002 | 0x00000004,
     0x00000001 | 0x00000002 | 0x00000004,
     None,
     3,
@@ -173,9 +173,9 @@ finally:
                 try:
                     with self.assertRaisesRegex(
                         RuntimeError,
-                        "pre-existing external handles",
+                        "pre-existing external mutation handles",
                     ):
-                        m._require_no_external_handles_to_same_object(
+                        m._require_no_external_mutation_handles(
                             handle,
                             "authoritative evidence root",
                         )
@@ -184,10 +184,14 @@ finally:
             finally:
                 child.terminate()
                 child.wait(timeout=10)
+                if child.stdout is not None:
+                    child.stdout.close()
+                if child.stderr is not None:
+                    child.stderr.close()
 
             handle = m._open_locked_directory(root)
             try:
-                m._require_no_external_handles_to_same_object(
+                m._require_no_external_mutation_handles(
                     handle,
                     "authoritative evidence root",
                 )
