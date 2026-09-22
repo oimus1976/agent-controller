@@ -386,6 +386,7 @@ def render_phase6_cleanup_candidate(plan: Phase6CleanupPlan) -> str:
             "    $BridgeObservedLabels -contains $BridgeRunnerLabel",
             "})",
             "if ($BridgeEligibleRunners.Count -gt 1) { throw 'Phase 6 ambiguous runner identity' }",
+            "if ($BridgeEligibleRunners.Count -eq 0) { throw 'Phase 6 runner absent without exact prior cleanup evidence' }",
             "$BridgeRemoteRunnerPresent = $false",
             "if ($BridgeEligibleRunners.Count -eq 1) {",
             "    $BridgeRemoteRunner = $BridgeEligibleRunners[0]",
