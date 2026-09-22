@@ -472,6 +472,8 @@ def _handle_entry_key(
 def _require_no_external_mutation_handles(
     handle: LockedHandle,
     description: str,
+    *,
+    _confirmation_pass: bool = True,
 ) -> None:
     _enable_debug_privilege()
     entries = _system_handle_entries()
@@ -597,9 +599,7 @@ def _require_no_external_mutation_handles(
                         ):
                             continue
                         raise RuntimeError(
-                            f"{description} has unduplicable external mutation "
-                            f"handle: pid={pid} "
-                            f"handle={int(entry.HandleValue)}"
+                            f"{description} has unduplicable external mutation handle: pid={pid} handle={int(entry.HandleValue)}"
                         )
                 try:
                     if _same_file_identity(
@@ -617,6 +617,13 @@ def _require_no_external_mutation_handles(
         raise RuntimeError(
             f"{description} has pre-existing external mutation handles: "
             + ",".join(str(pid) for pid in sorted(matching_pids))
+        )
+
+    if _confirmation_pass:
+        _require_no_external_mutation_handles(
+            handle,
+            description,
+            _confirmation_pass=False,
         )
 
 
