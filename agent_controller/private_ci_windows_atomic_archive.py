@@ -32,6 +32,7 @@ STATUS_OBJECT_PATH_NOT_FOUND = 0xC000003A
 STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
 SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
 FILE_ID_INFO_CLASS = 0x12
+FILE_STANDARD_INFORMATION_CLASS = 5
 FILE_ID_INFORMATION_CLASS = 59
 PROCESS_DUP_HANDLE = 0x0040
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -79,6 +80,16 @@ class BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
         ("nNumberOfLinks", wintypes.DWORD),
         ("nFileIndexHigh", wintypes.DWORD),
         ("nFileIndexLow", wintypes.DWORD),
+    ]
+
+
+class FILE_STANDARD_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("AllocationSize", ctypes.c_longlong),
+        ("EndOfFile", ctypes.c_longlong),
+        ("NumberOfLinks", wintypes.ULONG),
+        ("DeletePending", ctypes.c_ubyte),
+        ("Directory", ctypes.c_ubyte),
     ]
 
 
@@ -410,6 +421,32 @@ def _system_handle_entries() -> tuple[SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX, ...]:
     return tuple(entries)
 
 
+def _native_file_is_directory_once(
+    handle_value: int,
+    description: str,
+) -> bool:
+    info = FILE_STANDARD_INFORMATION()
+    io_status = IO_STATUS_BLOCK()
+    status = _ntdll.NtQueryInformationFile(
+        wintypes.HANDLE(handle_value),
+        ctypes.byref(io_status),
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+        FILE_STANDARD_INFORMATION_CLASS,
+    )
+    code = _ntstatus_code(status)
+    if code != 0:
+        raise RuntimeError(
+            f"{description} native FileStandardInformation query failed: "
+            f"ntstatus=0x{code:08x}"
+        )
+    if int(io_status.Information) < ctypes.sizeof(info):
+        raise RuntimeError(
+            f"{description} native FileStandardInformation payload truncated"
+        )
+    return bool(info.Directory)
+
+
 def _validated_file_id_identity(
     info: FILE_ID_INFO,
     description: str,
@@ -606,6 +643,8 @@ def _require_no_external_mutation_handles(
         tuple[
             SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX,
             int,
+            bool | None,
+            str | None,
             tuple[int, bytes] | None,
             str | None,
         ]
@@ -670,29 +709,42 @@ def _require_no_external_mutation_handles(
                             continue
 
                     duplicate_value = int(duplicate.value)
+                    duplicate_is_directory = None
+                    directory_error = None
                     duplicate_file_id_identity = None
                     identity_error = None
+                    duplicate_description = (
+                        f"{description} duplicated external mutation handle "
+                        f"pid={pid} handle={int(entry.HandleValue)}"
+                    )
                     try:
-                        duplicate_file_id_identity = (
-                            _stable_file_id_identity(
+                        duplicate_is_directory = (
+                            _native_file_is_directory_once(
                                 duplicate_value,
-                                (
-                                    f"{description} duplicated external "
-                                    f"mutation handle pid={pid} "
-                                    f"handle={int(entry.HandleValue)}"
-                                ),
+                                duplicate_description,
                             )
                         )
                     except Exception as exc:
-                        # Do not classify this as an identity failure yet. The
-                        # source handle slot may have been reused between the
-                        # system-table snapshot and DuplicateHandle. Keep the
-                        # duplicate open so the final snapshot can prove which
-                        # kernel Object was actually duplicated.
-                        identity_error = str(exc)
+                        # The source slot may have been reused before
+                        # DuplicateHandle. Defer fail-closed classification
+                        # until the final snapshot proves which Object was
+                        # actually duplicated.
+                        directory_error = str(exc)
+
+                    if duplicate_is_directory:
+                        try:
+                            duplicate_file_id_identity = (
+                                _stable_file_id_identity(
+                                    duplicate_value,
+                                    duplicate_description,
+                                )
+                            )
+                        except Exception as exc:
+                            identity_error = str(exc)
 
                     if (
-                        duplicate_file_id_identity is not None
+                        duplicate_is_directory is True
+                        and duplicate_file_id_identity is not None
                         and duplicate_file_id_identity
                         == root_file_id_identity
                     ):
@@ -704,6 +756,8 @@ def _require_no_external_mutation_handles(
                         (
                             entry,
                             duplicate_value,
+                            duplicate_is_directory,
+                            directory_error,
                             duplicate_file_id_identity,
                             identity_error,
                         )
@@ -742,6 +796,8 @@ def _require_no_external_mutation_handles(
         for (
             entry,
             duplicate_value,
+            duplicate_is_directory,
+            directory_error,
             duplicate_file_id_identity,
             identity_error,
         ) in retained_duplicates:
@@ -757,6 +813,27 @@ def _require_no_external_mutation_handles(
                     f"handle={duplicate_value}"
                 )
             if duplicate_object == original_object:
+                if directory_error is not None:
+                    raise RuntimeError(
+                        f"{description} duplicated external mutation handle "
+                        f"directory classification unavailable for live "
+                        f"snapshotted Object: pid={int(entry.UniqueProcessId)} "
+                        f"handle={int(entry.HandleValue)} "
+                        f"error={directory_error}"
+                    )
+                if duplicate_is_directory is False:
+                    # FILE_ADD_FILE/FILE_ADD_SUBDIRECTORY share their bit
+                    # values with FILE_WRITE_DATA/FILE_APPEND_DATA. A proven
+                    # non-directory File object is therefore a safe false
+                    # positive from the raw system-handle access mask filter.
+                    continue
+                if duplicate_is_directory is not True:
+                    raise RuntimeError(
+                        f"{description} duplicated external mutation handle "
+                        f"directory classification unavailable for live "
+                        f"snapshotted Object: pid={int(entry.UniqueProcessId)} "
+                        f"handle={int(entry.HandleValue)}"
+                    )
                 if identity_error is not None:
                     raise RuntimeError(
                         f"{description} duplicated external mutation handle "
@@ -764,9 +841,16 @@ def _require_no_external_mutation_handles(
                         f"pid={int(entry.UniqueProcessId)} "
                         f"handle={int(entry.HandleValue)} error={identity_error}"
                     )
+                if duplicate_file_id_identity is None:
+                    raise RuntimeError(
+                        f"{description} duplicated external mutation handle "
+                        f"identity unavailable for live snapshotted Object: "
+                        f"pid={int(entry.UniqueProcessId)} "
+                        f"handle={int(entry.HandleValue)}"
+                    )
                 # The duplicate is proven to represent the exact snapshotted
-                # Object, and FileIdInfo successfully proved that object is
-                # not the evidence root.
+                # directory Object, and its stable file identity proved that
+                # object is not the evidence root.
                 continue
 
             # The source slot was reused before duplication. The retained
@@ -805,7 +889,7 @@ def _require_no_external_mutation_handles(
                 + ",".join(str(pid) for pid in sorted(live_pids))
             )
     finally:
-        for _, duplicate_value, _, _ in retained_duplicates:
+        for _, duplicate_value, _, _, _, _ in retained_duplicates:
             _kernel32.CloseHandle(wintypes.HANDLE(duplicate_value))
 
 def _create_file(
