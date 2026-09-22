@@ -1,6 +1,9 @@
 import inspect
+import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
+from unittest.mock import patch
 
 from agent_controller.private_ci_phase4_contract import PrivateCiPilotBinding
 from agent_controller.private_ci_phase5_result import (
@@ -227,12 +230,30 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                 phase6_result_sha256=hashlib.sha256(phase6_raw).hexdigest()
             )
         )
-        result = classifier.classify_final_private_ci_pilot(
-            phase5_result_bytes=phase5_raw,
-            phase6_result_bytes=phase6_raw,
-            phase7_result_bytes=phase7_raw,
-        )
-        self.assertEqual(result, "SELF_HOSTED_PRIVATE_CI_PASS")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            from agent_controller import private_ci_final_publication
+
+            with patch.object(
+                private_ci_final_publication,
+                "FINAL_PUBLICATION_ROOT",
+                Path(temporary_directory),
+            ):
+                result = classifier.classify_final_private_ci_pilot(
+                    phase5_result_bytes=phase5_raw,
+                    phase6_result_bytes=phase6_raw,
+                    phase7_result_bytes=phase7_raw,
+                )
+                self.assertEqual(result, "SELF_HOSTED_PRIVATE_CI_PASS")
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "already published",
+                ):
+                    classifier.classify_final_private_ci_pilot(
+                        phase5_result_bytes=phase5_raw,
+                        phase6_result_bytes=phase6_raw,
+                        phase7_result_bytes=phase7_raw,
+                    )
 
     def test_final_classifier_rejects_cross_pilot_evidence(self):
         phase6 = self.phase6_module()
