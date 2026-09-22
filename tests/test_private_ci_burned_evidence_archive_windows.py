@@ -227,6 +227,8 @@ finally:
         self.assertIn("current_object_by_handle", region)
         self.assertIn("handed-off external mutation handle", region)
         self.assertIn("_file_type_once", region)
+        self.assertIn("authoritative root is not a disk handle", region)
+        self.assertIn("authoritative root directory classification", region)
         self.assertIn("FILE_TYPE_DISK = 0x0001", source)
         self.assertIn("_native_file_is_directory_once", region)
         self.assertIn("FILE_STANDARD_INFORMATION_CLASS = 5", source)
@@ -354,6 +356,19 @@ finally:
                 normal = m._open_locked_directory(root)
                 try:
                     self.assertEqual(
+                        m._file_type_once(
+                            int(duplicate.value),
+                            "cross-process duplicated mutation handle",
+                        ),
+                        m.FILE_TYPE_DISK,
+                    )
+                    self.assertTrue(
+                        m._native_file_is_directory_once(
+                            int(duplicate.value),
+                            "cross-process duplicated mutation handle",
+                        )
+                    )
+                    self.assertEqual(
                         m._native_file_id_identity_once(
                             int(duplicate.value),
                             "cross-process duplicated mutation handle",
@@ -448,6 +463,25 @@ finally:
         finally:
             os.close(read_fd)
             os.close(write_fd)
+
+    def test_04_unsupported_file_standard_info_is_non_target_signal(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        for status in (
+            m.STATUS_NOT_IMPLEMENTED,
+            m.STATUS_INVALID_INFO_CLASS,
+            m.STATUS_INVALID_DEVICE_REQUEST,
+        ):
+            fake_ntdll = SimpleNamespace(
+                NtQueryInformationFile=lambda *args, status=status: status,
+            )
+            with mock.patch.object(m, "_ntdll", fake_ntdll):
+                self.assertIsNone(
+                    m._native_file_is_directory_once(
+                        0x99,
+                        "synthetic unsupported disk/device",
+                    )
+                )
 
     def test_file_id_info_query_failure_blocks(self):
         from agent_controller import private_ci_windows_atomic_archive as m
@@ -872,9 +906,14 @@ finally:
                 ), mock.patch.object(
                     m,
                     "_file_type_once",
-                    side_effect=RuntimeError(
-                        "synthetic GetFileType failure"
-                    ),
+                    side_effect=[
+                        m.FILE_TYPE_DISK,
+                        RuntimeError("synthetic GetFileType failure"),
+                    ],
+                ), mock.patch.object(
+                    m,
+                    "_native_file_is_directory_once",
+                    return_value=True,
                 ), mock.patch.object(
                     m,
                     "_stable_file_id_identity",
@@ -955,9 +994,12 @@ finally:
                 ), mock.patch.object(
                     m,
                     "_native_file_is_directory_once",
-                    side_effect=RuntimeError(
-                        "synthetic FileStandardInformation failure"
-                    ),
+                    side_effect=[
+                        True,
+                        RuntimeError(
+                            "synthetic FileStandardInformation failure"
+                        ),
+                    ],
                 ), mock.patch.object(
                     m,
                     "_stable_file_id_identity",
