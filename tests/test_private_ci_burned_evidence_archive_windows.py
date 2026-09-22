@@ -226,6 +226,8 @@ finally:
         self.assertIn("retained_duplicates", region)
         self.assertIn("current_object_by_handle", region)
         self.assertIn("handed-off external mutation handle", region)
+        self.assertIn("_file_type_once", region)
+        self.assertIn("FILE_TYPE_DISK = 0x0001", source)
         self.assertIn("_native_file_is_directory_once", region)
         self.assertIn("FILE_STANDARD_INFORMATION_CLASS = 5", source)
         self.assertIn("_stable_file_id_identity", region)
@@ -421,6 +423,32 @@ finally:
                 m._kernel32.CloseHandle(file_handle)
                 m._kernel32.CloseHandle(directory_handle)
 
+    def test_03_file_type_filters_pipe_before_file_standard(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+        import msvcrt
+
+        read_fd, write_fd = os.pipe()
+        try:
+            read_handle = msvcrt.get_osfhandle(read_fd)
+            write_handle = msvcrt.get_osfhandle(write_fd)
+            self.assertEqual(
+                m._file_type_once(
+                    int(read_handle),
+                    "anonymous pipe read handle",
+                ),
+                m.FILE_TYPE_PIPE,
+            )
+            self.assertEqual(
+                m._file_type_once(
+                    int(write_handle),
+                    "anonymous pipe write handle",
+                ),
+                m.FILE_TYPE_PIPE,
+            )
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+
     def test_file_id_info_query_failure_blocks(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
@@ -545,6 +573,10 @@ finally:
                     ],
                 ), mock.patch.object(
                     m,
+                    "_file_type_once",
+                    return_value=m.FILE_TYPE_DISK,
+                ), mock.patch.object(
+                    m,
                     "_native_file_is_directory_once",
                     return_value=True,
                 ), mock.patch.object(
@@ -605,6 +637,10 @@ finally:
                         (own, stale),
                         (own,),
                     ],
+                ), mock.patch.object(
+                    m,
+                    "_file_type_once",
+                    return_value=m.FILE_TYPE_DISK,
                 ), mock.patch.object(
                     m,
                     "_native_file_is_directory_once",
@@ -674,6 +710,10 @@ finally:
                         (own, original),
                         (own, replacement),
                     ],
+                ), mock.patch.object(
+                    m,
+                    "_file_type_once",
+                    return_value=m.FILE_TYPE_DISK,
                 ), mock.patch.object(
                     m,
                     "_native_file_is_directory_once",
@@ -747,6 +787,10 @@ finally:
                     return_value=False,
                 ), mock.patch.object(
                     m,
+                    "_file_type_once",
+                    return_value=m.FILE_TYPE_DISK,
+                ), mock.patch.object(
+                    m,
                     "_native_file_is_directory_once",
                     return_value=True,
                 ), mock.patch.object(
@@ -764,6 +808,85 @@ finally:
                     with self.assertRaisesRegex(
                         RuntimeError,
                         "pre-existing external mutation handles",
+                    ):
+                        m._require_no_external_mutation_handles(
+                            handle,
+                            "authoritative evidence root",
+                        )
+            finally:
+                handle.close()
+
+    def test_file_type_failure_same_object_blocks(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handle = m._open_locked_directory(root)
+            try:
+                own = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                own.UniqueProcessId = os.getpid()
+                own.HandleValue = int(handle.handle)
+                own.Object = 0x11111111
+                own.ObjectTypeIndex = 7
+                own.GrantedAccess = 0
+
+                original = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                original.UniqueProcessId = os.getpid() + 1000
+                original.HandleValue = 0x77
+                original.Object = 0x22222222
+                original.ObjectTypeIndex = 7
+                original.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+
+                duplicate_entry = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                duplicate_entry.UniqueProcessId = os.getpid()
+                duplicate_entry.HandleValue = 0x99
+                duplicate_entry.Object = original.Object
+                duplicate_entry.ObjectTypeIndex = 7
+                duplicate_entry.GrantedAccess = 0
+
+                def duplicate_handle(*args):
+                    args[3]._obj.value = 0x99
+                    return 1
+
+                fake_kernel32 = SimpleNamespace(
+                    GetCurrentProcess=lambda: 1,
+                    OpenProcess=lambda *args: 123,
+                    DuplicateHandle=duplicate_handle,
+                    CloseHandle=lambda *args: 1,
+                )
+                with mock.patch.object(
+                    m,
+                    "_enable_debug_privilege",
+                    return_value=None,
+                ), mock.patch.object(
+                    m,
+                    "_system_handle_entries",
+                    side_effect=[
+                        (own, original),
+                        (own, duplicate_entry, original),
+                    ],
+                ), mock.patch.object(
+                    m,
+                    "_process_is_protected",
+                    return_value=False,
+                ), mock.patch.object(
+                    m,
+                    "_file_type_once",
+                    side_effect=RuntimeError(
+                        "synthetic GetFileType failure"
+                    ),
+                ), mock.patch.object(
+                    m,
+                    "_stable_file_id_identity",
+                    return_value=(0xAABBCCDD, b"1" * 16),
+                ), mock.patch.object(
+                    m,
+                    "_kernel32",
+                    fake_kernel32,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "file type unavailable for live snapshotted Object",
                     ):
                         m._require_no_external_mutation_handles(
                             handle,
@@ -825,6 +948,10 @@ finally:
                     m,
                     "_process_is_protected",
                     return_value=False,
+                ), mock.patch.object(
+                    m,
+                    "_file_type_once",
+                    return_value=m.FILE_TYPE_DISK,
                 ), mock.patch.object(
                     m,
                     "_native_file_is_directory_once",
@@ -906,6 +1033,10 @@ finally:
                     return_value=False,
                 ), mock.patch.object(
                     m,
+                    "_file_type_once",
+                    return_value=m.FILE_TYPE_DISK,
+                ), mock.patch.object(
+                    m,
                     "_native_file_is_directory_once",
                     return_value=True,
                 ), mock.patch.object(
@@ -984,6 +1115,10 @@ finally:
                     m,
                     "_process_is_protected",
                     return_value=False,
+                ), mock.patch.object(
+                    m,
+                    "_file_type_once",
+                    return_value=m.FILE_TYPE_DISK,
                 ), mock.patch.object(
                     m,
                     "_native_file_is_directory_once",
@@ -1069,6 +1204,10 @@ finally:
                     return_value=False,
                 ), mock.patch.object(
                     m,
+                    "_file_type_once",
+                    return_value=m.FILE_TYPE_DISK,
+                ), mock.patch.object(
+                    m,
                     "_native_file_is_directory_once",
                     return_value=True,
                 ), mock.patch.object(
@@ -1147,6 +1286,10 @@ finally:
                     m,
                     "_process_is_protected",
                     return_value=False,
+                ), mock.patch.object(
+                    m,
+                    "_file_type_once",
+                    return_value=m.FILE_TYPE_DISK,
                 ), mock.patch.object(
                     m,
                     "_native_file_is_directory_once",
