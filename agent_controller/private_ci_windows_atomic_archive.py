@@ -784,7 +784,10 @@ def _require_no_external_mutation_handles(
                         # actually duplicated.
                         file_type_error = str(exc)
 
-                    if duplicate_file_type == FILE_TYPE_DISK:
+                    if (
+                        duplicate_file_type == FILE_TYPE_DISK
+                        or file_type_error is not None
+                    ):
                         try:
                             duplicate_is_directory = (
                                 _native_file_is_directory_once(
@@ -795,10 +798,7 @@ def _require_no_external_mutation_handles(
                         except Exception as exc:
                             directory_error = str(exc)
 
-                    if (
-                        duplicate_file_type == FILE_TYPE_DISK
-                        and duplicate_is_directory
-                    ):
+                    if duplicate_is_directory is True:
                         try:
                             duplicate_file_id_identity = (
                                 _stable_file_id_identity(
@@ -810,8 +810,7 @@ def _require_no_external_mutation_handles(
                             identity_error = str(exc)
 
                     if (
-                        duplicate_file_type == FILE_TYPE_DISK
-                        and duplicate_is_directory is True
+                        duplicate_is_directory is True
                         and duplicate_file_id_identity is not None
                         and duplicate_file_id_identity
                         == root_file_id_identity
@@ -885,20 +884,6 @@ def _require_no_external_mutation_handles(
                     f"handle={duplicate_value}"
                 )
             if duplicate_object == original_object:
-                if file_type_error is not None:
-                    raise RuntimeError(
-                        f"{description} duplicated external mutation handle "
-                        f"file type unavailable for live snapshotted Object: "
-                        f"pid={int(entry.UniqueProcessId)} "
-                        f"handle={int(entry.HandleValue)} "
-                        f"error={file_type_error}"
-                    )
-                if duplicate_file_type != FILE_TYPE_DISK:
-                    # Object-manager File handles also cover pipes, sockets,
-                    # consoles, and devices. Their access-mask bit values can
-                    # alias directory mutation bits, but a proven non-disk
-                    # handle cannot be the authoritative evidence directory.
-                    continue
                 if directory_error is not None:
                     raise RuntimeError(
                         f"{description} duplicated external mutation handle "
@@ -906,6 +891,29 @@ def _require_no_external_mutation_handles(
                         f"snapshotted Object: pid={int(entry.UniqueProcessId)} "
                         f"handle={int(entry.HandleValue)} "
                         f"error={directory_error}"
+                    )
+                if duplicate_file_type is not None:
+                    if duplicate_file_type != FILE_TYPE_DISK:
+                        # Object-manager File handles also cover pipes,
+                        # sockets, consoles, and devices. Their access-mask
+                        # bit values can alias directory mutation bits, but a
+                        # proven non-disk handle cannot be the authoritative
+                        # evidence directory.
+                        continue
+                elif file_type_error is not None:
+                    # GetFileType can fail on ambient File objects whose access
+                    # masks alias directory mutation rights. The native
+                    # FileStandardInformation query is the bounded fallback:
+                    # True means continue to exact identity, while False/None
+                    # proves this same Object is not the authoritative disk
+                    # directory. Slot-reuse is already ruled out by the final
+                    # Object comparison above.
+                    if duplicate_is_directory is not True:
+                        continue
+                else:
+                    raise RuntimeError(
+                        f"{description} duplicated external mutation handle "
+                        f"file type classification unavailable"
                     )
                 if duplicate_is_directory is not True:
                     # The authoritative root was proven to be a disk
