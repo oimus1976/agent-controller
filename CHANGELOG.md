@@ -15,6 +15,31 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-22 — Burned canonical evidence archival hardening（Issue #227 / Draft PR #228）
+
+関連: Issue #227, Issue #216, PR #228
+
+### Added / changed
+
+- #216 restart時の固定canonical evidenceを、approval / protected consumption authorityを除外したstrict allowlistだけでgeneration-scoped archiveへ退避するcontroller-owned helperを追加。
+- plan/apply間のsource hash・size・controller source binding、elevated Windows runtime、handle-bound source retirement、handle-relative archive creation、authoritative PASSの遅延publishをfail-closedで固定。
+- external evidence-root mutation handle quiescenceを追加し、SeDebugPrivilege有効化後にpre-open handleを検査。OpenProcess / DuplicateHandleで検査不能なlive handleは見逃さずBLOCKEDとする。
+- PR #228 exact-head CI #890で、quiescenceの生存確認snapshotを複数candidate間で再利用することでclosed handleをliveと誤認し得るraceを確認。生存確認を失敗ごとにfresh rereadし、still-liveならDuplicateHandleを1回だけ再試行して、なおliveかつ複製不能な場合のみBLOCKEDとする修正を追加。
+- user-controlled Git replacement objectによるsource authentication迂回を防ぐため、trusted Git environmentとlocal object-sensitive commandの双方でreplacement objectsを無効化。
+
+### Safety / authority boundary
+
+- helperはGitHub mutation、runner mutation、credential取得/利用、workflow dispatch、target execution、pilot final PASSを行わない。
+- approval filesとprotected consumption markersはarchival scope外のまま維持し、burned authorityの再利用を許可しない。
+- WOBBUFFET上の実archive apply、Ready、mergeはhuman-final。Draft PR上の実装・CI・reviewだけではlive effectを許可しない。
+
+### Validation status
+
+- prior exact head `fc3394aac602a44af94212c1b202ac0b571a4f74` / deterministic-tests #862 はSUCCESS。
+- Codex rereviewでGit replacement objectsとunduplicable external mutation handleのP1 2件を受領し、後続headでremediationを継続。
+- exact head `b29334b893b3c2114075600ddf2b932250fbfac8` / run #890 はLinux unittest SUCCESS、Windows lane FAILURE。failureはexternal-handle quiescenceのraceとstatic message assertionで、current branchに修正を追加済み。new exact-head CIで再検証する。
+- PR #228はDraftのまま。human Ready / mergeおよびWOBBUFFET archive applyは未実施。
+
 ## 2026-09-19 — Phase 4/5 gated private-CI harness foundation（Issue #225 / Draft PR #226）
 
 関連: Issue #225, Issue #216, Issue #207, Issue #195, PR #226
