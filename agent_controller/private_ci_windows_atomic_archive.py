@@ -507,47 +507,45 @@ def _require_no_external_mutation_handles(
     current_process = _kernel32.GetCurrentProcess()
     matching_pids: set[int] = set()
     pending: list[tuple[str, SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX]] = []
+    mismatched_duplicates: list[
+        tuple[SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX, int]
+    ] = []
 
-    for pid, candidates in candidates_by_pid.items():
-        process = _kernel32.OpenProcess(
-            PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
-            False,
-            pid,
-        )
-        if not process:
-            query_process = _kernel32.OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION,
+    try:
+        for pid, candidates in candidates_by_pid.items():
+            process = _kernel32.OpenProcess(
+                PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
                 False,
                 pid,
             )
-            if not query_process:
-                if pid in (0, 4):
-                    continue
-                pending.extend(("uninspectable", entry) for entry in candidates)
-                continue
-            try:
-                if _process_is_protected(query_process):
-                    continue
-            finally:
-                _kernel32.CloseHandle(query_process)
-            pending.extend(("uninspectable", entry) for entry in candidates)
-            continue
-
-        try:
-            protected = _process_is_protected(process)
-            if protected:
-                continue
-            for entry in candidates:
-                duplicate = wintypes.HANDLE()
-                if not _kernel32.DuplicateHandle(
-                    process,
-                    wintypes.HANDLE(int(entry.HandleValue)),
-                    current_process,
-                    ctypes.byref(duplicate),
-                    0,
+            if not process:
+                query_process = _kernel32.OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION,
                     False,
-                    DUPLICATE_SAME_ACCESS,
-                ):
+                    pid,
+                )
+                if not query_process:
+                    if pid in (0, 4):
+                        continue
+                    pending.extend(
+                        ("uninspectable", entry) for entry in candidates
+                    )
+                    continue
+                try:
+                    if _process_is_protected(query_process):
+                        continue
+                finally:
+                    _kernel32.CloseHandle(query_process)
+                pending.extend(
+                    ("uninspectable", entry) for entry in candidates
+                )
+                continue
+
+            try:
+                protected = _process_is_protected(process)
+                if protected:
+                    continue
+                for entry in candidates:
                     duplicate = wintypes.HANDLE()
                     if not _kernel32.DuplicateHandle(
                         process,
@@ -558,64 +556,125 @@ def _require_no_external_mutation_handles(
                         False,
                         DUPLICATE_SAME_ACCESS,
                     ):
-                        pending.append(("unduplicable", entry))
-                        continue
-                try:
-                    if _same_file_identity(
-                        handle,
-                        int(duplicate.value),
-                    ):
+                        duplicate = wintypes.HANDLE()
+                        if not _kernel32.DuplicateHandle(
+                            process,
+                            wintypes.HANDLE(int(entry.HandleValue)),
+                            current_process,
+                            ctypes.byref(duplicate),
+                            0,
+                            False,
+                            DUPLICATE_SAME_ACCESS,
+                        ):
+                            pending.append(("unduplicable", entry))
+                            continue
+
+                    duplicate_value = int(duplicate.value)
+                    try:
+                        same_identity = _same_file_identity(
+                            handle,
+                            duplicate_value,
+                        )
+                    except Exception:
+                        _kernel32.CloseHandle(duplicate)
+                        raise
+
+                    if same_identity:
+                        _kernel32.CloseHandle(duplicate)
                         matching_pids.add(pid)
                         break
-                finally:
-                    _kernel32.CloseHandle(duplicate)
-        finally:
-            _kernel32.CloseHandle(process)
 
-    if matching_pids:
-        raise RuntimeError(
-            f"{description} has pre-existing external mutation handles: "
-            + ",".join(str(pid) for pid in sorted(matching_pids))
-        )
+                    # Keep the successful mismatching duplicate open. A later
+                    # single system-handle snapshot proves whether it still
+                    # represents the snapshotted Object (genuinely unrelated)
+                    # or a reused source slot (original lineage must remain
+                    # fail-closed until shown gone).
+                    mismatched_duplicates.append((entry, duplicate_value))
+            finally:
+                _kernel32.CloseHandle(process)
 
-    if not pending:
-        return
-
-    live_by_object: dict[int, set[int]] = {}
-    for current in _system_handle_entries():
-        pid = int(current.UniqueProcessId)
-        if pid == current_pid:
-            continue
-        if int(current.ObjectTypeIndex) != own_type_index:
-            continue
-        if int(current.GrantedAccess) & DIRECTORY_MUTATION_ACCESS == 0:
-            continue
-        object_pointer = int(current.Object or 0)
-        if object_pointer == 0:
-            continue
-        live_by_object.setdefault(object_pointer, set()).add(pid)
-
-    for pending_kind, entry in pending:
-        object_pointer = int(entry.Object or 0)
-        if object_pointer == 0:
+        if matching_pids:
             raise RuntimeError(
-                f"{description} external mutation handle object identity unavailable"
+                f"{description} has pre-existing external mutation handles: "
+                + ",".join(str(pid) for pid in sorted(matching_pids))
             )
-        live_pids = live_by_object.get(object_pointer)
-        if not live_pids:
-            continue
-        original_pid = int(entry.UniqueProcessId)
-        if pending_kind == "uninspectable":
+
+        if not pending and not mismatched_duplicates:
+            return
+
+        final_entries = _system_handle_entries()
+        live_by_object: dict[int, set[int]] = {}
+        current_object_by_handle: dict[int, int] = {}
+        for current in final_entries:
+            pid = int(current.UniqueProcessId)
+            object_pointer = int(current.Object or 0)
+            if pid == current_pid:
+                current_object_by_handle[int(current.HandleValue)] = (
+                    object_pointer
+                )
+                continue
+            if int(current.ObjectTypeIndex) != own_type_index:
+                continue
+            if int(current.GrantedAccess) & DIRECTORY_MUTATION_ACCESS == 0:
+                continue
+            if object_pointer == 0:
+                continue
+            live_by_object.setdefault(object_pointer, set()).add(pid)
+
+        for entry, duplicate_value in mismatched_duplicates:
+            original_object = int(entry.Object or 0)
+            if original_object == 0:
+                raise RuntimeError(
+                    f"{description} external mutation handle object identity unavailable"
+                )
+            duplicate_object = current_object_by_handle.get(duplicate_value)
+            if not duplicate_object:
+                raise RuntimeError(
+                    f"{description} duplicate lineage verification unavailable: "
+                    f"handle={duplicate_value}"
+                )
+            if duplicate_object == original_object:
+                # The duplicated handle still represents the exact snapshotted
+                # Object and its file identity mismatched the evidence root, so
+                # this candidate was genuinely unrelated.
+                continue
+
+            # The source slot was reused before duplication. Preserve the
+            # original snapshotted Object lineage and fail closed if any
+            # mutation-capable external handle still carries it.
+            live_pids = live_by_object.get(original_object)
+            if live_pids:
+                raise RuntimeError(
+                    f"{description} has handed-off external mutation handle: "
+                    f"pid={int(entry.UniqueProcessId)} "
+                    f"handle={int(entry.HandleValue)} live_pids="
+                    + ",".join(str(pid) for pid in sorted(live_pids))
+                )
+
+        for pending_kind, entry in pending:
+            object_pointer = int(entry.Object or 0)
+            if object_pointer == 0:
+                raise RuntimeError(
+                    f"{description} external mutation handle object identity unavailable"
+                )
+            live_pids = live_by_object.get(object_pointer)
+            if not live_pids:
+                continue
+            original_pid = int(entry.UniqueProcessId)
+            if pending_kind == "uninspectable":
+                raise RuntimeError(
+                    f"{description} has uninspectable external mutation handle: "
+                    f"pid={original_pid} live_pids="
+                    + ",".join(str(pid) for pid in sorted(live_pids))
+                )
             raise RuntimeError(
-                f"{description} has uninspectable external mutation handle: "
-                f"pid={original_pid} live_pids="
+                f"{description} has unduplicable external mutation handle: "
+                f"pid={original_pid} handle={int(entry.HandleValue)} live_pids="
                 + ",".join(str(pid) for pid in sorted(live_pids))
             )
-        raise RuntimeError(
-            f"{description} has unduplicable external mutation handle: "
-            f"pid={original_pid} handle={int(entry.HandleValue)} live_pids="
-            + ",".join(str(pid) for pid in sorted(live_pids))
-        )
+    finally:
+        for _, duplicate_value in mismatched_duplicates:
+            _kernel32.CloseHandle(wintypes.HANDLE(duplicate_value))
 
 def _create_file(
     path: Path,
