@@ -390,7 +390,7 @@ def _same_file_identity(
         right_handle,
         ctypes.byref(right_info),
     ):
-        return False
+        raise ctypes.WinError(ctypes.get_last_error())
     return (
         int(left_info.dwVolumeSerialNumber)
         == int(right_info.dwVolumeSerialNumber)
