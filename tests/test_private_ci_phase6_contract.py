@@ -134,7 +134,7 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
         m = self.module()
         plan = self.plan()
         expected_generation_root = (
-            r"C:\ProgramData\agent-controller\private-ci\"
+            "C:\\ProgramData\\agent-controller\\private-ci\\"
             + binding().environment_generation
         )
         self.assertEqual(plan.generation_root, expected_generation_root)
