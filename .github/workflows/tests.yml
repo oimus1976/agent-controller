@@ -31,7 +31,7 @@ jobs:
 
   windows-junction:
     runs-on: windows-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -61,5 +61,7 @@ jobs:
         run: python -m unittest discover -s tests -p "test_private_ci_approval_issuer_windows.py" -v
       - name: Run real Windows PowerShell 5.1 consumption helper regressions
         run: python -m unittest discover -s tests -p "test_private_ci_consumption_helper_windows.py" -v
+      - name: Run burned evidence archive UAC bridge parser regression
+        run: python -m unittest discover -s tests -p "test_private_ci_burned_evidence_archive_windows.py" -v
       - name: Run real Windows native-output decoding regressions
         run: python -m unittest discover -s tests -p "test_private_ci_native_output_windows.py" -v
