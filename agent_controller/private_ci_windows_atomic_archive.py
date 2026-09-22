@@ -422,6 +422,32 @@ def _validated_file_id_identity(
     return int(info.VolumeSerialNumber), file_id
 
 
+def _native_file_id_identity_once(
+    handle_value: int,
+    description: str,
+) -> tuple[int, bytes]:
+    info = FILE_ID_INFO()
+    io_status = IO_STATUS_BLOCK()
+    status = _ntdll.NtQueryInformationFile(
+        wintypes.HANDLE(handle_value),
+        ctypes.byref(io_status),
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+        FILE_ID_INFORMATION_CLASS,
+    )
+    code = _ntstatus_code(status)
+    if code != 0:
+        raise RuntimeError(
+            f"{description} native FileIdInformation query failed: "
+            f"ntstatus=0x{code:08x}"
+        )
+    if int(io_status.Information) < ctypes.sizeof(info):
+        raise RuntimeError(
+            f"{description} native FileIdInformation payload truncated"
+        )
+    return _validated_file_id_identity(info, description)
+
+
 def _file_id_identity_once(
     handle_value: int,
     description: str,
@@ -437,26 +463,16 @@ def _file_id_identity_once(
         return _validated_file_id_identity(info, description)
 
     win32_error = ctypes.get_last_error()
-    native_info = FILE_ID_INFO()
-    io_status = IO_STATUS_BLOCK()
-    status = _ntdll.NtQueryInformationFile(
-        wintypes.HANDLE(handle_value),
-        ctypes.byref(io_status),
-        ctypes.byref(native_info),
-        ctypes.sizeof(native_info),
-        FILE_ID_INFORMATION_CLASS,
-    )
-    code = _ntstatus_code(status)
-    if code != 0:
+    try:
+        return _native_file_id_identity_once(
+            handle_value,
+            description,
+        )
+    except Exception as exc:
         raise RuntimeError(
             f"{description} file identity query failed: "
-            f"winerror={win32_error} ntstatus=0x{code:08x}"
-        )
-    if int(io_status.Information) < ctypes.sizeof(native_info):
-        raise RuntimeError(
-            f"{description} native FileIdInformation payload truncated"
-        )
-    return _validated_file_id_identity(native_info, description)
+            f"winerror={win32_error}; native={exc}"
+        ) from exc
 
 
 def _stable_file_id_identity(
