@@ -421,6 +421,10 @@ def _native_file_identity_once(
             f"{description} FileInternalInformation query failed: "
             f"0x{code:08x}"
         )
+    if int(io_status.Information) < ctypes.sizeof(internal):
+        raise RuntimeError(
+            f"{description} FileInternalInformation payload truncated"
+        )
 
     volume_buffer = ctypes.create_string_buffer(
         NATIVE_IDENTITY_QUERY_BUFFER_SIZE
