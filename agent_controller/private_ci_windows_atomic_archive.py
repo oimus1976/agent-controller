@@ -549,8 +549,13 @@ def _require_no_external_mutation_handles(
     current_process = _kernel32.GetCurrentProcess()
     matching_pids: set[int] = set()
     pending: list[tuple[str, SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX]] = []
-    mismatched_duplicates: list[
-        tuple[SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX, int]
+    retained_duplicates: list[
+        tuple[
+            SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX,
+            int,
+            tuple[int, bytes] | None,
+            str | None,
+        ]
     ] = []
 
     try:
@@ -612,6 +617,8 @@ def _require_no_external_mutation_handles(
                             continue
 
                     duplicate_value = int(duplicate.value)
+                    duplicate_file_id_identity = None
+                    identity_error = None
                     try:
                         duplicate_file_id_identity = (
                             _stable_file_id_identity(
@@ -623,21 +630,31 @@ def _require_no_external_mutation_handles(
                                 ),
                             )
                         )
-                    except Exception:
-                        _kernel32.CloseHandle(duplicate)
-                        raise
+                    except Exception as exc:
+                        # Do not classify this as an identity failure yet. The
+                        # source handle slot may have been reused between the
+                        # system-table snapshot and DuplicateHandle. Keep the
+                        # duplicate open so the final snapshot can prove which
+                        # kernel Object was actually duplicated.
+                        identity_error = str(exc)
 
-                    if duplicate_file_id_identity == root_file_id_identity:
+                    if (
+                        duplicate_file_id_identity is not None
+                        and duplicate_file_id_identity
+                        == root_file_id_identity
+                    ):
                         _kernel32.CloseHandle(duplicate)
                         matching_pids.add(pid)
                         break
 
-                    # Keep the successful mismatching duplicate open. A later
-                    # single system-handle snapshot proves whether it still
-                    # represents the snapshotted Object (genuinely unrelated)
-                    # or a reused source slot (original lineage must remain
-                    # fail-closed until shown gone).
-                    mismatched_duplicates.append((entry, duplicate_value))
+                    retained_duplicates.append(
+                        (
+                            entry,
+                            duplicate_value,
+                            duplicate_file_id_identity,
+                            identity_error,
+                        )
+                    )
             finally:
                 _kernel32.CloseHandle(process)
 
@@ -647,7 +664,7 @@ def _require_no_external_mutation_handles(
                 + ",".join(str(pid) for pid in sorted(matching_pids))
             )
 
-        if not pending and not mismatched_duplicates:
+        if not pending and not retained_duplicates:
             return
 
         final_entries = _system_handle_entries()
@@ -669,7 +686,12 @@ def _require_no_external_mutation_handles(
                 continue
             live_by_object.setdefault(object_pointer, set()).add(pid)
 
-        for entry, duplicate_value in mismatched_duplicates:
+        for (
+            entry,
+            duplicate_value,
+            duplicate_file_id_identity,
+            identity_error,
+        ) in retained_duplicates:
             original_object = int(entry.Object or 0)
             if original_object == 0:
                 raise RuntimeError(
@@ -682,14 +704,23 @@ def _require_no_external_mutation_handles(
                     f"handle={duplicate_value}"
                 )
             if duplicate_object == original_object:
-                # The duplicated handle still represents the exact snapshotted
-                # Object and its file identity mismatched the evidence root, so
-                # this candidate was genuinely unrelated.
+                if identity_error is not None:
+                    raise RuntimeError(
+                        f"{description} duplicated external mutation handle "
+                        f"identity unavailable for live snapshotted Object: "
+                        f"pid={int(entry.UniqueProcessId)} "
+                        f"handle={int(entry.HandleValue)} error={identity_error}"
+                    )
+                # The duplicate is proven to represent the exact snapshotted
+                # Object, and FileIdInfo successfully proved that object is
+                # not the evidence root.
                 continue
 
-            # The source slot was reused before duplication. Preserve the
-            # original snapshotted Object lineage and fail closed if any
-            # mutation-capable external handle still carries it.
+            # The source slot was reused before duplication. The retained
+            # duplicate describes the replacement Object, so any FileIdInfo
+            # failure on it is irrelevant. Preserve the original snapshotted
+            # Object lineage and fail closed if any mutation-capable external
+            # handle still carries it.
             live_pids = live_by_object.get(original_object)
             if live_pids:
                 raise RuntimeError(
@@ -721,7 +752,7 @@ def _require_no_external_mutation_handles(
                 + ",".join(str(pid) for pid in sorted(live_pids))
             )
     finally:
-        for _, duplicate_value in mismatched_duplicates:
+        for _, duplicate_value, _, _ in retained_duplicates:
             _kernel32.CloseHandle(wintypes.HANDLE(duplicate_value))
 
 def _create_file(
