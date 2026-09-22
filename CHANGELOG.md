@@ -15,7 +15,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
-## 2026-09-22 — Burned canonical evidence archival hardening（Issue #227 / Draft PR #228）
+## 2026-09-22 — Burned canonical evidence archival hardening（Issue #227 / PR #228）
 
 関連: Issue #227, Issue #216, PR #228
 
@@ -40,7 +40,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 - helperはGitHub mutation、runner mutation、credential取得/利用、workflow dispatch、target execution、pilot final PASSを行わない。
 - approval filesとprotected consumption markersはarchival scope外のまま維持し、burned authorityの再利用を許可しない。
-- actual WOBBUFFET archive applyは別のexact human action。Draft PR上の実装・CI・reviewはowner-machine mutationを許可しない。
+- actual WOBBUFFET archive applyは別のexact human action。PR上の実装・CI・review・mergeはowner-machine mutationを許可しない。
 - Ready / mergeはADR #90によりhuman-final。
 
 ### Validation / review history
@@ -52,7 +52,10 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - exact head `fd0fb5b931406210830c981ec2f1a4027457f71c` / run #933 はLinux/Windows SUCCESS。Codex rereviewでprotected-process candidate exemptionのP1を検出。
 - protected-process remediation後、controlled real regressionをtest-only isolationした exact head `2ab220e418a2f8768d070b9b79f0e0582cc42de9` / deterministic-tests #936 はLinux/WindowsともSUCCESS。
 - Codex exact-head rereview of `2ab220e418`: **Didn't find any major issues.**
-- PR #228はDraftのまま。human Ready / mergeおよびWOBBUFFET archive applyは未実施。
+- documentation-only final head `98c71f1db531df4a03b61ad4f724ba94a3362866` / deterministic-tests #937 はLinux/WindowsともSUCCESS。Codex final confirmation of `98c71f1db5`: **Didn't find any major issues.**
+- PR #228はhuman Ready / merge gateを経て2026-09-22にmerge commit `2d396fc1dfd2154f071970341ca4a40d7649d9a7` で `main` へマージ済み。Issue #227もclose済み。
+- merge直後の `main` はmerge commitとidentical。workflowは `main` pushをtriggerしないためpost-merge CI runは発生しない。これはworkflow contractどおり。
+- WOBBUFFET archive applyは未実施。canonical evidence retirementは別のexact human-authorized actionとして残る。
 
 ## 2026-09-19 — Phase 4/5 gated private-CI harness foundation（Issue #225 / Draft PR #226）
 
