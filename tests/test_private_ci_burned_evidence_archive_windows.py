@@ -541,6 +541,72 @@ finally:
             finally:
                 handle.close()
 
+    def test_equal_native_identity_blocks_external_mutation_handle(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handle = m._open_locked_directory(root)
+            try:
+                own = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                own.UniqueProcessId = os.getpid()
+                own.HandleValue = int(handle.handle)
+                own.Object = 0x11111111
+                own.ObjectTypeIndex = 7
+                own.GrantedAccess = 0
+
+                external = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                external.UniqueProcessId = os.getpid() + 1000
+                external.HandleValue = 0x77
+                external.Object = 0x22222222
+                external.ObjectTypeIndex = 7
+                external.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+
+                def duplicate_handle(*args):
+                    args[3]._obj.value = 0x99
+                    return 1
+
+                fake_kernel32 = SimpleNamespace(
+                    GetCurrentProcess=lambda: 1,
+                    OpenProcess=lambda *args: 123,
+                    DuplicateHandle=duplicate_handle,
+                    CloseHandle=lambda *args: 1,
+                )
+                with mock.patch.object(
+                    m,
+                    "_enable_debug_privilege",
+                    return_value=None,
+                ), mock.patch.object(
+                    m,
+                    "_system_handle_entries",
+                    return_value=(own, external),
+                ), mock.patch.object(
+                    m,
+                    "_process_is_protected",
+                    return_value=False,
+                ), mock.patch.object(
+                    m,
+                    "_stable_native_file_identity",
+                    side_effect=[
+                        (0xAABBCCDD, 0x1111),
+                        (0xAABBCCDD, 0x1111),
+                    ],
+                ), mock.patch.object(
+                    m,
+                    "_kernel32",
+                    fake_kernel32,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "pre-existing external mutation handles",
+                    ):
+                        m._require_no_external_mutation_handles(
+                            handle,
+                            "authoritative evidence root",
+                        )
+            finally:
+                handle.close()
+
     def test_successful_mismatch_preserves_snapshot_lineage_across_slot_reuse(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
