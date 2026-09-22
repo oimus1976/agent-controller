@@ -1,10 +1,17 @@
+import inspect
 import unittest
 from dataclasses import replace
 
 from agent_controller.private_ci_phase4_contract import PrivateCiPilotBinding
+from agent_controller.private_ci_phase5_result import (
+    PHASE5_RESULT_SCHEMA,
+    PHASE5_RESULT_STATUS,
+    Phase5ResultEvidence,
+    phase5_result_bytes,
+)
 
 
-def binding():
+def binding(*, runner_name="ac-ci-0123456789abcdef"):
     generation = "ac-pilot-0123456789abcdef"
     return PrivateCiPilotBinding(
         repository="oimus1976/example-private",
@@ -15,7 +22,7 @@ def binding():
         workflow_sha="2" * 40,
         workflow_path=".github/workflows/private-ci-windows-pilot.yml",
         runner_id=23,
-        runner_name="ac-ci-0123456789abcdef",
+        runner_name=runner_name,
         runner_label="private-ci-windows-pilot",
         environment_generation=generation,
         runner_root=(
@@ -29,10 +36,44 @@ def binding():
     )
 
 
+def phase5_evidence(*, pilot_binding=None):
+    b = pilot_binding or binding()
+    return Phase5ResultEvidence(
+        schema=PHASE5_RESULT_SCHEMA,
+        binding=b,
+        phase5_plan_sha256="1" * 64,
+        phase4_result_sha256="2" * 64,
+        human_approval_sha256="3" * 64,
+        phase5_consumption_sha256="4" * 64,
+        candidate_sha256="5" * 64,
+        workflow_run_id=9001,
+        workflow_run_attempt=1,
+        job_id=7001,
+        runner_id=b.runner_id,
+        runner_name=b.runner_name,
+        runner_label=b.runner_label,
+        runner_process_id=8123,
+        runner_process_owner=r"WOBBUFFET\ac-runner",
+        runner_child_exit_code=0,
+        security_probe_sha256="6" * 64,
+        security_probe_result_sha256="7" * 64,
+        security_probe_stdout_sha256="8" * 64,
+        security_probe_stderr_sha256="9" * 64,
+        runner_stdout_sha256="a" * 64,
+        runner_stderr_sha256="b" * 64,
+        status=PHASE5_RESULT_STATUS,
+        completed_at="2026-09-22T12:00:00+00:00",
+    )
+
+
 class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
     def result_module(self):
         from agent_controller import private_ci_phase7_result
         return private_ci_phase7_result
+
+    def phase6_module(self):
+        from agent_controller import private_ci_phase6_result
+        return private_ci_phase6_result
 
     def classifier_module(self):
         from agent_controller import private_ci_final_classifier
@@ -54,13 +95,33 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
             local_readback_complete=True,
         )
 
-    def test_zero_residual_result_requires_every_postcondition(self):
+    def phase6_evidence(self, *, pilot_binding=None):
+        m = self.phase6_module()
+        b = pilot_binding or binding()
+        return m.Phase6CleanupResultEvidence(
+            schema=m.PHASE6_RESULT_SCHEMA,
+            binding=b,
+            phase6_plan_sha256="c" * 64,
+            phase5_result_sha256="d" * 64,
+            human_approval_sha256="e" * 64,
+            phase6_consumption_sha256="f" * 64,
+            runner_deregistered=True,
+            generation_removed=True,
+            status=m.PHASE6_RESULT_STATUS,
+            completed_at="2026-09-22T12:30:00+00:00",
+        )
+
+    def phase7_evidence(self, *, pilot_binding=None):
         m = self.result_module()
-        evidence = m.build_phase7_zero_residual_result(
-            binding=binding(),
-            phase6_result_sha256="1" * 64,
+        return m.build_phase7_zero_residual_result(
+            binding=pilot_binding or binding(),
+            phase6_result_sha256="3" * 64,
             observation=self.clean_observation(),
         )
+
+    def test_zero_residual_result_requires_every_postcondition(self):
+        m = self.result_module()
+        evidence = self.phase7_evidence()
         self.assertEqual(evidence.status, m.PHASE7_ZERO_RESIDUAL_STATUS)
 
         failures = (
@@ -81,7 +142,7 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, reason):
                     m.build_phase7_zero_residual_result(
                         binding=binding(),
-                        phase6_result_sha256="1" * 64,
+                        phase6_result_sha256="3" * 64,
                         observation=replace(
                             self.clean_observation(),
                             **{field: value},
@@ -90,52 +151,84 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
 
     def test_zero_residual_evidence_roundtrips_canonically(self):
         m = self.result_module()
-        evidence = m.build_phase7_zero_residual_result(
-            binding=binding(),
-            phase6_result_sha256="1" * 64,
-            observation=self.clean_observation(),
-        )
+        evidence = self.phase7_evidence()
         raw = m.phase7_result_bytes(evidence)
         self.assertEqual(m.parse_phase7_result_bytes(raw), evidence)
 
+    def test_phase6_result_roundtrips_and_requires_cleanup_pass(self):
+        m = self.phase6_module()
+        evidence = self.phase6_evidence()
+        raw = m.phase6_result_bytes(evidence)
+        self.assertEqual(m.parse_phase6_result_bytes(raw), evidence)
+
+        with self.assertRaisesRegex(ValueError, "RUNNER_DEREGISTRATION"):
+            m.phase6_result_bytes(
+                replace(evidence, runner_deregistered=False)
+            )
+        with self.assertRaisesRegex(ValueError, "GENERATION_REMOVAL"):
+            m.phase6_result_bytes(
+                replace(evidence, generation_removed=False)
+            )
+
+    def test_final_classifier_accepts_exact_evidence_bytes_only(self):
+        classifier = self.classifier_module()
+        self.assertEqual(
+            tuple(inspect.signature(
+                classifier.classify_final_private_ci_pilot
+            ).parameters),
+            (
+                "phase5_result_bytes",
+                "phase6_result_bytes",
+                "phase7_result_bytes",
+                "already_published",
+            ),
+        )
+
     def test_final_pass_requires_exact_phase5_phase6_phase7_success_chain(self):
-        result_module = self.result_module()
+        phase6 = self.phase6_module()
+        phase7 = self.result_module()
         classifier = self.classifier_module()
 
         result = classifier.classify_final_private_ci_pilot(
-            binding=binding(),
-            phase5_result_sha256="1" * 64,
-            phase5_status="PHASE5_EXACTLY_ONE_JOB_PASS",
-            phase6_result_sha256="2" * 64,
-            phase6_status="PHASE6_CLEANUP_PASS",
-            phase7_result_sha256="3" * 64,
-            phase7_status=result_module.PHASE7_ZERO_RESIDUAL_STATUS,
+            phase5_result_bytes=phase5_result_bytes(phase5_evidence()),
+            phase6_result_bytes=phase6.phase6_result_bytes(
+                self.phase6_evidence()
+            ),
+            phase7_result_bytes=phase7.phase7_result_bytes(
+                self.phase7_evidence()
+            ),
             already_published=False,
         )
         self.assertEqual(result, "SELF_HOSTED_PRIVATE_CI_PASS")
 
-        with self.assertRaisesRegex(ValueError, "PHASE7"):
-            classifier.classify_final_private_ci_pilot(
-                binding=binding(),
-                phase5_result_sha256="1" * 64,
-                phase5_status="PHASE5_EXACTLY_ONE_JOB_PASS",
-                phase6_result_sha256="2" * 64,
-                phase6_status="PHASE6_CLEANUP_PASS",
-                phase7_result_sha256="3" * 64,
-                phase7_status="BLOCKED",
-                already_published=False,
-            )
-
         with self.assertRaisesRegex(ValueError, "already published"):
             classifier.classify_final_private_ci_pilot(
-                binding=binding(),
-                phase5_result_sha256="1" * 64,
-                phase5_status="PHASE5_EXACTLY_ONE_JOB_PASS",
-                phase6_result_sha256="2" * 64,
-                phase6_status="PHASE6_CLEANUP_PASS",
-                phase7_result_sha256="3" * 64,
-                phase7_status=result_module.PHASE7_ZERO_RESIDUAL_STATUS,
+                phase5_result_bytes=phase5_result_bytes(phase5_evidence()),
+                phase6_result_bytes=phase6.phase6_result_bytes(
+                    self.phase6_evidence()
+                ),
+                phase7_result_bytes=phase7.phase7_result_bytes(
+                    self.phase7_evidence()
+                ),
                 already_published=True,
+            )
+
+    def test_final_classifier_rejects_cross_pilot_evidence(self):
+        phase6 = self.phase6_module()
+        phase7 = self.result_module()
+        classifier = self.classifier_module()
+        other = binding(runner_name="ac-ci-fedcba9876543210")
+
+        with self.assertRaisesRegex(ValueError, "binding mismatch"):
+            classifier.classify_final_private_ci_pilot(
+                phase5_result_bytes=phase5_result_bytes(phase5_evidence()),
+                phase6_result_bytes=phase6.phase6_result_bytes(
+                    self.phase6_evidence(pilot_binding=other)
+                ),
+                phase7_result_bytes=phase7.phase7_result_bytes(
+                    self.phase7_evidence()
+                ),
+                already_published=False,
             )
 
 
