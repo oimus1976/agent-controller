@@ -504,16 +504,26 @@ def _require_no_external_mutation_handles(
             continue
         candidates_by_pid.setdefault(pid, []).append(entry)
 
-    refreshed_keys: set[tuple[int, int, int, int, int]] = set()
+    refreshed_keys: set[tuple[int, int, int, int, int]] | None = None
 
-    def candidate_is_still_live(
-        entry: SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX,
-    ) -> bool:
+    def refresh_candidate_keys() -> set[tuple[int, int, int, int, int]]:
         nonlocal refreshed_keys
         refreshed_keys = {
             _handle_entry_key(current)
             for current in _system_handle_entries()
         }
+        return refreshed_keys
+
+    def candidate_is_still_live(
+        entry: SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX,
+        *,
+        refresh: bool = False,
+    ) -> bool:
+        nonlocal refreshed_keys
+        if refresh or refreshed_keys is None:
+            refresh_candidate_keys()
+        if refreshed_keys is None:
+            raise RuntimeError("candidate handle refresh unexpectedly unavailable")
         return _handle_entry_key(entry) in refreshed_keys
 
     current_process = _kernel32.GetCurrentProcess()
@@ -583,7 +593,10 @@ def _require_no_external_mutation_handles(
                         False,
                         DUPLICATE_SAME_ACCESS,
                     ):
-                        if not candidate_is_still_live(entry):
+                        if not candidate_is_still_live(
+                            entry,
+                            refresh=True,
+                        ):
                             continue
                         raise RuntimeError(
                             f"{description} has unduplicable external mutation "
