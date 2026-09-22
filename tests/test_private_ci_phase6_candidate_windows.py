@@ -128,7 +128,7 @@ class PrivateCiPhase6CandidateWindowsTests(unittest.TestCase):
             set(report["observed_effect_families"]),
             {
                 "ACL_MUTATION",
-                "FILESYSTEM_DESTRUCTIVE_MUTATION",
+                "GENERATION_RETIREMENT",
                 "HTTP_API_ACCESS",
                 "PROCESS_CONTROL",
                 "RUNNER_DEREGISTRATION",
