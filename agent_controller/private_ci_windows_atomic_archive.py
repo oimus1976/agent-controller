@@ -504,17 +504,16 @@ def _require_no_external_mutation_handles(
             continue
         candidates_by_pid.setdefault(pid, []).append(entry)
 
-    refreshed_keys: set[tuple[int, int, int, int, int]] | None = None
+    refreshed_keys: set[tuple[int, int, int, int, int]] = set()
 
     def candidate_is_still_live(
         entry: SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX,
     ) -> bool:
         nonlocal refreshed_keys
-        if refreshed_keys is None:
-            refreshed_keys = {
-                _handle_entry_key(current)
-                for current in _system_handle_entries()
-            }
+        refreshed_keys = {
+            _handle_entry_key(current)
+            for current in _system_handle_entries()
+        }
         return _handle_entry_key(entry) in refreshed_keys
 
     current_process = _kernel32.GetCurrentProcess()
@@ -545,7 +544,7 @@ def _require_no_external_mutation_handles(
                     continue
                 raise RuntimeError(
                     f"{description} has uninspectable external mutation "
-                    f"handles: pid={pid}"
+                    f"handle: pid={pid}"
                 )
             try:
                 if _process_is_protected(query_process):
@@ -574,11 +573,23 @@ def _require_no_external_mutation_handles(
                 ):
                     if not candidate_is_still_live(entry):
                         continue
-                    raise RuntimeError(
-                        f"{description} has unduplicable external mutation "
-                        f"handle: pid={pid} "
-                        f"handle={int(entry.HandleValue)}"
-                    )
+                    duplicate = wintypes.HANDLE()
+                    if not _kernel32.DuplicateHandle(
+                        process,
+                        wintypes.HANDLE(int(entry.HandleValue)),
+                        current_process,
+                        ctypes.byref(duplicate),
+                        0,
+                        False,
+                        DUPLICATE_SAME_ACCESS,
+                    ):
+                        if not candidate_is_still_live(entry):
+                            continue
+                        raise RuntimeError(
+                            f"{description} has unduplicable external mutation "
+                            f"handle: pid={pid} "
+                            f"handle={int(entry.HandleValue)}"
+                        )
                 try:
                     if _same_file_identity(
                         handle,
