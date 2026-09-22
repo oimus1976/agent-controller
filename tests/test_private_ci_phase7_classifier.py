@@ -212,6 +212,42 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
         self.assertIn("validate_phase6_result_authority", source)
         self.assertIn("validate_phase7_result_authority", source)
 
+    def test_synthetic_phase6_phase7_bytes_without_authority_are_rejected(self):
+        phase6 = self.phase6_module()
+        phase7 = self.result_module()
+        classifier = self.classifier_module()
+
+        import hashlib
+
+        phase5_raw = phase5_result_bytes(phase5_evidence())
+        phase6_raw = phase6.phase6_result_bytes(
+            self.phase6_evidence(
+                phase5_result_sha256=hashlib.sha256(phase5_raw).hexdigest()
+            )
+        )
+        phase7_raw = phase7.phase7_result_bytes(
+            self.phase7_evidence(
+                phase6_result_sha256=hashlib.sha256(phase6_raw).hexdigest()
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            from agent_controller import private_ci_result_authority
+
+            with patch.object(
+                private_ci_result_authority,
+                "RESULT_AUTHORITY_ROOT",
+                Path(temporary_directory),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "authority marker missing or unreadable",
+                ):
+                    classifier.classify_final_private_ci_pilot(
+                        phase5_result_bytes=phase5_raw,
+                        phase6_result_bytes=phase6_raw,
+                        phase7_result_bytes=phase7_raw,
+                    )
+
     def test_final_pass_requires_exact_phase5_phase6_phase7_success_chain(self):
         phase6 = self.phase6_module()
         phase7 = self.result_module()
@@ -232,12 +268,35 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temporary_directory:
             from agent_controller import private_ci_final_publication
+            from agent_controller import private_ci_result_authority
 
+            authority_root = Path(temporary_directory)
             with patch.object(
+                private_ci_result_authority,
+                "RESULT_AUTHORITY_ROOT",
+                authority_root,
+            ), patch.object(
                 private_ci_final_publication,
                 "FINAL_PUBLICATION_ROOT",
-                Path(temporary_directory),
+                authority_root,
             ):
+                private_ci_result_authority.publish_phase6_result_authority(
+                    phase6_raw,
+                    phase6_consumption_sha256=(
+                        self.phase6_evidence(
+                            phase5_result_sha256=hashlib.sha256(
+                                phase5_raw
+                            ).hexdigest()
+                        ).phase6_consumption_sha256
+                    ),
+                )
+                private_ci_result_authority.publish_phase7_result_authority(
+                    phase7_raw,
+                    phase6_result_sha256=hashlib.sha256(
+                        phase6_raw
+                    ).hexdigest(),
+                )
+
                 result = classifier.classify_final_private_ci_pilot(
                     phase5_result_bytes=phase5_raw,
                     phase6_result_bytes=phase6_raw,
@@ -275,12 +334,38 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                 phase6_result_sha256=hashlib.sha256(phase6_raw).hexdigest()
             )
         )
-        with self.assertRaisesRegex(ValueError, "binding mismatch"):
-            classifier.classify_final_private_ci_pilot(
-                phase5_result_bytes=phase5_raw,
-                phase6_result_bytes=phase6_raw,
-                phase7_result_bytes=phase7_raw,
-            )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            from agent_controller import private_ci_result_authority
+
+            authority_root = Path(temporary_directory)
+            with patch.object(
+                private_ci_result_authority,
+                "RESULT_AUTHORITY_ROOT",
+                authority_root,
+            ):
+                private_ci_result_authority.publish_phase6_result_authority(
+                    phase6_raw,
+                    phase6_consumption_sha256=(
+                        self.phase6_evidence(
+                            pilot_binding=other,
+                            phase5_result_sha256=hashlib.sha256(
+                                phase5_raw
+                            ).hexdigest(),
+                        ).phase6_consumption_sha256
+                    ),
+                )
+                private_ci_result_authority.publish_phase7_result_authority(
+                    phase7_raw,
+                    phase6_result_sha256=hashlib.sha256(
+                        phase6_raw
+                    ).hexdigest(),
+                )
+                with self.assertRaisesRegex(ValueError, "binding mismatch"):
+                    classifier.classify_final_private_ci_pilot(
+                        phase5_result_bytes=phase5_raw,
+                        phase6_result_bytes=phase6_raw,
+                        phase7_result_bytes=phase7_raw,
+                    )
 
 
 if __name__ == "__main__":
