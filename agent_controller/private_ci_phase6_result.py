@@ -8,6 +8,9 @@ from agent_controller.private_ci_phase4_contract import (
     PrivateCiPilotBinding,
     pilot_binding_reason_codes,
 )
+from agent_controller.private_ci_result_authority import (
+    validate_phase6_result_authority_marker,
+)
 
 
 PHASE6_RESULT_SCHEMA = "agent-controller.private-ci-phase6-result.v1"
@@ -138,4 +141,15 @@ def parse_phase6_result_bytes(raw: bytes) -> Phase6CleanupResultEvidence:
 
     if raw != phase6_result_bytes(evidence):
         raise ValueError("Phase 6 result is not canonical")
+    return evidence
+
+
+def validate_phase6_result_authority(
+    raw: bytes,
+) -> Phase6CleanupResultEvidence:
+    evidence = parse_phase6_result_bytes(raw)
+    validate_phase6_result_authority_marker(
+        raw,
+        phase6_consumption_sha256=evidence.phase6_consumption_sha256,
+    )
     return evidence
