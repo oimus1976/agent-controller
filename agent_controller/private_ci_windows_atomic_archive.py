@@ -504,27 +504,25 @@ def _require_no_external_mutation_handles(
             continue
         candidates_by_pid.setdefault(pid, []).append(entry)
 
-    refreshed_keys: set[tuple[int, int, int, int, int]] | None = None
-
-    def refresh_candidate_keys() -> set[tuple[int, int, int, int, int]]:
-        nonlocal refreshed_keys
-        refreshed_keys = {
-            _handle_entry_key(current)
-            for current in _system_handle_entries()
-        }
-        return refreshed_keys
-
-    def candidate_is_still_live(
+    def candidate_lineage_is_still_live(
         entry: SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX,
-        *,
-        refresh: bool = False,
     ) -> bool:
-        nonlocal refreshed_keys
-        if refresh or refreshed_keys is None:
-            refresh_candidate_keys()
-        if refreshed_keys is None:
-            raise RuntimeError("candidate handle refresh unexpectedly unavailable")
-        return _handle_entry_key(entry) in refreshed_keys
+        object_pointer = int(entry.Object or 0)
+        if object_pointer == 0:
+            raise RuntimeError(
+                f"{description} external mutation handle object identity unavailable"
+            )
+        for current in _system_handle_entries():
+            pid = int(current.UniqueProcessId)
+            if pid == current_pid:
+                continue
+            if int(current.ObjectTypeIndex) != own_type_index:
+                continue
+            if int(current.GrantedAccess) & DIRECTORY_MUTATION_ACCESS == 0:
+                continue
+            if int(current.Object or 0) == object_pointer:
+                return True
+        return False
 
     current_process = _kernel32.GetCurrentProcess()
     matching_pids: set[int] = set()
@@ -539,7 +537,7 @@ def _require_no_external_mutation_handles(
             live = [
                 entry
                 for entry in candidates
-                if candidate_is_still_live(entry)
+                if candidate_lineage_is_still_live(entry)
             ]
             if not live:
                 continue
@@ -579,7 +577,7 @@ def _require_no_external_mutation_handles(
                     False,
                     DUPLICATE_SAME_ACCESS,
                 ):
-                    if not candidate_is_still_live(entry):
+                    if not candidate_lineage_is_still_live(entry):
                         continue
                     duplicate = wintypes.HANDLE()
                     if not _kernel32.DuplicateHandle(
@@ -591,10 +589,7 @@ def _require_no_external_mutation_handles(
                         False,
                         DUPLICATE_SAME_ACCESS,
                     ):
-                        if not candidate_is_still_live(
-                            entry,
-                            refresh=True,
-                        ):
+                        if not candidate_lineage_is_still_live(entry):
                             continue
                         raise RuntimeError(
                             f"{description} has unduplicable external mutation handle: pid={pid} handle={int(entry.HandleValue)}"
