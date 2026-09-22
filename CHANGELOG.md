@@ -40,7 +40,8 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - exact head `b29334b893b3c2114075600ddf2b932250fbfac8` / run #890 はLinux unittest SUCCESS、Windows lane FAILURE。failureはexternal-handle quiescenceのraceとstatic message assertionで、後続headに修正を追加。
 - exact head `ce4af6027914f326c3b7010cace802fe080166bd` / run #894 ではreal external evidence-root mutation-handle regressionを含むruntime checksはPASS。残件はuninspectable-handle error wordingのstatic assertion 1件。
 - exact head `f9bdc0c533ec160e47cdfa0706f33ecde10cf578` / run #896 でもruntime checksはPASSし、残件は同メッセージをsource上でsplit literalにしていたためstatic substring assertionに一致しない1件のみ。
-- exact head `f679789ae2d0bddaa476d4c03a147502a2c6ab50` / run #898 ではstatic wording修正後、real external evidence-root mutation-handle regressionが1回missしてFAIL。single system-handle snapshotだけではpre-open handle取りこぼしを否定できないため、quiescenceをbounded 2-pass confirmationへ強化し、2回目で同じfail-closed検査を再実行する。
+- exact head `f679789ae2d0bddaa476d4c03a147502a2c6ab50` / run #898 ではstatic wording修正後、real external evidence-root mutation-handle regressionが1回missしてFAIL。
+- exact head `1e882ce861d67ff7863f999410e92b184f49f29a` / run #900 でも同real regressionがFAIL。CI timingを再確認した結果、テスト子プロセスがREADY後30秒でwriter handleを自発closeする一方、GitHub Windows runnerのquiescence scanは約2分かかっており、検査到達前にauthorityが消滅するtest-lifetime defectと判明。productionのtwo-pass化では解消せず実行時間を増やすため撤回し、test writerはparentがterminateするまでhandleを保持するよう修正。production側はsingle-pass + DuplicateHandle retry + fresh liveness rereadのfail-closed contractへ戻す。
 - PR #228はDraftのまま。human Ready / mergeおよびWOBBUFFET archive applyは未実施。
 
 ## 2026-09-19 — Phase 4/5 gated private-CI harness foundation（Issue #225 / Draft PR #226）
