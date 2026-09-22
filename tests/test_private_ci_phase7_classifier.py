@@ -180,19 +180,34 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                 replace(evidence, generation_removed=False)
             )
 
-    def test_final_classifier_accepts_exact_evidence_bytes_only(self):
+    def test_final_classifier_owns_durable_single_use_publication(self):
         classifier = self.classifier_module()
+        function = classifier.classify_final_private_ci_pilot
         self.assertEqual(
-            tuple(inspect.signature(
-                classifier.classify_final_private_ci_pilot
-            ).parameters),
+            tuple(inspect.signature(function).parameters),
             (
                 "phase5_result_bytes",
                 "phase6_result_bytes",
                 "phase7_result_bytes",
-                "already_published",
             ),
         )
+        source = inspect.getsource(function)
+        self.assertNotIn("already_published", source)
+        self.assertIn("consume_final_pass_publication", source)
+
+    def test_final_classifier_requires_authoritative_phase6_phase7_provenance(self):
+        phase6 = self.phase6_module()
+        phase7 = self.result_module()
+        classifier = self.classifier_module()
+
+        self.assertTrue(hasattr(phase6, "validate_phase6_result_authority"))
+        self.assertTrue(hasattr(phase7, "validate_phase7_result_authority"))
+
+        source = inspect.getsource(
+            classifier.classify_final_private_ci_pilot
+        )
+        self.assertIn("validate_phase6_result_authority", source)
+        self.assertIn("validate_phase7_result_authority", source)
 
     def test_final_pass_requires_exact_phase5_phase6_phase7_success_chain(self):
         phase6 = self.phase6_module()
@@ -216,17 +231,8 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
             phase5_result_bytes=phase5_raw,
             phase6_result_bytes=phase6_raw,
             phase7_result_bytes=phase7_raw,
-            already_published=False,
         )
         self.assertEqual(result, "SELF_HOSTED_PRIVATE_CI_PASS")
-
-        with self.assertRaisesRegex(ValueError, "already published"):
-            classifier.classify_final_private_ci_pilot(
-                phase5_result_bytes=phase5_raw,
-                phase6_result_bytes=phase6_raw,
-                phase7_result_bytes=phase7_raw,
-                already_published=True,
-            )
 
     def test_final_classifier_rejects_cross_pilot_evidence(self):
         phase6 = self.phase6_module()
@@ -253,7 +259,6 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                 phase5_result_bytes=phase5_raw,
                 phase6_result_bytes=phase6_raw,
                 phase7_result_bytes=phase7_raw,
-                already_published=False,
             )
 
 
