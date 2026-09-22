@@ -504,28 +504,10 @@ def _require_no_external_mutation_handles(
             continue
         candidates_by_pid.setdefault(pid, []).append(entry)
 
-    def candidate_lineage_is_still_live(
-        entry: SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX,
-    ) -> bool:
-        object_pointer = int(entry.Object or 0)
-        if object_pointer == 0:
-            raise RuntimeError(
-                f"{description} external mutation handle object identity unavailable"
-            )
-        for current in _system_handle_entries():
-            pid = int(current.UniqueProcessId)
-            if pid == current_pid:
-                continue
-            if int(current.ObjectTypeIndex) != own_type_index:
-                continue
-            if int(current.GrantedAccess) & DIRECTORY_MUTATION_ACCESS == 0:
-                continue
-            if int(current.Object or 0) == object_pointer:
-                return True
-        return False
-
     current_process = _kernel32.GetCurrentProcess()
     matching_pids: set[int] = set()
+    pending_uninspectable: list[SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX] = []
+    pending_unduplicable: list[SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX] = []
 
     for pid, candidates in candidates_by_pid.items():
         process = _kernel32.OpenProcess(
@@ -534,14 +516,6 @@ def _require_no_external_mutation_handles(
             pid,
         )
         if not process:
-            live = [
-                entry
-                for entry in candidates
-                if candidate_lineage_is_still_live(entry)
-            ]
-            if not live:
-                continue
-
             query_process = _kernel32.OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION,
                 False,
@@ -550,17 +524,15 @@ def _require_no_external_mutation_handles(
             if not query_process:
                 if pid in (0, 4):
                     continue
-                raise RuntimeError(
-                    f"{description} has uninspectable external mutation handle: pid={pid}"
-                )
+                pending_uninspectable.extend(candidates)
+                continue
             try:
                 if _process_is_protected(query_process):
                     continue
             finally:
                 _kernel32.CloseHandle(query_process)
-            raise RuntimeError(
-                f"{description} has uninspectable external mutation handle: pid={pid}"
-            )
+            pending_uninspectable.extend(candidates)
+            continue
 
         try:
             protected = _process_is_protected(process)
@@ -577,8 +549,6 @@ def _require_no_external_mutation_handles(
                     False,
                     DUPLICATE_SAME_ACCESS,
                 ):
-                    if not candidate_lineage_is_still_live(entry):
-                        continue
                     duplicate = wintypes.HANDLE()
                     if not _kernel32.DuplicateHandle(
                         process,
@@ -589,11 +559,8 @@ def _require_no_external_mutation_handles(
                         False,
                         DUPLICATE_SAME_ACCESS,
                     ):
-                        if not candidate_lineage_is_still_live(entry):
-                            continue
-                        raise RuntimeError(
-                            f"{description} has unduplicable external mutation handle: pid={pid} handle={int(entry.HandleValue)}"
-                        )
+                        pending_unduplicable.append(entry)
+                        continue
                 try:
                     if _same_file_identity(
                         handle,
@@ -612,6 +579,45 @@ def _require_no_external_mutation_handles(
             + ",".join(str(pid) for pid in sorted(matching_pids))
         )
 
+    pending = pending_uninspectable + pending_unduplicable
+    if not pending:
+        return
+
+    live_by_object: dict[int, set[int]] = {}
+    for current in _system_handle_entries():
+        pid = int(current.UniqueProcessId)
+        if pid == current_pid:
+            continue
+        if int(current.ObjectTypeIndex) != own_type_index:
+            continue
+        if int(current.GrantedAccess) & DIRECTORY_MUTATION_ACCESS == 0:
+            continue
+        object_pointer = int(current.Object or 0)
+        if object_pointer == 0:
+            continue
+        live_by_object.setdefault(object_pointer, set()).add(pid)
+
+    for entry in pending:
+        object_pointer = int(entry.Object or 0)
+        if object_pointer == 0:
+            raise RuntimeError(
+                f"{description} external mutation handle object identity unavailable"
+            )
+        live_pids = live_by_object.get(object_pointer)
+        if not live_pids:
+            continue
+        original_pid = int(entry.UniqueProcessId)
+        if entry in pending_uninspectable:
+            raise RuntimeError(
+                f"{description} has uninspectable external mutation handle: "
+                f"pid={original_pid} live_pids="
+                + ",".join(str(pid) for pid in sorted(live_pids))
+            )
+        raise RuntimeError(
+            f"{description} has unduplicable external mutation handle: "
+            f"pid={original_pid} handle={int(entry.HandleValue)} live_pids="
+            + ",".join(str(pid) for pid in sorted(live_pids))
+        )
 
 def _create_file(
     path: Path,
