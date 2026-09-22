@@ -127,6 +127,7 @@ class PrivateCiPhase6CandidateWindowsTests(unittest.TestCase):
         self.assertEqual(
             set(report["observed_effect_families"]),
             {
+                "ACL_MUTATION",
                 "FILESYSTEM_DESTRUCTIVE_MUTATION",
                 "HTTP_API_ACCESS",
                 "PROCESS_CONTROL",
