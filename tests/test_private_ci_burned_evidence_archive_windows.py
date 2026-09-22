@@ -226,7 +226,7 @@ finally:
         self.assertIn("mismatched_duplicates", region)
         self.assertIn("current_object_by_handle", region)
         self.assertIn("handed-off external mutation handle", region)
-        self.assertIn("_stable_native_file_identity", region)
+        self.assertIn("_stable_file_id_identity", region)
         self.assertNotIn("_same_file_identity", region)
         self.assertIn("object_pointer", region)
         self.assertIn("external mutation handle object identity unavailable", region)
@@ -234,91 +234,75 @@ finally:
         self.assertIn("uninspectable external mutation handle", region)
         self.assertIn("unduplicable external mutation handle", region)
 
-    def test_native_identity_query_failure_blocks(self):
+    def test_00_file_id_info_supports_mutation_only_directory_handle(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
-        fake_ntdll = SimpleNamespace(
-            NtQueryInformationFile=lambda *args: 0xC0000022,
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mutation_handle = m._kernel32.CreateFileW(
+                str(root),
+                m.FILE_ADD_FILE | m.FILE_ADD_SUBDIRECTORY,
+                m.FILE_SHARE_READ | m.FILE_SHARE_WRITE | 0x00000004,
+                None,
+                m.OPEN_EXISTING,
+                m.FILE_FLAG_BACKUP_SEMANTICS,
+                None,
+            )
+            self.assertNotEqual(mutation_handle, m.INVALID_HANDLE_VALUE)
+            try:
+                normal = m._open_locked_directory(root)
+                try:
+                    self.assertEqual(
+                        m._stable_file_id_identity(
+                            int(mutation_handle),
+                            "mutation-only directory handle",
+                        ),
+                        m._stable_file_id_identity(
+                            int(normal.handle),
+                            "normal directory handle",
+                        ),
+                    )
+                finally:
+                    normal.close()
+            finally:
+                m._kernel32.CloseHandle(mutation_handle)
+
+    def test_file_id_info_query_failure_blocks(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        def fail_query(*args):
+            ctypes.set_last_error(5)
+            return 0
+
+        fake_kernel32 = SimpleNamespace(
+            GetFileInformationByHandleEx=fail_query,
         )
-        with mock.patch.object(m, "_ntdll", fake_ntdll):
+        with mock.patch.object(m, "_kernel32", fake_kernel32):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "FileInternalInformation query failed",
+                "FileIdInfo query failed: winerror=5",
             ):
-                m._native_file_identity_once(
+                m._file_id_identity_once(
                     0x99,
                     "synthetic mutation handle",
                 )
 
-    def test_native_identity_rejects_non_ntfs(self):
-        from agent_controller import private_ci_windows_atomic_archive as m
-
-        fs_name = "FAT32".encode("utf-16-le")
-
-        def query_information(
-            handle,
-            io_status,
-            buffer,
-            length,
-            information_class,
-        ):
-            ctypes.cast(
-                buffer,
-                ctypes.POINTER(ctypes.c_longlong),
-            )[0] = 0x1234
-            io_status._obj.Information = ctypes.sizeof(ctypes.c_longlong)
-            return 0
-
-        def query_volume(
-            handle,
-            io_status,
-            buffer,
-            length,
-            information_class,
-        ):
-            if information_class == m.FILE_FS_VOLUME_INFORMATION_CLASS:
-                payload = bytearray(12)
-                payload[8:12] = (0xAABBCCDD).to_bytes(4, "little")
-            elif information_class == m.FILE_FS_ATTRIBUTE_INFORMATION_CLASS:
-                payload = bytearray(12 + len(fs_name))
-                payload[8:12] = len(fs_name).to_bytes(4, "little")
-                payload[12:] = fs_name
-            else:
-                raise AssertionError("unexpected information class")
-            ctypes.memmove(buffer, bytes(payload), len(payload))
-            io_status._obj.Information = len(payload)
-            return 0
-
-        fake_ntdll = SimpleNamespace(
-            NtQueryInformationFile=query_information,
-            NtQueryVolumeInformationFile=query_volume,
-        )
-        with mock.patch.object(m, "_ntdll", fake_ntdll):
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "unsupported file system for stable native identity: FAT32",
-            ):
-                m._native_file_identity_once(
-                    0x99,
-                    "synthetic mutation handle",
-                )
-
-    def test_stable_native_identity_rejects_change_between_reads(self):
+    def test_stable_file_id_identity_rejects_change_between_reads(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
         with mock.patch.object(
             m,
-            "_native_file_identity_once",
+            "_file_id_identity_once",
             side_effect=[
-                (0xAABBCCDD, 0x1111),
-                (0xAABBCCDD, 0x2222),
+                (0xAABBCCDD, b"1" * 16),
+                (0xAABBCCDD, b"2" * 16),
             ],
         ):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "native file identity changed during verification",
+                "FileIdInfo identity changed during verification",
             ):
-                m._stable_native_file_identity(
+                m._stable_file_id_identity(
                     0x99,
                     "synthetic mutation handle",
                 )
@@ -396,7 +380,7 @@ finally:
                     ],
                 ), mock.patch.object(
                     m,
-                    "_stable_native_file_identity",
+                    "_stable_file_id_identity",
                     return_value=(0xAABBCCDD, 0x1111),
                 ), mock.patch.object(
                     m,
@@ -454,7 +438,7 @@ finally:
                     ],
                 ), mock.patch.object(
                     m,
-                    "_stable_native_file_identity",
+                    "_stable_file_id_identity",
                     return_value=(0xAABBCCDD, 0x1111),
                 ), mock.patch.object(
                     m,
@@ -519,7 +503,7 @@ finally:
                     ],
                 ), mock.patch.object(
                     m,
-                    "_stable_native_file_identity",
+                    "_stable_file_id_identity",
                     return_value=(0xAABBCCDD, 0x1111),
                 ), mock.patch.object(
                     m,
@@ -586,7 +570,7 @@ finally:
                     return_value=False,
                 ), mock.patch.object(
                     m,
-                    "_stable_native_file_identity",
+                    "_stable_file_id_identity",
                     side_effect=[
                         (0xAABBCCDD, 0x1111),
                         (0xAABBCCDD, 0x1111),
@@ -669,7 +653,7 @@ finally:
                     return_value=False,
                 ), mock.patch.object(
                     m,
-                    "_stable_native_file_identity",
+                    "_stable_file_id_identity",
                     side_effect=[
                         (0xAABBCCDD, 0x1111),
                         (0xAABBCCDD, 0x3333),
@@ -745,7 +729,7 @@ finally:
                     return_value=False,
                 ), mock.patch.object(
                     m,
-                    "_stable_native_file_identity",
+                    "_stable_file_id_identity",
                     side_effect=[
                         (0xAABBCCDD, 0x1111),
                         (0xAABBCCDD, 0x2222),
