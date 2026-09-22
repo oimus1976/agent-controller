@@ -169,36 +169,57 @@ finally:
                 encoding="utf-8",
                 errors="replace",
             )
-            try:
-                self.assertEqual(child.stdout.readline().strip(), "READY")
+
+            # This regression validates the real controlled producer handle.
+            # Filter unrelated host-global File handles (for example a
+            # protected PID 4 device/file handle) out of this one test only.
+            # Production remains fail-closed for those handles, and dedicated
+            # focused regressions cover the PID 4/protected-process paths.
+            real_system_handle_entries = m._system_handle_entries
+
+            def controlled_system_handle_entries():
+                allowed_pids = {os.getpid(), child.pid}
+                return tuple(
+                    entry
+                    for entry in real_system_handle_entries()
+                    if int(entry.UniqueProcessId) in allowed_pids
+                )
+
+            with mock.patch.object(
+                m,
+                "_system_handle_entries",
+                side_effect=controlled_system_handle_entries,
+            ):
+                try:
+                    self.assertEqual(child.stdout.readline().strip(), "READY")
+                    handle = m._open_locked_directory(root)
+                    try:
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "external mutation handle",
+                        ):
+                            m._require_no_external_mutation_handles(
+                                handle,
+                                "authoritative evidence root",
+                            )
+                    finally:
+                        handle.close()
+                finally:
+                    child.terminate()
+                    child.wait(timeout=10)
+                    if child.stdout is not None:
+                        child.stdout.close()
+                    if child.stderr is not None:
+                        child.stderr.close()
+
                 handle = m._open_locked_directory(root)
                 try:
-                    with self.assertRaisesRegex(
-                        RuntimeError,
-                        "external mutation handle",
-                    ):
-                        m._require_no_external_mutation_handles(
-                            handle,
-                            "authoritative evidence root",
-                        )
+                    m._require_no_external_mutation_handles(
+                        handle,
+                        "authoritative evidence root",
+                    )
                 finally:
                     handle.close()
-            finally:
-                child.terminate()
-                child.wait(timeout=10)
-                if child.stdout is not None:
-                    child.stdout.close()
-                if child.stderr is not None:
-                    child.stderr.close()
-
-            handle = m._open_locked_directory(root)
-            try:
-                m._require_no_external_mutation_handles(
-                    handle,
-                    "authoritative evidence root",
-                )
-            finally:
-                handle.close()
 
     def test_quiescence_enables_debug_and_fails_closed_on_hidden_live_handles(self):
         from agent_controller import private_ci_windows_atomic_archive as m
