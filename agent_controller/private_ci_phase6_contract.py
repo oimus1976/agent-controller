@@ -32,7 +32,7 @@ PHASE6_TRANSCRIPT_FILENAME = "issue230-phase6-cleanup.log"
 PHASE6_SUCCESS_MARKER = "PHASE6_CLEANUP_PASS"
 PHASE6_EFFECTS = (
     "ACL_MUTATION",
-    "FILESYSTEM_DESTRUCTIVE_MUTATION",
+    "GENERATION_RETIREMENT",
     "HTTP_API_ACCESS",
     "PROCESS_CONTROL",
     "RUNNER_DEREGISTRATION",
@@ -295,6 +295,11 @@ def render_phase6_cleanup_candidate(plan: Phase6CleanupPlan) -> str:
         for status in active_statuses
     }
     qualified_target = f"{binding.host}\\{binding.target_identity}"
+    generation_retirement_helper = str(
+        PureWindowsPath(binding.controller_tree)
+        / "scripts"
+        / "retire_private_ci_generation.py"
+    )
 
     def gh_read(endpoint: str) -> str:
         return (
@@ -329,6 +334,15 @@ def render_phase6_cleanup_candidate(plan: Phase6CleanupPlan) -> str:
         f"$BridgeTargetIdentity = {_ps_single_quoted(binding.target_identity)}",
         f"$BridgeQualifiedTargetIdentity = {_ps_single_quoted(qualified_target)}",
         "$ErrorActionPreference = 'Stop'",
+        "",
+        "function Invoke-PrivateCiGenerationRetirement {",
+        "    $BridgeRetirementOutput = python.exe "
+        + _ps_single_quoted(generation_retirement_helper)
+        + " --generation-root $BridgeGenerationRoot --expected-generation $BridgeEnvironmentGeneration",
+        "    $BridgeRetirementExitCode = $LASTEXITCODE",
+        "    if ($BridgeRetirementExitCode -ne 0) { throw 'Phase 6 generation retirement helper failed; do not retry' }",
+        "    if (@($BridgeRetirementOutput) -notcontains 'PHASE6_GENERATION_RETIREMENT_IDENTITY_BOUND') { throw 'Phase 6 generation retirement proof missing' }",
+        "}",
         "",
         "Write-Host 'progress phase=phase6 step=identity-readback'",
         "$BridgeObservedHost = hostname.exe",
@@ -436,6 +450,12 @@ def render_phase6_cleanup_candidate(plan: Phase6CleanupPlan) -> str:
             "if ($BridgeGenerationTasks.Count -ne 0) { throw 'Phase 6 unexpected generation-bound scheduled task' }",
             "",
             "Write-Host 'progress phase=phase6 step=acl-lock'",
+            "icacls.exe $BridgeGenerationRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' /T /C",
+            "$BridgeGenerationAclGrantExitCode = $LASTEXITCODE",
+            "if ($BridgeGenerationAclGrantExitCode -ne 0) { throw 'Phase 6 generation-root ACL lock failed' }",
+            "icacls.exe $BridgeGenerationRoot /remove:g $BridgeQualifiedTargetIdentity /T /C",
+            "$BridgeGenerationAclRemoveExitCode = $LASTEXITCODE",
+            "if ($BridgeGenerationAclRemoveExitCode -ne 0) { throw 'Phase 6 generation target ACL removal failed' }",
             "icacls.exe $BridgeRunnerRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)'",
             "$BridgeAclRootGrantExitCode = $LASTEXITCODE",
             "if ($BridgeAclRootGrantExitCode -ne 0) { throw 'Phase 6 runner-root ACL lock failed' }",
@@ -494,8 +514,8 @@ def render_phase6_cleanup_candidate(plan: Phase6CleanupPlan) -> str:
             "    if ($BridgeRunnerDeleteExitCode -ne 0) { throw 'Phase 6 runner deregistration failed; do not retry' }",
             "}",
             "",
-            "Write-Host 'progress phase=phase6 step=delete-generation'",
-            "Remove-Item -LiteralPath $BridgeGenerationRoot -Recurse -Force -ErrorAction Stop",
+            "Write-Host 'progress phase=phase6 step=retire-generation'",
+            "Invoke-PrivateCiGenerationRetirement",
             "if (Test-Path -LiteralPath $BridgeGenerationRoot) { throw 'Phase 6 generation removal failed' }",
             "",
             "Write-Host 'progress phase=phase6 step=post-readback'",
