@@ -563,7 +563,7 @@ def _require_no_external_mutation_handles(
                 _kernel32.CloseHandle(query_process)
             raise RuntimeError(
                 f"{description} has uninspectable external mutation "
-                f"handles: pid={pid}"
+                f"handle: pid={pid}"
             )
 
         try:
