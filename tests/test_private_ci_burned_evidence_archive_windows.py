@@ -219,8 +219,9 @@ finally:
         self.assertIn("PROCESS_DUP_HANDLE", region)
         self.assertIn("PROCESS_QUERY_LIMITED_INFORMATION", region)
         self.assertLessEqual(region.count("_system_handle_entries()"), 2)
-        self.assertIn("candidate_is_still_live", region)
-        self.assertIn("refreshed_keys", region)
+        self.assertIn("candidate_lineage_is_still_live", region)
+        self.assertIn("object_pointer", region)
+        self.assertIn("external mutation handle object identity unavailable", region)
         self.assertIn("_process_is_protected", region)
         self.assertIn("uninspectable external mutation handle", region)
         self.assertIn("unduplicable external mutation handle", region)
@@ -362,6 +363,72 @@ finally:
                         handle,
                         "authoritative evidence root",
                     )
+            finally:
+                handle.close()
+
+    def test_handed_off_unduplicable_candidate_blocks_on_same_object_replacement(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handle = m._open_locked_directory(root)
+            try:
+                own = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                own.UniqueProcessId = os.getpid()
+                own.HandleValue = int(handle.handle)
+                own.Object = 0x11111111
+                own.ObjectTypeIndex = 7
+                own.GrantedAccess = 0
+
+                original = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                original.UniqueProcessId = os.getpid() + 1000
+                original.HandleValue = 0x77
+                original.Object = 0x22222222
+                original.ObjectTypeIndex = 7
+                original.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+
+                replacement = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                replacement.UniqueProcessId = os.getpid() + 2000
+                replacement.HandleValue = 0x88
+                replacement.Object = original.Object
+                replacement.ObjectTypeIndex = 7
+                replacement.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+
+                fake_kernel32 = SimpleNamespace(
+                    GetCurrentProcess=lambda: 1,
+                    OpenProcess=lambda *args: 123,
+                    DuplicateHandle=lambda *args: 0,
+                    CloseHandle=lambda *args: 1,
+                )
+                with mock.patch.object(
+                    m,
+                    "_enable_debug_privilege",
+                    return_value=None,
+                ), mock.patch.object(
+                    m,
+                    "_system_handle_entries",
+                    side_effect=[
+                        (own, original),
+                        (own, replacement),
+                        (own, replacement),
+                    ],
+                ), mock.patch.object(
+                    m,
+                    "_process_is_protected",
+                    return_value=False,
+                ), mock.patch.object(
+                    m,
+                    "_kernel32",
+                    fake_kernel32,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "unduplicable external mutation handle",
+                    ):
+                        m._require_no_external_mutation_handles(
+                            handle,
+                            "authoritative evidence root",
+                        )
             finally:
                 handle.close()
 
