@@ -95,14 +95,19 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
             local_readback_complete=True,
         )
 
-    def phase6_evidence(self, *, pilot_binding=None):
+    def phase6_evidence(
+        self,
+        *,
+        pilot_binding=None,
+        phase5_result_sha256="d" * 64,
+    ):
         m = self.phase6_module()
         b = pilot_binding or binding()
         return m.Phase6CleanupResultEvidence(
             schema=m.PHASE6_RESULT_SCHEMA,
             binding=b,
             phase6_plan_sha256="c" * 64,
-            phase5_result_sha256="d" * 64,
+            phase5_result_sha256=phase5_result_sha256,
             human_approval_sha256="e" * 64,
             phase6_consumption_sha256="f" * 64,
             runner_deregistered=True,
@@ -111,11 +116,16 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
             completed_at="2026-09-22T12:30:00+00:00",
         )
 
-    def phase7_evidence(self, *, pilot_binding=None):
+    def phase7_evidence(
+        self,
+        *,
+        pilot_binding=None,
+        phase6_result_sha256="3" * 64,
+    ):
         m = self.result_module()
         return m.build_phase7_zero_residual_result(
             binding=pilot_binding or binding(),
-            phase6_result_sha256="3" * 64,
+            phase6_result_sha256=phase6_result_sha256,
             observation=self.clean_observation(),
         )
 
@@ -189,27 +199,32 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
         phase7 = self.result_module()
         classifier = self.classifier_module()
 
+        import hashlib
+
+        phase5_raw = phase5_result_bytes(phase5_evidence())
+        phase6_raw = phase6.phase6_result_bytes(
+            self.phase6_evidence(
+                phase5_result_sha256=hashlib.sha256(phase5_raw).hexdigest()
+            )
+        )
+        phase7_raw = phase7.phase7_result_bytes(
+            self.phase7_evidence(
+                phase6_result_sha256=hashlib.sha256(phase6_raw).hexdigest()
+            )
+        )
         result = classifier.classify_final_private_ci_pilot(
-            phase5_result_bytes=phase5_result_bytes(phase5_evidence()),
-            phase6_result_bytes=phase6.phase6_result_bytes(
-                self.phase6_evidence()
-            ),
-            phase7_result_bytes=phase7.phase7_result_bytes(
-                self.phase7_evidence()
-            ),
+            phase5_result_bytes=phase5_raw,
+            phase6_result_bytes=phase6_raw,
+            phase7_result_bytes=phase7_raw,
             already_published=False,
         )
         self.assertEqual(result, "SELF_HOSTED_PRIVATE_CI_PASS")
 
         with self.assertRaisesRegex(ValueError, "already published"):
             classifier.classify_final_private_ci_pilot(
-                phase5_result_bytes=phase5_result_bytes(phase5_evidence()),
-                phase6_result_bytes=phase6.phase6_result_bytes(
-                    self.phase6_evidence()
-                ),
-                phase7_result_bytes=phase7.phase7_result_bytes(
-                    self.phase7_evidence()
-                ),
+                phase5_result_bytes=phase5_raw,
+                phase6_result_bytes=phase6_raw,
+                phase7_result_bytes=phase7_raw,
                 already_published=True,
             )
 
@@ -219,15 +234,25 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
         classifier = self.classifier_module()
         other = binding(runner_name="ac-ci-fedcba9876543210")
 
+        import hashlib
+
+        phase5_raw = phase5_result_bytes(phase5_evidence())
+        phase6_raw = phase6.phase6_result_bytes(
+            self.phase6_evidence(
+                pilot_binding=other,
+                phase5_result_sha256=hashlib.sha256(phase5_raw).hexdigest(),
+            )
+        )
+        phase7_raw = phase7.phase7_result_bytes(
+            self.phase7_evidence(
+                phase6_result_sha256=hashlib.sha256(phase6_raw).hexdigest()
+            )
+        )
         with self.assertRaisesRegex(ValueError, "binding mismatch"):
             classifier.classify_final_private_ci_pilot(
-                phase5_result_bytes=phase5_result_bytes(phase5_evidence()),
-                phase6_result_bytes=phase6.phase6_result_bytes(
-                    self.phase6_evidence(pilot_binding=other)
-                ),
-                phase7_result_bytes=phase7.phase7_result_bytes(
-                    self.phase7_evidence()
-                ),
+                phase5_result_bytes=phase5_raw,
+                phase6_result_bytes=phase6_raw,
+                phase7_result_bytes=phase7_raw,
                 already_published=False,
             )
 
