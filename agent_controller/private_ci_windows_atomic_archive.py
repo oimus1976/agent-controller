@@ -31,10 +31,7 @@ STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034
 STATUS_OBJECT_PATH_NOT_FOUND = 0xC000003A
 STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
 SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
-FILE_INTERNAL_INFORMATION_CLASS = 6
-FILE_FS_VOLUME_INFORMATION_CLASS = 1
-FILE_FS_ATTRIBUTE_INFORMATION_CLASS = 5
-NATIVE_IDENTITY_QUERY_BUFFER_SIZE = 4096
+FILE_ID_INFO_CLASS = 0x12
 PROCESS_DUP_HANDLE = 0x0040
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 DUPLICATE_SAME_ACCESS = 0x00000002
@@ -81,6 +78,17 @@ class BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
         ("nNumberOfLinks", wintypes.DWORD),
         ("nFileIndexHigh", wintypes.DWORD),
         ("nFileIndexLow", wintypes.DWORD),
+    ]
+
+
+class FILE_ID_128(ctypes.Structure):
+    _fields_ = [("Identifier", ctypes.c_ubyte * 16)]
+
+
+class FILE_ID_INFO(ctypes.Structure):
+    _fields_ = [
+        ("VolumeSerialNumber", ctypes.c_ulonglong),
+        ("FileId", FILE_ID_128),
     ]
 
 
@@ -202,24 +210,6 @@ if os.name == "nt":
     ]
     _ntdll.NtQuerySystemInformation.restype = ctypes.c_long
 
-    _ntdll.NtQueryInformationFile.argtypes = [
-        wintypes.HANDLE,
-        ctypes.POINTER(IO_STATUS_BLOCK),
-        wintypes.LPVOID,
-        wintypes.ULONG,
-        ctypes.c_int,
-    ]
-    _ntdll.NtQueryInformationFile.restype = ctypes.c_long
-
-    _ntdll.NtQueryVolumeInformationFile.argtypes = [
-        wintypes.HANDLE,
-        ctypes.POINTER(IO_STATUS_BLOCK),
-        wintypes.LPVOID,
-        wintypes.ULONG,
-        ctypes.c_int,
-    ]
-    _ntdll.NtQueryVolumeInformationFile.restype = ctypes.c_long
-
     _kernel32.CreateFileW.argtypes = [
         wintypes.LPCWSTR,
         wintypes.DWORD,
@@ -293,6 +283,14 @@ if os.name == "nt":
         ctypes.POINTER(BY_HANDLE_FILE_INFORMATION),
     ]
     _kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+
+    _kernel32.GetFileInformationByHandleEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    _kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
 
     _kernel32.ReadFile.argtypes = [
         wintypes.HANDLE,
@@ -402,120 +400,37 @@ def _system_handle_entries() -> tuple[SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX, ...]:
     return tuple(entries)
 
 
-def _native_file_identity_once(
+def _file_id_identity_once(
     handle_value: int,
     description: str,
-) -> tuple[int, int]:
-    internal = ctypes.c_longlong()
-    io_status = IO_STATUS_BLOCK()
-    status = _ntdll.NtQueryInformationFile(
+) -> tuple[int, bytes]:
+    info = FILE_ID_INFO()
+    ctypes.set_last_error(0)
+    if not _kernel32.GetFileInformationByHandleEx(
         wintypes.HANDLE(handle_value),
-        ctypes.byref(io_status),
-        ctypes.byref(internal),
-        ctypes.sizeof(internal),
-        FILE_INTERNAL_INFORMATION_CLASS,
-    )
-    code = _ntstatus_code(status)
-    if code != 0:
-        raise RuntimeError(
-            f"{description} FileInternalInformation query failed: "
-            f"0x{code:08x}"
-        )
-    if int(io_status.Information) < ctypes.sizeof(internal):
-        raise RuntimeError(
-            f"{description} FileInternalInformation payload truncated"
-        )
-
-    volume_buffer = ctypes.create_string_buffer(
-        NATIVE_IDENTITY_QUERY_BUFFER_SIZE
-    )
-    io_status = IO_STATUS_BLOCK()
-    status = _ntdll.NtQueryVolumeInformationFile(
-        wintypes.HANDLE(handle_value),
-        ctypes.byref(io_status),
-        volume_buffer,
-        len(volume_buffer),
-        FILE_FS_VOLUME_INFORMATION_CLASS,
-    )
-    code = _ntstatus_code(status)
-    if code != 0:
-        raise RuntimeError(
-            f"{description} FileFsVolumeInformation query failed: "
-            f"0x{code:08x}"
-        )
-    if int(io_status.Information) < 12:
-        raise RuntimeError(
-            f"{description} FileFsVolumeInformation payload truncated"
-        )
-    volume_serial = int.from_bytes(
-        volume_buffer.raw[8:12],
-        "little",
-        signed=False,
-    )
-
-    attribute_buffer = ctypes.create_string_buffer(
-        NATIVE_IDENTITY_QUERY_BUFFER_SIZE
-    )
-    io_status = IO_STATUS_BLOCK()
-    status = _ntdll.NtQueryVolumeInformationFile(
-        wintypes.HANDLE(handle_value),
-        ctypes.byref(io_status),
-        attribute_buffer,
-        len(attribute_buffer),
-        FILE_FS_ATTRIBUTE_INFORMATION_CLASS,
-    )
-    code = _ntstatus_code(status)
-    if code != 0:
-        raise RuntimeError(
-            f"{description} FileFsAttributeInformation query failed: "
-            f"0x{code:08x}"
-        )
-    information_length = int(io_status.Information)
-    if information_length < 12:
-        raise RuntimeError(
-            f"{description} FileFsAttributeInformation payload truncated"
-        )
-    name_length = int.from_bytes(
-        attribute_buffer.raw[8:12],
-        "little",
-        signed=False,
-    )
-    if (
-        name_length <= 0
-        or name_length % 2 != 0
-        or 12 + name_length > information_length
-        or 12 + name_length > len(attribute_buffer)
+        FILE_ID_INFO_CLASS,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
     ):
+        error = ctypes.get_last_error()
         raise RuntimeError(
-            f"{description} file-system name payload invalid"
+            f"{description} FileIdInfo query failed: winerror={error}"
         )
-    try:
-        file_system_name = attribute_buffer.raw[
-            12 : 12 + name_length
-        ].decode("utf-16-le", errors="strict")
-    except UnicodeDecodeError as exc:
-        raise RuntimeError(
-            f"{description} file-system name decode failed"
-        ) from exc
-    if file_system_name.casefold() != "ntfs":
-        raise RuntimeError(
-            f"{description} unsupported file system for stable native identity: "
-            f"{file_system_name}"
-        )
-
-    file_reference = int(internal.value) & 0xFFFFFFFFFFFFFFFF
-    return volume_serial, file_reference
+    return (
+        int(info.VolumeSerialNumber),
+        bytes(info.FileId.Identifier),
+    )
 
 
-def _stable_native_file_identity(
+def _stable_file_id_identity(
     handle_value: int,
     description: str,
-) -> tuple[int, int]:
-    first = _native_file_identity_once(handle_value, description)
-    second = _native_file_identity_once(handle_value, description)
+) -> tuple[int, bytes]:
+    first = _file_id_identity_once(handle_value, description)
+    second = _file_id_identity_once(handle_value, description)
     if first != second:
         raise RuntimeError(
-            f"{description} native file identity changed during verification"
+            f"{description} FileIdInfo identity changed during verification"
         )
     return first
 
@@ -626,7 +541,7 @@ def _require_no_external_mutation_handles(
     if not candidates_by_pid:
         return
 
-    root_native_identity = _stable_native_file_identity(
+    root_file_id_identity = _stable_file_id_identity(
         handle_value,
         f"{description} authoritative root",
     )
@@ -698,8 +613,8 @@ def _require_no_external_mutation_handles(
 
                     duplicate_value = int(duplicate.value)
                     try:
-                        duplicate_native_identity = (
-                            _stable_native_file_identity(
+                        duplicate_file_id_identity = (
+                            _stable_file_id_identity(
                                 duplicate_value,
                                 (
                                     f"{description} duplicated external "
@@ -712,7 +627,7 @@ def _require_no_external_mutation_handles(
                         _kernel32.CloseHandle(duplicate)
                         raise
 
-                    if duplicate_native_identity == root_native_identity:
+                    if duplicate_file_id_identity == root_file_id_identity:
                         _kernel32.CloseHandle(duplicate)
                         matching_pids.add(pid)
                         break
