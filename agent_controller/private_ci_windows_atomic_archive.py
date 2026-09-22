@@ -32,6 +32,7 @@ STATUS_OBJECT_PATH_NOT_FOUND = 0xC000003A
 STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
 SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
 FILE_ID_INFO_CLASS = 0x12
+FILE_ID_INFORMATION_CLASS = 59
 PROCESS_DUP_HANDLE = 0x0040
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 DUPLICATE_SAME_ACCESS = 0x00000002
@@ -209,6 +210,15 @@ if os.name == "nt":
         ctypes.POINTER(wintypes.ULONG),
     ]
     _ntdll.NtQuerySystemInformation.restype = ctypes.c_long
+
+    _ntdll.NtQueryInformationFile.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(IO_STATUS_BLOCK),
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        ctypes.c_int,
+    ]
+    _ntdll.NtQueryInformationFile.restype = ctypes.c_long
 
     _kernel32.CreateFileW.argtypes = [
         wintypes.LPCWSTR,
@@ -400,26 +410,53 @@ def _system_handle_entries() -> tuple[SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX, ...]:
     return tuple(entries)
 
 
+def _validated_file_id_identity(
+    info: FILE_ID_INFO,
+    description: str,
+) -> tuple[int, bytes]:
+    file_id = bytes(info.FileId.Identifier)
+    if file_id == b"\\x00" * 16:
+        raise RuntimeError(
+            f"{description} file identity unavailable: zero 128-bit FileId"
+        )
+    return int(info.VolumeSerialNumber), file_id
+
+
 def _file_id_identity_once(
     handle_value: int,
     description: str,
 ) -> tuple[int, bytes]:
     info = FILE_ID_INFO()
     ctypes.set_last_error(0)
-    if not _kernel32.GetFileInformationByHandleEx(
+    if _kernel32.GetFileInformationByHandleEx(
         wintypes.HANDLE(handle_value),
         FILE_ID_INFO_CLASS,
         ctypes.byref(info),
         ctypes.sizeof(info),
     ):
-        error = ctypes.get_last_error()
-        raise RuntimeError(
-            f"{description} FileIdInfo query failed: winerror={error}"
-        )
-    return (
-        int(info.VolumeSerialNumber),
-        bytes(info.FileId.Identifier),
+        return _validated_file_id_identity(info, description)
+
+    win32_error = ctypes.get_last_error()
+    native_info = FILE_ID_INFO()
+    io_status = IO_STATUS_BLOCK()
+    status = _ntdll.NtQueryInformationFile(
+        wintypes.HANDLE(handle_value),
+        ctypes.byref(io_status),
+        ctypes.byref(native_info),
+        ctypes.sizeof(native_info),
+        FILE_ID_INFORMATION_CLASS,
     )
+    code = _ntstatus_code(status)
+    if code != 0:
+        raise RuntimeError(
+            f"{description} file identity query failed: "
+            f"winerror={win32_error} ntstatus=0x{code:08x}"
+        )
+    if int(io_status.Information) < ctypes.sizeof(native_info):
+        raise RuntimeError(
+            f"{description} native FileIdInformation payload truncated"
+        )
+    return _validated_file_id_identity(native_info, description)
 
 
 def _stable_file_id_identity(
