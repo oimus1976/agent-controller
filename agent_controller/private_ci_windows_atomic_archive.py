@@ -27,9 +27,12 @@ FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
 FILE_NON_DIRECTORY_FILE = 0x00000040
 NT_FILE_OPEN_REPARSE_POINT = 0x00200000
 OBJ_CASE_INSENSITIVE = 0x00000040
+STATUS_NOT_IMPLEMENTED = 0xC0000002
+STATUS_INVALID_INFO_CLASS = 0xC0000003
+STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
+STATUS_INVALID_DEVICE_REQUEST = 0xC0000010
 STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034
 STATUS_OBJECT_PATH_NOT_FOUND = 0xC000003A
-STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
 SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
 FILE_ID_INFO_CLASS = 0x12
 FILE_STANDARD_INFORMATION_CLASS = 5
@@ -447,7 +450,7 @@ def _file_type_once(
 def _native_file_is_directory_once(
     handle_value: int,
     description: str,
-) -> bool:
+) -> bool | None:
     info = FILE_STANDARD_INFORMATION()
     io_status = IO_STATUS_BLOCK()
     status = _ntdll.NtQueryInformationFile(
@@ -458,6 +461,12 @@ def _native_file_is_directory_once(
         FILE_STANDARD_INFORMATION_CLASS,
     )
     code = _ntstatus_code(status)
+    if code in (
+        STATUS_NOT_IMPLEMENTED,
+        STATUS_INVALID_INFO_CLASS,
+        STATUS_INVALID_DEVICE_REQUEST,
+    ):
+        return None
     if code != 0:
         raise RuntimeError(
             f"{description} native FileStandardInformation query failed: "
@@ -653,6 +662,25 @@ def _require_no_external_mutation_handles(
 
     if not candidates_by_pid:
         return
+
+    root_file_type = _file_type_once(
+        handle_value,
+        f"{description} authoritative root",
+    )
+    if root_file_type != FILE_TYPE_DISK:
+        raise RuntimeError(
+            f"{description} authoritative root is not a disk handle: "
+            f"file_type={root_file_type}"
+        )
+    root_is_directory = _native_file_is_directory_once(
+        handle_value,
+        f"{description} authoritative root",
+    )
+    if root_is_directory is not True:
+        raise RuntimeError(
+            f"{description} authoritative root directory classification "
+            f"unavailable"
+        )
 
     root_file_id_identity = _stable_file_id_identity(
         handle_value,
@@ -879,19 +907,15 @@ def _require_no_external_mutation_handles(
                         f"handle={int(entry.HandleValue)} "
                         f"error={directory_error}"
                     )
-                if duplicate_is_directory is False:
-                    # FILE_ADD_FILE/FILE_ADD_SUBDIRECTORY share their bit
-                    # values with FILE_WRITE_DATA/FILE_APPEND_DATA. A proven
-                    # non-directory File object is therefore a safe false
-                    # positive from the raw system-handle access mask filter.
-                    continue
                 if duplicate_is_directory is not True:
-                    raise RuntimeError(
-                        f"{description} duplicated external mutation handle "
-                        f"directory classification unavailable for live "
-                        f"snapshotted Object: pid={int(entry.UniqueProcessId)} "
-                        f"handle={int(entry.HandleValue)}"
-                    )
+                    # The authoritative root was proven to be a disk
+                    # directory whose FileStandardInformation query is
+                    # supported. A retained same-Object candidate that is a
+                    # regular file or whose disk/device does not implement
+                    # FileStandardInformation cannot be that root. This
+                    # allowance is reached only after final Object-lineage
+                    # verification rules out source-slot reuse.
+                    continue
                 if identity_error is not None:
                     raise RuntimeError(
                         f"{description} duplicated external mutation handle "
