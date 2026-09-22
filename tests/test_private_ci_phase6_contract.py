@@ -1,6 +1,7 @@
 import hashlib
 import inspect
 import unittest
+from pathlib import PureWindowsPath
 
 from agent_controller.private_ci_phase4_contract import PrivateCiPilotBinding
 from agent_controller.private_ci_phase5_result import (
@@ -71,6 +72,10 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
         from agent_controller import private_ci_phase6_contract
         return private_ci_phase6_contract
 
+    def plan(self):
+        raw = phase5_result_bytes(phase5_evidence())
+        return self.module().build_phase6_cleanup_plan(raw)
+
     def test_cleanup_plan_is_derived_only_from_exact_phase5_evidence(self):
         m = self.module()
         raw = phase5_result_bytes(phase5_evidence())
@@ -86,12 +91,21 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
         self.assertEqual(plan.runner_id, binding().runner_id)
         self.assertEqual(plan.runner_name, binding().runner_name)
         self.assertEqual(plan.runner_label, binding().runner_label)
+        self.assertEqual(plan.runner_process_id, phase5_evidence().runner_process_id)
         self.assertEqual(
             plan.environment_generation,
             binding().environment_generation,
         )
         self.assertEqual(plan.runner_root, binding().runner_root)
-        self.assertEqual(plan.work_folder, binding().work_folder)
+
+        generation_root = str(PureWindowsPath(binding().runner_root).parent)
+        workspace_root = str(
+            PureWindowsPath(binding().runner_root) / binding().work_folder
+        )
+        self.assertEqual(plan.generation_root, generation_root)
+        self.assertEqual(plan.workspace_root, workspace_root)
+        self.assertTrue(plan.require_zero_services)
+        self.assertTrue(plan.require_zero_tasks)
 
         encoded = m.phase6_cleanup_plan_bytes(plan)
         self.assertEqual(m.parse_phase6_cleanup_plan_bytes(encoded), plan)
@@ -107,6 +121,7 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
             "generation_path",
             "runner_root",
             "work_folder",
+            "workspace_root",
             "process_id",
             "service_name",
             "task_name",
@@ -115,10 +130,26 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
         }
         self.assertTrue(parameters.isdisjoint(forbidden))
 
-    def test_cleanup_operator_spec_is_bounded_and_cannot_publish_final_pass(self):
+    def test_cleanup_plan_requires_canonical_generation_relationship(self):
         m = self.module()
-        raw = phase5_result_bytes(phase5_evidence())
-        plan = m.build_phase6_cleanup_plan(raw)
+        plan = self.plan()
+        expected_generation_root = (
+            r"C:\ProgramData\agent-controller\private-ci\"
+            + binding().environment_generation
+        )
+        self.assertEqual(plan.generation_root, expected_generation_root)
+        self.assertEqual(
+            plan.runner_root,
+            expected_generation_root + r"\runner",
+        )
+        self.assertEqual(
+            plan.workspace_root,
+            expected_generation_root + r"\runner\_work",
+        )
+
+    def test_cleanup_operator_spec_matches_attestable_direct_effects(self):
+        m = self.module()
+        plan = self.plan()
         plan_raw = m.phase6_cleanup_plan_bytes(plan)
 
         spec = m.build_phase6_cleanup_operator_spec(
@@ -128,14 +159,70 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
         self.assertEqual(spec.operation_id, "issue230-phase6-cleanup")
         self.assertEqual(spec.step_id, "cleanup-fresh-pilot")
         self.assertEqual(spec.required_identity, "c-admin")
+        self.assertEqual(
+            spec.allowed_effect_families,
+            (
+                "FILESYSTEM_DESTRUCTIVE_MUTATION",
+                "HTTP_API_ACCESS",
+                "PROCESS_CONTROL",
+                "RUNNER_DEREGISTRATION",
+            ),
+        )
         self.assertTrue(spec.require_parser_attestation)
-        self.assertTrue(spec.require_heartbeat_or_progress)
-        self.assertTrue(spec.require_child_exit_code)
+        self.assertFalse(spec.require_heartbeat_or_progress)
+        self.assertFalse(spec.require_child_exit_code)
         self.assertTrue(spec.require_fail_fast)
         self.assertNotEqual(
             spec.expected_success_marker,
             "SELF_HOSTED_PRIVATE_CI_PASS",
         )
+
+    def test_cleanup_candidate_is_canonical_exact_and_no_broad_sweep(self):
+        m = self.module()
+        plan = self.plan()
+        candidate = m.render_phase6_cleanup_candidate(plan)
+
+        self.assertEqual(candidate, m.render_phase6_cleanup_candidate(plan))
+        required = (
+            binding().repository,
+            binding().runner_name,
+            binding().runner_label,
+            binding().environment_generation,
+            plan.generation_root,
+            plan.runner_root,
+            plan.workspace_root,
+            "actions/runners?per_page=100",
+            "actions/runners/23",
+            "gh.exe api --method DELETE",
+            "Get-CimInstance Win32_Process",
+            "Get-CimInstance Win32_Service",
+            "Get-ScheduledTask",
+            "Stop-Process -Id $BridgeRunnerProcessId",
+            "Remove-Item -LiteralPath $BridgeGenerationRoot -Recurse -Force",
+            "Phase 6 active workflow readback failed",
+            "Phase 6 unexpected generation-bound process",
+            "Phase 6 unexpected generation-bound service",
+            "Phase 6 unexpected generation-bound scheduled task",
+            "Phase 6 generation root reparse point blocked",
+            "progress phase=phase6",
+            "PHASE6_CLEANUP_PASS",
+        )
+        for fragment in required:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, candidate)
+
+        self.assertEqual(candidate.count("gh.exe api --method DELETE"), 1)
+        self.assertEqual(
+            candidate.count(
+                "Remove-Item -LiteralPath $BridgeGenerationRoot -Recurse -Force"
+            ),
+            1,
+        )
+        self.assertNotIn("SELF_HOSTED_PRIVATE_CI_PASS", candidate)
+        self.assertNotIn("Get-ChildItem C:\\", candidate)
+        self.assertNotIn("Stop-Process -Name", candidate)
+        self.assertNotIn("Remove-Item -Path", candidate)
+        self.assertNotIn("-ErrorAction SilentlyContinue", candidate)
 
 
 if __name__ == "__main__":
