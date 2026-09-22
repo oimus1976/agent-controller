@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import inspect
 import tempfile
 import unittest
@@ -5,6 +7,12 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from agent_controller.operator_step_gate import (
+    ResultPublicationCapability,
+    authenticate_result_publication,
+    configure_controller_authority,
+    result_publication_auth_message,
+)
 from agent_controller.private_ci_phase4_contract import PrivateCiPilotBinding
 from agent_controller.private_ci_phase5_result import (
     PHASE5_RESULT_SCHEMA,
@@ -12,6 +20,45 @@ from agent_controller.private_ci_phase5_result import (
     Phase5ResultEvidence,
     phase5_result_bytes,
 )
+
+
+AST_KEY = b"A" * 32
+EVIDENCE_KEY = b"E" * 32
+
+
+def setUpModule():
+    try:
+        configure_controller_authority(
+            ast_hmac_key=AST_KEY,
+            evidence_hmac_key=EVIDENCE_KEY,
+        )
+    except RuntimeError:
+        pass
+
+
+def publication_capability(
+    *,
+    phase: int,
+    result_bytes: bytes,
+    upstream_sha256: str,
+):
+    result_sha256 = hashlib.sha256(result_bytes).hexdigest()
+    message = result_publication_auth_message(
+        phase=phase,
+        result_sha256=result_sha256,
+        upstream_sha256=upstream_sha256,
+    )
+    auth_tag = hmac.new(
+        EVIDENCE_KEY,
+        message,
+        hashlib.sha256,
+    ).hexdigest()
+    return authenticate_result_publication(
+        phase=phase,
+        result_bytes=result_bytes,
+        upstream_sha256=upstream_sha256,
+        auth_tag=auth_tag,
+    )
 
 
 def binding(*, runner_name="ac-ci-0123456789abcdef"):
@@ -217,7 +264,6 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
         phase7 = self.result_module()
         classifier = self.classifier_module()
 
-        import hashlib
 
         phase5_raw = phase5_result_bytes(phase5_evidence())
         phase6_raw = phase6.phase6_result_bytes(
@@ -253,7 +299,6 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
         phase7 = self.result_module()
         classifier = self.classifier_module()
 
-        import hashlib
 
         phase5_raw = phase5_result_bytes(phase5_evidence())
         phase6_evidence = self.phase6_evidence(
@@ -297,6 +342,36 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                         phase5_result_bytes=phase5_raw,
                         phase6_result_bytes=phase6_raw,
                         phase7_result_bytes=phase7_raw,
+                    )
+
+    def test_forged_result_publication_capability_is_rejected(self):
+        phase6 = self.phase6_module()
+        from agent_controller import private_ci_result_authority
+
+        phase5_raw = phase5_result_bytes(phase5_evidence())
+        evidence = self.phase6_evidence(
+            phase5_result_sha256=hashlib.sha256(phase5_raw).hexdigest()
+        )
+        phase6_raw = phase6.phase6_result_bytes(evidence)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with patch.object(
+                private_ci_result_authority,
+                "RESULT_AUTHORITY_ROOT",
+                Path(temporary_directory),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "RESULT_PUBLICATION_UNKNOWN",
+                ):
+                    private_ci_result_authority.publish_phase6_result_authority(
+                        phase6_raw,
+                        phase6_consumption_sha256=(
+                            evidence.phase6_consumption_sha256
+                        ),
+                        publication_capability=ResultPublicationCapability(
+                            token="0" * 64
+                        ),
                     )
 
     def test_authority_marker_primitives_require_protected_root_security(self):
@@ -361,7 +436,6 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
         phase7 = self.result_module()
         classifier = self.classifier_module()
 
-        import hashlib
 
         phase5_raw = phase5_result_bytes(phase5_evidence())
         phase6_raw = phase6.phase6_result_bytes(
@@ -388,21 +462,33 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                 "FINAL_PUBLICATION_ROOT",
                 authority_root,
             ):
+                phase6_consumption_sha256 = (
+                    self.phase6_evidence(
+                        phase5_result_sha256=hashlib.sha256(
+                            phase5_raw
+                        ).hexdigest()
+                    ).phase6_consumption_sha256
+                )
                 private_ci_result_authority.publish_phase6_result_authority(
                     phase6_raw,
-                    phase6_consumption_sha256=(
-                        self.phase6_evidence(
-                            phase5_result_sha256=hashlib.sha256(
-                                phase5_raw
-                            ).hexdigest()
-                        ).phase6_consumption_sha256
+                    phase6_consumption_sha256=phase6_consumption_sha256,
+                    publication_capability=publication_capability(
+                        phase=6,
+                        result_bytes=phase6_raw,
+                        upstream_sha256=phase6_consumption_sha256,
                     ),
                 )
+                phase6_result_sha256 = hashlib.sha256(
+                    phase6_raw
+                ).hexdigest()
                 private_ci_result_authority.publish_phase7_result_authority(
                     phase7_raw,
-                    phase6_result_sha256=hashlib.sha256(
-                        phase6_raw
-                    ).hexdigest(),
+                    phase6_result_sha256=phase6_result_sha256,
+                    publication_capability=publication_capability(
+                        phase=7,
+                        result_bytes=phase7_raw,
+                        upstream_sha256=phase6_result_sha256,
+                    ),
                 )
 
                 result = classifier.classify_final_private_ci_pilot(
@@ -428,7 +514,6 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
         classifier = self.classifier_module()
         other = binding(runner_name="ac-ci-fedcba9876543210")
 
-        import hashlib
 
         phase5_raw = phase5_result_bytes(phase5_evidence())
         phase6_raw = phase6.phase6_result_bytes(
@@ -451,22 +536,34 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                 "RESULT_AUTHORITY_ROOT",
                 authority_root,
             ):
+                phase6_consumption_sha256 = (
+                    self.phase6_evidence(
+                        pilot_binding=other,
+                        phase5_result_sha256=hashlib.sha256(
+                            phase5_raw
+                        ).hexdigest(),
+                    ).phase6_consumption_sha256
+                )
                 private_ci_result_authority.publish_phase6_result_authority(
                     phase6_raw,
-                    phase6_consumption_sha256=(
-                        self.phase6_evidence(
-                            pilot_binding=other,
-                            phase5_result_sha256=hashlib.sha256(
-                                phase5_raw
-                            ).hexdigest(),
-                        ).phase6_consumption_sha256
+                    phase6_consumption_sha256=phase6_consumption_sha256,
+                    publication_capability=publication_capability(
+                        phase=6,
+                        result_bytes=phase6_raw,
+                        upstream_sha256=phase6_consumption_sha256,
                     ),
                 )
+                phase6_result_sha256 = hashlib.sha256(
+                    phase6_raw
+                ).hexdigest()
                 private_ci_result_authority.publish_phase7_result_authority(
                     phase7_raw,
-                    phase6_result_sha256=hashlib.sha256(
-                        phase6_raw
-                    ).hexdigest(),
+                    phase6_result_sha256=phase6_result_sha256,
+                    publication_capability=publication_capability(
+                        phase=7,
+                        result_bytes=phase7_raw,
+                        upstream_sha256=phase6_result_sha256,
+                    ),
                 )
                 with self.assertRaisesRegex(ValueError, "binding mismatch"):
                     classifier.classify_final_private_ci_pilot(
