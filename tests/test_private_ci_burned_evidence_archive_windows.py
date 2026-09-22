@@ -227,6 +227,8 @@ finally:
         self.assertIn("current_object_by_handle", region)
         self.assertIn("handed-off external mutation handle", region)
         self.assertIn("_stable_file_id_identity", region)
+        self.assertIn("_native_file_id_identity_once", source)
+        self.assertIn("FILE_ID_INFORMATION_CLASS = 59", source)
         self.assertNotIn("_same_file_identity", region)
         self.assertIn("object_pointer", region)
         self.assertIn("external mutation handle object identity unavailable", region)
@@ -267,6 +269,110 @@ finally:
             finally:
                 m._kernel32.CloseHandle(mutation_handle)
 
+    def test_01_native_file_id_supports_cross_process_duplicated_mutation_handle(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            child_code = r"""
+import ctypes
+import sys
+import time
+from ctypes import wintypes
+
+path = sys.argv[1]
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.CreateFileW.argtypes = [
+    wintypes.LPCWSTR,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    wintypes.LPVOID,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    wintypes.HANDLE,
+]
+kernel32.CreateFileW.restype = wintypes.HANDLE
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.restype = wintypes.BOOL
+
+handle = kernel32.CreateFileW(
+    path,
+    0x00000002 | 0x00000004,
+    0x00000001 | 0x00000002 | 0x00000004,
+    None,
+    3,
+    0x02000000,
+    None,
+)
+if handle == ctypes.c_void_p(-1).value:
+    raise ctypes.WinError(ctypes.get_last_error())
+print(f"READY {int(handle)}", flush=True)
+try:
+    while True:
+        time.sleep(60)
+finally:
+    kernel32.CloseHandle(handle)
+"""
+            child = subprocess.Popen(
+                [sys.executable, "-c", child_code, str(root)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            process = None
+            duplicate = m.wintypes.HANDLE()
+            try:
+                ready = child.stdout.readline().strip().split()
+                self.assertEqual(ready[0], "READY")
+                source_handle = int(ready[1])
+
+                process = m._kernel32.OpenProcess(
+                    m.PROCESS_DUP_HANDLE
+                    | m.PROCESS_QUERY_LIMITED_INFORMATION,
+                    False,
+                    child.pid,
+                )
+                self.assertTrue(process)
+                self.assertTrue(
+                    m._kernel32.DuplicateHandle(
+                        process,
+                        m.wintypes.HANDLE(source_handle),
+                        m._kernel32.GetCurrentProcess(),
+                        ctypes.byref(duplicate),
+                        0,
+                        False,
+                        m.DUPLICATE_SAME_ACCESS,
+                    )
+                )
+
+                normal = m._open_locked_directory(root)
+                try:
+                    self.assertEqual(
+                        m._native_file_id_identity_once(
+                            int(duplicate.value),
+                            "cross-process duplicated mutation handle",
+                        ),
+                        m._native_file_id_identity_once(
+                            int(normal.handle),
+                            "normal directory handle",
+                        ),
+                    )
+                finally:
+                    normal.close()
+            finally:
+                if duplicate.value:
+                    m._kernel32.CloseHandle(duplicate)
+                if process:
+                    m._kernel32.CloseHandle(process)
+                child.terminate()
+                child.wait(timeout=10)
+                if child.stdout is not None:
+                    child.stdout.close()
+                if child.stderr is not None:
+                    child.stderr.close()
+
     def test_file_id_info_query_failure_blocks(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
@@ -277,10 +383,21 @@ finally:
         fake_kernel32 = SimpleNamespace(
             GetFileInformationByHandleEx=fail_query,
         )
-        with mock.patch.object(m, "_kernel32", fake_kernel32):
+        fake_ntdll = SimpleNamespace(
+            NtQueryInformationFile=lambda *args: 0xC000000D,
+        )
+        with mock.patch.object(
+            m,
+            "_kernel32",
+            fake_kernel32,
+        ), mock.patch.object(
+            m,
+            "_ntdll",
+            fake_ntdll,
+        ):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "FileIdInfo query failed: winerror=5",
+                "file identity query failed: winerror=5",
             ):
                 m._file_id_identity_once(
                     0x99,
