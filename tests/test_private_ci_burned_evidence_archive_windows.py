@@ -223,7 +223,7 @@ finally:
         self.assertIn('("uninspectable", entry)', region)
         self.assertIn('("unduplicable", entry)', region)
         self.assertIn("live_by_object", region)
-        self.assertIn("mismatched_duplicates", region)
+        self.assertIn("retained_duplicates", region)
         self.assertIn("current_object_by_handle", region)
         self.assertIn("handed-off external mutation handle", region)
         self.assertIn("_stable_file_id_identity", region)
@@ -588,6 +588,154 @@ finally:
                             handle,
                             "authoritative evidence root",
                         )
+            finally:
+                handle.close()
+
+    def test_file_id_failure_same_object_blocks_after_lineage_confirmation(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handle = m._open_locked_directory(root)
+            try:
+                own = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                own.UniqueProcessId = os.getpid()
+                own.HandleValue = int(handle.handle)
+                own.Object = 0x11111111
+                own.ObjectTypeIndex = 7
+                own.GrantedAccess = 0
+
+                original = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                original.UniqueProcessId = os.getpid() + 1000
+                original.HandleValue = 0x77
+                original.Object = 0x22222222
+                original.ObjectTypeIndex = 7
+                original.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+
+                duplicate_entry = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                duplicate_entry.UniqueProcessId = os.getpid()
+                duplicate_entry.HandleValue = 0x99
+                duplicate_entry.Object = original.Object
+                duplicate_entry.ObjectTypeIndex = 7
+                duplicate_entry.GrantedAccess = 0
+
+                def duplicate_handle(*args):
+                    args[3]._obj.value = 0x99
+                    return 1
+
+                fake_kernel32 = SimpleNamespace(
+                    GetCurrentProcess=lambda: 1,
+                    OpenProcess=lambda *args: 123,
+                    DuplicateHandle=duplicate_handle,
+                    CloseHandle=lambda *args: 1,
+                )
+                with mock.patch.object(
+                    m,
+                    "_enable_debug_privilege",
+                    return_value=None,
+                ), mock.patch.object(
+                    m,
+                    "_system_handle_entries",
+                    side_effect=[
+                        (own, original),
+                        (own, duplicate_entry, original),
+                    ],
+                ), mock.patch.object(
+                    m,
+                    "_process_is_protected",
+                    return_value=False,
+                ), mock.patch.object(
+                    m,
+                    "_stable_file_id_identity",
+                    side_effect=[
+                        (0xAABBCCDD, b"1" * 16),
+                        RuntimeError("synthetic FileIdInfo failure"),
+                    ],
+                ), mock.patch.object(
+                    m,
+                    "_kernel32",
+                    fake_kernel32,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "identity unavailable for live snapshotted Object",
+                    ):
+                        m._require_no_external_mutation_handles(
+                            handle,
+                            "authoritative evidence root",
+                        )
+            finally:
+                handle.close()
+
+    def test_file_id_failure_on_reused_slot_is_ignored_after_original_lineage_dies(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handle = m._open_locked_directory(root)
+            try:
+                own = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                own.UniqueProcessId = os.getpid()
+                own.HandleValue = int(handle.handle)
+                own.Object = 0x11111111
+                own.ObjectTypeIndex = 7
+                own.GrantedAccess = 0
+
+                original = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                original.UniqueProcessId = os.getpid() + 1000
+                original.HandleValue = 0x77
+                original.Object = 0x22222222
+                original.ObjectTypeIndex = 7
+                original.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+
+                duplicate_entry = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                duplicate_entry.UniqueProcessId = os.getpid()
+                duplicate_entry.HandleValue = 0x99
+                duplicate_entry.Object = 0x33333333
+                duplicate_entry.ObjectTypeIndex = 7
+                duplicate_entry.GrantedAccess = 0
+
+                def duplicate_handle(*args):
+                    args[3]._obj.value = 0x99
+                    return 1
+
+                fake_kernel32 = SimpleNamespace(
+                    GetCurrentProcess=lambda: 1,
+                    OpenProcess=lambda *args: 123,
+                    DuplicateHandle=duplicate_handle,
+                    CloseHandle=lambda *args: 1,
+                )
+                with mock.patch.object(
+                    m,
+                    "_enable_debug_privilege",
+                    return_value=None,
+                ), mock.patch.object(
+                    m,
+                    "_system_handle_entries",
+                    side_effect=[
+                        (own, original),
+                        (own, duplicate_entry),
+                    ],
+                ), mock.patch.object(
+                    m,
+                    "_process_is_protected",
+                    return_value=False,
+                ), mock.patch.object(
+                    m,
+                    "_stable_file_id_identity",
+                    side_effect=[
+                        (0xAABBCCDD, b"1" * 16),
+                        RuntimeError("synthetic FileIdInfo failure"),
+                    ],
+                ), mock.patch.object(
+                    m,
+                    "_kernel32",
+                    fake_kernel32,
+                ):
+                    m._require_no_external_mutation_handles(
+                        handle,
+                        "authoritative evidence root",
+                    )
             finally:
                 handle.close()
 
