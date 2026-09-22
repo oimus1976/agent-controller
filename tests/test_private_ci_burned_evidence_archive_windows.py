@@ -155,7 +155,8 @@ if handle == ctypes.c_void_p(-1).value:
     raise ctypes.WinError(ctypes.get_last_error())
 print("READY", flush=True)
 try:
-    time.sleep(30)
+    while True:
+        time.sleep(60)
 finally:
     kernel32.CloseHandle(handle)
 """
@@ -346,7 +347,6 @@ finally:
                     "_system_handle_entries",
                     side_effect=[
                         (own, stale),
-                        (own,),
                         (own,),
                     ],
                 ), mock.patch.object(
