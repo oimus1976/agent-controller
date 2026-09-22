@@ -23,25 +23,35 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 - #216 restart時の固定canonical evidenceを、approval / protected consumption authorityを除外したstrict allowlistだけでgeneration-scoped archiveへ退避するcontroller-owned helperを追加。
 - plan/apply間のsource hash・size・controller source binding、elevated Windows runtime、handle-bound source retirement、handle-relative archive creation、authoritative PASSの遅延publishをfail-closedで固定。
-- external evidence-root mutation handle quiescenceを追加し、SeDebugPrivilege有効化後にpre-open handleを検査。OpenProcess / DuplicateHandleで検査不能なlive handleは見逃さずBLOCKEDとする。
-- PR #228 exact-head CI #890で、quiescenceの生存確認snapshotを複数candidate間で再利用することでclosed handleをliveと誤認し得るraceを確認。初回のfresh rereadは共有しつつ、DuplicateHandleを1回だけ再試行し、その再試行も失敗した場合だけforced fresh rereadして、なおliveかつ複製不能な場合のみBLOCKEDとする修正を追加。
-- user-controlled Git replacement objectによるsource authentication迂回を防ぐため、trusted Git environmentとlocal object-sensitive commandの双方でreplacement objectsを無効化。
+- read-only empty inventoryは逐次scanだけではatomic absenceを証明できないためclear/no-opを主張せずBLOCKする。locked authoritative boundaryでのみabsenceをauthorityとして扱う。
+- incomplete prior helper archive residueを検出し、manifest / retirement-complete / archived copyの整合がない場合はmanual recoveryを要求してreuse/no-opをBLOCKする。
+- trusted Git environmentとlocal object-sensitive commandの双方でreplacement objectsを無効化し、reviewed controller source bytesをcanonical remote-main tree/blobと同一handleから再認証する。
+- UAC bootstrapはexact plan-bound source bytesから生成し、administrator-only CreateNew snapshotへ固定。trusted Program Files Python runtime、reparse/ACL検査、isolated cwd/PATH、`-I -S -B`を要求する。
+- evidence-root DACLをtransaction中だけAdministrator/Systemへ制限し、元ACLをfail-closedで復元する。
+- pre-open external mutation handle quiescenceを追加。SeDebugPrivilegeを必須化し、native system handle tableの初回snapshotと必要時のfinal snapshotの最大2回だけでlineageを確認する。
+- Object-manager File handleのaccess-mask bit aliasをそのままdirectory authorityと見なさず、authoritative rootをdisk directoryへbindingし、candidateはGetFileType + native FileStandardInformation + stable 128-bit FileIdで分類する。
+- cross-process duplicated mutation-only directory handleではWin32 FileIdInfoが失敗し得る実機characterizationを受け、同じ64-bit volume serial + 128-bit FileIdを返すnative FileIdInformation fallbackを追加。query failure / unstable identity / zero FileIdはfail-closed。
+- successful DuplicateHandle後のslot reuse / handle handoffを見逃さないよう、retained duplicateとsnapshotted kernel Object lineageをfinal snapshotまで保持し、元Objectが別PID/slotでliveならBLOCKする。
+- uninspectable / unduplicable candidateはlive original Object lineageが残る限りBLOCKする。PID 4およびprotected processも例外扱いせずpendingへ保持する。
+- ambient host-global File handlesによるreal regressionの偽陽性を避けるため、controlled cross-process lifecycle testだけはcurrent test process + spawned child PIDへraw snapshotをtest-onlyで絞る。productionのfail-closed global inspectionは変更しない。
+- authoritative PASS resultはnon-authoritative pending nameへ書いた後、full canonical allowlist gate・archive/manifest再検証・quiescence再確認を通過してからatomic publishする。
 
 ### Safety / authority boundary
 
 - helperはGitHub mutation、runner mutation、credential取得/利用、workflow dispatch、target execution、pilot final PASSを行わない。
 - approval filesとprotected consumption markersはarchival scope外のまま維持し、burned authorityの再利用を許可しない。
-- WOBBUFFET上の実archive apply、Ready、mergeはhuman-final。Draft PR上の実装・CI・reviewだけではlive effectを許可しない。
+- actual WOBBUFFET archive applyは別のexact human action。Draft PR上の実装・CI・reviewはowner-machine mutationを許可しない。
+- Ready / mergeはADR #90によりhuman-final。
 
-### Validation status
+### Validation / review history
 
-- prior exact head `fc3394aac602a44af94212c1b202ac0b571a4f74` / deterministic-tests #862 はSUCCESS。
-- Codex rereviewでGit replacement objectsとunduplicable external mutation handleのP1 2件を受領し、後続headでremediationを継続。
-- exact head `b29334b893b3c2114075600ddf2b932250fbfac8` / run #890 はLinux unittest SUCCESS、Windows lane FAILURE。failureはexternal-handle quiescenceのraceとstatic message assertionで、後続headに修正を追加。
-- exact head `ce4af6027914f326c3b7010cace802fe080166bd` / run #894 ではreal external evidence-root mutation-handle regressionを含むruntime checksはPASS。残件はuninspectable-handle error wordingのstatic assertion 1件。
-- exact head `f9bdc0c533ec160e47cdfa0706f33ecde10cf578` / run #896 でもruntime checksはPASSし、残件は同メッセージをsource上でsplit literalにしていたためstatic substring assertionに一致しない1件のみ。
-- exact head `f679789ae2d0bddaa476d4c03a147502a2c6ab50` / run #898 ではstatic wording修正後、real external evidence-root mutation-handle regressionが1回missしてFAIL。
-- exact head `1e882ce861d67ff7863f999410e92b184f49f29a` / run #900 でも同real regressionがFAIL。CI timingを再確認した結果、テスト子プロセスがREADY後30秒でwriter handleを自発closeする一方、GitHub Windows runnerのquiescence scanは約2分かかっており、検査到達前にauthorityが消滅するtest-lifetime defectと判明。productionのtwo-pass化では解消せず実行時間を増やすため撤回し、test writerはparentがterminateするまでhandleを保持するよう修正。production側はsingle-pass + DuplicateHandle retry + fresh liveness rereadのfail-closed contractへ戻す。
+- earlier CI/review roundsで、archive residue/no-op bypass、source retirement TOCTOU、destination/reparse containment、elevated runtime trust、canonical-name recreation、premature PASS、Git replacement objects、pre-open writers、handle handoff/slot reuse、duplicated-handle identity failure、PID 4/protected-process exemptions等のP1/P2を順次検出・remediation。
+- run #898 / #900のreal external-handle regression failureは、test writerがREADY後30秒でhandleを自発closeするtest-lifetime defectと判明。productionの追加full scanは採用せず、test writerをparent terminateまで保持する形へ修正。
+- run #923以降のWindows characterizationで、directory access bitsとordinary-file write bitsのalias、cross-process duplicate時のWin32/native query差、ambient host-global candidate偽陽性を切り分け、disk/directory classification・128-bit identity・Object-lineage contractを固定。
+- exact head `ceebfba18629ebee05d9a3b4ec4ba68a2a0449bf` / run #931 はLinux/Windows SUCCESS。Codex rereviewでPID 4 uninspectable candidate exemptionのP1を検出。
+- exact head `fd0fb5b931406210830c981ec2f1a4027457f71c` / run #933 はLinux/Windows SUCCESS。Codex rereviewでprotected-process candidate exemptionのP1を検出。
+- protected-process remediation後、controlled real regressionをtest-only isolationした exact head `2ab220e418a2f8768d070b9b79f0e0582cc42de9` / deterministic-tests #936 はLinux/WindowsともSUCCESS。
+- Codex exact-head rereview of `2ab220e418`: **Didn't find any major issues.**
 - PR #228はDraftのまま。human Ready / mergeおよびWOBBUFFET archive applyは未実施。
 
 ## 2026-09-19 — Phase 4/5 gated private-CI harness foundation（Issue #225 / Draft PR #226）
