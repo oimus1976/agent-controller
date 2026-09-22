@@ -633,6 +633,132 @@ finally:
             finally:
                 handle.close()
 
+    def test_live_pid4_mutation_candidate_blocks_when_uninspectable(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handle = m._open_locked_directory(root)
+            try:
+                own = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                own.UniqueProcessId = os.getpid()
+                own.HandleValue = int(handle.handle)
+                own.Object = 0x11111111
+                own.ObjectTypeIndex = 7
+                own.GrantedAccess = 0
+
+                system_candidate = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                system_candidate.UniqueProcessId = 4
+                system_candidate.HandleValue = 0x77
+                system_candidate.Object = 0x22222222
+                system_candidate.ObjectTypeIndex = 7
+                system_candidate.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+
+                fake_kernel32 = SimpleNamespace(
+                    GetCurrentProcess=lambda: 1,
+                    OpenProcess=lambda *args: 0,
+                    CloseHandle=lambda *args: 1,
+                )
+                with mock.patch.object(
+                    m,
+                    "_enable_debug_privilege",
+                    return_value=None,
+                ), mock.patch.object(
+                    m,
+                    "_system_handle_entries",
+                    side_effect=[
+                        (own, system_candidate),
+                        (own, system_candidate),
+                    ],
+                ), mock.patch.object(
+                    m,
+                    "_file_type_once",
+                    return_value=m.FILE_TYPE_DISK,
+                ), mock.patch.object(
+                    m,
+                    "_native_file_is_directory_once",
+                    return_value=True,
+                ), mock.patch.object(
+                    m,
+                    "_stable_file_id_identity",
+                    return_value=(0xAABBCCDD, b"1" * 16),
+                ), mock.patch.object(
+                    m,
+                    "_kernel32",
+                    fake_kernel32,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "uninspectable external mutation handle",
+                    ):
+                        m._require_no_external_mutation_handles(
+                            handle,
+                            "authoritative evidence root",
+                        )
+            finally:
+                handle.close()
+
+    def test_stale_pid4_mutation_candidate_clears_after_single_refresh(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handle = m._open_locked_directory(root)
+            try:
+                own = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                own.UniqueProcessId = os.getpid()
+                own.HandleValue = int(handle.handle)
+                own.Object = 0x11111111
+                own.ObjectTypeIndex = 7
+                own.GrantedAccess = 0
+
+                system_candidate = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                system_candidate.UniqueProcessId = 4
+                system_candidate.HandleValue = 0x77
+                system_candidate.Object = 0x22222222
+                system_candidate.ObjectTypeIndex = 7
+                system_candidate.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+
+                fake_kernel32 = SimpleNamespace(
+                    GetCurrentProcess=lambda: 1,
+                    OpenProcess=lambda *args: 0,
+                    CloseHandle=lambda *args: 1,
+                )
+                with mock.patch.object(
+                    m,
+                    "_enable_debug_privilege",
+                    return_value=None,
+                ), mock.patch.object(
+                    m,
+                    "_system_handle_entries",
+                    side_effect=[
+                        (own, system_candidate),
+                        (own,),
+                    ],
+                ), mock.patch.object(
+                    m,
+                    "_file_type_once",
+                    return_value=m.FILE_TYPE_DISK,
+                ), mock.patch.object(
+                    m,
+                    "_native_file_is_directory_once",
+                    return_value=True,
+                ), mock.patch.object(
+                    m,
+                    "_stable_file_id_identity",
+                    return_value=(0xAABBCCDD, b"1" * 16),
+                ), mock.patch.object(
+                    m,
+                    "_kernel32",
+                    fake_kernel32,
+                ):
+                    m._require_no_external_mutation_handles(
+                        handle,
+                        "authoritative evidence root",
+                    )
+            finally:
+                handle.close()
+
     def test_stale_unduplicable_candidate_is_skipped_after_single_refresh(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
