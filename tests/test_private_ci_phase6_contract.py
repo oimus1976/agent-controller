@@ -163,7 +163,7 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
             spec.allowed_effect_families,
             (
                 "ACL_MUTATION",
-                "FILESYSTEM_DESTRUCTIVE_MUTATION",
+                "GENERATION_RETIREMENT",
                 "HTTP_API_ACCESS",
                 "PROCESS_CONTROL",
                 "RUNNER_DEREGISTRATION",
@@ -200,7 +200,9 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
             "Get-ScheduledTask",
             "Stop-Process -Id $BridgeRunnerProcessId",
             "icacls.exe $BridgeRunnerRoot /inheritance:r /grant:r",
-            "Remove-Item -LiteralPath $BridgeGenerationRoot -Recurse -Force",
+            "Invoke-PrivateCiGenerationRetirement",
+            "PHASE6_GENERATION_RETIREMENT_IDENTITY_BOUND",
+            "Phase 6 runner absent without exact prior cleanup evidence",
             "Phase 6 target PR binding drift",
             "Phase 6 trusted workflow SHA drift",
             "Phase 6 active workflow readback failed",
@@ -216,12 +218,11 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
                 self.assertIn(fragment, candidate)
 
         self.assertEqual(candidate.count("gh.exe api --method DELETE"), 1)
-        self.assertEqual(
-            candidate.count(
-                "Remove-Item -LiteralPath $BridgeGenerationRoot -Recurse -Force"
-            ),
-            1,
+        self.assertNotIn(
+            "Remove-Item -LiteralPath $BridgeGenerationRoot",
+            candidate,
         )
+        self.assertNotIn("Remove-Item -Recurse", candidate)
         self.assertNotIn("SELF_HOSTED_PRIVATE_CI_PASS", candidate)
         self.assertNotIn("Get-ChildItem C:\\", candidate)
         self.assertNotIn("Stop-Process -Name", candidate)
