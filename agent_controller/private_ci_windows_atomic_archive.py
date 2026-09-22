@@ -34,6 +34,10 @@ SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
 FILE_ID_INFO_CLASS = 0x12
 FILE_STANDARD_INFORMATION_CLASS = 5
 FILE_ID_INFORMATION_CLASS = 59
+FILE_TYPE_UNKNOWN = 0x0000
+FILE_TYPE_DISK = 0x0001
+FILE_TYPE_CHAR = 0x0002
+FILE_TYPE_PIPE = 0x0003
 PROCESS_DUP_HANDLE = 0x0040
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 DUPLICATE_SAME_ACCESS = 0x00000002
@@ -255,6 +259,9 @@ if os.name == "nt":
     _kernel32.GetCurrentProcess.argtypes = []
     _kernel32.GetCurrentProcess.restype = wintypes.HANDLE
 
+    _kernel32.GetFileType.argtypes = [wintypes.HANDLE]
+    _kernel32.GetFileType.restype = wintypes.DWORD
+
     _kernel32.DuplicateHandle.argtypes = [
         wintypes.HANDLE,
         wintypes.HANDLE,
@@ -419,6 +426,22 @@ def _system_handle_entries() -> tuple[SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX, ...]:
             )
         )
     return tuple(entries)
+
+
+def _file_type_once(
+    handle_value: int,
+    description: str,
+) -> int:
+    ctypes.set_last_error(0)
+    file_type = int(
+        _kernel32.GetFileType(wintypes.HANDLE(handle_value))
+    )
+    error = ctypes.get_last_error()
+    if file_type == FILE_TYPE_UNKNOWN and error != 0:
+        raise RuntimeError(
+            f"{description} GetFileType failed: winerror={error}"
+        )
+    return file_type
 
 
 def _native_file_is_directory_once(
@@ -643,6 +666,8 @@ def _require_no_external_mutation_handles(
         tuple[
             SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX,
             int,
+            int | None,
+            str | None,
             bool | None,
             str | None,
             tuple[int, bytes] | None,
@@ -709,6 +734,8 @@ def _require_no_external_mutation_handles(
                             continue
 
                     duplicate_value = int(duplicate.value)
+                    duplicate_file_type = None
+                    file_type_error = None
                     duplicate_is_directory = None
                     directory_error = None
                     duplicate_file_id_identity = None
@@ -718,20 +745,32 @@ def _require_no_external_mutation_handles(
                         f"pid={pid} handle={int(entry.HandleValue)}"
                     )
                     try:
-                        duplicate_is_directory = (
-                            _native_file_is_directory_once(
-                                duplicate_value,
-                                duplicate_description,
-                            )
+                        duplicate_file_type = _file_type_once(
+                            duplicate_value,
+                            duplicate_description,
                         )
                     except Exception as exc:
                         # The source slot may have been reused before
                         # DuplicateHandle. Defer fail-closed classification
                         # until the final snapshot proves which Object was
                         # actually duplicated.
-                        directory_error = str(exc)
+                        file_type_error = str(exc)
 
-                    if duplicate_is_directory:
+                    if duplicate_file_type == FILE_TYPE_DISK:
+                        try:
+                            duplicate_is_directory = (
+                                _native_file_is_directory_once(
+                                    duplicate_value,
+                                    duplicate_description,
+                                )
+                            )
+                        except Exception as exc:
+                            directory_error = str(exc)
+
+                    if (
+                        duplicate_file_type == FILE_TYPE_DISK
+                        and duplicate_is_directory
+                    ):
                         try:
                             duplicate_file_id_identity = (
                                 _stable_file_id_identity(
@@ -743,7 +782,8 @@ def _require_no_external_mutation_handles(
                             identity_error = str(exc)
 
                     if (
-                        duplicate_is_directory is True
+                        duplicate_file_type == FILE_TYPE_DISK
+                        and duplicate_is_directory is True
                         and duplicate_file_id_identity is not None
                         and duplicate_file_id_identity
                         == root_file_id_identity
@@ -756,6 +796,8 @@ def _require_no_external_mutation_handles(
                         (
                             entry,
                             duplicate_value,
+                            duplicate_file_type,
+                            file_type_error,
                             duplicate_is_directory,
                             directory_error,
                             duplicate_file_id_identity,
@@ -796,6 +838,8 @@ def _require_no_external_mutation_handles(
         for (
             entry,
             duplicate_value,
+            duplicate_file_type,
+            file_type_error,
             duplicate_is_directory,
             directory_error,
             duplicate_file_id_identity,
@@ -813,6 +857,20 @@ def _require_no_external_mutation_handles(
                     f"handle={duplicate_value}"
                 )
             if duplicate_object == original_object:
+                if file_type_error is not None:
+                    raise RuntimeError(
+                        f"{description} duplicated external mutation handle "
+                        f"file type unavailable for live snapshotted Object: "
+                        f"pid={int(entry.UniqueProcessId)} "
+                        f"handle={int(entry.HandleValue)} "
+                        f"error={file_type_error}"
+                    )
+                if duplicate_file_type != FILE_TYPE_DISK:
+                    # Object-manager File handles also cover pipes, sockets,
+                    # consoles, and devices. Their access-mask bit values can
+                    # alias directory mutation bits, but a proven non-disk
+                    # handle cannot be the authoritative evidence directory.
+                    continue
                 if directory_error is not None:
                     raise RuntimeError(
                         f"{description} duplicated external mutation handle "
@@ -889,7 +947,7 @@ def _require_no_external_mutation_handles(
                 + ",".join(str(pid) for pid in sorted(live_pids))
             )
     finally:
-        for _, duplicate_value, _, _, _, _ in retained_duplicates:
+        for _, duplicate_value, _, _, _, _, _, _ in retained_duplicates:
             _kernel32.CloseHandle(wintypes.HANDLE(duplicate_value))
 
 def _create_file(
