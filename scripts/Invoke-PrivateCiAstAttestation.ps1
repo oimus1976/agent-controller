@@ -270,7 +270,18 @@ foreach ($CommandAst in $CommandAsts) {
     elseif ($LowerName -eq 'python.exe') {
         $CommandText = $CommandAst.Extent.Text
         $IsGenerationRetirement = (
-            $CommandText -match '(?i)^\s*python\.exe\s+[''"]C:\\Users\\c-admin\\[A-Za-z0-9_.-]+\\scripts\\retire_private_ci_generation\.py[''"]\s+--generation-root\s+\$BridgeGenerationRoot\s+--expected-generation\s+\$BridgeEnvironmentGeneration\s*
+            $CommandText -match '(?i)^\s*python\.exe\s+[''"]C:\\Users\\c-admin\\[A-Za-z0-9_.-]+\\scripts\\retire_private_ci_generation\.py[''"]\s+--generation-root\s+\$BridgeGenerationRoot\s+--expected-generation\s+\$BridgeEnvironmentGeneration\s*$'
+        )
+        if ($IsGenerationRetirement) {
+            if (-not $ObservedEffects.Contains('GENERATION_RETIREMENT')) {
+                $ObservedEffects.Add('GENERATION_RETIREMENT')
+            }
+        }
+        elseif (-not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+            $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+        }
+    }
+    elseif ($LowerName -eq 'start-process') {
         if (-not $ObservedEffects.Contains('PROCESS_LAUNCH')) {
             $ObservedEffects.Add('PROCESS_LAUNCH')
         }
