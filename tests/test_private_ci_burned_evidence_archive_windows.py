@@ -698,6 +698,145 @@ finally:
             finally:
                 handle.close()
 
+    def test_query_only_protected_process_candidate_blocks(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handle = m._open_locked_directory(root)
+            try:
+                own = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                own.UniqueProcessId = os.getpid()
+                own.HandleValue = int(handle.handle)
+                own.Object = 0x11111111
+                own.ObjectTypeIndex = 7
+                own.GrantedAccess = 0
+
+                protected_candidate = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                protected_candidate.UniqueProcessId = 4
+                protected_candidate.HandleValue = 0x77
+                protected_candidate.Object = 0x22222222
+                protected_candidate.ObjectTypeIndex = 7
+                protected_candidate.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+
+                open_calls = iter((0, 123))
+                fake_kernel32 = SimpleNamespace(
+                    GetCurrentProcess=lambda: 1,
+                    OpenProcess=lambda *args: next(open_calls),
+                    CloseHandle=lambda *args: 1,
+                )
+                with mock.patch.object(
+                    m,
+                    "_enable_debug_privilege",
+                    return_value=None,
+                ), mock.patch.object(
+                    m,
+                    "_system_handle_entries",
+                    side_effect=[
+                        (own, protected_candidate),
+                        (own, protected_candidate),
+                    ],
+                ), mock.patch.object(
+                    m,
+                    "_file_type_once",
+                    return_value=m.FILE_TYPE_DISK,
+                ), mock.patch.object(
+                    m,
+                    "_native_file_is_directory_once",
+                    return_value=True,
+                ), mock.patch.object(
+                    m,
+                    "_stable_file_id_identity",
+                    return_value=(0xAABBCCDD, b"1" * 16),
+                ), mock.patch.object(
+                    m,
+                    "_process_is_protected",
+                    return_value=True,
+                ), mock.patch.object(
+                    m,
+                    "_kernel32",
+                    fake_kernel32,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "uninspectable external mutation handle",
+                    ):
+                        m._require_no_external_mutation_handles(
+                            handle,
+                            "authoritative evidence root",
+                        )
+            finally:
+                handle.close()
+
+    def test_fully_opened_protected_process_candidate_blocks(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handle = m._open_locked_directory(root)
+            try:
+                own = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                own.UniqueProcessId = os.getpid()
+                own.HandleValue = int(handle.handle)
+                own.Object = 0x11111111
+                own.ObjectTypeIndex = 7
+                own.GrantedAccess = 0
+
+                protected_candidate = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                protected_candidate.UniqueProcessId = os.getpid() + 1000
+                protected_candidate.HandleValue = 0x77
+                protected_candidate.Object = 0x22222222
+                protected_candidate.ObjectTypeIndex = 7
+                protected_candidate.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+
+                fake_kernel32 = SimpleNamespace(
+                    GetCurrentProcess=lambda: 1,
+                    OpenProcess=lambda *args: 123,
+                    CloseHandle=lambda *args: 1,
+                )
+                with mock.patch.object(
+                    m,
+                    "_enable_debug_privilege",
+                    return_value=None,
+                ), mock.patch.object(
+                    m,
+                    "_system_handle_entries",
+                    side_effect=[
+                        (own, protected_candidate),
+                        (own, protected_candidate),
+                    ],
+                ), mock.patch.object(
+                    m,
+                    "_file_type_once",
+                    return_value=m.FILE_TYPE_DISK,
+                ), mock.patch.object(
+                    m,
+                    "_native_file_is_directory_once",
+                    return_value=True,
+                ), mock.patch.object(
+                    m,
+                    "_stable_file_id_identity",
+                    return_value=(0xAABBCCDD, b"1" * 16),
+                ), mock.patch.object(
+                    m,
+                    "_process_is_protected",
+                    return_value=True,
+                ), mock.patch.object(
+                    m,
+                    "_kernel32",
+                    fake_kernel32,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "uninspectable external mutation handle",
+                    ):
+                        m._require_no_external_mutation_handles(
+                            handle,
+                            "authoritative evidence root",
+                        )
+            finally:
+                handle.close()
+
     def test_stale_pid4_mutation_candidate_clears_after_single_refresh(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
