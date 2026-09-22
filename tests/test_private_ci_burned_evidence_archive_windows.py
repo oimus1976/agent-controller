@@ -226,6 +226,8 @@ finally:
         self.assertIn("retained_duplicates", region)
         self.assertIn("current_object_by_handle", region)
         self.assertIn("handed-off external mutation handle", region)
+        self.assertIn("_native_file_is_directory_once", region)
+        self.assertIn("FILE_STANDARD_INFORMATION_CLASS = 5", source)
         self.assertIn("_stable_file_id_identity", region)
         self.assertIn("_native_file_id_identity_once", source)
         self.assertIn("FILE_ID_INFORMATION_CLASS = 59", source)
@@ -373,6 +375,52 @@ finally:
                 if child.stderr is not None:
                     child.stderr.close()
 
+    def test_02_native_standard_info_filters_writable_file_bit_alias(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            file_path = root / "writable.bin"
+            file_path.write_bytes(b"x")
+
+            directory_handle = m._kernel32.CreateFileW(
+                str(root),
+                m.FILE_ADD_FILE | m.FILE_ADD_SUBDIRECTORY,
+                m.FILE_SHARE_READ | m.FILE_SHARE_WRITE | 0x00000004,
+                None,
+                m.OPEN_EXISTING,
+                m.FILE_FLAG_BACKUP_SEMANTICS,
+                None,
+            )
+            self.assertNotEqual(directory_handle, m.INVALID_HANDLE_VALUE)
+
+            file_handle = m._kernel32.CreateFileW(
+                str(file_path),
+                0x00000002 | 0x00000004,
+                m.FILE_SHARE_READ | m.FILE_SHARE_WRITE | 0x00000004,
+                None,
+                m.OPEN_EXISTING,
+                m.FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+            self.assertNotEqual(file_handle, m.INVALID_HANDLE_VALUE)
+            try:
+                self.assertTrue(
+                    m._native_file_is_directory_once(
+                        int(directory_handle),
+                        "mutation-only directory",
+                    )
+                )
+                self.assertFalse(
+                    m._native_file_is_directory_once(
+                        int(file_handle),
+                        "writable ordinary file",
+                    )
+                )
+            finally:
+                m._kernel32.CloseHandle(file_handle)
+                m._kernel32.CloseHandle(directory_handle)
+
     def test_file_id_info_query_failure_blocks(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
@@ -497,6 +545,10 @@ finally:
                     ],
                 ), mock.patch.object(
                     m,
+                    "_native_file_is_directory_once",
+                    return_value=True,
+                ), mock.patch.object(
+                    m,
                     "_stable_file_id_identity",
                     return_value=(0xAABBCCDD, 0x1111),
                 ), mock.patch.object(
@@ -553,6 +605,10 @@ finally:
                         (own, stale),
                         (own,),
                     ],
+                ), mock.patch.object(
+                    m,
+                    "_native_file_is_directory_once",
+                    return_value=True,
                 ), mock.patch.object(
                     m,
                     "_stable_file_id_identity",
@@ -618,6 +674,10 @@ finally:
                         (own, original),
                         (own, replacement),
                     ],
+                ), mock.patch.object(
+                    m,
+                    "_native_file_is_directory_once",
+                    return_value=True,
                 ), mock.patch.object(
                     m,
                     "_stable_file_id_identity",
@@ -687,6 +747,10 @@ finally:
                     return_value=False,
                 ), mock.patch.object(
                     m,
+                    "_native_file_is_directory_once",
+                    return_value=True,
+                ), mock.patch.object(
+                    m,
                     "_stable_file_id_identity",
                     side_effect=[
                         (0xAABBCCDD, 0x1111),
@@ -700,6 +764,85 @@ finally:
                     with self.assertRaisesRegex(
                         RuntimeError,
                         "pre-existing external mutation handles",
+                    ):
+                        m._require_no_external_mutation_handles(
+                            handle,
+                            "authoritative evidence root",
+                        )
+            finally:
+                handle.close()
+
+    def test_directory_classification_failure_same_object_blocks(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handle = m._open_locked_directory(root)
+            try:
+                own = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                own.UniqueProcessId = os.getpid()
+                own.HandleValue = int(handle.handle)
+                own.Object = 0x11111111
+                own.ObjectTypeIndex = 7
+                own.GrantedAccess = 0
+
+                original = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                original.UniqueProcessId = os.getpid() + 1000
+                original.HandleValue = 0x77
+                original.Object = 0x22222222
+                original.ObjectTypeIndex = 7
+                original.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+
+                duplicate_entry = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                duplicate_entry.UniqueProcessId = os.getpid()
+                duplicate_entry.HandleValue = 0x99
+                duplicate_entry.Object = original.Object
+                duplicate_entry.ObjectTypeIndex = 7
+                duplicate_entry.GrantedAccess = 0
+
+                def duplicate_handle(*args):
+                    args[3]._obj.value = 0x99
+                    return 1
+
+                fake_kernel32 = SimpleNamespace(
+                    GetCurrentProcess=lambda: 1,
+                    OpenProcess=lambda *args: 123,
+                    DuplicateHandle=duplicate_handle,
+                    CloseHandle=lambda *args: 1,
+                )
+                with mock.patch.object(
+                    m,
+                    "_enable_debug_privilege",
+                    return_value=None,
+                ), mock.patch.object(
+                    m,
+                    "_system_handle_entries",
+                    side_effect=[
+                        (own, original),
+                        (own, duplicate_entry, original),
+                    ],
+                ), mock.patch.object(
+                    m,
+                    "_process_is_protected",
+                    return_value=False,
+                ), mock.patch.object(
+                    m,
+                    "_native_file_is_directory_once",
+                    side_effect=RuntimeError(
+                        "synthetic FileStandardInformation failure"
+                    ),
+                ), mock.patch.object(
+                    m,
+                    "_stable_file_id_identity",
+                    return_value=(0xAABBCCDD, b"1" * 16),
+                ), mock.patch.object(
+                    m,
+                    "_kernel32",
+                    fake_kernel32,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "directory classification unavailable for live snapshotted Object",
                     ):
                         m._require_no_external_mutation_handles(
                             handle,
@@ -761,6 +904,10 @@ finally:
                     m,
                     "_process_is_protected",
                     return_value=False,
+                ), mock.patch.object(
+                    m,
+                    "_native_file_is_directory_once",
+                    return_value=True,
                 ), mock.patch.object(
                     m,
                     "_stable_file_id_identity",
@@ -837,6 +984,10 @@ finally:
                     m,
                     "_process_is_protected",
                     return_value=False,
+                ), mock.patch.object(
+                    m,
+                    "_native_file_is_directory_once",
+                    return_value=True,
                 ), mock.patch.object(
                     m,
                     "_stable_file_id_identity",
@@ -918,6 +1069,10 @@ finally:
                     return_value=False,
                 ), mock.patch.object(
                     m,
+                    "_native_file_is_directory_once",
+                    return_value=True,
+                ), mock.patch.object(
+                    m,
                     "_stable_file_id_identity",
                     side_effect=[
                         (0xAABBCCDD, 0x1111),
@@ -992,6 +1147,10 @@ finally:
                     m,
                     "_process_is_protected",
                     return_value=False,
+                ), mock.patch.object(
+                    m,
+                    "_native_file_is_directory_once",
+                    return_value=True,
                 ), mock.patch.object(
                     m,
                     "_stable_file_id_identity",
