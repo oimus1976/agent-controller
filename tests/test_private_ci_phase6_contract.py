@@ -162,6 +162,7 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
         self.assertEqual(
             spec.allowed_effect_families,
             (
+                "ACL_MUTATION",
                 "FILESYSTEM_DESTRUCTIVE_MUTATION",
                 "HTTP_API_ACCESS",
                 "PROCESS_CONTROL",
@@ -198,7 +199,10 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
             "Get-CimInstance Win32_Service",
             "Get-ScheduledTask",
             "Stop-Process -Id $BridgeRunnerProcessId",
+            "icacls.exe $BridgeRunnerRoot /inheritance:r /grant:r",
             "Remove-Item -LiteralPath $BridgeGenerationRoot -Recurse -Force",
+            "Phase 6 target PR binding drift",
+            "Phase 6 trusted workflow SHA drift",
             "Phase 6 active workflow readback failed",
             "Phase 6 unexpected generation-bound process",
             "Phase 6 unexpected generation-bound service",
