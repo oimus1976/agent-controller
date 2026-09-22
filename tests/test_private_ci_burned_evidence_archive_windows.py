@@ -850,7 +850,84 @@ finally:
             finally:
                 handle.close()
 
-    def test_file_type_failure_same_object_blocks(self):
+    def test_file_type_failure_same_object_native_directory_still_blocks(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handle = m._open_locked_directory(root)
+            try:
+                own = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                own.UniqueProcessId = os.getpid()
+                own.HandleValue = int(handle.handle)
+                own.Object = 0x11111111
+                own.ObjectTypeIndex = 7
+                own.GrantedAccess = 0
+
+                original = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                original.UniqueProcessId = os.getpid() + 1000
+                original.HandleValue = 0x77
+                original.Object = 0x22222222
+                original.ObjectTypeIndex = 7
+                original.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+
+                def duplicate_handle(*args):
+                    args[3]._obj.value = 0x99
+                    return 1
+
+                fake_kernel32 = SimpleNamespace(
+                    GetCurrentProcess=lambda: 1,
+                    OpenProcess=lambda *args: 123,
+                    DuplicateHandle=duplicate_handle,
+                    CloseHandle=lambda *args: 1,
+                )
+                with mock.patch.object(
+                    m,
+                    "_enable_debug_privilege",
+                    return_value=None,
+                ), mock.patch.object(
+                    m,
+                    "_system_handle_entries",
+                    return_value=(own, original),
+                ), mock.patch.object(
+                    m,
+                    "_process_is_protected",
+                    return_value=False,
+                ), mock.patch.object(
+                    m,
+                    "_file_type_once",
+                    side_effect=[
+                        m.FILE_TYPE_DISK,
+                        RuntimeError("synthetic GetFileType failure"),
+                    ],
+                ), mock.patch.object(
+                    m,
+                    "_native_file_is_directory_once",
+                    side_effect=[True, True],
+                ), mock.patch.object(
+                    m,
+                    "_stable_file_id_identity",
+                    side_effect=[
+                        (0xAABBCCDD, b"1" * 16),
+                        (0xAABBCCDD, b"1" * 16),
+                    ],
+                ), mock.patch.object(
+                    m,
+                    "_kernel32",
+                    fake_kernel32,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "pre-existing external mutation handles",
+                    ):
+                        m._require_no_external_mutation_handles(
+                            handle,
+                            "authoritative evidence root",
+                        )
+            finally:
+                handle.close()
+
+    def test_file_type_failure_same_object_native_non_target_is_skipped(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -913,7 +990,7 @@ finally:
                 ), mock.patch.object(
                     m,
                     "_native_file_is_directory_once",
-                    return_value=True,
+                    side_effect=[True, None],
                 ), mock.patch.object(
                     m,
                     "_stable_file_id_identity",
@@ -923,14 +1000,10 @@ finally:
                     "_kernel32",
                     fake_kernel32,
                 ):
-                    with self.assertRaisesRegex(
-                        RuntimeError,
-                        "file type unavailable for live snapshotted Object",
-                    ):
-                        m._require_no_external_mutation_handles(
-                            handle,
-                            "authoritative evidence root",
-                        )
+                    m._require_no_external_mutation_handles(
+                        handle,
+                        "authoritative evidence root",
+                    )
             finally:
                 handle.close()
 
