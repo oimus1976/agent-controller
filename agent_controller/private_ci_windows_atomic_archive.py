@@ -717,7 +717,7 @@ def _require_no_external_mutation_handles(
                     pid,
                 )
                 if not query_process:
-                    if pid in (0, 4):
+                    if pid == 0:
                         continue
                     pending.extend(
                         ("uninspectable", entry) for entry in candidates
