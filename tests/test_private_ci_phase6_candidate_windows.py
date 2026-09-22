@@ -164,7 +164,8 @@ class PrivateCiPhase6CandidateWindowsTests(unittest.TestCase):
         candidate = render_phase6_cleanup_candidate(plan)
         forged_generation = "ac-pilot-fedcba9876543210"
         forged_root = (
-            r"C:\ProgramData\agent-controller\private-ci\"
+            r"C:\ProgramData\agent-controller\private-ci"
+            + "\\"
             + forged_generation
         )
         call = "Invoke-PrivateCiGenerationRetirement"
