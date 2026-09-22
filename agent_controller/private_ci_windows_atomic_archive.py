@@ -506,8 +506,7 @@ def _require_no_external_mutation_handles(
 
     current_process = _kernel32.GetCurrentProcess()
     matching_pids: set[int] = set()
-    pending_uninspectable: list[SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX] = []
-    pending_unduplicable: list[SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX] = []
+    pending: list[tuple[str, SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX]] = []
 
     for pid, candidates in candidates_by_pid.items():
         process = _kernel32.OpenProcess(
@@ -524,14 +523,14 @@ def _require_no_external_mutation_handles(
             if not query_process:
                 if pid in (0, 4):
                     continue
-                pending_uninspectable.extend(candidates)
+                pending.extend(("uninspectable", entry) for entry in candidates)
                 continue
             try:
                 if _process_is_protected(query_process):
                     continue
             finally:
                 _kernel32.CloseHandle(query_process)
-            pending_uninspectable.extend(candidates)
+            pending.extend(("uninspectable", entry) for entry in candidates)
             continue
 
         try:
@@ -559,7 +558,7 @@ def _require_no_external_mutation_handles(
                         False,
                         DUPLICATE_SAME_ACCESS,
                     ):
-                        pending_unduplicable.append(entry)
+                        pending.append(("unduplicable", entry))
                         continue
                 try:
                     if _same_file_identity(
@@ -579,7 +578,6 @@ def _require_no_external_mutation_handles(
             + ",".join(str(pid) for pid in sorted(matching_pids))
         )
 
-    pending = pending_uninspectable + pending_unduplicable
     if not pending:
         return
 
@@ -597,7 +595,7 @@ def _require_no_external_mutation_handles(
             continue
         live_by_object.setdefault(object_pointer, set()).add(pid)
 
-    for entry in pending:
+    for pending_kind, entry in pending:
         object_pointer = int(entry.Object or 0)
         if object_pointer == 0:
             raise RuntimeError(
@@ -607,7 +605,7 @@ def _require_no_external_mutation_handles(
         if not live_pids:
             continue
         original_pid = int(entry.UniqueProcessId)
-        if entry in pending_uninspectable:
+        if pending_kind == "uninspectable":
             raise RuntimeError(
                 f"{description} has uninspectable external mutation handle: "
                 f"pid={original_pid} live_pids="
