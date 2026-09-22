@@ -347,6 +347,7 @@ finally:
                     side_effect=[
                         (own, stale),
                         (own,),
+                        (own,),
                     ],
                 ), mock.patch.object(
                     m,
