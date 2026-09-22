@@ -553,8 +553,7 @@ def _require_no_external_mutation_handles(
                 if pid in (0, 4):
                     continue
                 raise RuntimeError(
-                    f"{description} has uninspectable external mutation "
-                    f"handle: pid={pid}"
+                    f"{description} has uninspectable external mutation handle: pid={pid}"
                 )
             try:
                 if _process_is_protected(query_process):
@@ -562,8 +561,7 @@ def _require_no_external_mutation_handles(
             finally:
                 _kernel32.CloseHandle(query_process)
             raise RuntimeError(
-                f"{description} has uninspectable external mutation "
-                f"handle: pid={pid}"
+                f"{description} has uninspectable external mutation handle: pid={pid}"
             )
 
         try:
