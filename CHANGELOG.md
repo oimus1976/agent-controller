@@ -37,7 +37,8 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 - prior exact head `fc3394aac602a44af94212c1b202ac0b571a4f74` / deterministic-tests #862 はSUCCESS。
 - Codex rereviewでGit replacement objectsとunduplicable external mutation handleのP1 2件を受領し、後続headでremediationを継続。
-- exact head `b29334b893b3c2114075600ddf2b932250fbfac8` / run #890 はLinux unittest SUCCESS、Windows lane FAILURE。failureはexternal-handle quiescenceのraceとstatic message assertionで、current branchに修正を追加済み。new exact-head CIで再検証する。
+- exact head `b29334b893b3c2114075600ddf2b932250fbfac8` / run #890 はLinux unittest SUCCESS、Windows lane FAILURE。failureはexternal-handle quiescenceのraceとstatic message assertionで、後続headに修正を追加。
+- exact head `ce4af6027914f326c3b7010cace802fe080166bd` / run #894 ではreal external evidence-root mutation-handle regressionを含むruntime checksはPASS。残件はuninspectable-handle error wordingの単複不一致によるstatic assertion 1件のみで、後続headで修正済み。new exact-head CIで再検証する。
 - PR #228はDraftのまま。human Ready / mergeおよびWOBBUFFET archive applyは未実施。
 
 ## 2026-09-19 — Phase 4/5 gated private-CI harness foundation（Issue #225 / Draft PR #226）
