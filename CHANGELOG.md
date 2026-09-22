@@ -24,7 +24,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - #216 restart時の固定canonical evidenceを、approval / protected consumption authorityを除外したstrict allowlistだけでgeneration-scoped archiveへ退避するcontroller-owned helperを追加。
 - plan/apply間のsource hash・size・controller source binding、elevated Windows runtime、handle-bound source retirement、handle-relative archive creation、authoritative PASSの遅延publishをfail-closedで固定。
 - external evidence-root mutation handle quiescenceを追加し、SeDebugPrivilege有効化後にpre-open handleを検査。OpenProcess / DuplicateHandleで検査不能なlive handleは見逃さずBLOCKEDとする。
-- PR #228 exact-head CI #890で、quiescenceの生存確認snapshotを複数candidate間で再利用することでclosed handleをliveと誤認し得るraceを確認。生存確認を失敗ごとにfresh rereadし、still-liveならDuplicateHandleを1回だけ再試行して、なおliveかつ複製不能な場合のみBLOCKEDとする修正を追加。
+- PR #228 exact-head CI #890で、quiescenceの生存確認snapshotを複数candidate間で再利用することでclosed handleをliveと誤認し得るraceを確認。初回のfresh rereadは共有しつつ、DuplicateHandleを1回だけ再試行し、その再試行も失敗した場合だけforced fresh rereadして、なおliveかつ複製不能な場合のみBLOCKEDとする修正を追加。
 - user-controlled Git replacement objectによるsource authentication迂回を防ぐため、trusted Git environmentとlocal object-sensitive commandの双方でreplacement objectsを無効化。
 
 ### Safety / authority boundary
