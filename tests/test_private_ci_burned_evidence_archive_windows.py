@@ -231,6 +231,38 @@ finally:
         self.assertIn("uninspectable external mutation handle", region)
         self.assertIn("unduplicable external mutation handle", region)
 
+    def test_same_file_identity_query_failure_blocks(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        left_info = m.BY_HANDLE_FILE_INFORMATION()
+        left_info.dwVolumeSerialNumber = 1
+        left_info.nFileIndexHigh = 2
+        left_info.nFileIndexLow = 3
+
+        def fail_identity_query(*args):
+            import ctypes
+
+            ctypes.set_last_error(5)
+            return 0
+
+        fake_kernel32 = SimpleNamespace(
+            GetFileInformationByHandle=fail_identity_query,
+        )
+        with mock.patch.object(
+            m,
+            "_file_info",
+            return_value=left_info,
+        ), mock.patch.object(
+            m,
+            "_kernel32",
+            fake_kernel32,
+        ):
+            with self.assertRaises(OSError):
+                m._same_file_identity(
+                    SimpleNamespace(),
+                    0x99,
+                )
+
     def test_debug_privilege_is_mandatory_for_quiescence(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
