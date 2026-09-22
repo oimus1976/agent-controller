@@ -219,7 +219,9 @@ finally:
         self.assertIn("PROCESS_DUP_HANDLE", region)
         self.assertIn("PROCESS_QUERY_LIMITED_INFORMATION", region)
         self.assertLessEqual(region.count("_system_handle_entries()"), 2)
-        self.assertIn("candidate_lineage_is_still_live", region)
+        self.assertIn("pending_uninspectable", region)
+        self.assertIn("pending_unduplicable", region)
+        self.assertIn("live_by_object", region)
         self.assertIn("object_pointer", region)
         self.assertIn("external mutation handle object identity unavailable", region)
         self.assertIn("_process_is_protected", region)
@@ -409,7 +411,6 @@ finally:
                     "_system_handle_entries",
                     side_effect=[
                         (own, original),
-                        (own, replacement),
                         (own, replacement),
                     ],
                 ), mock.patch.object(
