@@ -31,6 +31,10 @@ STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034
 STATUS_OBJECT_PATH_NOT_FOUND = 0xC000003A
 STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
 SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
+FILE_INTERNAL_INFORMATION_CLASS = 6
+FILE_FS_VOLUME_INFORMATION_CLASS = 1
+FILE_FS_ATTRIBUTE_INFORMATION_CLASS = 5
+NATIVE_IDENTITY_QUERY_BUFFER_SIZE = 4096
 PROCESS_DUP_HANDLE = 0x0040
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 DUPLICATE_SAME_ACCESS = 0x00000002
@@ -197,6 +201,24 @@ if os.name == "nt":
         ctypes.POINTER(wintypes.ULONG),
     ]
     _ntdll.NtQuerySystemInformation.restype = ctypes.c_long
+
+    _ntdll.NtQueryInformationFile.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(IO_STATUS_BLOCK),
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        ctypes.c_int,
+    ]
+    _ntdll.NtQueryInformationFile.restype = ctypes.c_long
+
+    _ntdll.NtQueryVolumeInformationFile.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(IO_STATUS_BLOCK),
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        ctypes.c_int,
+    ]
+    _ntdll.NtQueryVolumeInformationFile.restype = ctypes.c_long
 
     _kernel32.CreateFileW.argtypes = [
         wintypes.LPCWSTR,
@@ -380,25 +402,118 @@ def _system_handle_entries() -> tuple[SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX, ...]:
     return tuple(entries)
 
 
-def _same_file_identity(
-    left: LockedHandle,
-    right_handle: int,
-) -> bool:
-    left_info = _file_info(left)
-    right_info = BY_HANDLE_FILE_INFORMATION()
-    if not _kernel32.GetFileInformationByHandle(
-        right_handle,
-        ctypes.byref(right_info),
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-    return (
-        int(left_info.dwVolumeSerialNumber)
-        == int(right_info.dwVolumeSerialNumber)
-        and int(left_info.nFileIndexHigh)
-        == int(right_info.nFileIndexHigh)
-        and int(left_info.nFileIndexLow)
-        == int(right_info.nFileIndexLow)
+def _native_file_identity_once(
+    handle_value: int,
+    description: str,
+) -> tuple[int, int]:
+    internal = ctypes.c_longlong()
+    io_status = IO_STATUS_BLOCK()
+    status = _ntdll.NtQueryInformationFile(
+        wintypes.HANDLE(handle_value),
+        ctypes.byref(io_status),
+        ctypes.byref(internal),
+        ctypes.sizeof(internal),
+        FILE_INTERNAL_INFORMATION_CLASS,
     )
+    code = _ntstatus_code(status)
+    if code != 0:
+        raise RuntimeError(
+            f"{description} FileInternalInformation query failed: "
+            f"0x{code:08x}"
+        )
+
+    volume_buffer = ctypes.create_string_buffer(
+        NATIVE_IDENTITY_QUERY_BUFFER_SIZE
+    )
+    io_status = IO_STATUS_BLOCK()
+    status = _ntdll.NtQueryVolumeInformationFile(
+        wintypes.HANDLE(handle_value),
+        ctypes.byref(io_status),
+        volume_buffer,
+        len(volume_buffer),
+        FILE_FS_VOLUME_INFORMATION_CLASS,
+    )
+    code = _ntstatus_code(status)
+    if code != 0:
+        raise RuntimeError(
+            f"{description} FileFsVolumeInformation query failed: "
+            f"0x{code:08x}"
+        )
+    if int(io_status.Information) < 12:
+        raise RuntimeError(
+            f"{description} FileFsVolumeInformation payload truncated"
+        )
+    volume_serial = int.from_bytes(
+        volume_buffer.raw[8:12],
+        "little",
+        signed=False,
+    )
+
+    attribute_buffer = ctypes.create_string_buffer(
+        NATIVE_IDENTITY_QUERY_BUFFER_SIZE
+    )
+    io_status = IO_STATUS_BLOCK()
+    status = _ntdll.NtQueryVolumeInformationFile(
+        wintypes.HANDLE(handle_value),
+        ctypes.byref(io_status),
+        attribute_buffer,
+        len(attribute_buffer),
+        FILE_FS_ATTRIBUTE_INFORMATION_CLASS,
+    )
+    code = _ntstatus_code(status)
+    if code != 0:
+        raise RuntimeError(
+            f"{description} FileFsAttributeInformation query failed: "
+            f"0x{code:08x}"
+        )
+    information_length = int(io_status.Information)
+    if information_length < 12:
+        raise RuntimeError(
+            f"{description} FileFsAttributeInformation payload truncated"
+        )
+    name_length = int.from_bytes(
+        attribute_buffer.raw[8:12],
+        "little",
+        signed=False,
+    )
+    if (
+        name_length <= 0
+        or name_length % 2 != 0
+        or 12 + name_length > information_length
+        or 12 + name_length > len(attribute_buffer)
+    ):
+        raise RuntimeError(
+            f"{description} file-system name payload invalid"
+        )
+    try:
+        file_system_name = attribute_buffer.raw[
+            12 : 12 + name_length
+        ].decode("utf-16-le", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(
+            f"{description} file-system name decode failed"
+        ) from exc
+    if file_system_name.casefold() != "ntfs":
+        raise RuntimeError(
+            f"{description} unsupported file system for stable native identity: "
+            f"{file_system_name}"
+        )
+
+    file_reference = int(internal.value) & 0xFFFFFFFFFFFFFFFF
+    return volume_serial, file_reference
+
+
+def _stable_native_file_identity(
+    handle_value: int,
+    description: str,
+) -> tuple[int, int]:
+    first = _native_file_identity_once(handle_value, description)
+    second = _native_file_identity_once(handle_value, description)
+    if first != second:
+        raise RuntimeError(
+            f"{description} native file identity changed during verification"
+        )
+    return first
 
 
 def _enable_debug_privilege() -> None:
@@ -504,6 +619,14 @@ def _require_no_external_mutation_handles(
             continue
         candidates_by_pid.setdefault(pid, []).append(entry)
 
+    if not candidates_by_pid:
+        return
+
+    root_native_identity = _stable_native_file_identity(
+        handle_value,
+        f"{description} authoritative root",
+    )
+
     current_process = _kernel32.GetCurrentProcess()
     matching_pids: set[int] = set()
     pending: list[tuple[str, SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX]] = []
@@ -571,15 +694,21 @@ def _require_no_external_mutation_handles(
 
                     duplicate_value = int(duplicate.value)
                     try:
-                        same_identity = _same_file_identity(
-                            handle,
-                            duplicate_value,
+                        duplicate_native_identity = (
+                            _stable_native_file_identity(
+                                duplicate_value,
+                                (
+                                    f"{description} duplicated external "
+                                    f"mutation handle pid={pid} "
+                                    f"handle={int(entry.HandleValue)}"
+                                ),
+                            )
                         )
                     except Exception:
                         _kernel32.CloseHandle(duplicate)
                         raise
 
-                    if same_identity:
+                    if duplicate_native_identity == root_native_identity:
                         _kernel32.CloseHandle(duplicate)
                         matching_pids.add(pid)
                         break
