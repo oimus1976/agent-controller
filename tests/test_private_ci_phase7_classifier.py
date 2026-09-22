@@ -248,6 +248,114 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                         phase7_result_bytes=phase7_raw,
                     )
 
+    def test_forged_phase6_phase7_results_cannot_self_publish_authority(self):
+        phase6 = self.phase6_module()
+        phase7 = self.result_module()
+        classifier = self.classifier_module()
+
+        import hashlib
+
+        phase5_raw = phase5_result_bytes(phase5_evidence())
+        phase6_evidence = self.phase6_evidence(
+            phase5_result_sha256=hashlib.sha256(phase5_raw).hexdigest()
+        )
+        phase6_raw = phase6.phase6_result_bytes(phase6_evidence)
+        phase7_raw = phase7.phase7_result_bytes(
+            self.phase7_evidence(
+                phase6_result_sha256=hashlib.sha256(phase6_raw).hexdigest()
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            from agent_controller import private_ci_final_publication
+            from agent_controller import private_ci_result_authority
+
+            authority_root = Path(temporary_directory)
+            with patch.object(
+                private_ci_result_authority,
+                "RESULT_AUTHORITY_ROOT",
+                authority_root,
+            ), patch.object(
+                private_ci_final_publication,
+                "FINAL_PUBLICATION_ROOT",
+                authority_root,
+            ):
+                with self.assertRaises((TypeError, ValueError)):
+                    private_ci_result_authority.publish_phase6_result_authority(
+                        phase6_raw,
+                        phase6_consumption_sha256=(
+                            phase6_evidence.phase6_consumption_sha256
+                        ),
+                    )
+                    private_ci_result_authority.publish_phase7_result_authority(
+                        phase7_raw,
+                        phase6_result_sha256=hashlib.sha256(
+                            phase6_raw
+                        ).hexdigest(),
+                    )
+                    classifier.classify_final_private_ci_pilot(
+                        phase5_result_bytes=phase5_raw,
+                        phase6_result_bytes=phase6_raw,
+                        phase7_result_bytes=phase7_raw,
+                    )
+
+    def test_authority_marker_primitives_require_protected_root_security(self):
+        from agent_controller import private_ci_final_publication
+        from agent_controller import private_ci_result_authority
+
+        for module, functions in (
+            (
+                private_ci_result_authority,
+                (
+                    "_publish",
+                    "_parse_and_validate",
+                ),
+            ),
+            (
+                private_ci_final_publication,
+                ("consume_final_pass_publication",),
+            ),
+        ):
+            with self.subTest(module=module.__name__):
+                self.assertTrue(
+                    hasattr(module, "_validate_authority_root_security"),
+                    module.__name__,
+                )
+                validator_source = inspect.getsource(
+                    module._validate_authority_root_security
+                )
+                self.assertIn(
+                    "validate_consumption_container_acl_state",
+                    validator_source,
+                )
+                self.assertIn("ReparsePoint", validator_source)
+                for function_name in functions:
+                    source = inspect.getsource(
+                        getattr(module, function_name)
+                    )
+                    self.assertIn(
+                        "_validate_authority_root_security",
+                        source,
+                    )
+
+        self.assertTrue(
+            hasattr(
+                private_ci_result_authority,
+                "_validate_authority_marker_security",
+            )
+        )
+        marker_source = inspect.getsource(
+            private_ci_result_authority._validate_authority_marker_security
+        )
+        self.assertIn("validate_consumption_acl_state", marker_source)
+        self.assertIn("ReparsePoint", marker_source)
+        self.assertIn(
+            "_validate_authority_marker_security",
+            inspect.getsource(
+                private_ci_result_authority._parse_and_validate
+            ),
+        )
+
     def test_final_pass_requires_exact_phase5_phase6_phase7_success_chain(self):
         phase6 = self.phase6_module()
         phase7 = self.result_module()
