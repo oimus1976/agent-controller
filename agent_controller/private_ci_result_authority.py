@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_controller.operator_step_gate import (
+    ResultPublicationCapability,
+    consume_result_publication_capability,
+)
 from agent_controller.private_ci_consumption_marker import CONSUMPTION_ROOT
 
 
@@ -60,6 +64,7 @@ def _publish(
     schema: str,
     result_bytes: bytes,
     upstream_sha256: str,
+    publication_capability: ResultPublicationCapability,
 ) -> ResultAuthorityMarker:
     if type(result_bytes) is not bytes:
         raise ValueError("result authority requires exact result bytes")
@@ -68,6 +73,12 @@ def _publish(
         "result authority upstream SHA-256",
     )
     result_sha = hashlib.sha256(result_bytes).hexdigest()
+    consume_result_publication_capability(
+        publication_capability,
+        phase=phase,
+        result_sha256=result_sha,
+        upstream_sha256=upstream,
+    )
     root = RESULT_AUTHORITY_ROOT
     if not root.is_dir():
         raise ValueError("result authority root missing")
@@ -152,12 +163,14 @@ def publish_phase6_result_authority(
     result_bytes: bytes,
     *,
     phase6_consumption_sha256: str,
+    publication_capability: ResultPublicationCapability,
 ) -> ResultAuthorityMarker:
     return _publish(
         phase=6,
         schema=PHASE6_RESULT_AUTHORITY_SCHEMA,
         result_bytes=result_bytes,
         upstream_sha256=phase6_consumption_sha256,
+        publication_capability=publication_capability,
     )
 
 
@@ -165,12 +178,14 @@ def publish_phase7_result_authority(
     result_bytes: bytes,
     *,
     phase6_result_sha256: str,
+    publication_capability: ResultPublicationCapability,
 ) -> ResultAuthorityMarker:
     return _publish(
         phase=7,
         schema=PHASE7_RESULT_AUTHORITY_SCHEMA,
         result_bytes=result_bytes,
         upstream_sha256=phase6_result_sha256,
+        publication_capability=publication_capability,
     )
 
 
