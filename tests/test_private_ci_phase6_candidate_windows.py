@@ -220,6 +220,74 @@ class PrivateCiPhase6CandidateWindowsTests(unittest.TestCase):
         )
         self.assertFalse(report["parsed"], report)
 
+    def test_generation_retirement_bindings_cannot_be_substituted_with_sibling_generation(self):
+        from agent_controller.private_ci_phase6_contract import (
+            build_phase6_cleanup_operator_spec,
+            build_phase6_cleanup_plan,
+            phase6_cleanup_plan_bytes,
+            render_phase6_cleanup_candidate,
+        )
+
+        phase5_raw = phase5_result_bytes(self.phase5_result())
+        plan = build_phase6_cleanup_plan(phase5_raw)
+        plan_raw = phase6_cleanup_plan_bytes(plan)
+        spec = build_phase6_cleanup_operator_spec(
+            plan,
+            phase6_plan_sha256=hashlib.sha256(plan_raw).hexdigest(),
+        )
+        candidate = render_phase6_cleanup_candidate(plan)
+
+        forged_generation = "ac-pilot-fedcba9876543210"
+        forged_root = (
+            r"C:\ProgramData\agent-controller\private-ci"
+            + "\\"
+            + forged_generation
+        )
+        # Substitute the original declarations with forged sibling values (only once each)
+        forged = candidate.replace(
+            f"$BridgeEnvironmentGeneration = '{plan.environment_generation}'",
+            f"$BridgeEnvironmentGeneration = '{forged_generation}'",
+        ).replace(
+            f"$BridgeGenerationRoot = '{plan.generation_root}'",
+            f"$BridgeGenerationRoot = '{forged_root}'",
+        )
+        self.assertNotEqual(candidate, forged)
+        self.assertEqual(forged.count("$BridgeEnvironmentGeneration ="), 1)
+        self.assertEqual(forged.count("$BridgeGenerationRoot ="), 1)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            candidate_path = Path(temporary_directory) / "phase6-substituted.ps1"
+            candidate_path.write_bytes(forged.encode("utf-8"))
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(self.producer),
+                    "-CandidatePath",
+                    str(candidate_path),
+                    "-SpecSha256",
+                    operator_step_spec_sha256(spec),
+                    "-ExpectedEnvironmentGeneration",
+                    plan.environment_generation,
+                    "-ExpectedGenerationRoot",
+                    plan.generation_root,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout)
+        problems = set(report["unresolved_placeholders"])
+        self.assertIn("NONCANONICAL_BINDING:BridgeGenerationRoot", problems)
+        self.assertIn("NONCANONICAL_BINDING:BridgeEnvironmentGeneration", problems)
+        self.assertFalse(report["parsed"], report)
+
 
 if __name__ == "__main__":
     unittest.main()

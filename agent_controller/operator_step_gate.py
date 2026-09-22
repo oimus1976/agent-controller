@@ -56,6 +56,8 @@ class OperatorStepSpec:
     require_heartbeat_or_progress: bool
     require_child_exit_code: bool
     require_fail_fast: bool
+    expected_environment_generation: Optional[str] = None
+    expected_generation_root: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +84,8 @@ class PowerShellAstAttestation:
     heartbeat_or_progress_proven: bool
     child_exit_code_proven: bool
     fail_fast_proven: bool
+    environment_generation: Optional[str] = None
+    generation_root: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -520,6 +524,11 @@ def _spec_payload(spec: OperatorStepSpec) -> dict[str, object]:
         "require_child_exit_code": spec.require_child_exit_code,
         "require_fail_fast": spec.require_fail_fast,
     }
+    if spec.expected_environment_generation is not None:
+        payload["expected_environment_generation"] = spec.expected_environment_generation
+    if spec.expected_generation_root is not None:
+        payload["expected_generation_root"] = spec.expected_generation_root
+    return payload
 
 
 def operator_step_spec_sha256(spec: OperatorStepSpec) -> str:
@@ -527,7 +536,7 @@ def operator_step_spec_sha256(spec: OperatorStepSpec) -> str:
 
 
 def _attestation_payload(report: PowerShellAstAttestation) -> dict[str, object]:
-    return {
+    payload = {
         "runtime": report.runtime,
         "parser": report.parser,
         "candidate_sha256": report.candidate_sha256,
@@ -551,6 +560,11 @@ def _attestation_payload(report: PowerShellAstAttestation) -> dict[str, object]:
         "child_exit_code_proven": report.child_exit_code_proven,
         "fail_fast_proven": report.fail_fast_proven,
     }
+    if report.environment_generation is not None:
+        payload["environment_generation"] = report.environment_generation
+    if report.generation_root is not None:
+        payload["generation_root"] = report.generation_root
+    return payload
 
 
 def ast_attestation_auth_message(report: PowerShellAstAttestation) -> bytes:
@@ -619,6 +633,10 @@ def _validate_attestation_shape(report: object) -> None:
     )
     if not all(type(value) is bool for value in bool_fields):
         raise ValueError("invalid AST attestation bool")
+    if report.environment_generation is not None and type(report.environment_generation) is not str:
+        raise ValueError("invalid AST attestation environment generation")
+    if report.generation_root is not None and type(report.generation_root) is not str:
+        raise ValueError("invalid AST attestation generation root")
 
 
 def _spec_reason_codes(spec: object) -> tuple[str, ...]:
@@ -723,6 +741,13 @@ def _attestation_reason_codes(
     for reason, observed, expected in bindings:
         if observed != expected:
             reasons.append(reason)
+
+    if spec.expected_environment_generation is not None:
+        if report.environment_generation != spec.expected_environment_generation:
+            reasons.append("AST_ENVIRONMENT_GENERATION_BINDING_MISMATCH")
+    if spec.expected_generation_root is not None:
+        if report.generation_root != spec.expected_generation_root:
+            reasons.append("AST_GENERATION_ROOT_BINDING_MISMATCH")
 
     observed_effects = set(report.observed_effect_families)
     allowed_effects = set(spec.allowed_effect_families)

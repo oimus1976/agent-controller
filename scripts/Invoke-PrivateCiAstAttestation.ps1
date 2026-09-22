@@ -3,7 +3,13 @@ param(
     [string]$CandidatePath,
 
     [Parameter(Mandatory = $true)]
-    [string]$SpecSha256
+    [string]$SpecSha256,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ExpectedEnvironmentGeneration,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ExpectedGenerationRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,10 +62,15 @@ $BindingNames = @(
     'BridgeTranscriptFilename',
     'BridgeExpectedSuccessMarker'
 )
+$Phase6BindingNames = @(
+    'BridgeGenerationRoot',
+    'BridgeEnvironmentGeneration'
+)
+$AllTrackedBindingNames = $BindingNames + $Phase6BindingNames
 $Bindings = @{}
 $BindingCounts = @{}
 $BindingProblems = New-Object System.Collections.Generic.List[string]
-foreach ($BindingName in $BindingNames) {
+foreach ($BindingName in $AllTrackedBindingNames) {
     $BindingCounts[$BindingName] = 0
 }
 $RootStatements = @()
@@ -88,7 +99,7 @@ foreach ($AssignmentAst in $AssignmentAsts) {
 
     foreach ($VariableNode in $LeftVariables) {
         $VariableName = Get-NormalizedVariableUserPath -UserPath $VariableNode.VariablePath.UserPath
-        if ($BindingNames -notcontains $VariableName) {
+        if ($AllTrackedBindingNames -notcontains $VariableName) {
             continue
         }
 
@@ -138,7 +149,7 @@ $ParameterAsts = $Ast.FindAll({
 }, $true)
 foreach ($ParameterAst in $ParameterAsts) {
     $ParameterName = Get-NormalizedVariableUserPath -UserPath $ParameterAst.Name.VariablePath.UserPath
-    if ($BindingNames -contains $ParameterName) {
+    if ($AllTrackedBindingNames -contains $ParameterName) {
         $BindingCounts[$ParameterName] = [int]$BindingCounts[$ParameterName] + 1
         $Problem = "NONCANONICAL_BINDING:$ParameterName"
         if (-not $BindingProblems.Contains($Problem)) {
@@ -156,7 +167,7 @@ foreach ($ForEachAst in $ForEachAsts) {
         continue
     }
     $ForEachVariableName = Get-NormalizedVariableUserPath -UserPath $ForEachAst.Variable.VariablePath.UserPath
-    if ($BindingNames -contains $ForEachVariableName) {
+    if ($AllTrackedBindingNames -contains $ForEachVariableName) {
         $BindingCounts[$ForEachVariableName] = [int]$BindingCounts[$ForEachVariableName] + 1
         $Problem = "NONCANONICAL_BINDING:$ForEachVariableName"
         if (-not $BindingProblems.Contains($Problem)) {
@@ -176,6 +187,65 @@ foreach ($BindingName in $BindingNames) {
         $Problem = "BINDING_VALUE_MISSING:$BindingName"
         if (-not $BindingProblems.Contains($Problem)) {
             $BindingProblems.Add($Problem)
+        }
+    }
+}
+
+if ($Bindings['BridgeExpectedSuccessMarker'] -eq 'PHASE6_CLEANUP_PASS') {
+    foreach ($BindingName in $Phase6BindingNames) {
+        if ([int]$BindingCounts[$BindingName] -ne 1) {
+            $Problem = "BINDING_COUNT_INVALID:$BindingName"
+            if (-not $BindingProblems.Contains($Problem)) {
+                $BindingProblems.Add($Problem)
+            }
+        }
+        if (-not $Bindings.ContainsKey($BindingName)) {
+            $Problem = "BINDING_VALUE_MISSING:$BindingName"
+            if (-not $BindingProblems.Contains($Problem)) {
+                $BindingProblems.Add($Problem)
+            }
+        }
+    }
+    if ($Bindings.ContainsKey('BridgeEnvironmentGeneration')) {
+        $GenEnv = [string]$Bindings['BridgeEnvironmentGeneration']
+        if ($GenEnv -notmatch '^ac-pilot-[a-z0-9-]+$') {
+            $Problem = "NONCANONICAL_BINDING:BridgeEnvironmentGeneration"
+            if (-not $BindingProblems.Contains($Problem)) {
+                $BindingProblems.Add($Problem)
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedEnvironmentGeneration) -and $GenEnv -cne $ExpectedEnvironmentGeneration) {
+            $Problem = "NONCANONICAL_BINDING:BridgeEnvironmentGeneration"
+            if (-not $BindingProblems.Contains($Problem)) {
+                $BindingProblems.Add($Problem)
+            }
+        }
+    }
+    if ($Bindings.ContainsKey('BridgeGenerationRoot') -and $Bindings.ContainsKey('BridgeEnvironmentGeneration')) {
+        $GenRoot = [string]$Bindings['BridgeGenerationRoot']
+        $GenEnv = [string]$Bindings['BridgeEnvironmentGeneration']
+        $ExpectedGenRootCanonical = "C:\ProgramData\agent-controller\private-ci\$GenEnv"
+        if ($GenRoot.TrimEnd('\/') -ne $ExpectedGenRootCanonical) {
+            $Problem = "NONCANONICAL_BINDING:BridgeGenerationRoot"
+            if (-not $BindingProblems.Contains($Problem)) {
+                $BindingProblems.Add($Problem)
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedGenerationRoot) -and $GenRoot.TrimEnd('\/') -ne $ExpectedGenerationRoot.TrimEnd('\/')) {
+            $Problem = "NONCANONICAL_BINDING:BridgeGenerationRoot"
+            if (-not $BindingProblems.Contains($Problem)) {
+                $BindingProblems.Add($Problem)
+            }
+        }
+    }
+}
+else {
+    foreach ($BindingName in $Phase6BindingNames) {
+        if ([int]$BindingCounts[$BindingName] -gt 1) {
+            $Problem = "BINDING_COUNT_INVALID:$BindingName"
+            if (-not $BindingProblems.Contains($Problem)) {
+                $BindingProblems.Add($Problem)
+            }
         }
     }
 }
@@ -776,6 +846,8 @@ $Result = [ordered]@{
     evidence_root = [string]$Bindings['BridgeEvidenceRoot']
     transcript_filename = [string]$Bindings['BridgeTranscriptFilename']
     expected_success_marker = [string]$Bindings['BridgeExpectedSuccessMarker']
+    environment_generation = if ($Bindings.ContainsKey('BridgeEnvironmentGeneration')) { [string]$Bindings['BridgeEnvironmentGeneration'] } else { $null }
+    generation_root = if ($Bindings.ContainsKey('BridgeGenerationRoot')) { [string]$Bindings['BridgeGenerationRoot'] } else { $null }
     observed_effect_families = @($ObservedEffects)
     automatic_variable_collisions = @($AutomaticVariableCollisions)
     unresolved_placeholders = @($UnresolvedPlaceholders)

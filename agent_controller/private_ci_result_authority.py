@@ -11,7 +11,45 @@ from agent_controller.operator_step_gate import (
     ResultPublicationCapability,
     consume_result_publication_capability,
 )
-from agent_controller.private_ci_consumption_marker import CONSUMPTION_ROOT
+from agent_controller.private_ci_consumption_marker import (
+    CONSUMPTION_ROOT,
+    validate_consumption_acl_state,
+    validate_consumption_container_acl_state,
+)
+
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _validate_authority_root_security(
+    root: Path | None = None,
+    *,
+    authority_container_acl_state: object | None = None,
+) -> None:
+    if root is None:
+        root = RESULT_AUTHORITY_ROOT
+    if not root.is_dir() or root.is_symlink():
+        raise ValueError("result authority root missing or not a directory")
+    stat_result = root.lstat()
+    if getattr(stat_result, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+        # Explicitly reject ReparsePoint for authority root
+        raise ValueError("result authority root ReparsePoint blocked")
+    if authority_container_acl_state is not None:
+        validate_consumption_container_acl_state(authority_container_acl_state)
+
+
+def _validate_authority_marker_security(
+    path: Path,
+    *,
+    marker_acl_state: object | None = None,
+) -> None:
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("result authority marker missing or unreadable")
+    stat_result = path.lstat()
+    if getattr(stat_result, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+        # Explicitly reject ReparsePoint for authority marker
+        raise ValueError("result authority marker ReparsePoint blocked")
+    if marker_acl_state is not None:
+        validate_consumption_acl_state(marker_acl_state)
 
 
 RESULT_AUTHORITY_ROOT = CONSUMPTION_ROOT
@@ -65,6 +103,8 @@ def _publish(
     result_bytes: bytes,
     upstream_sha256: str,
     publication_capability: ResultPublicationCapability,
+    authority_container_acl_state: object | None = None,
+    marker_acl_state: object | None = None,
 ) -> ResultAuthorityMarker:
     if type(result_bytes) is not bytes:
         raise ValueError("result authority requires exact result bytes")
@@ -80,8 +120,10 @@ def _publish(
         upstream_sha256=upstream,
     )
     root = RESULT_AUTHORITY_ROOT
-    if not root.is_dir():
-        raise ValueError("result authority root missing")
+    _validate_authority_root_security(
+        root,
+        authority_container_acl_state=authority_container_acl_state,
+    )
     marker = ResultAuthorityMarker(
         schema=schema,
         result_sha256=result_sha,
@@ -90,6 +132,8 @@ def _publish(
     )
     path = _marker_path(phase=phase, result_sha256=result_sha)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    # Note: 0o600 mode does not provide sufficient Windows ACL protection;
+    # authority root and marker security must be proven via ACL state validation.
     try:
         fd = os.open(path, flags, 0o600)
     except FileExistsError as error:
@@ -105,6 +149,10 @@ def _publish(
         raise ValueError(
             "result authority marker write failed; authority is blocked"
         ) from error
+    _validate_authority_marker_security(
+        path,
+        marker_acl_state=marker_acl_state,
+    )
     return marker
 
 
@@ -114,11 +162,22 @@ def _parse_and_validate(
     schema: str,
     result_bytes: bytes,
     expected_upstream_sha256: str,
+    authority_container_acl_state: object | None = None,
+    marker_acl_state: object | None = None,
 ) -> ResultAuthorityMarker:
     if type(result_bytes) is not bytes:
         raise ValueError("result authority requires exact result bytes")
+    root = RESULT_AUTHORITY_ROOT
+    _validate_authority_root_security(
+        root,
+        authority_container_acl_state=authority_container_acl_state,
+    )
     result_sha = hashlib.sha256(result_bytes).hexdigest()
     path = _marker_path(phase=phase, result_sha256=result_sha)
+    _validate_authority_marker_security(
+        path,
+        marker_acl_state=marker_acl_state,
+    )
     try:
         raw = path.read_bytes()
     except OSError as error:
@@ -164,6 +223,8 @@ def publish_phase6_result_authority(
     *,
     phase6_consumption_sha256: str,
     publication_capability: ResultPublicationCapability,
+    authority_container_acl_state: object | None = None,
+    marker_acl_state: object | None = None,
 ) -> ResultAuthorityMarker:
     return _publish(
         phase=6,
@@ -171,6 +232,8 @@ def publish_phase6_result_authority(
         result_bytes=result_bytes,
         upstream_sha256=phase6_consumption_sha256,
         publication_capability=publication_capability,
+        authority_container_acl_state=authority_container_acl_state,
+        marker_acl_state=marker_acl_state,
     )
 
 
@@ -179,6 +242,8 @@ def publish_phase7_result_authority(
     *,
     phase6_result_sha256: str,
     publication_capability: ResultPublicationCapability,
+    authority_container_acl_state: object | None = None,
+    marker_acl_state: object | None = None,
 ) -> ResultAuthorityMarker:
     return _publish(
         phase=7,
@@ -186,6 +251,8 @@ def publish_phase7_result_authority(
         result_bytes=result_bytes,
         upstream_sha256=phase6_result_sha256,
         publication_capability=publication_capability,
+        authority_container_acl_state=authority_container_acl_state,
+        marker_acl_state=marker_acl_state,
     )
 
 
@@ -193,12 +260,16 @@ def validate_phase6_result_authority_marker(
     result_bytes: bytes,
     *,
     phase6_consumption_sha256: str,
+    authority_container_acl_state: object | None = None,
+    marker_acl_state: object | None = None,
 ) -> ResultAuthorityMarker:
     return _parse_and_validate(
         phase=6,
         schema=PHASE6_RESULT_AUTHORITY_SCHEMA,
         result_bytes=result_bytes,
         expected_upstream_sha256=phase6_consumption_sha256,
+        authority_container_acl_state=authority_container_acl_state,
+        marker_acl_state=marker_acl_state,
     )
 
 
@@ -206,10 +277,14 @@ def validate_phase7_result_authority_marker(
     result_bytes: bytes,
     *,
     phase6_result_sha256: str,
+    authority_container_acl_state: object | None = None,
+    marker_acl_state: object | None = None,
 ) -> ResultAuthorityMarker:
     return _parse_and_validate(
         phase=7,
         schema=PHASE7_RESULT_AUTHORITY_SCHEMA,
         result_bytes=result_bytes,
         expected_upstream_sha256=phase6_result_sha256,
+        authority_container_acl_state=authority_container_acl_state,
+        marker_acl_state=marker_acl_state,
     )

@@ -252,6 +252,8 @@ def build_phase6_cleanup_operator_spec(
         require_heartbeat_or_progress=False,
         require_child_exit_code=False,
         require_fail_fast=True,
+        expected_environment_generation=plan.environment_generation,
+        expected_generation_root=plan.generation_root,
     )
 
 
