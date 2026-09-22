@@ -724,8 +724,7 @@ def _require_no_external_mutation_handles(
                     )
                     continue
                 try:
-                    if _process_is_protected(query_process):
-                        continue
+                    _process_is_protected(query_process)
                 finally:
                     _kernel32.CloseHandle(query_process)
                 pending.extend(
@@ -736,6 +735,9 @@ def _require_no_external_mutation_handles(
             try:
                 protected = _process_is_protected(process)
                 if protected:
+                    pending.extend(
+                        ("uninspectable", entry) for entry in candidates
+                    )
                     continue
                 for entry in candidates:
                     duplicate = wintypes.HANDLE()
