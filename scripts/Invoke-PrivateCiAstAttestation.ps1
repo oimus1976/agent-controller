@@ -598,6 +598,25 @@ foreach ($AssignmentAst in $AssignmentAsts) {
     }
 }
 
+function Get-EnclosingStatementContainer {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Language.Ast]$Node
+    )
+
+    $Current = $Node.Parent
+    while ($null -ne $Current) {
+        if (
+            $Current -is [System.Management.Automation.Language.StatementBlockAst] -or
+            $Current -is [System.Management.Automation.Language.NamedBlockAst]
+        ) {
+            return $Current
+        }
+        $Current = $Current.Parent
+    }
+    return $null
+}
+
 $NativeGuardRequiredCommands = New-Object System.Collections.Generic.List[object]
 foreach ($CommandAst in $CommandAsts) {
     if ($CommandAst.InvocationOperator -ne [System.Management.Automation.Language.TokenKind]::Unknown) {
@@ -617,22 +636,78 @@ foreach ($CommandAst in $CommandAsts) {
     }
 }
 
-$GuardedNativeExitVariables = New-Object System.Collections.Generic.List[string]
-foreach ($AssignmentAst in $AssignmentAsts) {
-    if (
-        $AssignmentAst.Left -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
-        ($RootStatements -notcontains $AssignmentAst)
-    ) {
-        continue
-    }
-    if ($AssignmentAst.Right.Extent.Text -notmatch '(?i)^\s*\$LASTEXITCODE\s*$') {
-        continue
+$AllNativeCommandsGuarded = $true
+foreach ($NativeCommandAst in $NativeGuardRequiredCommands) {
+    $NativeContainer = Get-EnclosingStatementContainer -Node $NativeCommandAst
+    if ($null -eq $NativeContainer) {
+        $AllNativeCommandsGuarded = $false
+        break
     }
 
-    $ExitVariableName = Get-NormalizedVariableUserPath -UserPath $AssignmentAst.Left.VariablePath.UserPath
+    $NextNativeStart = [int]::MaxValue
+    foreach ($OtherNativeCommandAst in $NativeGuardRequiredCommands) {
+        if ($OtherNativeCommandAst -eq $NativeCommandAst) {
+            continue
+        }
+        $OtherContainer = Get-EnclosingStatementContainer -Node $OtherNativeCommandAst
+        if (-not [object]::ReferenceEquals($NativeContainer, $OtherContainer)) {
+            continue
+        }
+        if (
+            $OtherNativeCommandAst.Extent.StartOffset -gt $NativeCommandAst.Extent.StartOffset -and
+            $OtherNativeCommandAst.Extent.StartOffset -lt $NextNativeStart
+        ) {
+            $NextNativeStart = $OtherNativeCommandAst.Extent.StartOffset
+        }
+    }
+
+    $ExitAssignment = $null
+    foreach ($AssignmentAst in $AssignmentAsts) {
+        if ($AssignmentAst.Left -isnot [System.Management.Automation.Language.VariableExpressionAst]) {
+            continue
+        }
+        $AssignmentContainer = Get-EnclosingStatementContainer -Node $AssignmentAst
+        if (-not [object]::ReferenceEquals($NativeContainer, $AssignmentContainer)) {
+            continue
+        }
+        if (
+            $AssignmentAst.Extent.StartOffset -lt $NativeCommandAst.Extent.EndOffset -or
+            $AssignmentAst.Extent.StartOffset -ge $NextNativeStart
+        ) {
+            continue
+        }
+        if ($AssignmentAst.Right.Extent.Text -notmatch '(?i)^\s*\$LASTEXITCODE\s*$') {
+            continue
+        }
+        if (
+            $null -eq $ExitAssignment -or
+            $AssignmentAst.Extent.StartOffset -lt $ExitAssignment.Extent.StartOffset
+        ) {
+            $ExitAssignment = $AssignmentAst
+        }
+    }
+    if ($null -eq $ExitAssignment) {
+        $AllNativeCommandsGuarded = $false
+        break
+    }
+
+    $ExitVariableName = Get-NormalizedVariableUserPath -UserPath $ExitAssignment.Left.VariablePath.UserPath
+    if ($ExitVariableName -notmatch '(?i)^Bridge[A-Za-z0-9]*ExitCode$') {
+        $AllNativeCommandsGuarded = $false
+        break
+    }
     $EscapedExitVariableName = [regex]::Escape($ExitVariableName)
+
+    $GuardIf = $null
     foreach ($IfAst in $AllIfAsts) {
-        if ($RootStatements -notcontains $IfAst) {
+        $IfContainer = Get-EnclosingStatementContainer -Node $IfAst
+        if (-not [object]::ReferenceEquals($NativeContainer, $IfContainer)) {
+            continue
+        }
+        if (
+            $IfAst.Extent.StartOffset -lt $ExitAssignment.Extent.EndOffset -or
+            $IfAst.Extent.StartOffset -ge $NextNativeStart
+        ) {
             continue
         }
         $IfText = $IfAst.Extent.Text
@@ -644,11 +719,17 @@ foreach ($AssignmentAst in $AssignmentAsts) {
             $IfText -match ("(?is)^\s*if\s*\(\s*\$" + $EscapedExitVariableName + "\s*-ne\s*0\s*\)") -and
             $ThrowAsts.Count -gt 0
         ) {
-            if (-not $GuardedNativeExitVariables.Contains($ExitVariableName)) {
-                $GuardedNativeExitVariables.Add($ExitVariableName)
+            if (
+                $null -eq $GuardIf -or
+                $IfAst.Extent.StartOffset -lt $GuardIf.Extent.StartOffset
+            ) {
+                $GuardIf = $IfAst
             }
-            break
         }
+    }
+    if ($null -eq $GuardIf) {
+        $AllNativeCommandsGuarded = $false
+        break
     }
 }
 
@@ -656,7 +737,7 @@ $SynchronousFailFastProven = (
     -not $ChildProcessAssigned -and
     $ErrorActionPreferenceStopAssigned -and
     $NativeGuardRequiredCommands.Count -gt 0 -and
-    $GuardedNativeExitVariables.Count -ge $NativeGuardRequiredCommands.Count
+    $AllNativeCommandsGuarded
 )
 $FailFastProven = $ChildFailFastProven -or $SynchronousFailFastProven
 
