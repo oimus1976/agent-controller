@@ -147,6 +147,20 @@ def phase5_evidence(*, pilot_binding=None):
 
 
 class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
+    def setUp(self):
+        # Linux deterministic tests exercise publication semantics with mocked
+        # ACL readback and must not require Windows PowerShell. The real
+        # installer remains unmocked on Windows, where the production-path
+        # regression runs in the dedicated Windows CI job.
+        if os.name != "nt":
+            for target in (
+                "agent_controller.private_ci_result_authority.install_protected_marker_acl",
+                "agent_controller.private_ci_final_publication.install_protected_marker_acl",
+            ):
+                patcher = patch(target)
+                patcher.start()
+                self.addCleanup(patcher.stop)
+
     def result_module(self):
         from agent_controller import private_ci_phase7_result
         return private_ci_phase7_result
