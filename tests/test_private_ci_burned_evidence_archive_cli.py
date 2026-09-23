@@ -111,10 +111,23 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         build_transport = namespace["_build_uac_bootstrap_transport"]
 
         source = self.ps_path.read_text(encoding="utf-8")
-        rendered = source.replace(
-            "__EXPECTED_PLAN_SHA256__",
-            "b" * 64,
+        representative_plan_raw = (
+            b'{"schema":"probe","payload":"'
+            + (bytes(range(256)) * 8).hex().encode("ascii")
+            + b'"}\n'
         )
+        representative_plan_base64 = base64.b64encode(
+            representative_plan_raw
+        ).decode("ascii")
+        rendered = (
+            source
+            .replace("__EXPECTED_PLAN_SHA256__", "b" * 64)
+            .replace(
+                "__EXPECTED_PLAN_BASE64__",
+                representative_plan_base64,
+            )
+        )
+        self.assertNotIn("__EXPECTED_PLAN_BASE64__", rendered)
         transport = build_transport(rendered)
 
         compressed = base64.b64decode(
