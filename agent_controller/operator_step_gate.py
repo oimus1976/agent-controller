@@ -56,6 +56,8 @@ class OperatorStepSpec:
     require_heartbeat_or_progress: bool
     require_child_exit_code: bool
     require_fail_fast: bool
+    expected_environment_generation: Optional[str] = None
+    expected_generation_root: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +84,8 @@ class PowerShellAstAttestation:
     heartbeat_or_progress_proven: bool
     child_exit_code_proven: bool
     fail_fast_proven: bool
+    environment_generation: Optional[str] = None
+    generation_root: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +95,11 @@ class AuthenticatedAstAttestation:
 
 @dataclass(frozen=True, slots=True)
 class PriorEvidenceCapability:
+    token: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResultPublicationCapability:
     token: str
 
 
@@ -115,6 +124,13 @@ class _EvidenceBinding:
     evidence_sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class _ResultPublicationBinding:
+    phase: int
+    result_sha256: str
+    upstream_sha256: str
+
+
 class _ControllerAuthority:
     __slots__ = (
         "_ast_hmac_key",
@@ -123,6 +139,9 @@ class _ControllerAuthority:
         "_evidence_bindings",
         "_consumed_evidence",
         "_evidence_lock",
+        "_result_publication_bindings",
+        "_consumed_result_publications",
+        "_result_publication_lock",
     )
 
     def __init__(self, *, ast_hmac_key: bytes, evidence_hmac_key: bytes) -> None:
@@ -132,6 +151,11 @@ class _ControllerAuthority:
         self._evidence_bindings: dict[str, _EvidenceBinding] = {}
         self._consumed_evidence: set[str] = set()
         self._evidence_lock = threading.Lock()
+        self._result_publication_bindings: dict[
+            str, _ResultPublicationBinding
+        ] = {}
+        self._consumed_result_publications: set[str] = set()
+        self._result_publication_lock = threading.Lock()
 
     def authenticate_ast(
         self,
@@ -240,6 +264,81 @@ class _ControllerAuthority:
             self._consumed_evidence.add(token)
         return True, ""
 
+    def authenticate_result_publication(
+        self,
+        *,
+        phase: int,
+        result_bytes: bytes,
+        upstream_sha256: str,
+        auth_tag: str,
+    ) -> ResultPublicationCapability:
+        if phase not in (6, 7):
+            raise ValueError("result publication phase invalid")
+        if type(result_bytes) is not bytes:
+            raise ValueError("result publication requires exact result bytes")
+        if not _valid_digest(upstream_sha256):
+            raise ValueError("result publication upstream SHA-256 invalid")
+        if not _valid_digest(auth_tag):
+            raise ValueError("result publication authentication tag invalid")
+
+        result_sha256 = hashlib.sha256(result_bytes).hexdigest()
+        message = result_publication_auth_message(
+            phase=phase,
+            result_sha256=result_sha256,
+            upstream_sha256=upstream_sha256,
+        )
+        expected_tag = hmac.new(
+            self._evidence_hmac_key,
+            message,
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(auth_tag, expected_tag):
+            raise ValueError("result publication authentication failed")
+
+        token = secrets.token_hex(32)
+        self._result_publication_bindings[token] = _ResultPublicationBinding(
+            phase=phase,
+            result_sha256=result_sha256,
+            upstream_sha256=upstream_sha256,
+        )
+        return ResultPublicationCapability(token=token)
+
+    def claim_result_publication(
+        self,
+        capability: object,
+        *,
+        phase: int,
+        result_sha256: str,
+        upstream_sha256: str,
+    ) -> tuple[bool, str]:
+        if type(capability) is not ResultPublicationCapability:
+            return False, "RESULT_PUBLICATION_CAPABILITY_TYPE_INVALID"
+        if not _valid_digest(capability.token):
+            return False, "RESULT_PUBLICATION_CAPABILITY_INVALID"
+        if phase not in (6, 7):
+            return False, "RESULT_PUBLICATION_PHASE_INVALID"
+        if not _valid_digest(result_sha256):
+            return False, "RESULT_PUBLICATION_RESULT_SHA_INVALID"
+        if not _valid_digest(upstream_sha256):
+            return False, "RESULT_PUBLICATION_UPSTREAM_SHA_INVALID"
+
+        expected = _ResultPublicationBinding(
+            phase=phase,
+            result_sha256=result_sha256,
+            upstream_sha256=upstream_sha256,
+        )
+        token = capability.token
+        with self._result_publication_lock:
+            if token in self._consumed_result_publications:
+                return False, "RESULT_PUBLICATION_ALREADY_CONSUMED"
+            actual = self._result_publication_bindings.get(token)
+            if actual is None:
+                return False, "RESULT_PUBLICATION_UNKNOWN"
+            if actual != expected:
+                return False, "RESULT_PUBLICATION_BINDING_MISMATCH"
+            self._consumed_result_publications.add(token)
+        return True, ""
+
 
 _ACTIVE_CONTROLLER_AUTHORITY: Optional[_ControllerAuthority] = None
 _AUTHORITY_CONFIG_LOCK = threading.Lock()
@@ -305,6 +404,44 @@ def authenticate_prior_evidence(
     )
 
 
+def authenticate_result_publication(
+    *,
+    phase: int,
+    result_bytes: bytes,
+    upstream_sha256: str,
+    auth_tag: str,
+) -> ResultPublicationCapability:
+    authority = _active_authority()
+    if authority is None:
+        raise RuntimeError("controller authority is not configured")
+    return authority.authenticate_result_publication(
+        phase=phase,
+        result_bytes=result_bytes,
+        upstream_sha256=upstream_sha256,
+        auth_tag=auth_tag,
+    )
+
+
+def consume_result_publication_capability(
+    capability: object,
+    *,
+    phase: int,
+    result_sha256: str,
+    upstream_sha256: str,
+) -> None:
+    authority = _active_authority()
+    if authority is None:
+        raise RuntimeError("controller authority is not configured")
+    claimed, reason = authority.claim_result_publication(
+        capability,
+        phase=phase,
+        result_sha256=result_sha256,
+        upstream_sha256=upstream_sha256,
+    )
+    if not claimed:
+        raise ValueError(reason)
+
+
 def _candidate_sha256(candidate: str) -> str:
     return hashlib.sha256(candidate.encode("utf-8")).hexdigest()
 
@@ -334,6 +471,27 @@ def _valid_plain_string_tuple(value: object) -> bool:
 
 def _canonical_bytes(payload: dict[str, object]) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+
+
+def result_publication_auth_message(
+    *,
+    phase: int,
+    result_sha256: str,
+    upstream_sha256: str,
+) -> bytes:
+    if phase not in (6, 7):
+        raise ValueError("result publication phase invalid")
+    if not _valid_digest(result_sha256):
+        raise ValueError("result publication result SHA-256 invalid")
+    if not _valid_digest(upstream_sha256):
+        raise ValueError("result publication upstream SHA-256 invalid")
+    return _canonical_bytes(
+        {
+            "phase": phase,
+            "result_sha256": result_sha256,
+            "upstream_sha256": upstream_sha256,
+        }
+    )
 
 
 def _spec_payload(spec: OperatorStepSpec) -> dict[str, object]:
@@ -366,6 +524,11 @@ def _spec_payload(spec: OperatorStepSpec) -> dict[str, object]:
         "require_child_exit_code": spec.require_child_exit_code,
         "require_fail_fast": spec.require_fail_fast,
     }
+    if spec.expected_environment_generation is not None:
+        payload["expected_environment_generation"] = spec.expected_environment_generation
+    if spec.expected_generation_root is not None:
+        payload["expected_generation_root"] = spec.expected_generation_root
+    return payload
 
 
 def operator_step_spec_sha256(spec: OperatorStepSpec) -> str:
@@ -373,7 +536,7 @@ def operator_step_spec_sha256(spec: OperatorStepSpec) -> str:
 
 
 def _attestation_payload(report: PowerShellAstAttestation) -> dict[str, object]:
-    return {
+    payload = {
         "runtime": report.runtime,
         "parser": report.parser,
         "candidate_sha256": report.candidate_sha256,
@@ -397,6 +560,11 @@ def _attestation_payload(report: PowerShellAstAttestation) -> dict[str, object]:
         "child_exit_code_proven": report.child_exit_code_proven,
         "fail_fast_proven": report.fail_fast_proven,
     }
+    if report.environment_generation is not None:
+        payload["environment_generation"] = report.environment_generation
+    if report.generation_root is not None:
+        payload["generation_root"] = report.generation_root
+    return payload
 
 
 def ast_attestation_auth_message(report: PowerShellAstAttestation) -> bytes:
@@ -465,6 +633,10 @@ def _validate_attestation_shape(report: object) -> None:
     )
     if not all(type(value) is bool for value in bool_fields):
         raise ValueError("invalid AST attestation bool")
+    if report.environment_generation is not None and type(report.environment_generation) is not str:
+        raise ValueError("invalid AST attestation environment generation")
+    if report.generation_root is not None and type(report.generation_root) is not str:
+        raise ValueError("invalid AST attestation generation root")
 
 
 def _spec_reason_codes(spec: object) -> tuple[str, ...]:
@@ -569,6 +741,13 @@ def _attestation_reason_codes(
     for reason, observed, expected in bindings:
         if observed != expected:
             reasons.append(reason)
+
+    if spec.expected_environment_generation is not None:
+        if report.environment_generation != spec.expected_environment_generation:
+            reasons.append("AST_ENVIRONMENT_GENERATION_BINDING_MISMATCH")
+    if spec.expected_generation_root is not None:
+        if report.generation_root != spec.expected_generation_root:
+            reasons.append("AST_GENERATION_ROOT_BINDING_MISMATCH")
 
     observed_effects = set(report.observed_effect_families)
     allowed_effects = set(spec.allowed_effect_families)

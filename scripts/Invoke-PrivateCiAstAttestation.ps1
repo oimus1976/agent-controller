@@ -3,7 +3,13 @@ param(
     [string]$CandidatePath,
 
     [Parameter(Mandatory = $true)]
-    [string]$SpecSha256
+    [string]$SpecSha256,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ExpectedEnvironmentGeneration,
+
+    [Parameter(Mandatory = $false)]
+    [string]$ExpectedGenerationRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,10 +62,15 @@ $BindingNames = @(
     'BridgeTranscriptFilename',
     'BridgeExpectedSuccessMarker'
 )
+$Phase6BindingNames = @(
+    'BridgeGenerationRoot',
+    'BridgeEnvironmentGeneration'
+)
+$AllTrackedBindingNames = $BindingNames + $Phase6BindingNames
 $Bindings = @{}
 $BindingCounts = @{}
 $BindingProblems = New-Object System.Collections.Generic.List[string]
-foreach ($BindingName in $BindingNames) {
+foreach ($BindingName in $AllTrackedBindingNames) {
     $BindingCounts[$BindingName] = 0
 }
 $RootStatements = @()
@@ -88,7 +99,7 @@ foreach ($AssignmentAst in $AssignmentAsts) {
 
     foreach ($VariableNode in $LeftVariables) {
         $VariableName = Get-NormalizedVariableUserPath -UserPath $VariableNode.VariablePath.UserPath
-        if ($BindingNames -notcontains $VariableName) {
+        if ($AllTrackedBindingNames -notcontains $VariableName) {
             continue
         }
 
@@ -138,7 +149,7 @@ $ParameterAsts = $Ast.FindAll({
 }, $true)
 foreach ($ParameterAst in $ParameterAsts) {
     $ParameterName = Get-NormalizedVariableUserPath -UserPath $ParameterAst.Name.VariablePath.UserPath
-    if ($BindingNames -contains $ParameterName) {
+    if ($AllTrackedBindingNames -contains $ParameterName) {
         $BindingCounts[$ParameterName] = [int]$BindingCounts[$ParameterName] + 1
         $Problem = "NONCANONICAL_BINDING:$ParameterName"
         if (-not $BindingProblems.Contains($Problem)) {
@@ -156,7 +167,7 @@ foreach ($ForEachAst in $ForEachAsts) {
         continue
     }
     $ForEachVariableName = Get-NormalizedVariableUserPath -UserPath $ForEachAst.Variable.VariablePath.UserPath
-    if ($BindingNames -contains $ForEachVariableName) {
+    if ($AllTrackedBindingNames -contains $ForEachVariableName) {
         $BindingCounts[$ForEachVariableName] = [int]$BindingCounts[$ForEachVariableName] + 1
         $Problem = "NONCANONICAL_BINDING:$ForEachVariableName"
         if (-not $BindingProblems.Contains($Problem)) {
@@ -176,6 +187,65 @@ foreach ($BindingName in $BindingNames) {
         $Problem = "BINDING_VALUE_MISSING:$BindingName"
         if (-not $BindingProblems.Contains($Problem)) {
             $BindingProblems.Add($Problem)
+        }
+    }
+}
+
+if ($Bindings['BridgeExpectedSuccessMarker'] -eq 'PHASE6_CLEANUP_PASS') {
+    foreach ($BindingName in $Phase6BindingNames) {
+        if ([int]$BindingCounts[$BindingName] -ne 1) {
+            $Problem = "BINDING_COUNT_INVALID:$BindingName"
+            if (-not $BindingProblems.Contains($Problem)) {
+                $BindingProblems.Add($Problem)
+            }
+        }
+        if (-not $Bindings.ContainsKey($BindingName)) {
+            $Problem = "BINDING_VALUE_MISSING:$BindingName"
+            if (-not $BindingProblems.Contains($Problem)) {
+                $BindingProblems.Add($Problem)
+            }
+        }
+    }
+    if ($Bindings.ContainsKey('BridgeEnvironmentGeneration')) {
+        $GenEnv = [string]$Bindings['BridgeEnvironmentGeneration']
+        if ($GenEnv -notmatch '^ac-pilot-[a-z0-9-]+$') {
+            $Problem = "NONCANONICAL_BINDING:BridgeEnvironmentGeneration"
+            if (-not $BindingProblems.Contains($Problem)) {
+                $BindingProblems.Add($Problem)
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedEnvironmentGeneration) -and $GenEnv -cne $ExpectedEnvironmentGeneration) {
+            $Problem = "NONCANONICAL_BINDING:BridgeEnvironmentGeneration"
+            if (-not $BindingProblems.Contains($Problem)) {
+                $BindingProblems.Add($Problem)
+            }
+        }
+    }
+    if ($Bindings.ContainsKey('BridgeGenerationRoot') -and $Bindings.ContainsKey('BridgeEnvironmentGeneration')) {
+        $GenRoot = [string]$Bindings['BridgeGenerationRoot']
+        $GenEnv = [string]$Bindings['BridgeEnvironmentGeneration']
+        $ExpectedGenRootCanonical = "C:\ProgramData\agent-controller\private-ci\$GenEnv"
+        if ($GenRoot.TrimEnd('\/') -ne $ExpectedGenRootCanonical) {
+            $Problem = "NONCANONICAL_BINDING:BridgeGenerationRoot"
+            if (-not $BindingProblems.Contains($Problem)) {
+                $BindingProblems.Add($Problem)
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedGenerationRoot) -and $GenRoot.TrimEnd('\/') -ne $ExpectedGenerationRoot.TrimEnd('\/')) {
+            $Problem = "NONCANONICAL_BINDING:BridgeGenerationRoot"
+            if (-not $BindingProblems.Contains($Problem)) {
+                $BindingProblems.Add($Problem)
+            }
+        }
+    }
+}
+else {
+    foreach ($BindingName in $Phase6BindingNames) {
+        if ([int]$BindingCounts[$BindingName] -gt 1) {
+            $Problem = "BINDING_COUNT_INVALID:$BindingName"
+            if (-not $BindingProblems.Contains($Problem)) {
+                $BindingProblems.Add($Problem)
+            }
         }
     }
 }
@@ -262,6 +332,25 @@ foreach ($CommandAst in $CommandAsts) {
     )) {
         continue
     }
+    elseif ($LowerName -eq 'invoke-privatecigenerationretirement') {
+        if (-not $ObservedEffects.Contains('GENERATION_RETIREMENT')) {
+            $ObservedEffects.Add('GENERATION_RETIREMENT')
+        }
+    }
+    elseif ($LowerName -eq 'python.exe') {
+        $CommandText = $CommandAst.Extent.Text
+        $IsGenerationRetirement = (
+            $CommandText -match '(?i)^\s*python\.exe\s+[''"]C:\\Users\\c-admin\\[A-Za-z0-9_.-]+\\scripts\\retire_private_ci_generation\.py[''"]\s+--generation-root\s+\$BridgeGenerationRoot\s+--expected-generation\s+\$BridgeEnvironmentGeneration\s*$'
+        )
+        if ($IsGenerationRetirement) {
+            if (-not $ObservedEffects.Contains('GENERATION_RETIREMENT')) {
+                $ObservedEffects.Add('GENERATION_RETIREMENT')
+            }
+        }
+        elseif (-not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+            $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+        }
+    }
     elseif ($LowerName -eq 'start-process') {
         if (-not $ObservedEffects.Contains('PROCESS_LAUNCH')) {
             $ObservedEffects.Add('PROCESS_LAUNCH')
@@ -314,6 +403,23 @@ foreach ($CommandAst in $CommandAsts) {
             $CommandText -match '(?i)-H\s+[''"]X-GitHub-Api-Version:\s*2026-03-10[''"]' -and
             $CommandText -match '(?i)repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runners\?per_page=100'
         )
+        $IsPullRequestRead = (
+            $CommandText -match '(?i)^\s*gh\.exe\s+api\b' -and
+            $CommandText -notmatch '(?i)--method\b' -and
+            $CommandText -match '(?i)-H\s+[''"]X-GitHub-Api-Version:\s*2026-03-10[''"]' -and
+            $CommandText -match '(?i)repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pulls/[1-9][0-9]*[''"]?\s*$'
+        )
+        $IsMainRefRead = (
+            $CommandText -match '(?i)^\s*gh\.exe\s+api\b' -and
+            $CommandText -notmatch '(?i)--method\b' -and
+            $CommandText -match '(?i)-H\s+[''"]X-GitHub-Api-Version:\s*2026-03-10[''"]' -and
+            $CommandText -match '(?i)repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/git/ref/heads/main[''"]?\s*$'
+        )
+        $IsRunnerDeregistration = (
+            $CommandText -match '(?i)^\s*gh\.exe\s+api\s+--method\s+DELETE\b' -and
+            $CommandText -match '(?i)-H\s+[''"]X-GitHub-Api-Version:\s*2026-03-10[''"]' -and
+            $CommandText -match '(?i)repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runners/[1-9][0-9]*[''"]?\s*$'
+        )
         $IsWorkflowDispatch = (
             $CommandText -match '(?i)^\s*gh\.exe\s+api\s+--method\s+POST\b' -and
             $CommandText -match '(?i)-H\s+[''"]X-GitHub-Api-Version:\s*2026-03-10[''"]' -and
@@ -321,9 +427,19 @@ foreach ($CommandAst in $CommandAsts) {
             $CommandText -match '(?i)-f\s+[''"]ref=main[''"]' -and
             $CommandText -notmatch '(?i)return_run_details'
         )
-        if ($IsWorkflowDispatchRead -or $IsRunnerInventoryRead) {
+        if (
+            $IsWorkflowDispatchRead -or
+            $IsRunnerInventoryRead -or
+            $IsPullRequestRead -or
+            $IsMainRefRead
+        ) {
             if (-not $ObservedEffects.Contains('HTTP_API_ACCESS')) {
                 $ObservedEffects.Add('HTTP_API_ACCESS')
+            }
+        }
+        elseif ($IsRunnerDeregistration) {
+            if (-not $ObservedEffects.Contains('RUNNER_DEREGISTRATION')) {
+                $ObservedEffects.Add('RUNNER_DEREGISTRATION')
             }
         }
         elseif ($IsWorkflowDispatch) {
@@ -530,13 +646,14 @@ if ($ChildProcessAssigned -and $StartedAtAssigned) {
 }
 
 $ChildExitCodeProven = $ChildProcessAssigned -and $ChildExitCodeAssigned
-$FailFastProven = $false
+$AllIfAsts = @($Ast.FindAll({
+    param($Node)
+    $Node -is [System.Management.Automation.Language.IfStatementAst]
+}, $true))
+
+$ChildFailFastProven = $false
 if ($ChildExitCodeProven) {
-    $IfAsts = @($Ast.FindAll({
-        param($Node)
-        $Node -is [System.Management.Automation.Language.IfStatementAst]
-    }, $true))
-    foreach ($IfAst in $IfAsts) {
+    foreach ($IfAst in $AllIfAsts) {
         $IfText = $IfAst.Extent.Text
         $ThrowAsts = @($IfAst.FindAll({
             param($Node)
@@ -546,11 +663,172 @@ if ($ChildExitCodeProven) {
             $IfText -match '(?is)^\s*if\s*\(\s*\$BridgeChildExitCode\s*-ne\s*0\s*\)' -and
             $ThrowAsts.Count -gt 0
         ) {
-            $FailFastProven = $true
+            $ChildFailFastProven = $true
             break
         }
     }
 }
+
+$ErrorActionPreferenceStopAssigned = $false
+foreach ($AssignmentAst in $AssignmentAsts) {
+    if (
+        $AssignmentAst.Left -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
+        ($RootStatements -notcontains $AssignmentAst)
+    ) {
+        continue
+    }
+    $LeftName = Get-NormalizedVariableUserPath -UserPath $AssignmentAst.Left.VariablePath.UserPath
+    if ($LeftName -ine 'ErrorActionPreference') {
+        continue
+    }
+    $RightText = $AssignmentAst.Right.Extent.Text.Trim()
+    if ($RightText -match '(?i)^[''"]Stop[''"]$') {
+        $ErrorActionPreferenceStopAssigned = $true
+    }
+}
+
+function Get-EnclosingStatementContainer {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Language.Ast]$Node
+    )
+
+    $Current = $Node.Parent
+    while ($null -ne $Current) {
+        if (
+            $Current -is [System.Management.Automation.Language.StatementBlockAst] -or
+            $Current -is [System.Management.Automation.Language.NamedBlockAst]
+        ) {
+            return $Current
+        }
+        $Current = $Current.Parent
+    }
+    return $null
+}
+
+$NativeGuardRequiredCommands = New-Object System.Collections.Generic.List[object]
+foreach ($CommandAst in $CommandAsts) {
+    if ($CommandAst.InvocationOperator -ne [System.Management.Automation.Language.TokenKind]::Unknown) {
+        continue
+    }
+    $NativeName = $CommandAst.GetCommandName()
+    if ([string]::IsNullOrWhiteSpace($NativeName)) {
+        continue
+    }
+    $NativeLowerName = $NativeName.ToLowerInvariant()
+    $NativeLastSlash = $NativeLowerName.LastIndexOf('\')
+    if ($NativeLastSlash -ge 0) {
+        $NativeLowerName = $NativeLowerName.Substring($NativeLastSlash + 1)
+    }
+    if ($NativeLowerName -in @('gh.exe', 'icacls', 'icacls.exe', 'python.exe')) {
+        $NativeGuardRequiredCommands.Add($CommandAst)
+    }
+}
+
+$AllNativeCommandsGuarded = $true
+foreach ($NativeCommandAst in $NativeGuardRequiredCommands) {
+    $NativeContainer = Get-EnclosingStatementContainer -Node $NativeCommandAst
+    if ($null -eq $NativeContainer) {
+        $AllNativeCommandsGuarded = $false
+        break
+    }
+
+    $NextNativeStart = [int]::MaxValue
+    foreach ($OtherNativeCommandAst in $NativeGuardRequiredCommands) {
+        if ($OtherNativeCommandAst -eq $NativeCommandAst) {
+            continue
+        }
+        $OtherContainer = Get-EnclosingStatementContainer -Node $OtherNativeCommandAst
+        if (-not [object]::ReferenceEquals($NativeContainer, $OtherContainer)) {
+            continue
+        }
+        if (
+            $OtherNativeCommandAst.Extent.StartOffset -gt $NativeCommandAst.Extent.StartOffset -and
+            $OtherNativeCommandAst.Extent.StartOffset -lt $NextNativeStart
+        ) {
+            $NextNativeStart = $OtherNativeCommandAst.Extent.StartOffset
+        }
+    }
+
+    $ExitAssignment = $null
+    foreach ($AssignmentAst in $AssignmentAsts) {
+        if ($AssignmentAst.Left -isnot [System.Management.Automation.Language.VariableExpressionAst]) {
+            continue
+        }
+        $AssignmentContainer = Get-EnclosingStatementContainer -Node $AssignmentAst
+        if (-not [object]::ReferenceEquals($NativeContainer, $AssignmentContainer)) {
+            continue
+        }
+        if (
+            $AssignmentAst.Extent.StartOffset -lt $NativeCommandAst.Extent.EndOffset -or
+            $AssignmentAst.Extent.StartOffset -ge $NextNativeStart
+        ) {
+            continue
+        }
+        if ($AssignmentAst.Right.Extent.Text -notmatch '(?i)^\s*\$LASTEXITCODE\s*$') {
+            continue
+        }
+        if (
+            $null -eq $ExitAssignment -or
+            $AssignmentAst.Extent.StartOffset -lt $ExitAssignment.Extent.StartOffset
+        ) {
+            $ExitAssignment = $AssignmentAst
+        }
+    }
+    if ($null -eq $ExitAssignment) {
+        $AllNativeCommandsGuarded = $false
+        break
+    }
+
+    $ExitVariableName = Get-NormalizedVariableUserPath -UserPath $ExitAssignment.Left.VariablePath.UserPath
+    if ($ExitVariableName -notmatch '(?i)^Bridge[A-Za-z0-9]*ExitCode$') {
+        $AllNativeCommandsGuarded = $false
+        break
+    }
+    $EscapedExitVariableName = [regex]::Escape($ExitVariableName)
+
+    $GuardIf = $null
+    foreach ($IfAst in $AllIfAsts) {
+        $IfContainer = Get-EnclosingStatementContainer -Node $IfAst
+        if (-not [object]::ReferenceEquals($NativeContainer, $IfContainer)) {
+            continue
+        }
+        if (
+            $IfAst.Extent.StartOffset -lt $ExitAssignment.Extent.EndOffset -or
+            $IfAst.Extent.StartOffset -ge $NextNativeStart
+        ) {
+            continue
+        }
+        $IfText = $IfAst.Extent.Text
+        $ThrowAsts = @($IfAst.FindAll({
+            param($Node)
+            $Node -is [System.Management.Automation.Language.ThrowStatementAst]
+        }, $true))
+        if (
+            $IfText -match ("(?is)^\s*if\s*\(\s*\$" + $EscapedExitVariableName + "\s*-ne\s*0\s*\)") -and
+            $ThrowAsts.Count -gt 0
+        ) {
+            if (
+                $null -eq $GuardIf -or
+                $IfAst.Extent.StartOffset -lt $GuardIf.Extent.StartOffset
+            ) {
+                $GuardIf = $IfAst
+            }
+        }
+    }
+    if ($null -eq $GuardIf) {
+        $AllNativeCommandsGuarded = $false
+        break
+    }
+}
+
+$SynchronousFailFastProven = (
+    -not $ChildProcessAssigned -and
+    $ErrorActionPreferenceStopAssigned -and
+    $NativeGuardRequiredCommands.Count -gt 0 -and
+    $AllNativeCommandsGuarded
+)
+$FailFastProven = $ChildFailFastProven -or $SynchronousFailFastProven
 
 $StructuralErrorCount = [int]$ParseErrors.Count + [int]$BindingProblems.Count
 $Result = [ordered]@{
@@ -568,6 +846,8 @@ $Result = [ordered]@{
     evidence_root = [string]$Bindings['BridgeEvidenceRoot']
     transcript_filename = [string]$Bindings['BridgeTranscriptFilename']
     expected_success_marker = [string]$Bindings['BridgeExpectedSuccessMarker']
+    environment_generation = if ($Bindings.ContainsKey('BridgeEnvironmentGeneration')) { [string]$Bindings['BridgeEnvironmentGeneration'] } else { $null }
+    generation_root = if ($Bindings.ContainsKey('BridgeGenerationRoot')) { [string]$Bindings['BridgeGenerationRoot'] } else { $null }
     observed_effect_families = @($ObservedEffects)
     automatic_variable_collisions = @($AutomaticVariableCollisions)
     unresolved_placeholders = @($UnresolvedPlaceholders)

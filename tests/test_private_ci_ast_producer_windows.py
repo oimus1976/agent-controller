@@ -404,6 +404,88 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
             report["observed_effect_families"],
         )
 
+
+    def test_exact_phase6_runner_delete_is_classified(self):
+        command = (
+            "gh.exe api --method DELETE "
+            "-H 'X-GitHub-Api-Version: 2026-03-10' "
+            "'repos/oimus1976/example/actions/runners/23'"
+        )
+        report, _ = self.run_producer(self.bound_candidate(command))
+        self.assertIn(
+            "RUNNER_DEREGISTRATION",
+            report["observed_effect_families"],
+        )
+        self.assertNotIn(
+            "DYNAMIC_OR_UNKNOWN_COMMAND",
+            report["observed_effect_families"],
+        )
+
+        unsafe = (
+            "gh.exe api --method DELETE "
+            "-H 'X-GitHub-Api-Version: 2026-03-10' "
+            "'repos/oimus1976/example/actions/runners/not-a-number'"
+        )
+        unsafe_report, _ = self.run_producer(self.bound_candidate(unsafe))
+        self.assertIn(
+            "DYNAMIC_OR_UNKNOWN_COMMAND",
+            unsafe_report["observed_effect_families"],
+        )
+
+    def test_exact_phase6_target_binding_reads_are_classified_read_only(self):
+        commands = (
+            (
+                "gh.exe api "
+                "-H 'X-GitHub-Api-Version: 2026-03-10' "
+                "'repos/oimus1976/example/pulls/4'"
+            ),
+            (
+                "gh.exe api "
+                "-H 'X-GitHub-Api-Version: 2026-03-10' "
+                "'repos/oimus1976/example/git/ref/heads/main'"
+            ),
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                report, _ = self.run_producer(self.bound_candidate(command))
+                self.assertIn(
+                    "HTTP_API_ACCESS",
+                    report["observed_effect_families"],
+                )
+                self.assertNotIn(
+                    "DYNAMIC_OR_UNKNOWN_COMMAND",
+                    report["observed_effect_families"],
+                )
+
+    def test_synchronous_native_exit_guards_prove_fail_fast(self):
+        candidate = self.bound_candidate(
+            "$ErrorActionPreference = 'Stop'\n"
+            "$BridgeRunnerJson = gh.exe api "
+            "-H 'X-GitHub-Api-Version: 2026-03-10' "
+            "'repos/oimus1976/example/actions/runners?per_page=100'\n"
+            "$BridgeRunnerReadExitCode = $LASTEXITCODE\n"
+            "if ($BridgeRunnerReadExitCode -ne 0) { throw 'runner read failed' }\n"
+            "icacls.exe C:\\target /inheritance:r\n"
+            "$BridgeAclExitCode = $LASTEXITCODE\n"
+            "if ($BridgeAclExitCode -ne 0) { throw 'acl failed' }"
+        )
+        report, _ = self.run_producer(candidate)
+        self.assertTrue(report["fail_fast_proven"])
+        self.assertFalse(report["child_exit_code_proven"])
+
+    def test_synchronous_fail_fast_rejects_unguarded_native_command(self):
+        candidate = self.bound_candidate(
+            "$ErrorActionPreference = 'Stop'\n"
+            "$BridgeRunnerJson = gh.exe api "
+            "-H 'X-GitHub-Api-Version: 2026-03-10' "
+            "'repos/oimus1976/example/actions/runners?per_page=100'\n"
+            "$BridgeRunnerReadExitCode = $LASTEXITCODE\n"
+            "if ($BridgeRunnerReadExitCode -ne 0) { throw 'runner read failed' }\n"
+            "icacls.exe C:\\target /inheritance:r"
+        )
+        report, _ = self.run_producer(candidate)
+        self.assertFalse(report["fail_fast_proven"])
+
     def test_other_gh_api_shapes_remain_unknown(self):
         cases = (
             "gh.exe api repos/oimus1976/example",

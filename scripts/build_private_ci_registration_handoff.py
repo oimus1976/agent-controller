@@ -11,6 +11,7 @@ from pathlib import Path
 from agent_controller.private_ci_consumption_marker import (
     CONSUMPTION_ROOT,
     consumption_marker_path,
+    read_consumption_acl_state,
     validate_consumption_acl_state,
     validate_consumption_container_acl_state,
 )
@@ -80,48 +81,10 @@ def _require_regular_nonreparse_file(path: Path, description: str) -> None:
 
 
 def _acl_state(path: Path) -> object:
-    quoted_path = str(path).replace("'", "''")
-    mutation_mask = " -bor\n    ".join(
-        f"[Security.AccessControl.FileSystemRights]::{right}"
-        for right in _ATOMIC_MUTATING_FILE_SYSTEM_RIGHTS
-    )
-    script = rf"""
-$Acl = Get-Acl -LiteralPath '{quoted_path}'
-$OwnerAccount = New-Object -TypeName Security.Principal.NTAccount -ArgumentList $Acl.Owner
-$OwnerSid = $OwnerAccount.Translate([Security.Principal.SecurityIdentifier]).Value
-$MutationMask = [int](
-    {mutation_mask}
-)
-$Rules = @($Acl.Access | ForEach-Object {{
-    $Sid = $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-    $Rights = [int]$_.FileSystemRights
-    [ordered]@{{
-        sid = $Sid
-        access_type = [string]$_.AccessControlType
-        inherited = [bool]$_.IsInherited
-        can_mutate = [bool](($Rights -band $MutationMask) -ne 0)
-    }}
-}})
-[ordered]@{{
-    protected = [bool]$Acl.AreAccessRulesProtected
-    owner_sid = $OwnerSid
-    rules = $Rules
-}} | ConvertTo-Json -Depth 5 -Compress
-""".strip()
-    completed = _completed(
-        "powershell.exe",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        script,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(f"ACL readback failed: {path}")
     try:
-        return json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
-        raise RuntimeError(f"ACL readback invalid: {path}") from error
+        return read_consumption_acl_state(path)
+    except ValueError as error:
+        raise RuntimeError(f"ACL readback failed: {path}") from error
 
 
 def _write_exclusive(path: Path, content: bytes) -> None:
