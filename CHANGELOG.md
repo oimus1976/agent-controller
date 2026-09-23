@@ -15,6 +15,28 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-24 — Embedded reviewed plan across UAC archive boundary（Issue #239 / PR #240）
+
+関連: Issue #239, Issue #216, Issue #227, PR #240
+
+### Changed
+
+- WOBBUFFETで#237修正後の#227 archive applyがUAC起動までは進むものの、canonical 5件・archive・manifest/resultが完全に未変更のまま終了する実機事象を確認。
+- read-only UAC probeで、親processに一時設定した `AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64` が `Start-Process -Verb RunAs` のelevated childから見えず、exit code 11となることを確認。archive helper/evidence mutationは実行していない。
+- exact reviewed plan base64を `__EXPECTED_PLAN_BASE64__` tokenとしてreviewed PowerShell bootstrap templateへ直接renderし、plan SHAとともに#237のgzip/SHA-guarded in-memory transportへ含める方式へ変更。
+- elevated bootstrapはprocess environmentをplan authorityとして読まず、embedded base64をdecodeしてexact plan SHA-256を再検証してからsnapshot/archive処理へ進む。
+- outer `uac_apply_command` から一時environment設定とcleanupを除去。mutable checkoutの`-File`実行には移行しない。
+
+### Validation / authority boundary
+
+- test-first head `05d94093953c236c27acb15632756312b7e306fc` / deterministic-tests #1007で、新 `__EXPECTED_PLAN_BASE64__` contract不在により新規testだけがREDとなることを確認。
+- exact code/test head `f8773644e3a77c4c9a0518190e224ac1b06d7e65` / deterministic-tests #1012はLinux `unittest` / Windows `windows-junction`ともSUCCESS。
+- Windows PowerShell 5.1で、process environmentを明示的に持たない状態でもembedded plan payloadのdecode/SHA verificationが成功し、embedded payload mutationはsnapshot前のSHA mismatchでfail closedすることを実行確認。
+- fully rendered bootstrapには代表的plan base64も含めたうえで#237の30,000文字safe ceilingをtestし、production plannerでも同ceilingと32,767文字full-command limitを引き続き強制する。
+- source binding、trusted PowerShell、elevated Python isolation、snapshot/ACL、atomic archive authority boundariesは維持する。
+- このPRはWOBBUFFET archive applyをauthorizationしない。merge後に新canonical mainへ同期し、fresh archive plan生成と別human apply authorizationを必要とする。
+- Ready / mergeはADR #90によりhuman-final。
+
 ## 2026-09-23 — Bounded UAC bootstrap transport for burned-evidence archive（Issue #237 / PR #238）
 
 関連: Issue #237, Issue #216, Issue #227, PR #238

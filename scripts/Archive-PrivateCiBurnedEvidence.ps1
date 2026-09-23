@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $ExpectedPlanSha256 = '__EXPECTED_PLAN_SHA256__'
-$PlanEnvironmentName = 'AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64'
+$ExpectedPlanBase64 = '__EXPECTED_PLAN_BASE64__'
 $ExpectedHost = 'WOBBUFFET'
 $ExpectedIdentity = 'WOBBUFFET\c-admin'
 $ExpectedEvidenceRoot = 'C:\Users\Public\Documents\agent-controller-handoff'
@@ -156,9 +156,7 @@ $Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
 if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Burned evidence archive bootstrap is not elevated.' }
 
-$ExpectedPlanBase64 = [Environment]::GetEnvironmentVariable($PlanEnvironmentName,[EnvironmentVariableTarget]::Process)
-if ([string]::IsNullOrWhiteSpace($ExpectedPlanBase64)) { throw 'Reviewed archive plan environment payload is missing.' }
-[Environment]::SetEnvironmentVariable($PlanEnvironmentName,$null,[EnvironmentVariableTarget]::Process)
+if ([string]::IsNullOrWhiteSpace($ExpectedPlanBase64)) { throw 'Reviewed archive embedded plan payload is missing.' }
 
 try { $PlanBytes = [Convert]::FromBase64String($ExpectedPlanBase64) } catch { throw 'Reviewed archive plan base64 is invalid.' }
 $PlanStream = New-Object IO.MemoryStream(,$PlanBytes)

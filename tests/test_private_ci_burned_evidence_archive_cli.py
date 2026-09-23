@@ -111,10 +111,23 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         build_transport = namespace["_build_uac_bootstrap_transport"]
 
         source = self.ps_path.read_text(encoding="utf-8")
-        rendered = source.replace(
-            "__EXPECTED_PLAN_SHA256__",
-            "b" * 64,
+        representative_plan_raw = (
+            b'{"schema":"probe","payload":"'
+            + (bytes(range(256)) * 8).hex().encode("ascii")
+            + b'"}\n'
         )
+        representative_plan_base64 = base64.b64encode(
+            representative_plan_raw
+        ).decode("ascii")
+        rendered = (
+            source
+            .replace("__EXPECTED_PLAN_SHA256__", "b" * 64)
+            .replace(
+                "__EXPECTED_PLAN_BASE64__",
+                representative_plan_base64,
+            )
+        )
+        self.assertNotIn("__EXPECTED_PLAN_BASE64__", rendered)
         transport = build_transport(rendered)
 
         compressed = base64.b64decode(
@@ -203,8 +216,9 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
             source,
         )
         self.assertIn("-EncodedCommand", source)
-        self.assertIn(
-            "AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64",
+        self.assertIn("__EXPECTED_PLAN_BASE64__", source)
+        self.assertNotIn(
+            "$env:AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64=",
             source,
         )
         self.assertNotIn(" -File ", source)
@@ -351,10 +365,59 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertNotIn("--path", source)
         self.assertNotIn("--filename", source)
 
+    def test_uac_bootstrap_embeds_plan_payload_without_process_environment(self):
+        ps_source = self.ps_path.read_text(encoding="utf-8")
+        cli_source = self.cli_path.read_text(encoding="utf-8")
+
+        self.assertEqual(
+            ps_source.count("__EXPECTED_PLAN_SHA256__"),
+            1,
+        )
+        self.assertEqual(
+            ps_source.count("__EXPECTED_PLAN_BASE64__"),
+            1,
+        )
+        self.assertNotIn(
+            "AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64",
+            ps_source,
+        )
+        self.assertNotIn(
+            "GetEnvironmentVariable($PlanEnvironmentName",
+            ps_source,
+        )
+        self.assertIn(
+            '$ExpectedPlanBase64 = \'__EXPECTED_PLAN_BASE64__\'',
+            ps_source,
+        )
+
+        plan_start = cli_source.index("def command_plan")
+        apply_start = cli_source.index(
+            "def command_apply_internal",
+            plan_start,
+        )
+        region = cli_source[plan_start:apply_start]
+        self.assertIn(
+            'plan_token = "__EXPECTED_PLAN_BASE64__"',
+            region,
+        )
+        self.assertIn(
+            "bootstrap_template.count(plan_token) != 1",
+            region,
+        )
+        self.assertIn(
+            ".replace(plan_token, plan_base64)",
+            region,
+        )
+        self.assertNotIn(
+            "$env:AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64=",
+            region,
+        )
+
     def test_powershell_bootstrap_snapshots_reviewed_sources_before_python_import(self):
         source = self.ps_path.read_text(encoding="utf-8")
         self.assertIn("__EXPECTED_PLAN_SHA256__", source)
-        self.assertIn("AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64", source)
+        self.assertIn("__EXPECTED_PLAN_BASE64__", source)
+        self.assertNotIn("AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64", source)
         self.assertIn("$Plan.controller_sources", source)
         self.assertIn("$ExpectedSourcePaths", source)
         self.assertIn("[IO.FileShare]::Read", source)

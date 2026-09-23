@@ -227,6 +227,93 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
             combined,
         )
 
+    def _run_embedded_plan_probe(
+        self,
+        *,
+        plan_raw: bytes,
+        embedded_raw: bytes,
+    ) -> subprocess.CompletedProcess[str]:
+        source = self.script.read_text(encoding="utf-8")
+        self.assertEqual(source.count("__EXPECTED_PLAN_SHA256__"), 1)
+        self.assertEqual(source.count("__EXPECTED_PLAN_BASE64__"), 1)
+
+        plan_sha = hashlib.sha256(plan_raw).hexdigest()
+        embedded_base64 = base64.b64encode(embedded_raw).decode("ascii")
+        rendered = (
+            source
+            .replace("__EXPECTED_PLAN_SHA256__", plan_sha)
+            .replace("__EXPECTED_PLAN_BASE64__", embedded_base64)
+        )
+
+        prefix_end = rendered.index("$ObservedHost =")
+        verify_start = rendered.index(
+            "try { $PlanBytes = [Convert]::FromBase64String"
+        )
+        verify_end = rendered.index("$PythonPath =", verify_start)
+        probe_source = (
+            rendered[:prefix_end]
+            + rendered[verify_start:verify_end]
+            + "\nWrite-Output 'EMBEDDED_PLAN_PAYLOAD_PASS'\n"
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "embedded-plan-probe.ps1"
+            probe.write_text(probe_source, encoding="utf-8")
+            env = os.environ.copy()
+            env.pop("AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64", None)
+            return subprocess.run(
+                [
+                    self.powershell,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(probe),
+                ],
+                cwd=self.repo_root,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+
+    def test_embedded_plan_payload_requires_no_inherited_process_environment(self):
+        plan_raw = (
+            b'{"controller_main_sha":"probe","probe":"embedded-plan"}\n'
+        )
+        completed = self._run_embedded_plan_probe(
+            plan_raw=plan_raw,
+            embedded_raw=plan_raw,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=completed.stdout + "\n" + completed.stderr,
+        )
+        self.assertIn("EMBEDDED_PLAN_PAYLOAD_PASS", completed.stdout)
+
+    def test_embedded_plan_payload_digest_mismatch_fails_closed(self):
+        plan_raw = (
+            b'{"controller_main_sha":"probe","probe":"expected"}\n'
+        )
+        embedded_raw = (
+            b'{"controller_main_sha":"probe","probe":"mutated"}\n'
+        )
+        completed = self._run_embedded_plan_probe(
+            plan_raw=plan_raw,
+            embedded_raw=embedded_raw,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("EMBEDDED_PLAN_PAYLOAD_PASS", completed.stdout)
+        combined = completed.stdout + "\n" + completed.stderr
+        self.assertIn(
+            "Reviewed archive plan SHA-256 mismatch before snapshot.",
+            combined,
+        )
+
     def test_apply_bridge_parses_under_windows_powershell_51(self):
         quoted = str(self.script).replace("'", "''")
         command = (
