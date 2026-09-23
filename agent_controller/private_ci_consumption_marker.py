@@ -141,15 +141,32 @@ _ATOMIC_MUTATING_FILE_SYSTEM_RIGHTS = (
 )
 
 
+def _windows_powershell_env(**updates: str) -> dict[str, str]:
+    # When Python is launched from PowerShell 7, inheriting its PSModulePath
+    # into Windows PowerShell 5.1 can make inbox modules resolve to incompatible
+    # PowerShell 7 module paths. Let powershell.exe reconstruct its own default
+    # module path instead.
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() != "PSMODULEPATH"
+    }
+    env.update(updates)
+    return env
+
+
 def read_consumption_acl_state(path: Path) -> dict[str, object]:
-    quoted_path = str(path).replace("'", "''")
     mutation_mask = " -bor\n    ".join(
         f"[Security.AccessControl.FileSystemRights]::{right}"
         for right in _ATOMIC_MUTATING_FILE_SYSTEM_RIGHTS
     )
     script = rf"""
 $ErrorActionPreference = 'Stop'
-$Acl = Get-Acl -LiteralPath '{quoted_path}'
+$LiteralPath = $env:TARGET_ACL_PATH
+if ([string]::IsNullOrWhiteSpace($LiteralPath)) {
+    throw "TARGET_ACL_PATH environment variable is required"
+}
+$Acl = Get-Acl -LiteralPath $LiteralPath
 $OwnerAccount = New-Object -TypeName Security.Principal.NTAccount -ArgumentList $Acl.Owner
 $OwnerSid = $OwnerAccount.Translate([Security.Principal.SecurityIdentifier]).Value
 $MutationMask = [int](
@@ -181,6 +198,7 @@ $Rules = @($Acl.Access | ForEach-Object {{
                 "-Command",
                 script,
             ],
+            env=_windows_powershell_env(TARGET_ACL_PATH=str(path)),
             check=False,
             capture_output=True,
             text=True,
@@ -262,7 +280,7 @@ def install_protected_marker_acl(path: Path) -> None:
     if getattr(stat_result, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
         raise ValueError(f"marker ReparsePoint blocked: {path}")
 
-    env = dict(os.environ, TARGET_MARKER_PATH=str(path))
+    env = _windows_powershell_env(TARGET_MARKER_PATH=str(path))
     try:
         completed = subprocess.run(
             [
