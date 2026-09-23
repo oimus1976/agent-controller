@@ -14,7 +14,25 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - provider の完了表示、plan approval、artifact publication、CI、review、Controller PASS は別の事実として扱う。
 
 ---
- 
+
+## 2026-09-23 — Windows CRLF canonical-source compatibility（Issue #235 / Draft PR #236）
+
+関連: Issue #235, Issue #216, Issue #227, PR #236
+
+### Changed
+
+- WOBBUFFETでの#216 restart時、clean/current-main checkoutでも `core.autocrlf=true` によりtracked sourceのworking bytesがCRLF化し、#227 archive plannerのraw Git-blob比較がcanonical LF blobを誤ってrejectする実機事象を確認。
+- characterizationでは `scripts/Archive-PrivateCiBurnedEvidence.ps1` のraw blobはcanonicalと不一致、Git filtered blobはcanonicalと一致した。
+- arbitrary Git clean filterをauthorityとして信頼せず、canonical source equivalenceを「raw exact blob一致」または「CRLF -> LFだけを正規化したblob一致」に限定する。lone CRやその他のbyte mutationは引き続きrejectする。
+- archive planへ記録するsource SHA-256 / sizeはcanonicalized bytesではなく、snapshot/applyで実際に使用するexact working bytesへ引き続きbindingする。
+
+### Validation / authority boundary
+
+- test-firstでLF exact / CRLF materialization accept、content mutation / lone-CR rejectのregressionを追加。test-only head `6f0b555e4c744f4686c489864857b0ec79f6fa87` のdeterministic-tests #994で新規2テストがmissing matcherによりREDとなることを確認してから実装へ進んだ。
+- local `.git/config` / `.git/info/attributes`由来のarbitrary filterはcanonical authorityとして採用しない。
+- この修正はWOBBUFFET archive apply、runner registration、workflow dispatch、target execution、fresh pilot authorityをauthorizationしない。merge後もexact canonical mainへ再同期し、archive planをfresh生成してから別human apply gateを必要とする。
+- Ready / mergeはADR #90によりhuman-final。
+
 ## 2026-09-23 — Controller-owned Phase 6/7 cleanup and zero-residual classification（Issue #230 / PR #232）
 
 関連: Issue #230, Issue #216, PR #232

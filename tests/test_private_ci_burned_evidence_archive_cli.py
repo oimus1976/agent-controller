@@ -156,9 +156,23 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
             binding_start,
         )
         binding_region = source[binding_start:binding_end]
-        self.assertIn("git_digest", binding_region)
+        self.assertIn(
+            "_working_source_matches_canonical_blob",
+            binding_region,
+        )
         self.assertIn("expected_blob = canonical_blob_ids.get", binding_region)
         self.assertIn("is not canonical blob", binding_region)
+        self.assertIn('"--no-filters"', region)
+        self.assertNotIn('"--path"', region)
+        matcher_start = source.index(
+            "def _working_source_matches_canonical_blob"
+        )
+        matcher_end = source.index("def _python_binding", matcher_start)
+        matcher_region = source[matcher_start:matcher_end]
+        self.assertIn('raw.replace(b"\\r\\n", b"\\n")', matcher_region)
+        self.assertIn('if b"\\r" in normalized', matcher_region)
+        self.assertNotIn("check-attr", matcher_region)
+        self.assertNotIn("clean=", matcher_region)
 
     def test_elevated_apply_does_not_rerun_mutable_checkout_git_or_powershell(self):
         source = self.cli_path.read_text(encoding="utf-8")
