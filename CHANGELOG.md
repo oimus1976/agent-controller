@@ -350,6 +350,7 @@ Related: Issue #196
 関連: Issue #55, Issue #113, Draft PR #114
 
 ### Added / changed
+
 - GitHub-authoritative issue comment / PR review evidenceから、trusted exact-head `@codex review` request、trusted source-head `@codex address that feedback` request、Codex review submissionのexact `commit_id`をread-onlyに集計するobservationを追加。
 - serial multi-head review/remediation loopとsame-head duplicate replayを分離し、distinct reviewed heads、distinct loop heads、per-head counts、duplicate countsをconcise JSONで出力する。
 - standalone read-only CLI `python -m agent_controller.codex_amplification --repo OWNER/REPO --pr N --policy PATH` を追加し、既存policyの `trusted_review_request_authors` を再利用する。
@@ -699,6 +700,7 @@ Related: Issue #196
 ## [Unreleased]
 
 関連: Issue #168, PR #169
+
 ### Added
 
 - provider-capacity observation/recommendation boundaryを明示。
