@@ -15,7 +15,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
  
-## 2026-09-23 — Controller-owned Phase 6/7 cleanup and zero-residual classification（Issue #230 / Draft PR #232）
+## 2026-09-23 — Controller-owned Phase 6/7 cleanup and zero-residual classification（Issue #230 / PR #232）
 
 関連: Issue #230, Issue #216, PR #232
 
@@ -53,7 +53,10 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - Jules independent review of `e6989cef53c7` はcase-variant environment poisoning concernを報告。Windows CPython `os.environ`のnormalizationに依存せずauthority boundaryを強化するためcase-insensitive reserved-key scrubを追加。
 - remediation後exact head `2587abc4abe249d1125c537319d17c4ac97124ba` / deterministic-tests #990はLinux/WindowsともSUCCESS。real Windows authority-marker ACL publication regressionもSUCCESS。
 - Jules focused rereview of `2587abc4abe2`: **NO P1/P2 BLOCKER FOUND**。
-- PR #232はこの記録時点ではDraft / 未merge。WOBBUFFET live cleanup/applyは未実施。
+- PR #232はhuman Ready / merge gateを経て2026-09-23にsquash merge commit `40ca7fb4f97c8329741fec797cf3d1e583e24015` で `main` へマージ済み。Issue #230も`Closes #230`によりclose済み。
+- merge commit tree `45af798ff9c1bde5dab9fc90767be87b967f551e` はfinal PR head `b8a72a4d81428adaba78cc33ef3f3818f0c0afbc` のtreeと完全一致し、squash merge後の内容包含を確認。
+- merge後の`main` commitにはworkflow runが発生していない。これはdeterministic-tests workflowが`main` pushをtriggerしない既存contractどおり。
+- WOBBUFFET live cleanup/applyは未実施。#230のmergeはowner-machine mutationをauthorizationせず、#216再開時はfresh authority chainと別human live gateを必要とする。
 
 ## 2026-09-22 — Burned canonical evidence archival hardening（Issue #227 / PR #228）
 
@@ -347,7 +350,6 @@ Related: Issue #196
 関連: Issue #55, Issue #113, Draft PR #114
 
 ### Added / changed
-
 - GitHub-authoritative issue comment / PR review evidenceから、trusted exact-head `@codex review` request、trusted source-head `@codex address that feedback` request、Codex review submissionのexact `commit_id`をread-onlyに集計するobservationを追加。
 - serial multi-head review/remediation loopとsame-head duplicate replayを分離し、distinct reviewed heads、distinct loop heads、per-head counts、duplicate countsをconcise JSONで出力する。
 - standalone read-only CLI `python -m agent_controller.codex_amplification --repo OWNER/REPO --pr N --policy PATH` を追加し、既存policyの `trusted_review_request_authors` を再利用する。
@@ -697,7 +699,6 @@ Related: Issue #196
 ## [Unreleased]
 
 関連: Issue #168, PR #169
-
 ### Added
 
 - provider-capacity observation/recommendation boundaryを明示。
