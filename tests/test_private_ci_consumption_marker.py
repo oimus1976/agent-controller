@@ -218,9 +218,13 @@ class ProtectedConsumptionMarkerTests(unittest.TestCase):
                 captured_call["env"] = env
                 return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
-            with patch("subprocess.run", side_effect=fake_run):
-                install_protected_marker_acl(path)
+            with patch.dict(os.environ, {"PSModulePath": r"C:\Program Files\PowerShell\7\Modules"}, clear=False):
+                with patch("subprocess.run", side_effect=fake_run):
+                    install_protected_marker_acl(path)
 
+            self.assertFalse(
+                any(key.upper() == "PSMODULEPATH" for key in captured_call["env"])
+            )
             self.assertIn("TARGET_MARKER_PATH", captured_call["env"])
             self.assertEqual(captured_call["env"]["TARGET_MARKER_PATH"], str(path))
             # Verify script references env variable rather than interpolating literal path
