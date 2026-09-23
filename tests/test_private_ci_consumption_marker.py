@@ -231,6 +231,51 @@ class ProtectedConsumptionMarkerTests(unittest.TestCase):
             self.assertIn("$LiteralPath = $env:TARGET_MARKER_PATH", _INSTALL_PROTECTED_MARKER_ACL_SCRIPT)
             self.assertNotIn(str(path), _INSTALL_PROTECTED_MARKER_ACL_SCRIPT)
 
+    def test_windows_powershell_env_scrubs_case_variant_authority_keys(self):
+        from unittest.mock import patch
+        from agent_controller.private_ci_consumption_marker import _windows_powershell_env
+
+        poisoned = {
+            "target_marker_path": r"C:\attacker\marker.json",
+            "target_acl_path": r"C:\attacker\acl-target",
+            "PsMoDuLePaTh": r"C:\Program Files\PowerShell\7\Modules",
+        }
+        with patch.dict(os.environ, poisoned, clear=False):
+            env = _windows_powershell_env(
+                TARGET_MARKER_PATH=r"C:\safe\marker.json",
+                TARGET_ACL_PATH=r"C:\safe\acl-target",
+            )
+
+        marker_keys = [
+            key for key in env if key.upper() == "TARGET_MARKER_PATH"
+        ]
+        acl_keys = [
+            key for key in env if key.upper() == "TARGET_ACL_PATH"
+        ]
+        module_keys = [
+            key for key in env if key.upper() == "PSMODULEPATH"
+        ]
+
+        self.assertEqual(marker_keys, ["TARGET_MARKER_PATH"])
+        self.assertEqual(acl_keys, ["TARGET_ACL_PATH"])
+        self.assertEqual(module_keys, [])
+        self.assertEqual(env["TARGET_MARKER_PATH"], r"C:\safe\marker.json")
+        self.assertEqual(env["TARGET_ACL_PATH"], r"C:\safe\acl-target")
+
+    def test_windows_powershell_env_rejects_case_colliding_updates(self):
+        from agent_controller.private_ci_consumption_marker import _windows_powershell_env
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "duplicate case-insensitive Windows environment key",
+        ):
+            _windows_powershell_env(
+                **{
+                    "target_marker_path": r"C:\first",
+                    "TARGET_MARKER_PATH": r"C:\second",
+                }
+            )
+
     def test_real_windows_install_protected_marker_acl_roundtrip(self):
         if os.name != "nt":
             self.skipTest("real Windows marker ACL roundtrip test")
