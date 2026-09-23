@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import inspect
+import os
 import tempfile
 import unittest
 from dataclasses import replace
@@ -715,6 +716,9 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
             )
 
     def test_unprotected_real_root_blocks_publication_and_validation(self):
+        if os.name != "nt":
+            self.skipTest("real Windows ACL readback regression")
+
         from agent_controller import private_ci_final_publication
         from agent_controller import private_ci_result_authority
 
