@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gzip
 import hashlib
 import ctypes
 import json
@@ -21,6 +22,8 @@ AUTHORITATIVE_EVIDENCE_ROOT = r"C:\Users\Public\Documents\agent-controller-hando
 CONTROLLER_REPOSITORY_URL = "https://github.com/oimus1976/agent-controller.git"
 EXPECTED_HOST = "WOBBUFFET"
 EXPECTED_IDENTITY = r"WOBBUFFET\c-admin"
+WINDOWS_CREATEPROCESS_COMMAND_LINE_LIMIT = 32767
+UAC_ARGUMENT_SAFE_LIMIT = 30000
 REVIEWED_CONTROLLER_SOURCE_PATHS = (
     "scripts/Archive-PrivateCiBurnedEvidence.ps1",
     "scripts/archive_private_ci_burned_evidence.py",
@@ -118,6 +121,66 @@ def _working_source_matches_canonical_blob(
     if b"\r" in normalized:
         return False
     return _git_blob_sha1(normalized) == expected_blob
+
+def _build_uac_bootstrap_transport(
+    rendered_bootstrap: str,
+) -> dict[str, object]:
+    if type(rendered_bootstrap) is not str or not rendered_bootstrap:
+        raise ValueError("rendered archive bootstrap is invalid")
+
+    bootstrap_raw = rendered_bootstrap.encode("utf-8")
+    bootstrap_sha256 = hashlib.sha256(bootstrap_raw).hexdigest()
+    compressed = gzip.compress(
+        bootstrap_raw,
+        compresslevel=9,
+        mtime=0,
+    )
+    compressed_payload_base64 = base64.b64encode(compressed).decode("ascii")
+
+    stub = (
+        "$ErrorActionPreference='Stop';"
+        "$p=[Convert]::FromBase64String('"
+        + compressed_payload_base64
+        + "');"
+        "$i=New-Object IO.MemoryStream(,$p);"
+        "$g=New-Object IO.Compression.GzipStream("
+        "$i,[IO.Compression.CompressionMode]::Decompress);"
+        "$o=New-Object IO.MemoryStream;"
+        "try{$g.CopyTo($o)}finally{$g.Dispose();$i.Dispose()};"
+        "$r=$o.ToArray();$o.Dispose();"
+        "$h=[Security.Cryptography.SHA256]::Create();"
+        "try{$s=([BitConverter]::ToString("
+        "$h.ComputeHash($r))).Replace('-','').ToLowerInvariant()}"
+        "finally{$h.Dispose()};"
+        "if($s -cne '"
+        + bootstrap_sha256
+        + "'){throw 'Reviewed archive bootstrap SHA-256 mismatch.'};"
+        "$t=[Text.Encoding]::UTF8.GetString($r);"
+        "& ([ScriptBlock]::Create($t))"
+    )
+    encoded_command = base64.b64encode(
+        stub.encode("utf-16-le")
+    ).decode("ascii")
+    uac_argument = (
+        "-NoProfile -NonInteractive -ExecutionPolicy Bypass "
+        f"-EncodedCommand {encoded_command}"
+    )
+    if len(uac_argument) > UAC_ARGUMENT_SAFE_LIMIT:
+        raise RuntimeError(
+            "archive UAC bootstrap exceeds safe command-line limit: "
+            f"chars={len(uac_argument)} "
+            f"safe_limit={UAC_ARGUMENT_SAFE_LIMIT}"
+        )
+
+    return {
+        "bootstrap_sha256": bootstrap_sha256,
+        "compressed_payload_base64": compressed_payload_base64,
+        "encoded_command": encoded_command,
+        "uac_argument": uac_argument,
+        "uac_argument_chars": len(uac_argument),
+        "safe_argument_limit": UAC_ARGUMENT_SAFE_LIMIT,
+    }
+
 
 def _python_binding() -> tuple[str, str]:
     path = Path(sys.executable).resolve(strict=True)
@@ -695,15 +758,17 @@ def command_plan() -> int:
         sha_token,
         digest,
     )
-    encoded_bootstrap = base64.b64encode(
-        rendered_bootstrap.encode("utf-16-le")
-    ).decode("ascii")
+    transport = _build_uac_bootstrap_transport(rendered_bootstrap)
+    encoded_bootstrap = str(transport["encoded_command"])
+    uac_argument = str(transport["uac_argument"])
     powershell_path = _trusted_windows_powershell_path()
     quoted_powershell = str(powershell_path).replace("'", "''")
-    uac_argument = (
-        "-NoProfile -NonInteractive -ExecutionPolicy Bypass "
-        f"-EncodedCommand {encoded_bootstrap}"
-    )
+    full_command_chars = len(str(powershell_path)) + 1 + len(uac_argument)
+    if full_command_chars >= WINDOWS_CREATEPROCESS_COMMAND_LINE_LIMIT:
+        raise RuntimeError(
+            "archive UAC process command line exceeds Windows limit: "
+            f"chars={full_command_chars}"
+        )
 
     print("BURNED_CANONICAL_ARCHIVE_PLAN_READY")
     print(f"archive_plan_sha256={digest}")
@@ -711,6 +776,7 @@ def command_plan() -> int:
     print(f"python_executable={plan.python_executable}")
     print(f"python_sha256={plan.python_sha256}")
     print(f"artifact_count={len(plan.items)}")
+    print(f"uac_argument_chars={transport['uac_argument_chars']}")
     for item in plan.items:
         print(
             "artifact="

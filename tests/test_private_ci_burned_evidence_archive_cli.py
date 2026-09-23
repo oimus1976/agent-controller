@@ -1,4 +1,6 @@
 import ast
+import base64
+import gzip
 import hashlib
 import runpy
 import tempfile
@@ -89,6 +91,53 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
                     hashlib.sha256(raw).hexdigest(),
                 )
 
+    def test_legacy_full_source_encoded_bootstrap_exceeds_windows_limit(self):
+        source = self.ps_path.read_text(encoding="utf-8")
+        rendered = source.replace(
+            "__EXPECTED_PLAN_SHA256__",
+            "a" * 64,
+        )
+        legacy_encoded = base64.b64encode(
+            rendered.encode("utf-16-le")
+        ).decode("ascii")
+        legacy_argument = (
+            "-NoProfile -NonInteractive -ExecutionPolicy Bypass "
+            f"-EncodedCommand {legacy_encoded}"
+        )
+        self.assertGreater(len(legacy_argument), 32767)
+
+    def test_compressed_uac_transport_round_trips_exact_bootstrap_bytes(self):
+        namespace = runpy.run_path(str(self.cli_path))
+        build_transport = namespace["_build_uac_bootstrap_transport"]
+
+        source = self.ps_path.read_text(encoding="utf-8")
+        rendered = source.replace(
+            "__EXPECTED_PLAN_SHA256__",
+            "b" * 64,
+        )
+        transport = build_transport(rendered)
+
+        compressed = base64.b64decode(
+            transport["compressed_payload_base64"],
+            validate=True,
+        )
+        self.assertEqual(
+            gzip.decompress(compressed),
+            rendered.encode("utf-8"),
+        )
+        self.assertEqual(
+            transport["bootstrap_sha256"],
+            hashlib.sha256(rendered.encode("utf-8")).hexdigest(),
+        )
+        self.assertLessEqual(
+            len(transport["uac_argument"]),
+            transport["safe_argument_limit"],
+        )
+        self.assertLess(
+            transport["safe_argument_limit"],
+            32767,
+        )
+
     def test_python_cli_parses(self):
         source = self.cli_path.read_text(encoding="utf-8")
         ast.parse(source, filename=str(self.cli_path))
@@ -145,7 +194,14 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
     def test_plan_carries_reviewed_plan_and_encoded_bootstrap_across_uac_boundary(self):
         source = self.cli_path.read_text(encoding="utf-8")
         self.assertIn("plan_base64 = base64.b64encode(raw)", source)
-        self.assertIn("encoded_bootstrap = base64.b64encode(", source)
+        self.assertIn("_build_uac_bootstrap_transport(", source)
+        self.assertIn("gzip.compress(", source)
+        self.assertIn("GzipStream", source)
+        self.assertIn("UAC_ARGUMENT_SAFE_LIMIT = 30000", source)
+        self.assertIn(
+            "WINDOWS_CREATEPROCESS_COMMAND_LINE_LIMIT = 32767",
+            source,
+        )
         self.assertIn("-EncodedCommand", source)
         self.assertIn(
             "AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64",
@@ -165,6 +221,8 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertIn("bootstrap_binding", region)
         self.assertNotIn("bootstrap_path.read_text", region)
         self.assertNotIn("Archive-PrivateCiBurnedEvidence.ps1\").read_text", region)
+        self.assertIn("_build_uac_bootstrap_transport", region)
+        self.assertIn("full_command_chars", region)
 
     def test_planner_uses_trusted_absolute_git_and_canonical_blob_checks(self):
         source = self.cli_path.read_text(encoding="utf-8")

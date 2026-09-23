@@ -1,3 +1,4 @@
+import base64
 import ctypes
 import os
 import hashlib
@@ -92,6 +93,139 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
             )
             matcher = namespace["_working_source_matches_canonical_blob"]
             self.assertTrue(matcher(raw, canonical_blob))
+
+    def test_compressed_uac_transport_executes_under_windows_powershell_51(self):
+        namespace = runpy.run_path(
+            str(
+                self.repo_root
+                / "scripts"
+                / "archive_private_ci_burned_evidence.py"
+            )
+        )
+        build_transport = namespace["_build_uac_bootstrap_transport"]
+        marker = "COMPRESSED_UAC_TRANSPORT_EXECUTED"
+        transport = build_transport(f"Write-Output '{marker}'")
+
+        completed = subprocess.run(
+            [
+                self.powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                transport["encoded_command"],
+            ],
+            cwd=self.repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=completed.stdout + "\n" + completed.stderr,
+        )
+        self.assertIn(marker, completed.stdout)
+        self.assertLessEqual(
+            len(transport["uac_argument"]),
+            transport["safe_argument_limit"],
+        )
+
+    def test_compressed_uac_transport_corruption_fails_before_execution(self):
+        namespace = runpy.run_path(
+            str(
+                self.repo_root
+                / "scripts"
+                / "archive_private_ci_burned_evidence.py"
+            )
+        )
+        build_transport = namespace["_build_uac_bootstrap_transport"]
+        marker = "CORRUPT_PAYLOAD_MUST_NOT_EXECUTE"
+        transport = build_transport(f"Write-Output '{marker}'")
+
+        stub = base64.b64decode(
+            transport["encoded_command"],
+            validate=True,
+        ).decode("utf-16-le")
+        payload = transport["compressed_payload_base64"]
+        replacement = ("A" if payload[0] != "A" else "B") + payload[1:]
+        corrupt_stub = stub.replace(payload, replacement, 1)
+        corrupt_encoded = base64.b64encode(
+            corrupt_stub.encode("utf-16-le")
+        ).decode("ascii")
+
+        completed = subprocess.run(
+            [
+                self.powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                corrupt_encoded,
+            ],
+            cwd=self.repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn(marker, completed.stdout)
+
+    def test_compressed_uac_transport_digest_mismatch_fails_before_execution(self):
+        namespace = runpy.run_path(
+            str(
+                self.repo_root
+                / "scripts"
+                / "archive_private_ci_burned_evidence.py"
+            )
+        )
+        build_transport = namespace["_build_uac_bootstrap_transport"]
+        marker = "DIGEST_MISMATCH_MUST_NOT_EXECUTE"
+        transport = build_transport(f"Write-Output '{marker}'")
+
+        stub = base64.b64decode(
+            transport["encoded_command"],
+            validate=True,
+        ).decode("utf-16-le")
+        stub = stub.replace(
+            transport["bootstrap_sha256"],
+            "0" * 64,
+            1,
+        )
+        mismatched_encoded = base64.b64encode(
+            stub.encode("utf-16-le")
+        ).decode("ascii")
+
+        completed = subprocess.run(
+            [
+                self.powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                mismatched_encoded,
+            ],
+            cwd=self.repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn(marker, completed.stdout)
+        combined = completed.stdout + "\n" + completed.stderr
+        self.assertIn(
+            "Reviewed archive bootstrap SHA-256 mismatch.",
+            combined,
+        )
 
     def test_apply_bridge_parses_under_windows_powershell_51(self):
         quoted = str(self.script).replace("'", "''")
