@@ -1,4 +1,6 @@
 import ast
+import hashlib
+import runpy
 import unittest
 from pathlib import Path
 
@@ -13,6 +15,41 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         cls.ps_path = (
             cls.repo_root / "scripts" / "Archive-PrivateCiBurnedEvidence.ps1"
         )
+
+    @staticmethod
+    def _git_blob_sha1(raw: bytes) -> str:
+        try:
+            digest = hashlib.sha1(usedforsecurity=False)
+        except TypeError:
+            digest = hashlib.sha1()
+        digest.update(f"blob {len(raw)}\\0".encode("ascii"))
+        digest.update(raw)
+        return digest.hexdigest()
+
+    def test_canonical_source_match_accepts_exact_and_crlf_materialization(self):
+        namespace = runpy.run_path(str(self.cli_path))
+        matcher = namespace["_working_source_matches_canonical_blob"]
+
+        canonical = b"Write-Host 'one'\nWrite-Host 'two'\n"
+        expected_blob = self._git_blob_sha1(canonical)
+
+        self.assertTrue(matcher(canonical, expected_blob))
+        self.assertTrue(
+            matcher(canonical.replace(b"\n", b"\r\n"), expected_blob)
+        )
+
+    def test_canonical_source_match_rejects_mutation_and_lone_cr(self):
+        namespace = runpy.run_path(str(self.cli_path))
+        matcher = namespace["_working_source_matches_canonical_blob"]
+
+        canonical = b"Write-Host 'one'\nWrite-Host 'two'\n"
+        expected_blob = self._git_blob_sha1(canonical)
+
+        mutated = b"Write-Host 'evil'\r\nWrite-Host 'two'\r\n"
+        lone_cr = b"Write-Host 'one'\rWrite-Host 'two'\r\n"
+
+        self.assertFalse(matcher(mutated, expected_blob))
+        self.assertFalse(matcher(lone_cr, expected_blob))
 
     def test_python_cli_parses(self):
         source = self.cli_path.read_text(encoding="utf-8")
