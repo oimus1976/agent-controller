@@ -1,4 +1,6 @@
 import json
+import os
+from pathlib import Path
 import unittest
 
 from agent_controller.private_ci_consumption_marker import (
@@ -145,6 +147,116 @@ class ProtectedConsumptionMarkerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "ACL readback invalid"):
                 read_consumption_acl_state(Path("some/path"))
 
+    def test_install_protected_marker_acl_missing_file_raises_value_error(self):
+        from agent_controller.private_ci_consumption_marker import install_protected_marker_acl
+
+        with self.assertRaisesRegex(ValueError, "marker missing or not a regular file"):
+            install_protected_marker_acl(Path("nonexistent/marker.json"))
+
+    def test_install_protected_marker_acl_reparse_point_raises_value_error(self):
+        import tempfile
+        from unittest.mock import MagicMock, patch
+        from agent_controller.private_ci_consumption_marker import install_protected_marker_acl
+
+        mock_reparse_stat = MagicMock()
+        mock_reparse_stat.st_mode = 0o100644
+        mock_reparse_stat.st_file_attributes = 0x400
+
+        with tempfile.NamedTemporaryFile() as temp_file:
+            path = Path(temp_file.name)
+            with patch.object(Path, "lstat", return_value=mock_reparse_stat):
+                with self.assertRaisesRegex(ValueError, "marker ReparsePoint blocked"):
+                    install_protected_marker_acl(path)
+
+    def test_install_protected_marker_acl_powershell_failure_raises_value_error(self):
+        import tempfile
+        import subprocess
+        from unittest.mock import patch
+        from agent_controller.private_ci_consumption_marker import install_protected_marker_acl
+
+        with tempfile.NamedTemporaryFile() as temp_file:
+            path = Path(temp_file.name)
+            with patch(
+                "subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    args=[], returncode=1, stdout="", stderr="Access denied"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "protected marker ACL installation failed"
+                ):
+                    install_protected_marker_acl(path)
+
+    def test_install_protected_marker_acl_oserror_raises_value_error(self):
+        import tempfile
+        from unittest.mock import patch
+        from agent_controller.private_ci_consumption_marker import install_protected_marker_acl
+
+        with tempfile.NamedTemporaryFile() as temp_file:
+            path = Path(temp_file.name)
+            with patch("subprocess.run", side_effect=OSError("powershell not found")):
+                with self.assertRaisesRegex(
+                    ValueError, "protected marker ACL installation unavailable"
+                ):
+                    install_protected_marker_acl(path)
+
+    def test_install_protected_marker_acl_uses_safe_path_transport(self):
+        import tempfile
+        import subprocess
+        from unittest.mock import patch
+        from agent_controller.private_ci_consumption_marker import (
+            install_protected_marker_acl,
+            _INSTALL_PROTECTED_MARKER_ACL_SCRIPT,
+        )
+
+        with tempfile.NamedTemporaryFile() as temp_file:
+            path = Path(temp_file.name)
+            captured_call = {}
+
+            def fake_run(cmd, env=None, **kwargs):
+                captured_call["cmd"] = cmd
+                captured_call["env"] = env
+                return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+            with patch("subprocess.run", side_effect=fake_run):
+                install_protected_marker_acl(path)
+
+            self.assertIn("TARGET_MARKER_PATH", captured_call["env"])
+            self.assertEqual(captured_call["env"]["TARGET_MARKER_PATH"], str(path))
+            # Verify script references env variable rather than interpolating literal path
+            self.assertIn("$LiteralPath = $env:TARGET_MARKER_PATH", _INSTALL_PROTECTED_MARKER_ACL_SCRIPT)
+            self.assertNotIn(str(path), _INSTALL_PROTECTED_MARKER_ACL_SCRIPT)
+
+    def test_real_windows_install_protected_marker_acl_roundtrip(self):
+        if os.name != "nt":
+            self.skipTest("real Windows marker ACL roundtrip test")
+        import tempfile
+        from agent_controller.private_ci_consumption_marker import (
+            install_protected_marker_acl,
+            read_consumption_acl_state,
+        )
+
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            temp_file.write(b"marker payload")
+            temp_file.flush()
+        marker_path = Path(temp_file.name)
+        try:
+            install_protected_marker_acl(marker_path)
+            acl = read_consumption_acl_state(marker_path)
+            self.assertTrue(acl.get("protected"))
+            rules = acl.get("rules", [])
+            for r in rules:
+                self.assertFalse(r.get("inherited"))
+            mutating_sids = {r.get("sid") for r in rules if r.get("can_mutate")}
+            self.assertEqual(mutating_sids, {"S-1-5-18", "S-1-5-32-544"})
+            users_rules = [r for r in rules if r.get("sid") == "S-1-5-32-545"]
+            self.assertTrue(users_rules)
+            for ur in users_rules:
+                self.assertFalse(ur.get("can_mutate"))
+        finally:
+            marker_path.unlink(missing_ok=True)
+
 
 if __name__ == "__main__":
     unittest.main()
+

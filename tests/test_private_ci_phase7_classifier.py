@@ -1069,6 +1069,12 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                 private_ci_final_publication,
                 "read_consumption_acl_state",
                 return_value=protected_acl(),
+            ), patch.object(
+                private_ci_result_authority,
+                "install_protected_marker_acl",
+            ), patch.object(
+                private_ci_final_publication,
+                "install_protected_marker_acl",
             ):
                 # 1. Publish Phase 6
                 m6 = private_ci_result_authority.publish_phase6_result_authority(
@@ -1141,6 +1147,9 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                 private_ci_final_publication,
                 "read_consumption_acl_state",
                 return_value=protected_acl(),
+            ), patch.object(
+                private_ci_final_publication,
+                "install_protected_marker_acl",
             ):
                 m1 = private_ci_final_publication.consume_final_pass_publication(
                     phase5_result_bytes=phase5_raw,
@@ -1156,6 +1165,273 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                         phase5_result_bytes=phase5_raw,
                         phase6_result_bytes=phase6_raw,
                         phase7_result_bytes=phase7_raw,
+                    )
+
+    @staticmethod
+    def _prepare_real_protected_directory(path: Path) -> None:
+        import subprocess
+        script = r"""
+$ErrorActionPreference = 'Stop'
+$Path = $env:TARGET_DIR
+$Acl = New-Object Security.AccessControl.DirectorySecurity
+$Acl.SetAccessRuleProtection($true, $false)
+$SystemSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
+$AdminSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
+$UsersSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')
+$InheritFlags = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+$PropFlags = [Security.AccessControl.PropagationFlags]::None
+$Allow = [Security.AccessControl.AccessControlType]::Allow
+
+$Principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if ($Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    $Acl.SetOwner($AdminSid)
+}
+
+$Acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($SystemSid, [Security.AccessControl.FileSystemRights]::FullControl, $InheritFlags, $PropFlags, $Allow)))
+$Acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($AdminSid, [Security.AccessControl.FileSystemRights]::FullControl, $InheritFlags, $PropFlags, $Allow)))
+$Acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($UsersSid, [Security.AccessControl.FileSystemRights]::ReadAndExecute, $InheritFlags, $PropFlags, $Allow)))
+
+Set-Acl -LiteralPath $Path -AclObject $Acl
+""".strip()
+        subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            env=dict(os.environ, TARGET_DIR=str(path)),
+            check=True,
+        )
+
+    def test_real_windows_production_publication_and_replay_guard(self):
+        if os.name != "nt":
+            self.skipTest("real Windows ACL production path regression")
+        try:
+            import ctypes
+            is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            is_admin = False
+        if not is_admin:
+            self.skipTest("real Windows ACL production path regression requires elevated Administrator privilege")
+
+        from agent_controller import private_ci_final_publication
+        from agent_controller import private_ci_result_authority
+        from agent_controller.private_ci_consumption_marker import (
+            read_consumption_acl_state,
+        )
+        from agent_controller.private_ci_final_classifier import (
+            FINAL_PRIVATE_CI_PASS,
+            classify_final_private_ci_pilot,
+        )
+
+        phase5_raw = phase5_result_bytes(phase5_evidence())
+        phase5_sha = hashlib.sha256(phase5_raw).hexdigest()
+        phase6_raw = self.phase6_module().phase6_result_bytes(
+            self.phase6_evidence(
+                phase5_result_sha256=phase5_sha,
+            )
+        )
+        phase6_sha = hashlib.sha256(phase6_raw).hexdigest()
+        phase6_consumption_sha = self.phase6_evidence().phase6_consumption_sha256
+        phase7_raw = self.result_module().phase7_result_bytes(
+            self.phase7_evidence(
+                phase6_result_sha256=phase6_sha,
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            authority_root = Path(temp_dir)
+            self._prepare_real_protected_directory(authority_root)
+
+            with patch.object(
+                private_ci_result_authority,
+                "RESULT_AUTHORITY_ROOT",
+                authority_root,
+            ), patch.object(
+                private_ci_final_publication,
+                "FINAL_PUBLICATION_ROOT",
+                authority_root,
+            ):
+                # 1. Real Phase 6 publication receives protected explicit DACL on NTFS
+                m6 = private_ci_result_authority.publish_phase6_result_authority(
+                    phase6_raw,
+                    phase6_consumption_sha256=phase6_consumption_sha,
+                    publication_capability=publication_capability(
+                        phase=6,
+                        result_bytes=phase6_raw,
+                        upstream_sha256=phase6_consumption_sha,
+                    ),
+                )
+                self.assertIsNotNone(m6)
+
+                # Verify actual marker file on NTFS
+                m6_path = authority_root / f"issue230-phase6-result-{phase6_sha}.authority.json"
+                self.assertTrue(m6_path.is_file())
+                m6_fs_acl = read_consumption_acl_state(m6_path)
+                self.assertTrue(m6_fs_acl["protected"])
+                for r in m6_fs_acl["rules"]:
+                    self.assertFalse(r["inherited"])
+                mutating_sids = {r["sid"] for r in m6_fs_acl["rules"] if r["can_mutate"]}
+                self.assertEqual(mutating_sids, {"S-1-5-18", "S-1-5-32-544"})
+                users_rules = [r for r in m6_fs_acl["rules"] if r["sid"] == "S-1-5-32-545"]
+                self.assertTrue(users_rules)
+                for ur in users_rules:
+                    self.assertFalse(ur["can_mutate"])
+
+                # 2. Phase 6 marker validation succeeds
+                v6 = private_ci_result_authority.validate_phase6_result_authority_marker(
+                    phase6_raw,
+                    phase6_consumption_sha256=phase6_consumption_sha,
+                )
+                self.assertEqual(v6.result_sha256, m6.result_sha256)
+
+                # 3. Real Phase 7 publication receives protected explicit DACL on NTFS
+                m7 = private_ci_result_authority.publish_phase7_result_authority(
+                    phase7_raw,
+                    phase6_result_sha256=phase6_sha,
+                    publication_capability=publication_capability(
+                        phase=7,
+                        result_bytes=phase7_raw,
+                        upstream_sha256=phase6_sha,
+                    ),
+                )
+                self.assertIsNotNone(m7)
+
+                # 4. Phase 7 marker validation succeeds
+                v7 = private_ci_result_authority.validate_phase7_result_authority_marker(
+                    phase7_raw,
+                    phase6_result_sha256=phase6_sha,
+                )
+                self.assertEqual(v7.result_sha256, m7.result_sha256)
+
+                # 5. Final PASS marker receives protected explicit DACL and classification returns PASS once
+                classification = classify_final_private_ci_pilot(
+                    phase5_result_bytes=phase5_raw,
+                    phase6_result_bytes=phase6_raw,
+                    phase7_result_bytes=phase7_raw,
+                )
+                self.assertEqual(classification, FINAL_PRIVATE_CI_PASS)
+
+                # Verify actual final PASS marker on NTFS
+                fp_path = authority_root / f"issue230-final-pass-{phase5_sha}.published.json"
+                self.assertTrue(fp_path.is_file())
+                fp_fs_acl = read_consumption_acl_state(fp_path)
+                self.assertTrue(fp_fs_acl["protected"])
+                for r in fp_fs_acl["rules"]:
+                    self.assertFalse(r["inherited"])
+                mutating_sids = {r["sid"] for r in fp_fs_acl["rules"] if r["can_mutate"]}
+                self.assertEqual(mutating_sids, {"S-1-5-18", "S-1-5-32-544"})
+                users_rules = [r for r in fp_fs_acl["rules"] if r["sid"] == "S-1-5-32-545"]
+                self.assertTrue(users_rules)
+                for ur in users_rules:
+                    self.assertFalse(ur["can_mutate"])
+
+                # 6. Second final publication is rejected (replay guard)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "final PASS already published",
+                ):
+                    private_ci_final_publication.consume_final_pass_publication(
+                        phase5_result_bytes=phase5_raw,
+                        phase6_result_bytes=phase6_raw,
+                        phase7_result_bytes=phase7_raw,
+                    )
+
+    def test_real_windows_acl_application_failure_blocks(self):
+        if os.name != "nt":
+            self.skipTest("real Windows ACL failure regression")
+
+        from agent_controller import private_ci_final_publication
+        from agent_controller import private_ci_result_authority
+
+        phase5_raw = phase5_result_bytes(phase5_evidence())
+        phase6_raw = self.phase6_module().phase6_result_bytes(
+            self.phase6_evidence(
+                phase5_result_sha256=hashlib.sha256(phase5_raw).hexdigest()
+            )
+        )
+        phase6_consumption_sha = self.phase6_evidence().phase6_consumption_sha256
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            authority_root = Path(temp_dir)
+
+            with patch.object(
+                private_ci_result_authority,
+                "RESULT_AUTHORITY_ROOT",
+                authority_root,
+            ), patch.object(
+                private_ci_result_authority,
+                "read_consumption_acl_state",
+                return_value=protected_acl(),
+            ), patch.object(
+                private_ci_result_authority,
+                "install_protected_marker_acl",
+                side_effect=ValueError("simulated ACL application failure"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "simulated ACL application failure",
+                ):
+                    private_ci_result_authority.publish_phase6_result_authority(
+                        phase6_raw,
+                        phase6_consumption_sha256=phase6_consumption_sha,
+                        publication_capability=publication_capability(
+                            phase=6,
+                            result_bytes=phase6_raw,
+                            upstream_sha256=phase6_consumption_sha,
+                        ),
+                    )
+
+                # Replay must fail closed because marker was already created exclusively on disk
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "result authority already published",
+                ):
+                    private_ci_result_authority.publish_phase6_result_authority(
+                        phase6_raw,
+                        phase6_consumption_sha256=phase6_consumption_sha,
+                        publication_capability=publication_capability(
+                            phase=6,
+                            result_bytes=phase6_raw,
+                            upstream_sha256=phase6_consumption_sha,
+                        ),
+                    )
+
+            with patch.object(
+                private_ci_final_publication,
+                "FINAL_PUBLICATION_ROOT",
+                authority_root,
+            ), patch.object(
+                private_ci_final_publication,
+                "read_consumption_acl_state",
+                return_value=protected_acl(),
+            ), patch.object(
+                private_ci_final_publication,
+                "install_protected_marker_acl",
+                side_effect=ValueError("simulated ACL application failure"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "simulated ACL application failure",
+                ):
+                    private_ci_final_publication.consume_final_pass_publication(
+                        phase5_result_bytes=phase5_raw,
+                        phase6_result_bytes=phase6_raw,
+                        phase7_result_bytes=b"{}",
+                    )
+
+                # Final pass replay must fail closed because marker was created exclusively on disk
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "final PASS already published",
+                ):
+                    private_ci_final_publication.consume_final_pass_publication(
+                        phase5_result_bytes=phase5_raw,
+                        phase6_result_bytes=phase6_raw,
+                        phase7_result_bytes=b"{}",
                     )
 
 

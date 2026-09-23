@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -198,3 +199,105 @@ $Rules = @($Acl.Access | ForEach-Object {{
     if type(payload) is not dict:
         raise ValueError(f"ACL readback shape invalid for {path}")
     return payload
+
+
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+_INSTALL_PROTECTED_MARKER_ACL_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$LiteralPath = $env:TARGET_MARKER_PATH
+if ([string]::IsNullOrWhiteSpace($LiteralPath)) {
+    throw "TARGET_MARKER_PATH environment variable is required"
+}
+if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {
+    throw "Marker path is missing before ACL installation: $LiteralPath"
+}
+$Item = Get-Item -LiteralPath $LiteralPath -Force
+if (($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Reparse point blocked at protected marker boundary: $LiteralPath"
+}
+
+$SystemSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
+$AdministratorsSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
+$UsersSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')
+
+$FileAcl = New-Object Security.AccessControl.FileSecurity
+$FileAcl.SetAccessRuleProtection($true, $false)
+
+$Principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if ($Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    $FileAcl.SetOwner($AdministratorsSid)
+}
+
+$NoneInheritance = [Security.AccessControl.InheritanceFlags]::None
+$NonePropagation = [Security.AccessControl.PropagationFlags]::None
+$Allow = [Security.AccessControl.AccessControlType]::Allow
+
+foreach ($Entry in @(
+    @($SystemSid, [Security.AccessControl.FileSystemRights]::FullControl),
+    @($AdministratorsSid, [Security.AccessControl.FileSystemRights]::FullControl),
+    @($UsersSid, [Security.AccessControl.FileSystemRights]::ReadAndExecute)
+)) {
+    $FileAcl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule -ArgumentList @(
+        $Entry[0], $Entry[1], $NoneInheritance, $NonePropagation, $Allow
+    )))
+}
+
+Set-Acl -LiteralPath $LiteralPath -AclObject $FileAcl
+
+$ItemAfter = Get-Item -LiteralPath $LiteralPath -Force
+if (($ItemAfter.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Reparse point blocked after protected marker ACL installation: $LiteralPath"
+}
+""".strip()
+
+
+def install_protected_marker_acl(path: Path) -> None:
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"marker missing or not a regular file: {path}")
+    try:
+        stat_result = path.lstat()
+    except OSError as error:
+        raise ValueError(f"marker stat failed: {path}") from error
+    if getattr(stat_result, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+        raise ValueError(f"marker ReparsePoint blocked: {path}")
+
+    env = dict(os.environ, TARGET_MARKER_PATH=str(path))
+    try:
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                _INSTALL_PROTECTED_MARKER_ACL_SCRIPT,
+            ],
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as error:
+        raise ValueError(
+            f"protected marker ACL installation unavailable for {path}"
+        ) from error
+
+    if completed.returncode != 0:
+        raise ValueError(
+            f"protected marker ACL installation failed for {path}: {completed.stderr.strip()}"
+        )
+
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(
+            f"marker missing or not a regular file after ACL installation: {path}"
+        )
+    try:
+        stat_result_after = path.lstat()
+    except OSError as error:
+        raise ValueError(f"marker stat failed after ACL installation: {path}") from error
+    if getattr(stat_result_after, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+        raise ValueError(f"marker ReparsePoint blocked after ACL installation: {path}")
+

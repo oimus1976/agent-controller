@@ -9,6 +9,7 @@ from pathlib import Path
 
 from agent_controller.private_ci_consumption_marker import (
     CONSUMPTION_ROOT,
+    install_protected_marker_acl,
     read_consumption_acl_state,
     validate_consumption_acl_state,
     validate_consumption_container_acl_state,
@@ -135,6 +136,7 @@ def consume_final_pass_publication(
             "final PASS publication marker write failed; publication is blocked"
         ) from error
 
+    install_protected_marker_acl(path)
     _validate_authority_marker_security(path)
 
     return marker

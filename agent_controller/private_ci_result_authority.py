@@ -13,6 +13,7 @@ from agent_controller.operator_step_gate import (
 )
 from agent_controller.private_ci_consumption_marker import (
     CONSUMPTION_ROOT,
+    install_protected_marker_acl,
     read_consumption_acl_state,
     validate_consumption_acl_state,
     validate_consumption_container_acl_state,
@@ -141,6 +142,7 @@ def _publish(
         raise ValueError(
             "result authority marker write failed; authority is blocked"
         ) from error
+    install_protected_marker_acl(path)
     _validate_authority_marker_security(path)
     return marker
 
