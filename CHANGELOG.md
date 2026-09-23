@@ -14,6 +14,46 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - provider の完了表示、plan approval、artifact publication、CI、review、Controller PASS は別の事実として扱う。
 
 ---
+ 
+## 2026-09-23 — Controller-owned Phase 6/7 cleanup and zero-residual classification（Issue #230 / Draft PR #232）
+
+関連: Issue #230, Issue #216, PR #232
+
+### Added / changed
+
+- #216 fresh private-CI pilotのPhase 5後をcontroller-ownedに閉じるため、Phase 6 cleanup plan / authority / result、Phase 7 zero-residual evidence、final classifierを追加。
+- Phase 6 planはexact canonical Phase 5 evidenceからだけ導出し、repository / PR / target SHA / workflow SHA+path / runner id-name-label / generation / runner root-work folder / host / broker / target identityへ固定。caller-supplied arbitrary cleanup targetをauthorityとして受け付けない。
+- destructive Phase 6は専用human approval + protected durable single-use consumptionを必須化し、mutation前のfresh GitHub/local readbackでrunner/generation/process/service/task/workspace drift・duplicate・uncertaintyをfail closedする。
+- runner absentを無条件successにせず、同一consumed authorityによるexact prior cleanup evidenceがある場合だけ受理する。
+- generation retirementはreviewed exact generation/root bindingとWindows handle identityへ結び、no-follow / reparse-aware scan、same-parent tombstone rename、stable identity verificationを経て対象generationだけをretireする。
+- operator-step authenticated AST bindingにexpected environment generation / generation rootを追加し、post-render reassignmentだけでなくvalid-looking sibling generationへの単発置換も拒否する。
+- Phase 6/7 result authorityはcontroller-owned authenticated single-use publication capabilityへ結び、caller自身がPASS result markerを自己発行できない構造へ変更。
+- Phase 7はrunner/job/generation/workspace/process/service/task/credential lifecycle/target binding/GitHub-local readbackの全zero-residual postconditionをfresh evidenceとして要求し、missing/unreadable/ambiguous stateをPASSへ推定しない。
+- final classifierはexact Phase 5 -> Phase 6 -> Phase 7 hash/binding chainだけを受け付け、`SELF_HOSTED_PRIVATE_CI_PASS`をdurable replay guardの下でexactly onceだけpublishする。
+- authority root / result marker / final-PASS markerはactual Windows filesystem ACLをcontroller-owned `Get-Acl` readbackで検証し、ReparsePoint/symlinkをrejectする。new markerはexclusive create/write/fsync/close後、protected explicit DACLを設定してからpost-create ACLを再検証する。
+- Windows PowerShell 7 -> Python -> Windows PowerShell 5.1 child境界でinherited `PSModulePath`がinbox Security module autoloadを壊す実CI事象を受け、WinPS child envから`PSModulePath`を除去してWinPS自身にdefault module pathを再構築させる。
+- controller-owned `TARGET_MARKER_PATH` / `TARGET_ACL_PATH`等はcase-insensitive Windows env boundaryでcanonicalizeし、親環境の全case variantをscrubしてからexactly one canonical valueを挿入する。case-colliding controller updatesはfail closedする。
+
+### Safety / authority boundary
+
+- Phase 6 cleanup approvalはregistration / Phase 4 / Phase 5 approvalから独立し、consumptionはfirst destructive mutation前に行う。consumed/failed/uncertain cleanup authorityを自動retryしない。
+- Phase 6/7 result JSON、console output、provider/agent claimはauthorityではない。protected controller-owned publication capabilityとactual protected marker stateを通過したevidenceだけをfinal classifierへ進める。
+- final PASSはPhase 5 target job success単独、cleanup success単独、zero-residual単独では発行しない。
+- implementation/review/CIはWOBBUFFET cleanup、runner deregistration、workflow dispatch、target executionを一切authorizationしない。actual owner-machine mutationは別のexact human-final action。
+- public repository側のReady / mergeはADR #90によりhuman-final。
+
+### Validation / review history
+
+- Requirement / AC baseline -> RED -> implementationの順で進め、Phase 6 runner absence ambiguity、generation path replacement、result publication provenance、authority-root ACL、generation binding等のP1をadversarial reviewで順次検出・remediation。
+- P1-Aではresult-authority marker発行をcontroller-owned authenticated single-use capabilityへ変更。
+- P1-Bではauthority root / marker ACLをcaller-supplied dictからactual filesystem readbackへ変更し、result/final markerへprotected explicit Windows DACLを適用してから検証するproduction pathを追加。
+- P1-CではPhase 6 expected generation/rootをoperator specへ固定し、AST observed valueとのexact matchとsibling-generation substitution regressionを追加。
+- Codex final review of exact head `981282eb967fd27ef205dade3451f570bed42042` がresult-authority marker / final-PASS markerのprotected DACL未設定P1を2件検出。Antigravity remediation後、real Windows production-path regressionをWindows CIへ追加した。
+- GitHub Windows CIでWinPS 5.1 `Microsoft.PowerShell.Security` autoload failureを実測し、PowerShell 7由来`PSModulePath`隔離をproduction helperへ追加。exact head `e6989cef53c7004999679d9ef947591240fa7dec` / deterministic-tests #988はLinux/WindowsともSUCCESS。
+- Jules independent review of `e6989cef53c7` はcase-variant environment poisoning concernを報告。Windows CPython `os.environ`のnormalizationに依存せずauthority boundaryを強化するためcase-insensitive reserved-key scrubを追加。
+- remediation後exact head `2587abc4abe249d1125c537319d17c4ac97124ba` / deterministic-tests #990はLinux/WindowsともSUCCESS。real Windows authority-marker ACL publication regressionもSUCCESS。
+- Jules focused rereview of `2587abc4abe2`: **NO P1/P2 BLOCKER FOUND**。
+- PR #232はこの記録時点ではDraft / 未merge。WOBBUFFET live cleanup/applyは未実施。
 
 ## 2026-09-22 — Burned canonical evidence archival hardening（Issue #227 / PR #228）
 
