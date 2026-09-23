@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -125,3 +126,75 @@ def validate_consumption_container_acl_state(payload: object) -> None:
         validate_approval_acl_state(payload)
     except ValueError as error:
         raise ValueError(f"consumption authority container ACL invalid: {error}") from error
+
+
+_ATOMIC_MUTATING_FILE_SYSTEM_RIGHTS = (
+    "WriteData",
+    "AppendData",
+    "WriteAttributes",
+    "WriteExtendedAttributes",
+    "Delete",
+    "DeleteSubdirectoriesAndFiles",
+    "ChangePermissions",
+    "TakeOwnership",
+)
+
+
+def read_consumption_acl_state(path: Path) -> dict[str, object]:
+    quoted_path = str(path).replace("'", "''")
+    mutation_mask = " -bor\n    ".join(
+        f"[Security.AccessControl.FileSystemRights]::{right}"
+        for right in _ATOMIC_MUTATING_FILE_SYSTEM_RIGHTS
+    )
+    script = rf"""
+$ErrorActionPreference = 'Stop'
+$Acl = Get-Acl -LiteralPath '{quoted_path}'
+$OwnerAccount = New-Object -TypeName Security.Principal.NTAccount -ArgumentList $Acl.Owner
+$OwnerSid = $OwnerAccount.Translate([Security.Principal.SecurityIdentifier]).Value
+$MutationMask = [int](
+    {mutation_mask}
+)
+$Rules = @($Acl.Access | ForEach-Object {{
+    $Sid = $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+    $Rights = [int]$_.FileSystemRights
+    [ordered]@{{
+        sid = $Sid
+        access_type = [string]$_.AccessControlType
+        inherited = [bool]$_.IsInherited
+        can_mutate = [bool](($Rights -band $MutationMask) -ne 0)
+    }}
+}})
+[ordered]@{{
+    protected = [bool]$Acl.AreAccessRulesProtected
+    owner_sid = $OwnerSid
+    rules = $Rules
+}} | ConvertTo-Json -Depth 5 -Compress
+""".strip()
+    try:
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as error:
+        raise ValueError(f"ACL readback unavailable for {path}") from error
+
+    if completed.returncode != 0:
+        raise ValueError(f"ACL readback failed for {path}: {completed.stderr.strip()}")
+    try:
+        payload = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"ACL readback invalid for {path}") from error
+    if type(payload) is not dict:
+        raise ValueError(f"ACL readback shape invalid for {path}")
+    return payload

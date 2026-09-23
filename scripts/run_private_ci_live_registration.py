@@ -25,6 +25,7 @@ from agent_controller.private_ci_consumption_marker import (
     CONSUMPTION_SCHEMA,
     consumption_marker_path,
     parse_consumption_marker_bytes,
+    read_consumption_acl_state,
     validate_consumption_acl_state,
     validate_consumption_container_acl_state,
 )
@@ -199,50 +200,10 @@ _ATOMIC_MUTATING_FILE_SYSTEM_RIGHTS = (
 
 
 def _approval_acl_state(path: Path) -> object:
-    quoted_path = str(path).replace("'", "''")
-    mutation_mask = " -bor\n    ".join(
-        f"[Security.AccessControl.FileSystemRights]::{right}"
-        for right in _ATOMIC_MUTATING_FILE_SYSTEM_RIGHTS
-    )
-    script = rf"""
-$Acl = Get-Acl -LiteralPath '{quoted_path}'
-$OwnerAccount = New-Object -TypeName Security.Principal.NTAccount -ArgumentList $Acl.Owner
-$OwnerSid = $OwnerAccount.Translate([Security.Principal.SecurityIdentifier]).Value
-# Use only atomic mutation bits. Composite aliases such as Write, Modify, and
-# FullControl overlap ordinary read/execute access and must not be used here.
-$MutationMask = [int](
-    {mutation_mask}
-)
-$Rules = @($Acl.Access | ForEach-Object {{
-    $Sid = $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-    $Rights = [int]$_.FileSystemRights
-    [ordered]@{{
-        sid = $Sid
-        access_type = [string]$_.AccessControlType
-        inherited = [bool]$_.IsInherited
-        can_mutate = [bool](($Rights -band $MutationMask) -ne 0)
-    }}
-}})
-[ordered]@{{
-    protected = [bool]$Acl.AreAccessRulesProtected
-    owner_sid = $OwnerSid
-    rules = $Rules
-}} | ConvertTo-Json -Depth 5 -Compress
-""".strip()
-    completed = _completed(
-        "powershell.exe",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        script,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError("ACL readback failed")
     try:
-        return json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
-        raise RuntimeError("ACL readback invalid") from error
+        return read_consumption_acl_state(path)
+    except ValueError as error:
+        raise RuntimeError("ACL readback failed") from error
 
 
 def _require_regular_nonreparse_file(path: Path, description: str) -> None:

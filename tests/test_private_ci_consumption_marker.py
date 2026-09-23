@@ -109,6 +109,42 @@ class ProtectedConsumptionMarkerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "inheritance"):
             validate_consumption_acl_state(acl)
 
+    def test_read_consumption_acl_state_atomic_rights(self):
+        from agent_controller.private_ci_consumption_marker import (
+            _ATOMIC_MUTATING_FILE_SYSTEM_RIGHTS,
+        )
+        expected_rights = {
+            "WriteData",
+            "AppendData",
+            "WriteAttributes",
+            "WriteExtendedAttributes",
+            "Delete",
+            "DeleteSubdirectoriesAndFiles",
+            "ChangePermissions",
+            "TakeOwnership",
+        }
+        self.assertEqual(set(_ATOMIC_MUTATING_FILE_SYSTEM_RIGHTS), expected_rights)
+
+    def test_read_consumption_acl_state_powershell_failure_raises_value_error(self):
+        from unittest.mock import patch
+        from pathlib import Path
+        import subprocess
+        from agent_controller.private_ci_consumption_marker import read_consumption_acl_state
+
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="Error")):
+            with self.assertRaisesRegex(ValueError, "ACL readback failed"):
+                read_consumption_acl_state(Path("some/path"))
+
+    def test_read_consumption_acl_state_json_decode_error_raises_value_error(self):
+        from unittest.mock import patch
+        from pathlib import Path
+        import subprocess
+        from agent_controller.private_ci_consumption_marker import read_consumption_acl_state
+
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="not valid json", stderr="")):
+            with self.assertRaisesRegex(ValueError, "ACL readback invalid"):
+                read_consumption_acl_state(Path("some/path"))
+
 
 if __name__ == "__main__":
     unittest.main()

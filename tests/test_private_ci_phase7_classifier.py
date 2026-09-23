@@ -36,6 +36,35 @@ def setUpModule():
         pass
 
 
+def protected_acl(*, untrusted_mutator: bool = False):
+    rules = [
+        {
+            "sid": "S-1-5-18",
+            "access_type": "Allow",
+            "inherited": False,
+            "can_mutate": True,
+        },
+        {
+            "sid": "S-1-5-32-544",
+            "access_type": "Allow",
+            "inherited": False,
+            "can_mutate": True,
+        },
+    ]
+    if untrusted_mutator:
+        rules.append({
+            "sid": "S-1-5-32-545",
+            "access_type": "Allow",
+            "inherited": False,
+            "can_mutate": True,
+        })
+    return {
+        "protected": True,
+        "owner_sid": "S-1-5-32-544",
+        "rules": rules,
+    }
+
+
 def publication_capability(
     *,
     phase: int,
@@ -283,6 +312,9 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                 private_ci_result_authority,
                 "RESULT_AUTHORITY_ROOT",
                 Path(temporary_directory),
+            ), patch(
+                "agent_controller.private_ci_result_authority.read_consumption_acl_state",
+                return_value=protected_acl(),
             ):
                 with self.assertRaisesRegex(
                     ValueError,
@@ -461,6 +493,14 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                 private_ci_final_publication,
                 "FINAL_PUBLICATION_ROOT",
                 authority_root,
+            ), patch.object(
+                private_ci_result_authority,
+                "read_consumption_acl_state",
+                return_value=protected_acl(),
+            ), patch.object(
+                private_ci_final_publication,
+                "read_consumption_acl_state",
+                return_value=protected_acl(),
             ):
                 phase6_consumption_sha256 = (
                     self.phase6_evidence(
@@ -535,6 +575,10 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                 private_ci_result_authority,
                 "RESULT_AUTHORITY_ROOT",
                 authority_root,
+            ), patch.object(
+                private_ci_result_authority,
+                "read_consumption_acl_state",
+                return_value=protected_acl(),
             ):
                 phase6_consumption_sha256 = (
                     self.phase6_evidence(
@@ -572,6 +616,325 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                         phase7_result_bytes=phase7_raw,
                     )
 
+    def test_omitted_or_failing_acl_readback_fails_closed(self):
+        from agent_controller import private_ci_final_publication
+        from agent_controller import private_ci_result_authority
+
+        phase5_raw = phase5_result_bytes(phase5_evidence())
+        phase6_raw = self.phase6_module().phase6_result_bytes(
+            self.phase6_evidence(
+                phase5_result_sha256=hashlib.sha256(phase5_raw).hexdigest()
+            )
+        )
+        phase6_consumption_sha = self.phase6_evidence().phase6_consumption_sha256
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            authority_root = Path(temp_dir)
+            with patch.object(
+                private_ci_result_authority,
+                "RESULT_AUTHORITY_ROOT",
+                authority_root,
+            ), patch.object(
+                private_ci_final_publication,
+                "FINAL_PUBLICATION_ROOT",
+                authority_root,
+            ), patch.object(
+                private_ci_result_authority,
+                "read_consumption_acl_state",
+                side_effect=ValueError("ACL readback unavailable"),
+            ), patch.object(
+                private_ci_final_publication,
+                "read_consumption_acl_state",
+                side_effect=ValueError("ACL readback unavailable"),
+            ):
+                # 1. Publication fails closed when ACL readback fails
+                with self.assertRaisesRegex(ValueError, "ACL readback unavailable"):
+                    private_ci_result_authority.publish_phase6_result_authority(
+                        phase6_raw,
+                        phase6_consumption_sha256=phase6_consumption_sha,
+                        publication_capability=publication_capability(
+                            phase=6,
+                            result_bytes=phase6_raw,
+                            upstream_sha256=phase6_consumption_sha,
+                        ),
+                    )
+
+                # 2. Validation fails closed when ACL readback fails
+                with self.assertRaisesRegex(ValueError, "ACL readback unavailable"):
+                    private_ci_result_authority.validate_phase6_result_authority_marker(
+                        phase6_raw,
+                        phase6_consumption_sha256=phase6_consumption_sha,
+                    )
+
+                # 3. Final PASS publication fails closed when ACL readback fails
+                with self.assertRaisesRegex(ValueError, "ACL readback unavailable"):
+                    private_ci_final_publication.consume_final_pass_publication(
+                        phase5_result_bytes=phase5_raw,
+                        phase6_result_bytes=phase6_raw,
+                        phase7_result_bytes=b"{}",
+                    )
+
+    def test_forged_caller_acl_payload_cannot_substitute_for_actual_readback(self):
+        from agent_controller import private_ci_final_publication
+        from agent_controller import private_ci_result_authority
+
+        phase5_raw = phase5_result_bytes(phase5_evidence())
+        phase6_raw = self.phase6_module().phase6_result_bytes(
+            self.phase6_evidence(
+                phase5_result_sha256=hashlib.sha256(phase5_raw).hexdigest()
+            )
+        )
+        phase6_consumption_sha = self.phase6_evidence().phase6_consumption_sha256
+
+        # Callers cannot supply an ACL dictionary argument to bypass readback
+        with self.assertRaises(TypeError):
+            private_ci_result_authority.publish_phase6_result_authority(
+                phase6_raw,
+                phase6_consumption_sha256=phase6_consumption_sha,
+                publication_capability=publication_capability(
+                    phase=6,
+                    result_bytes=phase6_raw,
+                    upstream_sha256=phase6_consumption_sha,
+                ),
+                authority_container_acl_state=protected_acl(),
+            )
+
+        with self.assertRaises(TypeError):
+            private_ci_final_publication.consume_final_pass_publication(
+                phase5_result_bytes=phase5_raw,
+                phase6_result_bytes=phase6_raw,
+                phase7_result_bytes=b"{}",
+                authority_container_acl_state=protected_acl(),
+            )
+
+        with self.assertRaises(TypeError):
+            private_ci_result_authority.validate_phase6_result_authority_marker(
+                phase6_raw,
+                phase6_consumption_sha256=phase6_consumption_sha,
+                marker_acl_state=protected_acl(),
+            )
+
+    def test_unprotected_real_root_blocks_publication_and_validation(self):
+        from agent_controller import private_ci_final_publication
+        from agent_controller import private_ci_result_authority
+
+        phase5_raw = phase5_result_bytes(phase5_evidence())
+        phase6_raw = self.phase6_module().phase6_result_bytes(
+            self.phase6_evidence(
+                phase5_result_sha256=hashlib.sha256(phase5_raw).hexdigest()
+            )
+        )
+        phase6_consumption_sha = self.phase6_evidence().phase6_consumption_sha256
+
+        # Use an actual real Windows temporary directory without mocking read_consumption_acl_state
+        with tempfile.TemporaryDirectory() as temp_dir:
+            real_root = Path(temp_dir)
+            with patch.object(
+                private_ci_result_authority,
+                "RESULT_AUTHORITY_ROOT",
+                real_root,
+            ), patch.object(
+                private_ci_final_publication,
+                "FINAL_PUBLICATION_ROOT",
+                real_root,
+            ):
+                # Real Windows filesystem ACL readback of temp_dir has protected=False
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "consumption authority container ACL invalid",
+                ):
+                    private_ci_result_authority.publish_phase6_result_authority(
+                        phase6_raw,
+                        phase6_consumption_sha256=phase6_consumption_sha,
+                        publication_capability=publication_capability(
+                            phase=6,
+                            result_bytes=phase6_raw,
+                            upstream_sha256=phase6_consumption_sha,
+                        ),
+                    )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "consumption authority container ACL invalid",
+                ):
+                    private_ci_final_publication.consume_final_pass_publication(
+                        phase5_result_bytes=phase5_raw,
+                        phase6_result_bytes=phase6_raw,
+                        phase7_result_bytes=b"{}",
+                    )
+
+    def test_untrusted_owner_or_mutating_principal_real_root_blocks(self):
+        from agent_controller import private_ci_final_publication
+        from agent_controller import private_ci_result_authority
+
+        phase5_raw = phase5_result_bytes(phase5_evidence())
+        phase6_raw = self.phase6_module().phase6_result_bytes(
+            self.phase6_evidence(
+                phase5_result_sha256=hashlib.sha256(phase5_raw).hexdigest()
+            )
+        )
+        phase6_consumption_sha = self.phase6_evidence().phase6_consumption_sha256
+
+        # 1. Untrusted owner
+        bad_owner_acl = protected_acl()
+        bad_owner_acl["owner_sid"] = "S-1-5-21-4121720210-324024630-1488705960-1001"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            authority_root = Path(temp_dir)
+            with patch.object(
+                private_ci_result_authority,
+                "RESULT_AUTHORITY_ROOT",
+                authority_root,
+            ), patch.object(
+                private_ci_final_publication,
+                "FINAL_PUBLICATION_ROOT",
+                authority_root,
+            ), patch.object(
+                private_ci_result_authority,
+                "read_consumption_acl_state",
+                return_value=bad_owner_acl,
+            ), patch.object(
+                private_ci_final_publication,
+                "read_consumption_acl_state",
+                return_value=bad_owner_acl,
+            ):
+                with self.assertRaisesRegex(ValueError, "approval ACL owner is not trusted"):
+                    private_ci_result_authority.publish_phase6_result_authority(
+                        phase6_raw,
+                        phase6_consumption_sha256=phase6_consumption_sha,
+                        publication_capability=publication_capability(
+                            phase=6,
+                            result_bytes=phase6_raw,
+                            upstream_sha256=phase6_consumption_sha,
+                        ),
+                    )
+
+                with self.assertRaisesRegex(ValueError, "approval ACL owner is not trusted"):
+                    private_ci_final_publication.consume_final_pass_publication(
+                        phase5_result_bytes=phase5_raw,
+                        phase6_result_bytes=phase6_raw,
+                        phase7_result_bytes=b"{}",
+                    )
+
+        # 2. Untrusted mutator
+        untrusted_mutator_acl = protected_acl(untrusted_mutator=True)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            authority_root = Path(temp_dir)
+            with patch.object(
+                private_ci_result_authority,
+                "RESULT_AUTHORITY_ROOT",
+                authority_root,
+            ), patch.object(
+                private_ci_result_authority,
+                "read_consumption_acl_state",
+                return_value=untrusted_mutator_acl,
+            ):
+                with self.assertRaisesRegex(ValueError, "grants mutation to untrusted principal"):
+                    private_ci_result_authority.publish_phase6_result_authority(
+                        phase6_raw,
+                        phase6_consumption_sha256=phase6_consumption_sha,
+                        publication_capability=publication_capability(
+                            phase=6,
+                            result_bytes=phase6_raw,
+                            upstream_sha256=phase6_consumption_sha,
+                        ),
+                    )
+
+    def test_result_authority_marker_with_bad_acl_blocks(self):
+        from agent_controller import private_ci_result_authority
+
+        phase5_raw = phase5_result_bytes(phase5_evidence())
+        phase6_raw = self.phase6_module().phase6_result_bytes(
+            self.phase6_evidence(
+                phase5_result_sha256=hashlib.sha256(phase5_raw).hexdigest()
+            )
+        )
+        phase6_consumption_sha = self.phase6_evidence().phase6_consumption_sha256
+
+        untrusted_mutator_acl = protected_acl(untrusted_mutator=True)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            authority_root = Path(temp_dir)
+            with patch.object(
+                private_ci_result_authority,
+                "RESULT_AUTHORITY_ROOT",
+                authority_root,
+            ), patch.object(
+                private_ci_result_authority,
+                "read_consumption_acl_state",
+                return_value=protected_acl(),
+            ):
+                marker = private_ci_result_authority.publish_phase6_result_authority(
+                    phase6_raw,
+                    phase6_consumption_sha256=phase6_consumption_sha,
+                    publication_capability=publication_capability(
+                        phase=6,
+                        result_bytes=phase6_raw,
+                        upstream_sha256=phase6_consumption_sha,
+                    ),
+                )
+                self.assertIsNotNone(marker)
+
+            def bad_marker_readback(path_obj):
+                if str(path_obj).endswith(".authority.json"):
+                    return untrusted_mutator_acl
+                return protected_acl()
+
+            with patch.object(
+                private_ci_result_authority,
+                "RESULT_AUTHORITY_ROOT",
+                authority_root,
+            ), patch.object(
+                private_ci_result_authority,
+                "read_consumption_acl_state",
+                side_effect=bad_marker_readback,
+            ):
+                with self.assertRaisesRegex(ValueError, "grants mutation to untrusted principal"):
+                    private_ci_result_authority.validate_phase6_result_authority_marker(
+                        phase6_raw,
+                        phase6_consumption_sha256=phase6_consumption_sha,
+                    )
+
+    def test_final_pass_marker_with_bad_acl_blocks(self):
+        from agent_controller import private_ci_final_publication
+
+        phase5_raw = phase5_result_bytes(phase5_evidence())
+        phase6_raw = self.phase6_module().phase6_result_bytes(
+            self.phase6_evidence(
+                phase5_result_sha256=hashlib.sha256(phase5_raw).hexdigest()
+            )
+        )
+        phase7_raw = self.result_module().phase7_result_bytes(
+            self.phase7_evidence(
+                phase6_result_sha256=hashlib.sha256(phase6_raw).hexdigest()
+            )
+        )
+
+        untrusted_mutator_acl = protected_acl(untrusted_mutator=True)
+
+        def bad_marker_readback(path_obj):
+            if str(path_obj).endswith(".published.json"):
+                return untrusted_mutator_acl
+            return protected_acl()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            authority_root = Path(temp_dir)
+            with patch.object(
+                private_ci_final_publication,
+                "FINAL_PUBLICATION_ROOT",
+                authority_root,
+            ), patch.object(
+                private_ci_final_publication,
+                "read_consumption_acl_state",
+                side_effect=bad_marker_readback,
+            ):
+                with self.assertRaisesRegex(ValueError, "grants mutation to untrusted principal"):
+                    private_ci_final_publication.consume_final_pass_publication(
+                        phase5_result_bytes=phase5_raw,
+                        phase6_result_bytes=phase6_raw,
+                        phase7_result_bytes=phase7_raw,
+                    )
+
     def test_authority_root_and_marker_reject_reparse_points(self):
         from unittest.mock import MagicMock
         from agent_controller import private_ci_final_publication
@@ -603,6 +966,14 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                 private_ci_final_publication,
                 "FINAL_PUBLICATION_ROOT",
                 authority_root,
+            ), patch.object(
+                private_ci_result_authority,
+                "read_consumption_acl_state",
+                return_value=protected_acl(),
+            ), patch.object(
+                private_ci_final_publication,
+                "read_consumption_acl_state",
+                return_value=protected_acl(),
             ):
                 # 1. Authority root reparse rejection for Phase 6 publication
                 with patch.object(Path, "lstat", return_value=mock_reparse_stat):
@@ -659,7 +1030,7 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                             phase6_consumption_sha256=phase6_consumption_sha,
                         )
 
-    def test_authority_root_and_marker_require_protected_acl_state(self):
+    def test_valid_protected_root_and_marker_succeeds(self):
         from agent_controller import private_ci_final_publication
         from agent_controller import private_ci_result_authority
 
@@ -676,49 +1047,6 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
         )
         phase6_consumption_sha = self.phase6_evidence().phase6_consumption_sha256
 
-        protected_valid_acl = {
-            "protected": True,
-            "owner_sid": "S-1-5-32-544",
-            "rules": [
-                {
-                    "sid": "S-1-5-18",
-                    "access_type": "Allow",
-                    "inherited": False,
-                    "can_mutate": True,
-                },
-                {
-                    "sid": "S-1-5-32-544",
-                    "access_type": "Allow",
-                    "inherited": False,
-                    "can_mutate": True,
-                },
-            ],
-        }
-        untrusted_acl = {
-            "protected": True,
-            "owner_sid": "S-1-5-32-544",
-            "rules": [
-                {
-                    "sid": "S-1-5-18",
-                    "access_type": "Allow",
-                    "inherited": False,
-                    "can_mutate": True,
-                },
-                {
-                    "sid": "S-1-5-32-544",
-                    "access_type": "Allow",
-                    "inherited": False,
-                    "can_mutate": True,
-                },
-                {
-                    "sid": "S-1-5-32-545",
-                    "access_type": "Allow",
-                    "inherited": False,
-                    "can_mutate": True,
-                },
-            ],
-        }
-
         with tempfile.TemporaryDirectory() as temp_dir:
             authority_root = Path(temp_dir)
             with patch.object(
@@ -729,35 +1057,17 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                 private_ci_final_publication,
                 "FINAL_PUBLICATION_ROOT",
                 authority_root,
+            ), patch.object(
+                private_ci_result_authority,
+                "read_consumption_acl_state",
+                return_value=protected_acl(),
+            ), patch.object(
+                private_ci_final_publication,
+                "read_consumption_acl_state",
+                return_value=protected_acl(),
             ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "untrusted principal",
-                ):
-                    private_ci_result_authority.publish_phase6_result_authority(
-                        phase6_raw,
-                        phase6_consumption_sha256=phase6_consumption_sha,
-                        publication_capability=publication_capability(
-                            phase=6,
-                            result_bytes=phase6_raw,
-                            upstream_sha256=phase6_consumption_sha,
-                        ),
-                        authority_container_acl_state=untrusted_acl,
-                    )
-
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "untrusted principal",
-                ):
-                    private_ci_final_publication.consume_final_pass_publication(
-                        phase5_result_bytes=phase5_raw,
-                        phase6_result_bytes=phase6_raw,
-                        phase7_result_bytes=phase7_raw,
-                        authority_container_acl_state=untrusted_acl,
-                    )
-
-                # Valid ACL succeeds
-                marker = private_ci_result_authority.publish_phase6_result_authority(
+                # 1. Publish Phase 6
+                m6 = private_ci_result_authority.publish_phase6_result_authority(
                     phase6_raw,
                     phase6_consumption_sha256=phase6_consumption_sha,
                     publication_capability=publication_capability(
@@ -765,30 +1075,43 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                         result_bytes=phase6_raw,
                         upstream_sha256=phase6_consumption_sha,
                     ),
-                    authority_container_acl_state=protected_valid_acl,
-                    marker_acl_state=protected_valid_acl,
                 )
-                self.assertIsNotNone(marker)
+                self.assertIsNotNone(m6)
 
-                # Marker validation fails with untrusted marker ACL
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "untrusted principal",
-                ):
-                    private_ci_result_authority.validate_phase6_result_authority_marker(
-                        phase6_raw,
-                        phase6_consumption_sha256=phase6_consumption_sha,
-                        marker_acl_state=untrusted_acl,
-                    )
-
-                # Marker validation succeeds with valid marker ACL
-                validated = private_ci_result_authority.validate_phase6_result_authority_marker(
+                # 2. Validate Phase 6
+                v6 = private_ci_result_authority.validate_phase6_result_authority_marker(
                     phase6_raw,
                     phase6_consumption_sha256=phase6_consumption_sha,
-                    authority_container_acl_state=protected_valid_acl,
-                    marker_acl_state=protected_valid_acl,
                 )
-                self.assertEqual(validated.result_sha256, marker.result_sha256)
+                self.assertEqual(v6.result_sha256, m6.result_sha256)
+
+                # 3. Publish Phase 7
+                phase6_sha = hashlib.sha256(phase6_raw).hexdigest()
+                m7 = private_ci_result_authority.publish_phase7_result_authority(
+                    phase7_raw,
+                    phase6_result_sha256=phase6_sha,
+                    publication_capability=publication_capability(
+                        phase=7,
+                        result_bytes=phase7_raw,
+                        upstream_sha256=phase6_sha,
+                    ),
+                )
+                self.assertIsNotNone(m7)
+
+                # 4. Validate Phase 7
+                v7 = private_ci_result_authority.validate_phase7_result_authority_marker(
+                    phase7_raw,
+                    phase6_result_sha256=phase6_sha,
+                )
+                self.assertEqual(v7.result_sha256, m7.result_sha256)
+
+                # 5. Consume Final PASS
+                fp = private_ci_final_publication.consume_final_pass_publication(
+                    phase5_result_bytes=phase5_raw,
+                    phase6_result_bytes=phase6_raw,
+                    phase7_result_bytes=phase7_raw,
+                )
+                self.assertIsNotNone(fp)
 
     def test_final_pass_publication_replay_guard(self):
         from agent_controller import private_ci_final_publication
@@ -810,6 +1133,10 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
                 private_ci_final_publication,
                 "FINAL_PUBLICATION_ROOT",
                 authority_root,
+            ), patch.object(
+                private_ci_final_publication,
+                "read_consumption_acl_state",
+                return_value=protected_acl(),
             ):
                 m1 = private_ci_final_publication.consume_final_pass_publication(
                     phase5_result_bytes=phase5_raw,
