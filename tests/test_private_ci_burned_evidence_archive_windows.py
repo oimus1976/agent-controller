@@ -1,6 +1,7 @@
 import ctypes
 import os
 import hashlib
+import runpy
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,75 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
         cls.powershell = shutil.which("powershell.exe")
         if cls.powershell is None:
             raise unittest.SkipTest("Windows PowerShell 5.1 unavailable")
+
+    def test_real_git_autocrlf_checkout_matches_canonical_source(self):
+        git = shutil.which("git.exe")
+        if git is None:
+            self.skipTest("Git for Windows unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.ps1"
+            env = os.environ.copy()
+            env["GIT_CONFIG_NOSYSTEM"] = "1"
+            env["GIT_CONFIG_GLOBAL"] = "NUL"
+
+            def run_git(*args: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [git, *args],
+                    cwd=root,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+
+            run_git("init")
+            run_git("config", "user.name", "Agent Controller Test")
+            run_git("config", "user.email", "agent-controller@example.invalid")
+            run_git("config", "core.autocrlf", "false")
+
+            canonical = b"Write-Host 'one'\nWrite-Host 'two'\n"
+            source.write_bytes(canonical)
+            run_git("add", "source.ps1")
+            run_git("commit", "-m", "canonical LF source")
+            canonical_blob = run_git(
+                "rev-parse",
+                "HEAD:source.ps1",
+            ).stdout.strip()
+
+            run_git("config", "core.autocrlf", "true")
+            source.unlink()
+            run_git("checkout", "--", "source.ps1")
+
+            raw = source.read_bytes()
+            raw_blob = run_git(
+                "hash-object",
+                "--no-filters",
+                "source.ps1",
+            ).stdout.strip()
+            filtered_blob = run_git(
+                "hash-object",
+                "source.ps1",
+            ).stdout.strip()
+            status = run_git("status", "--porcelain").stdout.strip()
+
+            self.assertIn(b"\r\n", raw)
+            self.assertEqual(status, "")
+            self.assertNotEqual(raw_blob, canonical_blob)
+            self.assertEqual(filtered_blob, canonical_blob)
+
+            namespace = runpy.run_path(
+                str(
+                    self.repo_root
+                    / "scripts"
+                    / "archive_private_ci_burned_evidence.py"
+                )
+            )
+            matcher = namespace["_working_source_matches_canonical_blob"]
+            self.assertTrue(matcher(raw, canonical_blob))
 
     def test_apply_bridge_parses_under_windows_powershell_51(self):
         quoted = str(self.script).replace("'", "''")
