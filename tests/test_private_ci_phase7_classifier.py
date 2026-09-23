@@ -1184,6 +1184,7 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
     @staticmethod
     def _prepare_real_protected_directory(path: Path) -> None:
         import subprocess
+        from agent_controller.private_ci_consumption_marker import _windows_powershell_env
         script = r"""
 $ErrorActionPreference = 'Stop'
 $Path = $env:TARGET_DIR
@@ -1216,7 +1217,7 @@ Set-Acl -LiteralPath $Path -AclObject $Acl
                 "-Command",
                 script,
             ],
-            env=dict(os.environ, TARGET_DIR=str(path)),
+            env=_windows_powershell_env(TARGET_DIR=str(path)),
             check=True,
         )
 
