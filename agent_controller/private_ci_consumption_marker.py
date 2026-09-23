@@ -142,16 +142,27 @@ _ATOMIC_MUTATING_FILE_SYSTEM_RIGHTS = (
 
 
 def _windows_powershell_env(**updates: str) -> dict[str, str]:
-    # When Python is launched from PowerShell 7, inheriting its PSModulePath
-    # into Windows PowerShell 5.1 can make inbox modules resolve to incompatible
-    # PowerShell 7 module paths. Let powershell.exe reconstruct its own default
-    # module path instead.
+    # Windows environment-variable names are case-insensitive. Canonicalize
+    # controller-owned updates and scrub every inherited case-variant before
+    # adding them, so an inherited spelling cannot compete with authority-bound
+    # TARGET_* values. Also let powershell.exe rebuild its own PSModulePath
+    # instead of inheriting a PowerShell 7 module path through Python.
+    canonical_updates: dict[str, str] = {}
+    for key, value in updates.items():
+        canonical_key = key.upper()
+        if canonical_key in canonical_updates:
+            raise ValueError(
+                f"duplicate case-insensitive Windows environment key: {canonical_key}"
+            )
+        canonical_updates[canonical_key] = value
+
+    reserved = {"PSMODULEPATH", *canonical_updates}
     env = {
         key: value
         for key, value in os.environ.items()
-        if key.upper() != "PSMODULEPATH"
+        if key.upper() not in reserved
     }
-    env.update(updates)
+    env.update(canonical_updates)
     return env
 
 
