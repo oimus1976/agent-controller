@@ -46,7 +46,7 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         canonical = b"Write-Host 'one'\nWrite-Host 'two'\n"
         expected_blob = self._git_blob_sha1(canonical)
 
-        mutated = b"Write-Host 'evil'\r\nWrite-Host 'two'\r\n"
+        mutated = b"Write-Host 'xxx'\r\nWrite-Host 'two'\r\n"
         lone_cr = b"Write-Host 'one'\rWrite-Host 'two'\r\n"
 
         self.assertFalse(matcher(mutated, expected_blob))
@@ -202,6 +202,10 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertIn("is not canonical blob", binding_region)
         self.assertIn('"--no-filters"', region)
         self.assertNotIn('"--path"', region)
+        self.assertIn(
+            "_working_source_matches_canonical_blob",
+            region,
+        )
         matcher_start = source.index(
             "def _working_source_matches_canonical_blob"
         )
