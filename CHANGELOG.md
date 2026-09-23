@@ -15,7 +15,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
-## 2026-09-23 — Bounded UAC bootstrap transport for burned-evidence archive（Issue #237 / Draft PR #238）
+## 2026-09-23 — Bounded UAC bootstrap transport for burned-evidence archive（Issue #237 / PR #238）
 
 関連: Issue #237, Issue #216, Issue #227, PR #238
 
@@ -30,6 +30,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 ### Validation / authority boundary
 
 - test-first head `e2ec370bdb47d364090f296a0dae1ed38c0f83a6` / deterministic-tests #1001で、旧full-source transportが32,767文字を超えるcharacterizationはPASS、新transport API不在だけがREDとなることを確認。
+- exact head `0eab888b17a2cdde93dfe2b55742e9f52df9402b` / deterministic-tests #1005はLinux `unittest` / Windows `windows-junction`ともSUCCESS。Windows PowerShell 5.1で正常compressed payloadの展開・実行、payload破損拒否、reconstructed bootstrap SHA不一致拒否を実行確認。
 - reviewed source binding、exact plan SHA、trusted Windows PowerShell、elevated Python isolation、snapshot/ACL境界は変更しない。
 - このPRはWOBBUFFET archive applyの再実行をauthorizationしない。merge後にfresh preflightと別human retry approvalが必要。
 - Ready / mergeはADR #90によりhuman-final。
