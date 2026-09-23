@@ -15,7 +15,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
-## 2026-09-23 — Windows CRLF canonical-source compatibility（Issue #235 / Draft PR #236）
+## 2026-09-23 — Windows CRLF canonical-source compatibility（Issue #235 / PR #236）
 
 関連: Issue #235, Issue #216, Issue #227, PR #236
 
@@ -29,6 +29,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 ### Validation / authority boundary
 
 - test-firstでLF exact / CRLF materialization accept、content mutation / lone-CR rejectのregressionを追加。test-only head `6f0b555e4c744f4686c489864857b0ec79f6fa87` のdeterministic-tests #994で新規2テストがmissing matcherによりREDとなることを確認してから実装へ進んだ。
+- exact head `030053eb1cc3b187b79c6f3003110d308f4bc4ca` / deterministic-tests #999はLinux `unittest` / Windows `windows-junction`ともSUCCESS。Windows CI上の一時Git repoで`core.autocrlf=true`を実際に再現し、clean working treeでraw blob != canonical / filtered blob == canonicalかつbounded matcher acceptを確認。
 - local `.git/config` / `.git/info/attributes`由来のarbitrary filterはcanonical authorityとして採用しない。
 - この修正はWOBBUFFET archive apply、runner registration、workflow dispatch、target execution、fresh pilot authorityをauthorizationしない。merge後もexact canonical mainへ再同期し、archive planをfresh生成してから別human apply gateを必要とする。
 - Ready / mergeはADR #90によりhuman-final。
