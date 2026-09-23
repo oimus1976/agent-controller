@@ -752,11 +752,15 @@ def command_plan() -> int:
             "archive UAC bootstrap source is not UTF-8"
         ) from error
     sha_token = "__EXPECTED_PLAN_SHA256__"
+    plan_token = "__EXPECTED_PLAN_BASE64__"
     if bootstrap_template.count(sha_token) != 1:
-        raise RuntimeError("archive UAC bootstrap template marker invalid")
-    rendered_bootstrap = bootstrap_template.replace(
-        sha_token,
-        digest,
+        raise RuntimeError("archive UAC bootstrap SHA template marker invalid")
+    if bootstrap_template.count(plan_token) != 1:
+        raise RuntimeError("archive UAC bootstrap plan template marker invalid")
+    rendered_bootstrap = (
+        bootstrap_template
+        .replace(sha_token, digest)
+        .replace(plan_token, plan_base64)
     )
     transport = _build_uac_bootstrap_transport(rendered_bootstrap)
     encoded_bootstrap = str(transport["encoded_command"])
@@ -785,16 +789,9 @@ def command_plan() -> int:
     print("archive_plan_json=" + raw.decode("utf-8").rstrip("\n"))
     print(
         "uac_apply_command="
-        "$env:AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64="
-        f"'{plan_base64}'; "
-        "try { "
         f"Start-Process '{quoted_powershell}' -Verb RunAs -Wait "
         "-ArgumentList "
         f"\"{uac_argument}\""
-        " } finally { "
-        "Remove-Item Env:AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64 "
-        "-ErrorAction SilentlyContinue"
-        " }"
     )
     print("NO_MUTATION_PERFORMED")
     return 0
