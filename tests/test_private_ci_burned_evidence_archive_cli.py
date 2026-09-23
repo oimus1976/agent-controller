@@ -22,7 +22,7 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
             digest = hashlib.sha1(usedforsecurity=False)
         except TypeError:
             digest = hashlib.sha1()
-        digest.update(f"blob {len(raw)}\\0".encode("ascii"))
+        digest.update(f"blob {len(raw)}\0".encode("ascii"))
         digest.update(raw)
         return digest.hexdigest()
 
