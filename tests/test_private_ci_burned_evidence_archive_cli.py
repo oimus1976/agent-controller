@@ -203,8 +203,9 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
             source,
         )
         self.assertIn("-EncodedCommand", source)
-        self.assertIn(
-            "AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64",
+        self.assertIn("__EXPECTED_PLAN_BASE64__", source)
+        self.assertNotIn(
+            "$env:AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64=",
             source,
         )
         self.assertNotIn(" -File ", source)
@@ -402,7 +403,8 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
     def test_powershell_bootstrap_snapshots_reviewed_sources_before_python_import(self):
         source = self.ps_path.read_text(encoding="utf-8")
         self.assertIn("__EXPECTED_PLAN_SHA256__", source)
-        self.assertIn("AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64", source)
+        self.assertIn("__EXPECTED_PLAN_BASE64__", source)
+        self.assertNotIn("AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64", source)
         self.assertIn("$Plan.controller_sources", source)
         self.assertIn("$ExpectedSourcePaths", source)
         self.assertIn("[IO.FileShare]::Read", source)
