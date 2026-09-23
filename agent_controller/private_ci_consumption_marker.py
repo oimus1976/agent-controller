@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -125,3 +127,205 @@ def validate_consumption_container_acl_state(payload: object) -> None:
         validate_approval_acl_state(payload)
     except ValueError as error:
         raise ValueError(f"consumption authority container ACL invalid: {error}") from error
+
+
+_ATOMIC_MUTATING_FILE_SYSTEM_RIGHTS = (
+    "WriteData",
+    "AppendData",
+    "WriteAttributes",
+    "WriteExtendedAttributes",
+    "Delete",
+    "DeleteSubdirectoriesAndFiles",
+    "ChangePermissions",
+    "TakeOwnership",
+)
+
+
+def _windows_powershell_env(**updates: str) -> dict[str, str]:
+    # Windows environment-variable names are case-insensitive. Canonicalize
+    # controller-owned updates and scrub every inherited case-variant before
+    # adding them, so an inherited spelling cannot compete with authority-bound
+    # TARGET_* values. Also let powershell.exe rebuild its own PSModulePath
+    # instead of inheriting a PowerShell 7 module path through Python.
+    canonical_updates: dict[str, str] = {}
+    for key, value in updates.items():
+        canonical_key = key.upper()
+        if canonical_key in canonical_updates:
+            raise ValueError(
+                f"duplicate case-insensitive Windows environment key: {canonical_key}"
+            )
+        canonical_updates[canonical_key] = value
+
+    reserved = {"PSMODULEPATH", *canonical_updates}
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() not in reserved
+    }
+    env.update(canonical_updates)
+    return env
+
+
+def read_consumption_acl_state(path: Path) -> dict[str, object]:
+    mutation_mask = " -bor\n    ".join(
+        f"[Security.AccessControl.FileSystemRights]::{right}"
+        for right in _ATOMIC_MUTATING_FILE_SYSTEM_RIGHTS
+    )
+    script = rf"""
+$ErrorActionPreference = 'Stop'
+$LiteralPath = $env:TARGET_ACL_PATH
+if ([string]::IsNullOrWhiteSpace($LiteralPath)) {{
+    throw "TARGET_ACL_PATH environment variable is required"
+}}
+$Acl = Get-Acl -LiteralPath $LiteralPath
+$OwnerAccount = New-Object -TypeName Security.Principal.NTAccount -ArgumentList $Acl.Owner
+$OwnerSid = $OwnerAccount.Translate([Security.Principal.SecurityIdentifier]).Value
+$MutationMask = [int](
+    {mutation_mask}
+)
+$Rules = @($Acl.Access | ForEach-Object {{
+    $Sid = $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+    $Rights = [int]$_.FileSystemRights
+    [ordered]@{{
+        sid = $Sid
+        access_type = [string]$_.AccessControlType
+        inherited = [bool]$_.IsInherited
+        can_mutate = [bool](($Rights -band $MutationMask) -ne 0)
+    }}
+}})
+[ordered]@{{
+    protected = [bool]$Acl.AreAccessRulesProtected
+    owner_sid = $OwnerSid
+    rules = $Rules
+}} | ConvertTo-Json -Depth 5 -Compress
+""".strip()
+    try:
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+            env=_windows_powershell_env(TARGET_ACL_PATH=str(path)),
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as error:
+        raise ValueError(f"ACL readback unavailable for {path}") from error
+
+    if completed.returncode != 0:
+        raise ValueError(f"ACL readback failed for {path}: {completed.stderr.strip()}")
+    try:
+        payload = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"ACL readback invalid for {path}") from error
+    if type(payload) is not dict:
+        raise ValueError(f"ACL readback shape invalid for {path}")
+    return payload
+
+
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+_INSTALL_PROTECTED_MARKER_ACL_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$LiteralPath = $env:TARGET_MARKER_PATH
+if ([string]::IsNullOrWhiteSpace($LiteralPath)) {
+    throw "TARGET_MARKER_PATH environment variable is required"
+}
+if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {
+    throw "Marker path is missing before ACL installation: $LiteralPath"
+}
+$Item = Get-Item -LiteralPath $LiteralPath -Force
+if (($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Reparse point blocked at protected marker boundary: $LiteralPath"
+}
+
+$SystemSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
+$AdministratorsSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
+$UsersSid = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')
+
+$FileAcl = New-Object Security.AccessControl.FileSecurity
+$FileAcl.SetAccessRuleProtection($true, $false)
+
+$Principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if ($Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    $FileAcl.SetOwner($AdministratorsSid)
+}
+
+$NoneInheritance = [Security.AccessControl.InheritanceFlags]::None
+$NonePropagation = [Security.AccessControl.PropagationFlags]::None
+$Allow = [Security.AccessControl.AccessControlType]::Allow
+
+foreach ($Entry in @(
+    @($SystemSid, [Security.AccessControl.FileSystemRights]::FullControl),
+    @($AdministratorsSid, [Security.AccessControl.FileSystemRights]::FullControl),
+    @($UsersSid, [Security.AccessControl.FileSystemRights]::ReadAndExecute)
+)) {
+    $FileAcl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule -ArgumentList @(
+        $Entry[0], $Entry[1], $NoneInheritance, $NonePropagation, $Allow
+    )))
+}
+
+Set-Acl -LiteralPath $LiteralPath -AclObject $FileAcl
+
+$ItemAfter = Get-Item -LiteralPath $LiteralPath -Force
+if (($ItemAfter.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Reparse point blocked after protected marker ACL installation: $LiteralPath"
+}
+""".strip()
+
+
+def install_protected_marker_acl(path: Path) -> None:
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"marker missing or not a regular file: {path}")
+    try:
+        stat_result = path.lstat()
+    except OSError as error:
+        raise ValueError(f"marker stat failed: {path}") from error
+    if getattr(stat_result, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+        raise ValueError(f"marker ReparsePoint blocked: {path}")
+
+    env = _windows_powershell_env(TARGET_MARKER_PATH=str(path))
+    try:
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                _INSTALL_PROTECTED_MARKER_ACL_SCRIPT,
+            ],
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as error:
+        raise ValueError(
+            f"protected marker ACL installation unavailable for {path}"
+        ) from error
+
+    if completed.returncode != 0:
+        raise ValueError(
+            f"protected marker ACL installation failed for {path}: {completed.stderr.strip()}"
+        )
+
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(
+            f"marker missing or not a regular file after ACL installation: {path}"
+        )
+    try:
+        stat_result_after = path.lstat()
+    except OSError as error:
+        raise ValueError(f"marker stat failed after ACL installation: {path}") from error
+    if getattr(stat_result_after, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+        raise ValueError(f"marker ReparsePoint blocked after ACL installation: {path}")

@@ -1,0 +1,16 @@
+diff --git a/tests/test_private_ci_phase7_classifier.py b/tests/test_private_ci_phase7_classifier.py
+index b61c51a..845b303 100644
+--- a/tests/test_private_ci_phase7_classifier.py
++++ b/tests/test_private_ci_phase7_classifier.py
+@@ -158,10 +158,13 @@ class PrivateCiPhase7ClassifierRedTests(unittest.TestCase):
+         # regression runs in the dedicated Windows CI job.
+         if os.name != "nt":
++            import agent_controller.private_ci_result_authority
++            import agent_controller.private_ci_final_publication
+             for target in (
+                 "agent_controller.private_ci_result_authority.install_protected_marker_acl",
+                 "agent_controller.private_ci_final_publication.install_protected_marker_acl",
+             ):
+                 patcher = patch(target)
+                 patcher.start()
+                 self.addCleanup(patcher.stop)
