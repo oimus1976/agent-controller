@@ -163,9 +163,9 @@ def read_consumption_acl_state(path: Path) -> dict[str, object]:
     script = rf"""
 $ErrorActionPreference = 'Stop'
 $LiteralPath = $env:TARGET_ACL_PATH
-if ([string]::IsNullOrWhiteSpace($LiteralPath)) {
+if ([string]::IsNullOrWhiteSpace($LiteralPath)) {{
     throw "TARGET_ACL_PATH environment variable is required"
-}
+}}
 $Acl = Get-Acl -LiteralPath $LiteralPath
 $OwnerAccount = New-Object -TypeName Security.Principal.NTAccount -ArgumentList $Acl.Owner
 $OwnerSid = $OwnerAccount.Translate([Security.Principal.SecurityIdentifier]).Value
