@@ -81,6 +81,44 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+
+def _git_blob_sha1(raw: bytes) -> str:
+    if type(raw) is not bytes:
+        raise ValueError("Git blob source must be exact bytes")
+    try:
+        digest = hashlib.sha1(usedforsecurity=False)
+    except TypeError:
+        digest = hashlib.sha1()
+    digest.update(f"blob {len(raw)}\0".encode("ascii"))
+    digest.update(raw)
+    return digest.hexdigest()
+
+
+def _working_source_matches_canonical_blob(
+    raw: bytes,
+    expected_blob: str,
+) -> bool:
+    if (
+        type(raw) is not bytes
+        or type(expected_blob) is not str
+        or len(expected_blob) != 40
+        or any(character not in "0123456789abcdef" for character in expected_blob)
+    ):
+        return False
+
+    if _git_blob_sha1(raw) == expected_blob:
+        return True
+
+    # Accept only the bounded text materialization performed by a normal
+    # Windows core.autocrlf checkout. Do not consult repository/local clean
+    # filters: .git/config and .git/info/attributes are not canonical authority.
+    if b"\r\n" not in raw:
+        return False
+    normalized = raw.replace(b"\r\n", b"\n")
+    if b"\r" in normalized:
+        return False
+    return _git_blob_sha1(normalized) == expected_blob
+
 def _python_binding() -> tuple[str, str]:
     path = Path(sys.executable).resolve(strict=True)
     stat_result = path.lstat()
@@ -103,22 +141,7 @@ def _controller_source_bindings(
         path = root.joinpath(*pure.parts)
         with path.open("rb") as handle:
             stat_result = os.fstat(handle.fileno())
-            digest = hashlib.sha256()
-            try:
-                git_digest = hashlib.sha1(usedforsecurity=False)
-            except TypeError:
-                git_digest = hashlib.sha1()
-            git_digest.update(
-                f"blob {stat_result.st_size}\0".encode("ascii")
-            )
-            size = 0
-            while True:
-                chunk = handle.read(1024 * 1024)
-                if not chunk:
-                    break
-                digest.update(chunk)
-                git_digest.update(chunk)
-                size += len(chunk)
+            raw = handle.read()
         if getattr(stat_result, "st_file_attributes", 0) & 0x400:
             raise RuntimeError(
                 f"reviewed controller source is reparse: {relative_path}"
@@ -127,12 +150,15 @@ def _controller_source_bindings(
             raise RuntimeError(
                 f"reviewed controller source is not file: {relative_path}"
             )
-        if size != stat_result.st_size:
+        if len(raw) != stat_result.st_size:
             raise RuntimeError(
                 f"reviewed controller source size drift: {relative_path}"
             )
         expected_blob = canonical_blob_ids.get(relative_path)
-        if not expected_blob or git_digest.hexdigest() != expected_blob:
+        if (
+            not expected_blob
+            or not _working_source_matches_canonical_blob(raw, expected_blob)
+        ):
             raise RuntimeError(
                 f"reviewed controller source is not canonical blob: "
                 f"{relative_path}"
@@ -140,8 +166,8 @@ def _controller_source_bindings(
         bindings.append(
             ReviewedSource(
                 relative_path=relative_path,
-                sha256=digest.hexdigest(),
-                size=size,
+                sha256=hashlib.sha256(raw).hexdigest(),
+                size=len(raw),
             )
         )
     return tuple(bindings)
@@ -520,9 +546,27 @@ def _require_controller_source_exact(
             f"reviewed source blob hash: {relative_path}",
         )
         if observed_blob != expected_blob:
-            raise RuntimeError(
-                f"reviewed source differs from canonical main: {relative_path}"
-            )
+            source_path = root.joinpath(*PurePosixPath(relative_path).parts)
+            with source_path.open("rb") as handle:
+                stat_result = os.fstat(handle.fileno())
+                raw = handle.read()
+            if getattr(stat_result, "st_file_attributes", 0) & 0x400:
+                raise RuntimeError(
+                    f"reviewed controller source is reparse: {relative_path}"
+                )
+            if not stat.S_ISREG(stat_result.st_mode):
+                raise RuntimeError(
+                    f"reviewed controller source is not file: {relative_path}"
+                )
+            if len(raw) != stat_result.st_size:
+                raise RuntimeError(
+                    f"reviewed controller source size drift: {relative_path}"
+                )
+            if not _working_source_matches_canonical_blob(raw, expected_blob):
+                raise RuntimeError(
+                    f"reviewed source differs from canonical main: "
+                    f"{relative_path}"
+                )
 
     return local_head, root, canonical_blob_ids
 
