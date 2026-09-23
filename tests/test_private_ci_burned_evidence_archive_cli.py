@@ -1,6 +1,7 @@
 import ast
 import hashlib
 import runpy
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -50,6 +51,43 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
 
         self.assertFalse(matcher(mutated, expected_blob))
         self.assertFalse(matcher(lone_cr, expected_blob))
+
+    def test_controller_source_bindings_accept_crlf_but_bind_exact_raw_bytes(self):
+        namespace = runpy.run_path(str(self.cli_path))
+        bind_sources = namespace["_controller_source_bindings"]
+        reviewed_paths = namespace["REVIEWED_CONTROLLER_SOURCE_PATHS"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical_blob_ids = {}
+            expected_raw = {}
+            for relative_path in reviewed_paths:
+                canonical = (
+                    f"# canonical {relative_path}\n"
+                    "Write-Host 'bounded-eol'\n"
+                ).encode("utf-8")
+                raw = canonical.replace(b"\n", b"\r\n")
+                path = root.joinpath(*Path(relative_path).parts)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(raw)
+                canonical_blob_ids[relative_path] = self._git_blob_sha1(
+                    canonical
+                )
+                expected_raw[relative_path] = raw
+
+            bindings = bind_sources(root, canonical_blob_ids)
+
+            self.assertEqual(
+                tuple(binding.relative_path for binding in bindings),
+                tuple(reviewed_paths),
+            )
+            for binding in bindings:
+                raw = expected_raw[binding.relative_path]
+                self.assertEqual(binding.size, len(raw))
+                self.assertEqual(
+                    binding.sha256,
+                    hashlib.sha256(raw).hexdigest(),
+                )
 
     def test_python_cli_parses(self):
         source = self.cli_path.read_text(encoding="utf-8")
