@@ -53,6 +53,31 @@ function Assert-PlainDirectory {
     if (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Directory is a reparse point: $LiteralPath" }
 }
 
+function Test-MutationCapableFileSystemRights {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Security.AccessControl.FileSystemRights]$Rights
+    )
+
+    # Use only granular mutation-capable bits. Composite values such as
+    # Modify and FullControl also contain read and/or Synchronize bits, so
+    # using them as an overlap mask falsely classifies read-only ACEs as
+    # writable. WriteData/CreateFiles and AppendData/CreateDirectories are
+    # aliases that share the same underlying bits.
+    $MutationMask = (
+        [Security.AccessControl.FileSystemRights]::WriteData -bor
+        [Security.AccessControl.FileSystemRights]::AppendData -bor
+        [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+        [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    )
+
+    return (($Rights -band $MutationMask) -ne 0)
+}
+
 function Assert-NoLowPrivilegeWriteAcl {
     param([Parameter(Mandatory = $true)][string]$LiteralPath)
     $LowPrivilegeSids = @(
@@ -70,14 +95,6 @@ function Assert-NoLowPrivilegeWriteAcl {
         throw 'Unable to resolve ac-runner SID for runtime ACL validation.'
     }
 
-    $WriteMask = (
-        [Security.AccessControl.FileSystemRights]::Write -bor
-        [Security.AccessControl.FileSystemRights]::Modify -bor
-        [Security.AccessControl.FileSystemRights]::FullControl -bor
-        [Security.AccessControl.FileSystemRights]::Delete -bor
-        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-        [Security.AccessControl.FileSystemRights]::TakeOwnership
-    )
     $Acl = Get-Acl -LiteralPath $LiteralPath -ErrorAction Stop
     foreach ($Rule in @($Acl.Access)) {
         if (
@@ -96,7 +113,7 @@ function Assert-NoLowPrivilegeWriteAcl {
         }
         if (
             $LowPrivilegeSids -contains $Sid -and
-            (($Rule.FileSystemRights -band $WriteMask) -ne 0)
+            (Test-MutationCapableFileSystemRights -Rights $Rule.FileSystemRights)
         ) {
             throw "Low-privilege write access on Python runtime: $LiteralPath sid=$Sid"
         }
