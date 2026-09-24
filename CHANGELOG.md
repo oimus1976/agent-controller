@@ -15,6 +15,26 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-24 — Granular archive runtime ACL mutation classification（Issue #241 / PR #242）
+
+関連: Issue #241, Issue #216, Issue #227, PR #242
+
+### Changed
+
+- PR #240 merge後のWOBBUFFET #227 archive applyで、exact saved UAC commandはreturnしたもののcanonical 5件・archive・manifest/resultが完全に未変更のまま終了する実機事象を再確認。
+- read-only pre-mutation probeで、`WOBBUFFET\\ac-runner` SID解決、controller/evidence root、Python binding、controller source bindingは正常だが、`Users (S-1-5-32-545)` の `ReadAndExecute, Synchronize` ACEをlow-privilege write accessとして誤判定することを確認。
+- 旧判定は `Write | Modify | FullControl | Delete | ChangePermissions | TakeOwnership` の複合値をoverlap maskとして使っており、`Modify` のread bitsや `FullControl` の `Synchronize` bitがread-only ACEにも交差するためfalse positiveとなっていた。
+- runtime ACL判定を、`WriteData/CreateFiles`、`AppendData/CreateDirectories`、`WriteExtendedAttributes`、`WriteAttributes`、`DeleteSubdirectoriesAndFiles`、`Delete`、`ChangePermissions`、`TakeOwnership` のgranular mutation bitsだけを見るclassifierへ変更。
+- `Read` / `ReadAndExecute` / `ExecuteFile` / `ReadPermissions` / `Synchronize` 単独はmutation authorityとして扱わず、実write/create/delete/ACL/owner変更は引き続きfail closedで拒否する。
+
+### Validation / authority boundary
+
+- test-only head `6e8beb63c270ce04f7eb33cbcb6b2b92df67e446` / deterministic-tests #1014で、Linux `unittest` SUCCESS、Windows `windows-junction`は新規2 regressionだけがmissing classifierによりFAILするREDを確認。
+- Windows PowerShell 5.1 regressionは `ReadAndExecute | Synchronize` を非mutationとして受理し、granular mutation rightsおよびそれらを含む `Write` / `Modify` / `FullControl` をmutationとして検出するexact bootstrap classifier semanticsを直接実行する。
+- unresolved `ac-runner` SID / ACL principal、reparse/runtime ancestry、trusted Python/source bindingのfail-closed境界は維持する。
+- この修正はWOBBUFFET archive applyのretryをauthorizationしない。merge後はexact canonical main同期 -> fresh archive plan -> read-only preflight -> 新しいexplicit human archive-apply authorizationが必要。
+- Ready / mergeはADR #90によりhuman-final。
+
 ## 2026-09-24 — Embedded reviewed plan across UAC archive boundary（Issue #239 / PR #240）
 
 関連: Issue #239, Issue #216, Issue #227, PR #240
