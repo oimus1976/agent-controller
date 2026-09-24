@@ -314,6 +314,94 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
             combined,
         )
 
+    def _run_bootstrap_prefix_probe(
+        self,
+        body: str,
+    ) -> subprocess.CompletedProcess[str]:
+        source = self.script.read_text(encoding="utf-8")
+        prefix_end = source.index("$ObservedHost =")
+        probe_source = source[:prefix_end] + "\n" + body + "\n"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "bootstrap-prefix-probe.ps1"
+            probe.write_text(probe_source, encoding="utf-8")
+            return subprocess.run(
+                [
+                    self.powershell,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(probe),
+                ],
+                cwd=self.repo_root,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+
+    def test_acl_mutation_classifier_accepts_read_execute_and_synchronize(self):
+        completed = self._run_bootstrap_prefix_probe(
+            r"""
+$Cases = @(
+    [Security.AccessControl.FileSystemRights]::Read,
+    [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+    [Security.AccessControl.FileSystemRights]::ExecuteFile,
+    [Security.AccessControl.FileSystemRights]::ReadPermissions,
+    [Security.AccessControl.FileSystemRights]::Synchronize,
+    ([Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize)
+)
+foreach ($Rights in $Cases) {
+    if (Test-MutationCapableFileSystemRights -Rights $Rights) {
+        throw "Non-mutation rights falsely classified as mutation: $Rights"
+    }
+}
+Write-Output 'ACL_NON_MUTATION_RIGHTS_PASS'
+"""
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=completed.stdout + "\n" + completed.stderr,
+        )
+        self.assertIn("ACL_NON_MUTATION_RIGHTS_PASS", completed.stdout)
+
+    def test_acl_mutation_classifier_detects_granular_mutation_rights(self):
+        completed = self._run_bootstrap_prefix_probe(
+            r"""
+$Cases = @(
+    [Security.AccessControl.FileSystemRights]::WriteData,
+    [Security.AccessControl.FileSystemRights]::CreateFiles,
+    [Security.AccessControl.FileSystemRights]::AppendData,
+    [Security.AccessControl.FileSystemRights]::CreateDirectories,
+    [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes,
+    [Security.AccessControl.FileSystemRights]::WriteAttributes,
+    [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles,
+    [Security.AccessControl.FileSystemRights]::Delete,
+    [Security.AccessControl.FileSystemRights]::ChangePermissions,
+    [Security.AccessControl.FileSystemRights]::TakeOwnership,
+    [Security.AccessControl.FileSystemRights]::Write,
+    [Security.AccessControl.FileSystemRights]::Modify,
+    [Security.AccessControl.FileSystemRights]::FullControl
+)
+foreach ($Rights in $Cases) {
+    if (-not (Test-MutationCapableFileSystemRights -Rights $Rights)) {
+        throw "Mutation rights not detected: $Rights"
+    }
+}
+Write-Output 'ACL_MUTATION_RIGHTS_PASS'
+"""
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=completed.stdout + "\n" + completed.stderr,
+        )
+        self.assertIn("ACL_MUTATION_RIGHTS_PASS", completed.stdout)
+
     def test_apply_bridge_parses_under_windows_powershell_51(self):
         quoted = str(self.script).replace("'", "''")
         command = (
