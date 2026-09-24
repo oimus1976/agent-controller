@@ -15,6 +15,26 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-24 — Archive ACL translation ordering and generic-right hardening（Issue #243 / PR #244）
+
+関連: Issue #243, Issue #216, Issue #241, PR #244
+
+### Changed
+
+- PR #242 merge後のWOBBUFFET read-only pre-mutation probeで、granular classifier自体は `ReadAndExecute | Synchronize -> mutation=false` と正しく動作する一方、`APPLICATION PACKAGE AUTHORITY` のread-only ACE 4件がlocalized NTAccountからSIDへ変換できず、`Assert-NoLowPrivilegeWriteAcl` がmutation判定前のprincipal translationでfail closedする別のfalse positiveを確認。
+- 同ACLをSID-nativeで列挙すると13件すべて取得でき、変換不能だったread-only principalは `S-1-15-2-1` / `S-1-15-2-2` と確認。4件ともmutation-capable rightsを持たない。
+- Allow ACEの処理順を、mutation-capable判定 -> non-mutationなら即continue -> mutation-capable ACEだけprincipalをSIDへ変換、へ変更。mutation-capable ACEでprincipal変換に失敗する場合は従来どおりfail closedを維持。
+- 同じ実機ACLでraw inherited rights `0x10000000` が `mutation=false` と観測されたため、Windows generic ACCESS_MASKも明示的に扱う。GENERIC_WRITE (`0x40000000`) / GENERIC_ALL (`0x10000000`) はmutation、GENERIC_READ / GENERIC_EXECUTE単独はnon-mutationとして分類する。
+- granular write/create/delete/ACL/owner-change bitsの判定、low-privilege SID set、runtime ancestry/reparse/source/Python bindingは変更しない。
+
+### Validation / authority boundary
+
+- test-only ordering head `eb2c290db55393ee3e222c4b86b44b02e075e24f` / deterministic-tests #1018で、Linux deterministic suite 1317件中、新しいtranslation-order regression 1件だけが `mutation_check=1108` / `principal_translation=811` によりREDとなることを確認。
+- Windows PowerShell 5.1 regressionにraw GENERIC_READ / GENERIC_EXECUTE / GENERIC_WRITE / GENERIC_ALL casesを追加し、production classifier semanticsを直接実行する。
+- WOBBUFFETでの実機再確認はmerge後のcanonical mainに対するread-only pre-mutation probeで行い、PASSするまでfresh archive plan生成・archive retryへ進まない。
+- この修正はarchive applyをauthorizationしない。旧plan/承認は再利用不可。
+- Ready / mergeはADR #90によりhuman-final。
+
 ## 2026-09-24 — Granular archive runtime ACL mutation classification（Issue #241 / PR #242）
 
 関連: Issue #241, Issue #216, Issue #227, PR #242
