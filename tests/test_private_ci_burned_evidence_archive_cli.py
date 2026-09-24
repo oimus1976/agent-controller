@@ -394,6 +394,36 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
             acl_gate_region,
         )
 
+    def test_bootstrap_acl_gate_checks_mutation_before_principal_translation(self):
+        source = self.ps_path.read_text(encoding="utf-8")
+        acl_gate_start = source.index("function Assert-NoLowPrivilegeWriteAcl")
+        acl_gate_end = source.index(
+            "function Assert-TrustedPythonRuntime",
+            acl_gate_start,
+        )
+        acl_gate_region = source[acl_gate_start:acl_gate_end]
+
+        mutation_check = acl_gate_region.index(
+            "Test-MutationCapableFileSystemRights -Rights $Rule.FileSystemRights"
+        )
+        principal_translation = acl_gate_region.index(
+            "$Rule.IdentityReference.Translate("
+        )
+        unresolved_fail_closed = acl_gate_region.index(
+            "Unable to resolve runtime ACL principal:"
+        )
+
+        self.assertLess(
+            mutation_check,
+            principal_translation,
+            "non-mutation ACEs must be skipped before principal translation",
+        )
+        self.assertLess(principal_translation, unresolved_fail_closed)
+        self.assertRegex(
+            acl_gate_region[:principal_translation],
+            r"Test-MutationCapableFileSystemRights[\s\S]+?continue",
+        )
+
     def test_read_only_empty_inventory_never_reports_success(self):
         source = self.cli_path.read_text(encoding="utf-8")
         plan_start = source.index("def command_plan")
