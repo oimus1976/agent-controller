@@ -376,6 +376,11 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, classifier_region)
 
+        self.assertIn(
+            "$GenericMutationMask = [int64]0x50000000",
+            classifier_region,
+        )
+
         acl_gate_end = source.index(
             "function Assert-TrustedPythonRuntime",
             acl_gate_start,
