@@ -343,6 +343,57 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertIn("evidence ACL restore failed", source)
         self.assertIn("Burned evidence archive cleanup incomplete", source)
 
+    def test_bootstrap_acl_gate_uses_granular_mutation_classifier(self):
+        source = self.ps_path.read_text(encoding="utf-8")
+        classifier_start = source.index(
+            "function Test-MutationCapableFileSystemRights"
+        )
+        acl_gate_start = source.index(
+            "function Assert-NoLowPrivilegeWriteAcl",
+            classifier_start,
+        )
+        classifier_region = source[classifier_start:acl_gate_start]
+
+        for required in (
+            "::WriteData",
+            "::AppendData",
+            "::WriteExtendedAttributes",
+            "::WriteAttributes",
+            "::DeleteSubdirectoriesAndFiles",
+            "::Delete",
+            "::ChangePermissions",
+            "::TakeOwnership",
+        ):
+            self.assertIn(required, classifier_region)
+
+        for forbidden in (
+            "::Write -bor",
+            "::Modify",
+            "::FullControl",
+            "::Read",
+            "::ReadAndExecute",
+            "::Synchronize",
+        ):
+            self.assertNotIn(forbidden, classifier_region)
+
+        acl_gate_end = source.index(
+            "function Assert-TrustedPythonRuntime",
+            acl_gate_start,
+        )
+        acl_gate_region = source[acl_gate_start:acl_gate_end]
+        self.assertIn(
+            "Test-MutationCapableFileSystemRights -Rights $Rule.FileSystemRights",
+            acl_gate_region,
+        )
+        self.assertIn(
+            "Unable to resolve ac-runner SID for runtime ACL validation.",
+            acl_gate_region,
+        )
+        self.assertIn(
+            "Unable to resolve runtime ACL principal:",
+            acl_gate_region,
+        )
+
     def test_read_only_empty_inventory_never_reports_success(self):
         source = self.cli_path.read_text(encoding="utf-8")
         plan_start = source.index("def command_plan")
