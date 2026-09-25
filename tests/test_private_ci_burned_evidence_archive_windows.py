@@ -352,7 +352,10 @@ $Cases = @(
     [Security.AccessControl.FileSystemRights]::ExecuteFile,
     [Security.AccessControl.FileSystemRights]::ReadPermissions,
     [Security.AccessControl.FileSystemRights]::Synchronize,
-    ([Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize)
+    ([Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize),
+    ([Enum]::ToObject([Security.AccessControl.FileSystemRights], [int32]::MinValue)),
+    ([Enum]::ToObject([Security.AccessControl.FileSystemRights], [int32]536870912)),
+    ([Enum]::ToObject([Security.AccessControl.FileSystemRights], [int32]-1610612736))
 )
 foreach ($Rights in $Cases) {
     if (Test-MutationCapableFileSystemRights -Rights $Rights) {
@@ -385,7 +388,9 @@ $Cases = @(
     [Security.AccessControl.FileSystemRights]::TakeOwnership,
     [Security.AccessControl.FileSystemRights]::Write,
     [Security.AccessControl.FileSystemRights]::Modify,
-    [Security.AccessControl.FileSystemRights]::FullControl
+    [Security.AccessControl.FileSystemRights]::FullControl,
+    ([Enum]::ToObject([Security.AccessControl.FileSystemRights], [int32]1073741824)),
+    ([Enum]::ToObject([Security.AccessControl.FileSystemRights], [int32]268435456))
 )
 foreach ($Rights in $Cases) {
     if (-not (Test-MutationCapableFileSystemRights -Rights $Rights)) {

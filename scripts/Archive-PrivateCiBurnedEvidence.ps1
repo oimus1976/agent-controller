@@ -59,11 +59,16 @@ function Test-MutationCapableFileSystemRights {
         [Security.AccessControl.FileSystemRights]$Rights
     )
 
-    # Use only granular mutation-capable bits. Composite values such as
-    # Modify and FullControl also contain read and/or Synchronize bits, so
-    # using them as an overlap mask falsely classifies read-only ACEs as
-    # writable. WriteData/CreateFiles and AppendData/CreateDirectories are
-    # aliases that share the same underlying bits.
+    # Use only granular mutation-capable file-system bits for the normal
+    # FileSystemRights values. Composite values such as Modify and
+    # FullControl also contain read and/or Synchronize bits, so using those
+    # composites themselves as an overlap mask falsely classifies read-only
+    # ACEs as writable.
+    #
+    # Raw inherited ACEs can also retain Windows generic ACCESS_MASK bits
+    # that are not named FileSystemRights members. GENERIC_WRITE
+    # (0x40000000) and GENERIC_ALL (0x10000000) are mutation-capable and
+    # must fail closed; GENERIC_READ / GENERIC_EXECUTE alone are not.
     $MutationMask = (
         [Security.AccessControl.FileSystemRights]::WriteData -bor
         [Security.AccessControl.FileSystemRights]::AppendData -bor
@@ -74,8 +79,13 @@ function Test-MutationCapableFileSystemRights {
         [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
         [Security.AccessControl.FileSystemRights]::TakeOwnership
     )
+    $RightsValue = [int64][int32]$Rights
+    $GenericMutationMask = [int64]0x50000000
 
-    return (($Rights -band $MutationMask) -ne 0)
+    return (
+        (($Rights -band $MutationMask) -ne 0) -or
+        (($RightsValue -band $GenericMutationMask) -ne 0)
+    )
 }
 
 function Assert-NoLowPrivilegeWriteAcl {
@@ -103,6 +113,11 @@ function Assert-NoLowPrivilegeWriteAcl {
         ) {
             continue
         }
+        if (-not (
+            Test-MutationCapableFileSystemRights -Rights $Rule.FileSystemRights
+        )) {
+            continue
+        }
         try {
             $Sid = $Rule.IdentityReference.Translate(
                 [Security.Principal.SecurityIdentifier]
@@ -111,10 +126,7 @@ function Assert-NoLowPrivilegeWriteAcl {
         catch {
             throw "Unable to resolve runtime ACL principal: $LiteralPath"
         }
-        if (
-            $LowPrivilegeSids -contains $Sid -and
-            (Test-MutationCapableFileSystemRights -Rights $Rule.FileSystemRights)
-        ) {
+        if ($LowPrivilegeSids -contains $Sid) {
             throw "Low-privilege write access on Python runtime: $LiteralPath sid=$Sid"
         }
     }
