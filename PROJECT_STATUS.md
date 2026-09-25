@@ -26,7 +26,7 @@ This table lists pointers only. Status comes from each authority Issue's latest 
 |---|---|---|---|
 | Private-CI live pilot (main line) | [#216](https://github.com/oimus1976/agent-controller/issues/216) | [#229](https://github.com/oimus1976/agent-controller/issues/229), [#243](https://github.com/oimus1976/agent-controller/issues/243) | comments on #216 |
 | Test-suite audit follow-up | [#246](https://github.com/oimus1976/agent-controller/issues/246) | [#254](https://github.com/oimus1976/agent-controller/issues/254) / PR [#255](https://github.com/oimus1976/agent-controller/pull/255) | comments on #246 |
-| Worker entry point and handoff | [#256](https://github.com/oimus1976/agent-controller/issues/256) | the PR that introduced this file | comments on #256 |
+| Worker entry point and handoff | [#256](https://github.com/oimus1976/agent-controller/issues/256) | PR [#257](https://github.com/oimus1976/agent-controller/pull/257) | comments on #256 |
 
 ## Standing decisions
 

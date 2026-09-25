@@ -15,7 +15,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
-## 2026-09-25 — Worker-neutral entry point and handoff（Issue #256 / PR #PR_NUMBER）
+## 2026-09-25 — Worker-neutral entry point and handoff（Issue #256 / PR #257）
 
 関連: Issue #256, ADR #12, ADR #90, ADR #199, Issue #194, Issue #200, Issue #120
 
