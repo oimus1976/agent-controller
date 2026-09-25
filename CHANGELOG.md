@@ -15,9 +15,9 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
-## 2026-09-25 — Guard-specific assertions for fallback-only classification and schema tests（Issue #250 / PR #PR_NUMBER）
+## 2026-09-25 — Guard-specific assertions for fallback-only classification and schema tests（Issue #250 / PR #251）
 
-関連: Issue #250, Issue #246, PR #PR_NUMBER
+関連: Issue #250, Issue #246, PR #251
 
 ### Changed
 
