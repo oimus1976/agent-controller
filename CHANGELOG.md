@@ -15,9 +15,9 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
-## 2026-09-25 — Deterministic suite hygiene from test audit（Issue #245 / PR #PR_NUMBER）
+## 2026-09-25 — Deterministic suite hygiene from test audit（Issue #245 / PR #247）
 
-関連: Issue #245, Issue #246, PR #PR_NUMBER
+関連: Issue #245, Issue #246, PR #247
 
 ### Changed
 
