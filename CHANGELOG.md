@@ -15,9 +15,9 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
-## 2026-09-25 — Archive CLI behavior tests replace source-text assertions（Issue #252 / PR #PR_NUMBER）
+## 2026-09-25 — Archive CLI behavior tests replace source-text assertions（Issue #252 / PR #253）
 
-関連: Issue #252, Issue #246, Issue #216, PR #PR_NUMBER
+関連: Issue #252, Issue #246, Issue #216, PR #253
 
 ### Changed
 
