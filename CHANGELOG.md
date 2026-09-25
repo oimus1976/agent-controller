@@ -15,9 +15,9 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
-## 2026-09-25 — Pilot freeze end-to-end behavior tests replace source-text assertions（Issue #254 / PR #PR_NUMBER）
+## 2026-09-25 — Pilot freeze end-to-end behavior tests replace source-text assertions（Issue #254 / PR #255）
 
-関連: Issue #254, Issue #246, Issue #216, PR #PR_NUMBER
+関連: Issue #254, Issue #246, Issue #216, PR #255
 
 ### Changed
 
