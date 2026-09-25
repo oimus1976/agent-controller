@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import importlib.util
 import inspect
@@ -86,31 +87,39 @@ class ApplyOwnershipTests(unittest.TestCase):
                 broker_identity="WOBBUFFET\\c-admin",
             )
 
-            with (
-                mock.patch.object(MODULE, "_plan_path", return_value=plan_path),
-                mock.patch.object(MODULE, "_phase0_path", return_value=phase0_path),
-                mock.patch.object(MODULE, "_candidate_path", return_value=candidate_path),
-                mock.patch.object(MODULE, "parse_plan_bytes", return_value=plan),
-                mock.patch.object(MODULE, "_require_human_approval", return_value="d" * 64),
-                mock.patch.object(MODULE, "validate_phase0_evidence_bytes", return_value=evidence),
-                mock.patch.object(MODULE, "validate_frozen_plan", return_value=()),
-                mock.patch.object(MODULE, "_require_exact_phase0_host"),
-                mock.patch.object(MODULE, "_require_repo_matches_phase0"),
-                mock.patch.object(MODULE, "_require_frozen_target_still_exact"),
-                mock.patch.object(MODULE, "_require_live_outputs_absent"),
-                mock.patch.object(MODULE, "_configure_authority", return_value=(b"a" * 32, b"b" * 32)),
-                mock.patch.object(MODULE, "_powershell_attestation", return_value=object()),
-                mock.patch.object(MODULE, "_authenticate_phase0", return_value=object()),
-                mock.patch.object(MODULE, "WindowsEphemeralRegistrationRuntime", return_value=object()),
-                mock.patch.object(
-                    MODULE,
-                    "_acquire_apply_ownership",
-                    side_effect=RuntimeError("live apply ownership already claimed"),
-                ),
-                mock.patch.object(MODULE, "_validate_protected_consumption_marker"),
-                mock.patch.object(MODULE, "execute_live_registration") as execute,
-                mock.patch.object(MODULE, "_write_exclusive") as publish,
-            ):
+            # ExitStack keeps static block nesting below CPython's compiler
+            # limit; a single 19-item ``with`` fails to compile on some
+            # Python 3.12 patch releases ("too many statically nested blocks").
+            patches = {
+                "_plan_path": {"return_value": plan_path},
+                "_phase0_path": {"return_value": phase0_path},
+                "_candidate_path": {"return_value": candidate_path},
+                "parse_plan_bytes": {"return_value": plan},
+                "_require_human_approval": {"return_value": "d" * 64},
+                "validate_phase0_evidence_bytes": {"return_value": evidence},
+                "validate_frozen_plan": {"return_value": ()},
+                "_require_exact_phase0_host": {},
+                "_require_repo_matches_phase0": {},
+                "_require_frozen_target_still_exact": {},
+                "_require_live_outputs_absent": {},
+                "_configure_authority": {"return_value": (b"a" * 32, b"b" * 32)},
+                "_powershell_attestation": {"return_value": object()},
+                "_authenticate_phase0": {"return_value": object()},
+                "WindowsEphemeralRegistrationRuntime": {"return_value": object()},
+                "_acquire_apply_ownership": {
+                    "side_effect": RuntimeError("live apply ownership already claimed"),
+                },
+                "_validate_protected_consumption_marker": {},
+                "execute_live_registration": {},
+                "_write_exclusive": {},
+            }
+            with contextlib.ExitStack() as stack:
+                mocks = {
+                    name: stack.enter_context(mock.patch.object(MODULE, name, **kwargs))
+                    for name, kwargs in patches.items()
+                }
+                execute = mocks["execute_live_registration"]
+                publish = mocks["_write_exclusive"]
                 with self.assertRaisesRegex(RuntimeError, "ownership already claimed"):
                     MODULE.command_apply(expected_plan_sha)
 

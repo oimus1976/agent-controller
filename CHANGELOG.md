@@ -15,6 +15,25 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-25 — Deterministic suite hygiene from test audit（Issue #245 / PR #PR_NUMBER）
+
+関連: Issue #245, Issue #246, PR #PR_NUMBER
+
+### Changed
+
+- テスト棚卸し（全 `test_*` のAST走査、テスト単位の行カバレッジ、`agent_controller/` に対する6,673件のミューテーション）の結果を記録した。重複・同名上書きのテストは0件、ミューテーション検出率は約89%。量の問題はなく、信頼性上の欠陥3件だけをこのPRで修正する。強化・引退候補は Issue #246 に分離した。
+- `test_private_ci_live_registration_apply_lock.py` の19個の `mock.patch.object` を1つの `with` に入れた構成は、Python 3.12.3 では `SyntaxError: too many statically nested blocks` になる。そのためモジュールごとimportできず、4件が実行されていなかった。CIは新しい3.12系のためpassしていた。`contextlib.ExitStack` に置き換え、patch対象・戻り値・assertionは同一のまま維持した。
+- `tests/test_reconciler.py` は実際のシステムtempディレクトリにある固定名のlock（`agent_controller_pr_<sha256(testowner/testrepo#1)>.lock`）を共有していた。中断されたrunが残したlockがあると、手動で消すまで27件が `CONCURRENT_RECONCILIATION` で落ち続けた。各テストに専用のlockディレクトリを割り当て、lockの識別子（owner/repo/prのhash）と並行lock判定のassertionは変更していない。lockの配置先を固定する回帰テストを1件追加した。
+- 構文チェックだけを行う個別テスト4件（archive CLI / phase4 / phase5 / pilot freeze）を削除し、`scripts/*.py` をすべて `compile()` する `tests/test_scripts_compile.py` に置き換えた。これまで構文チェックがなかった `collect_private_ci_phase0.py`、`verify_local_closeout.py` なども対象になる。
+
+### Validation / authority boundary
+
+- 本番コード（`agent_controller/`、`scripts/`）は変更していない。`ReconcilerLock` にstale lockからの回復機構がない点は、プロダクト判断として Issue #246 に記録した。
+- Python 3.12.3 のローカル実行：1315件がimport・実行でき、passした（Windows専用の104件はskip）。変更前はCIで1317件（削除4件、追加2件）。
+- システムtempに古いlockがある状態で、変更前の `tests.test_reconciler` は failures=20 / errors=7、変更後はOK。新しいlock隔離テストは、変更前のsetUpでは `'/tmp' != '<per-test dir>'` でREDになる。
+- `scripts/` に構文エラーを注入すると、`test_scripts_compile` は `SyntaxError` でREDになる。
+- Windows専用テスト、CI workflow、live Windows操作の権限は変更していない。Ready / merge は ADR #90 により human-final。
+
 ## 2026-09-24 — Archive ACL translation ordering and generic-right hardening（Issue #243 / PR #244）
 
 関連: Issue #243, Issue #216, Issue #241, PR #244

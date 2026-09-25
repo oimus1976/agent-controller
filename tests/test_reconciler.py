@@ -22,8 +22,45 @@ class TestReconciler(unittest.TestCase):
         with open(self.policy_file, 'w') as f:
             json.dump(self.valid_policy, f)
 
+        # reconcile_pr_once places its target lock in tempfile.gettempdir().
+        # Give every test a private lock directory so a lock left behind by an
+        # interrupted run, a failed assertion, or a parallel suite cannot turn
+        # later tests into CONCURRENT_RECONCILIATION false failures.
+        self.lock_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.lock_dir.cleanup)
+        lock_dir_patcher = patch("tempfile.gettempdir", return_value=self.lock_dir.name)
+        lock_dir_patcher.start()
+        self.addCleanup(lock_dir_patcher.stop)
+
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def test_reconciler_lock_is_isolated_per_test(self):
+        from agent_controller import reconciler
+
+        observed = []
+        real_lock = reconciler.ReconcilerLock
+
+        def recording_lock(lock_file):
+            observed.append(lock_file)
+            return real_lock(lock_file)
+
+        with patch.object(reconciler, "ReconcilerLock", side_effect=recording_lock), \
+                patch("agent_controller.reconciler.watch_pr_once", side_effect=RuntimeError("stop")):
+            try:
+                reconcile_pr_once(
+                    self.owner, self.repo, self.pr_number,
+                    state_file=self.state_file,
+                    policy_file=self.policy_file,
+                    receipts_file=self.receipts_file,
+                    apply=False,
+                )
+            except RuntimeError:
+                pass
+
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(os.path.dirname(observed[0]), self.lock_dir.name)
+        self.assertFalse(os.path.exists(observed[0]))
 
     # 1. first valid observation -> baseline established / no action / no mutation
     @patch('agent_controller.reconciler.watch_pr_once')

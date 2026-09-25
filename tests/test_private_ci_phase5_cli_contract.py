@@ -1,4 +1,3 @@
-import ast
 import unittest
 from pathlib import Path
 
@@ -11,12 +10,6 @@ class PrivateCiPhase5CliContractRedTests(unittest.TestCase):
 
     def source(self):
         return self.path.read_text(encoding="utf-8")
-
-    def test_phase5_controller_script_parses(self):
-        source = self.source()
-        ast.parse(source, filename=str(self.path))
-
-
 
     def test_phase5_plan_and_apply_require_post_phase4_generation_snapshot(self):
         source = self.source()
