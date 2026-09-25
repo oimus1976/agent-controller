@@ -36,11 +36,13 @@ Implementation and review must remain independent.
 - A read of one raw GitHub surface is advisory. Absence on one surface is not absence of a review.
 - Owner: [#194](https://github.com/oimus1976/agent-controller/issues/194).
 
-## 5. Provider results pending human application
+## 5. Codex task results pending human application
 
-- A provider task can complete while the GitHub branch is still unchanged. For example, Codex needs `View Task → Update branch`.
-- Treat that state as "complete, pending human apply". Do not reimplement the change, and do not infer failure from an unchanged head.
-- After the human applies it, re-read the exact head from GitHub.
+- A GitHub Codex task can complete and commit in its task environment while the GitHub branch is still unchanged. Applying the result may need the human handoff `View Task → Update branch`, or its current equivalent.
+- While a completed Codex task offers that handoff, treat it as "complete, pending human apply". Do not reimplement the change, and do not infer failure from an unchanged head or a task-side push failure.
+- After the human applies it, re-read the exact head from GitHub and bind tests and review to that head.
+- Consider a fallback implementation only after the handoff is shown to be absent, has failed explicitly, or cannot be reconciled with the remote state.
+- #200 defines these states for Codex only. Other providers have no equivalent rule yet; extending it needs its own owner decision.
 - Owner: [#200](https://github.com/oimus1976/agent-controller/issues/200).
 
 ## 6. Workstream isolation and scope
@@ -75,6 +77,7 @@ Implementation and review must remain independent.
 - Before writing custom integration code, prefer official APIs/CLIs/SDKs, then established OSS, then thin wrappers ([ADR #12](https://github.com/oimus1976/agent-controller/issues/12)).
 - Specification drives the work, and layered evidence establishes conformance ([ADR #179](https://github.com/oimus1976/agent-controller/issues/179)).
 - Write stable acceptance items and verify each against evidence.
+- Owners: [ADR #12](https://github.com/oimus1976/agent-controller/issues/12), [ADR #179](https://github.com/oimus1976/agent-controller/issues/179).
 
 ## 11. Public-repository evidence hygiene
 
@@ -86,6 +89,7 @@ Implementation and review must remain independent.
 
 - After a human merge, confirm the merge on GitHub and run [`post-merge-closeout.md`](post-merge-closeout.md).
 - Keep remote topic branches unless a human decides otherwise ([`docs/post-merge-cleanup-candidates.md`](../post-merge-cleanup-candidates.md)).
+- Owners: [#256](https://github.com/oimus1976/agent-controller/issues/256), which moved this rule from the previous root `AGENTS.md`; branch retention in [`post-merge-cleanup-candidates.md`](../post-merge-cleanup-candidates.md).
 
 ## 13. Handoff and status index
 
