@@ -32,9 +32,10 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ### Validation / authority boundary
 
-- `tests/test_worker_entry_contract.py`（14件）を追加した：`AGENTS.md` のサイズ上限、必須見出しと必須規則文言（該当セクションのリスト項目にあること）、`PROJECT_STATUS.md` が索引である宣言と状態列の不在、各規則の `Owner:` 行と所有記録へのリンク、入口文書の相対リンク（インライン形式と参照形式）の解決、`CLAUDE.md` 等が `AGENTS.md` を覆い隠さないこと（全階層を走査し、import先が各ファイルの位置から見てrootの `AGENTS.md` を指すこと。`AGENTS.override.md` は禁止）。コードブロックやHTMLコメント内の文言は数えない。
+- `tests/test_worker_entry_contract.py`（18件）を追加した：`AGENTS.md` のサイズ上限、必須見出しと必須規則文言（該当セクションのリスト項目にあること）、`PROJECT_STATUS.md` が索引である宣言と状態列の不在、各規則の `Owner:` 行が規則ごとに決めた所有記録へリンクしていること、入口文書の相対リンク（インライン形式と参照形式）の解決、`CLAUDE.md` 等が `AGENTS.md` を覆い隠さないこと（全階層を走査し、import先が各ファイルの位置から見てrootの `AGENTS.md` を指すこと。`AGENTS.override.md` は禁止）。コードブロックやHTMLコメント内の文言は数えない。
 - 各チェッカーには違反を含むfixtureでのテストも付け、チェッカーが違反を見逃すようになれば失敗するようにした。
 - Codex（OpenAI、L2、agent-reported）による独立レビューの指摘3件（MAJOR）を反映した：規則5（重複実装の禁止）を #200 の範囲どおりCodexに限定し、フォールバックの条件を明記した。shadowファイル検査を全階層・位置依存のimportに対応させた。契約テストを文字列一致からMarkdown構造の検査に変えた。
+- 新しいheadでのCodex再レビュー（GPT-5.6 Sol・medium、L2、agent-reported）の指摘3件（MAJOR）も反映した：リスト項目の中の引用（`- > …`）やインデントコードに置かれた必須文言は、読まずに「未対応の書式」として失敗させる（fail closed）。一方、正しい書式である行頭からの続き行は受け入れる。各規則の所有記録を規則番号ごとに固定し、`Owner:` 行がその記録にリンクしていることを確認する。ファイルは改行コードを正規化して読むので、WindowsのCRLF checkoutでも同じ結果になる（#253で記録した落とし穴を再発させていた）。
 - 本番コードは変更していない。`PROJECT_STATUS.md` と checkpoint は指し示すものであって証拠ではなく、事実は引き続きGitHubとCIから再確認する。Ready / merge は ADR #90 により human-final。
 
 ## 2026-09-25 — Archive CLI behavior tests replace source-text assertions（Issue #252 / PR #253）

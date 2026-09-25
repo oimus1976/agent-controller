@@ -8,10 +8,15 @@ These checks keep the entry documents usable by every worker:
 - Every relative link in the entry documents resolves.
 - No provider-specific instruction file shadows `AGENTS.md`.
 
-The checks read the operative Markdown structure. Text inside fenced code
-blocks or HTML comments does not count, and each required statement must sit
-in the section and list where a worker will act on it. Each checker is also
-run against small fixtures, so a checker that stops seeing a violation fails.
+The checks read the operative Markdown structure with a small line-based
+reader, not a full CommonMark parser (the suite uses the standard library
+only). Text inside fenced code blocks or HTML comments does not count, and
+each required statement must sit in a list item of the section where a worker
+will act on it. Inside those sections the reader fails closed: a list item
+that contains a blockquote or an indented code block is reported as
+unsupported instead of being read. Files are read with normalized line
+endings, so a CRLF checkout behaves like an LF one. Each checker is also run
+against small fixtures, so a checker that stops seeing a violation fails.
 """
 
 import os
@@ -26,8 +31,9 @@ AGENTS = ROOT / "AGENTS.md"
 STATUS = ROOT / "PROJECT_STATUS.md"
 GOVERNANCE = ROOT / "docs" / "governance"
 
-# Codex caps combined instruction files at 32 KiB by default. The entry file
-# must stay far below that so it is always loaded in full and actually read.
+# Codex caps the combined size of the instruction files it loads
+# (`project_doc_max_bytes`). The entry file stays far below any such cap so it
+# is always loaded in full and actually read.
 AGENTS_SIZE_BUDGET_BYTES = 8 * 1024
 
 AGENTS_REQUIRED_SECTIONS = ("Start here", "Non-negotiables", "Handoff")
@@ -50,7 +56,24 @@ AGENTS_REQUIRED_STATEMENTS = {
 STATUS_REQUIRED_SECTIONS = ("Main line", "Active workstreams", "Standing decisions")
 STATUS_FORBIDDEN_COLUMNS = ("status", "state", "ci", "review")
 
-RULES_MINIMUM_SECTIONS = 13
+# The owning records of each numbered rule in docs/governance/rules.md. Each
+# rule's Owner line must link every record listed here. Changing a rule's
+# owner is a deliberate edit to both files.
+RULE_OWNERS = {
+    1: ("issue:1", "issue:12"),
+    2: ("issue:90",),
+    3: ("issue:199",),
+    4: ("issue:194",),
+    5: ("issue:200",),
+    6: ("issue:120",),
+    7: ("issue:256",),
+    8: ("issue:216", "issue:195"),
+    9: ("text:BASELINE §8",),
+    10: ("issue:12", "issue:179"),
+    11: ("doc:PUBLIC_REPOSITORY_READINESS.md",),
+    12: ("issue:256",),
+    13: ("issue:256",),
+}
 
 # Files that make a provider read something other than AGENTS.md. Claude Code
 # skips AGENTS.md when a CLAUDE.md is present, and Codex prefers
@@ -64,13 +87,13 @@ REFERENCE_USE = re.compile(r"\[([^\]]+)\]\[([^\]]*)\]")
 REFERENCE_DEFINITION = re.compile(r"^ {0,3}\[([^\]]+)\]:\s*<?([^\s>]+)>?")
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
-ISSUE_LINK = re.compile(r"\]\(https://github\.com/oimus1976/agent-controller/issues/\d+\)")
-RELATIVE_MD_LINK = re.compile(r"\]\((?![a-z]+://)[^)\s]+\.md(?:#[^)\s]*)?\)")
+BLOCK_START = re.compile(r"^ {0,3}(?:#|>|\||<|`{3,}|~{3,}|(?:[-*+]|\d+[.)])(?:\s|$))")
 OWNER_ITEM = re.compile(r"^\s*-\s+Owners?:\s")
 
 
 def _text(path):
-    return path.read_bytes().decode("utf-8")
+    text = path.read_bytes().decode("utf-8")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _normalized(text):
@@ -116,18 +139,50 @@ def split_sections(lines):
 
 
 def list_items(lines):
-    """Return each list item with its indented continuation lines, normalized."""
+    """Return (items, unsupported) for the list items in ``lines``.
+
+    An item is its marker line plus indented continuation lines and lazy
+    continuation lines (unindented text that continues the paragraph).
+    Items whose content opens a blockquote or an indented code block are
+    returned in ``unsupported`` and left out of ``items``.
+    """
     items = []
+    unsupported = []
     current = None
+    blank = False
     for line in lines:
-        if LIST_ITEM.match(line):
-            current = [line]
+        marker = LIST_ITEM.match(line)
+        if marker:
+            current = {"parts": [line[marker.end():]], "raw": line, "bad": False}
+            rest = line[marker.end():]
+            gap = len(re.match(r"^\s*(?:[-*+]|\d+[.)])(\s*)", line).group(1))
+            # Five or more spaces after the marker open an indented code block.
+            if rest.startswith(">") or gap >= 5:
+                current["bad"] = True
             items.append(current)
-        elif current is not None and line.strip() and line.startswith((" ", "\t")):
-            current.append(line.strip())
+            blank = False
+            continue
+        if current is None:
+            continue
+        if not line.strip():
+            blank = True
+            continue
+        if line.startswith((" ", "\t")):
+            if line.lstrip().startswith(">"):
+                current["bad"] = True
+            current["parts"].append(line.strip())
+            blank = False
+            continue
+        if not blank and not BLOCK_START.match(line):
+            current["parts"].append(line.strip())
+            continue
+        current = None
+    for item in items:
+        if item["bad"]:
+            unsupported.append(item["raw"].strip())
         else:
-            current = None
-    return [_normalized(" ".join(item)) for item in items]
+            item["text"] = _normalized(" ".join(item["parts"]))
+    return [item["text"] for item in items if not item["bad"]], unsupported
 
 
 def agents_violations(text):
@@ -137,7 +192,9 @@ def agents_violations(text):
         if heading not in sections:
             violations.append(f"missing section: {heading}")
     for heading, statements in AGENTS_REQUIRED_STATEMENTS.items():
-        items = list_items(sections.get(heading, []))
+        items, unsupported = list_items(sections.get(heading, []))
+        for raw in unsupported:
+            violations.append(f"{heading}: unsupported Markdown inside a list item: {raw[:60]}")
         for label, phrase in statements.items():
             if not any(phrase in item for item in items):
                 violations.append(f"{heading}: no list item states {label!r} ({phrase!r})")
@@ -168,21 +225,40 @@ def status_violations(text):
     return violations
 
 
-def rules_violations(text):
+def _owner_matches(line, owner):
+    kind, value = owner.split(":", 1)
+    if kind == "issue":
+        pattern = rf"\]\(https://github\.com/oimus1976/agent-controller/issues/{value}\)"
+    elif kind == "doc":
+        pattern = rf"\]\((?:[^)\s]*/)?{re.escape(value)}\)"
+    else:
+        pattern = re.escape(value)
+    return re.search(pattern, line) is not None
+
+
+def rules_violations(text, rule_owners=RULE_OWNERS):
     violations = []
     _, sections = split_sections(operative_lines(text))
-    if len(sections) < RULES_MINIMUM_SECTIONS:
-        violations.append(f"only {len(sections)} rule sections")
+    numbered = {}
     for title, lines in sections.items():
-        owners = [line for line in lines if OWNER_ITEM.match(line)]
-        if not owners:
+        match = re.match(r"^(\d+)\. ", title)
+        if not match:
+            violations.append(f"{title}: rule section is not numbered")
+            continue
+        numbered[int(match.group(1))] = (title, lines)
+    if sorted(numbered) != sorted(rule_owners):
+        violations.append(f"rule numbers {sorted(numbered)} do not match {sorted(rule_owners)}")
+    for number, owners in sorted(rule_owners.items()):
+        if number not in numbered:
+            continue
+        title, lines = numbered[number]
+        owner_lines = [line for line in lines if OWNER_ITEM.match(line)]
+        if not owner_lines:
             violations.append(f"{title}: no Owner line")
             continue
-        if not any(
-            ISSUE_LINK.search(line) or RELATIVE_MD_LINK.search(line) or re.search(r"BASELINE §\d", line)
-            for line in owners
-        ):
-            violations.append(f"{title}: Owner line links no owning record")
+        for owner in owners:
+            if not any(_owner_matches(line, owner) for line in owner_lines):
+                violations.append(f"{title}: Owner line does not link {owner}")
     return violations
 
 
@@ -268,6 +344,33 @@ class WorkerEntryCheckerFixtureTests(unittest.TestCase):
                 violations = agents_violations(self._agents_with(line, wrapped))
                 self.assertTrue(any("evidence authority" in v for v in violations), violations)
 
+    def test_statement_nested_in_quote_or_code_inside_list_item_fails_closed(self):
+        line = next(l for l in _text(AGENTS).splitlines() if "claims until verified" in l)
+        body = line[2:]
+        for wrapped in (f"- > {body}", f"-     {body}", f"- Evidence.\n  > {body}"):
+            with self.subTest(wrapped=wrapped[:8]):
+                violations = agents_violations(self._agents_with(line, wrapped))
+                self.assertTrue(any("unsupported Markdown" in v for v in violations), violations)
+                self.assertTrue(any("evidence authority" in v for v in violations), violations)
+
+    def test_lazy_and_indented_continuations_are_read(self):
+        for continuation in ("are claims\nuntil verified.", "are claims\n  until verified."):
+            with self.subTest(continuation=continuation):
+                text = self._agents_with("are claims until verified.", continuation)
+                self.assertEqual(agents_violations(text), [])
+
+    def test_crlf_checkout_reads_like_lf(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for source in (AGENTS, STATUS, GOVERNANCE / "rules.md"):
+                copy = Path(tmp) / source.name
+                copy.write_bytes(_text(source).replace("\n", "\r\n").encode("utf-8"))
+                with self.subTest(document=source.name):
+                    self.assertEqual(_text(copy), _text(source))
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "AGENTS.md"
+            copy.write_bytes(_text(AGENTS).replace("\n", "\r\n").encode("utf-8"))
+            self.assertEqual(agents_violations(_text(copy)), [])
+
     def test_statement_moved_to_another_section_is_not_counted(self):
         line = next(l for l in _text(AGENTS).splitlines() if "do not reimplement" in l)
         text = self._agents_with(line + "\n", "")
@@ -295,10 +398,23 @@ class WorkerEntryCheckerFixtureTests(unittest.TestCase):
         text = _text(GOVERNANCE / "rules.md")
         owner = "- Owner: [#200](https://github.com/oimus1976/agent-controller/issues/200).\n"
         self.assertIn(owner, text)
-        for replacement in ("", "- Owner: #200.\n", "- See also [`README.md`](README.md).\n"):
+        for replacement in (
+            "",
+            "- Owner: #200.\n",
+            "- See also [#200](https://github.com/oimus1976/agent-controller/issues/200).\n",
+            "- Owner: [unrelated README](README.md).\n",
+            "- Owner: [#199](https://github.com/oimus1976/agent-controller/issues/199).\n",
+        ):
             with self.subTest(replacement=replacement):
                 violations = rules_violations(text.replace(owner, replacement, 1))
                 self.assertTrue(any(v.startswith("5. ") for v in violations), violations)
+
+    def test_rule_numbering_must_match_the_owner_map(self):
+        text = _text(GOVERNANCE / "rules.md")
+        self.assertIn("## 13. ", text)
+        violations = rules_violations(text.replace("## 13. ", "## ", 1))
+        self.assertTrue(any("not numbered" in v for v in violations), violations)
+        self.assertTrue(any("do not match" in v for v in violations), violations)
 
     def test_broken_inline_and_reference_links_are_rejected(self):
         document = GOVERNANCE / "README.md"
