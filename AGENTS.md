@@ -2,7 +2,7 @@
 
 This file is the entry point for every worker — Codex, Claude Code, Antigravity, Jules, and chat assistants. It is deliberately short: it tells you what to read and which rules you must never break. Rule text and rationale live in [`docs/governance/`](docs/governance/README.md).
 
-Do not add `CLAUDE.md` or `GEMINI.md`. By default, a project `CLAUDE.md` or `CLAUDE.local.md` stops Claude Code from reading this file. If a provider-specific file ever becomes unavoidable, it may contain only an import of this file.
+Do not add `CLAUDE.md` or `GEMINI.md`. By default, a project `CLAUDE.md` or `CLAUDE.local.md` stops Claude Code from reading this file, and Antigravity already reads this file itself. If a Claude-specific file ever becomes unavoidable, it may contain only the import `@AGENTS.md`, written relative to its own directory.
 
 ## Start here
 

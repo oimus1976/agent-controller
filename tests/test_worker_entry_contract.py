@@ -13,8 +13,9 @@ reader, not a full CommonMark parser (the suite uses the standard library
 only). Text inside fenced code blocks or HTML comments does not count, and
 each required statement must sit in a list item of the section where a worker
 will act on it. Inside those sections the reader fails closed: a list item
-that contains a blockquote, an indented code block, or strikethrough is
-reported as unsupported instead of being read. Files are read with normalized line
+that contains a blockquote, an indented or fenced code block, or
+strikethrough is reported as unsupported instead of being read, and text in
+inline code does not count. Files are read with normalized line
 endings, so a CRLF checkout behaves like an LF one. Each checker is also run
 against small fixtures, so a checker that stops seeing a violation fails.
 """
@@ -78,11 +79,14 @@ RULE_OWNERS = {
     13: ("issue:256",),
 }
 
-# Files that make a provider read something other than AGENTS.md. Claude Code
-# skips AGENTS.md when a CLAUDE.md is present, and Codex prefers
-# AGENTS.override.md over AGENTS.md in the same directory.
-SHIM_ONLY_FILES = frozenset({"CLAUDE.md", "CLAUDE.local.md", "GEMINI.md"})
-FORBIDDEN_FILES = frozenset({"AGENTS.override.md"})
+# Files that make a provider read something other than AGENTS.md. By default
+# Claude Code skips AGENTS.md when a CLAUDE.md or CLAUDE.local.md is present,
+# so those may exist only as an import shim. Codex prefers AGENTS.override.md
+# over AGENTS.md in the same directory. Antigravity reads AGENTS.md itself and
+# adds GEMINI.md cumulatively, and its `@filename` form does not inline the
+# target, so a GEMINI.md cannot be a faithful shim and is not allowed.
+SHIM_ONLY_FILES = frozenset({"CLAUDE.md", "CLAUDE.local.md"})
+FORBIDDEN_FILES = frozenset({"AGENTS.override.md", "GEMINI.md"})
 SKIPPED_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__"})
 
 INLINE_LINK = re.compile(r"\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
@@ -154,13 +158,14 @@ def list_items(lines):
     current = None
     blank = False
     for line in lines:
+        line = line.expandtabs(4)
         marker = LIST_ITEM.match(line)
         if marker:
             current = {"parts": [line[marker.end():]], "raw": line, "bad": False, "column": marker.end()}
             rest = line[marker.end():]
             gap = len(re.match(r"^\s*(?:[-*+]|\d+[.)])(\s*)", line).group(1))
             # Five or more spaces after the marker open an indented code block.
-            if rest.startswith(">") or gap >= 5:
+            if rest.startswith((">", "```", "~~~")) or gap >= 5:
                 current["bad"] = True
             items.append(current)
             blank = False
@@ -174,7 +179,7 @@ def list_items(lines):
             indent = len(line) - len(line.lstrip())
             # After a blank line, four or more spaces beyond the item's content
             # column open an indented code block inside the item.
-            if line.lstrip().startswith(">") or (blank and indent >= current["column"] + 4):
+            if line.lstrip().startswith((">", "```", "~~~")) or (blank and indent >= current["column"] + 4):
                 current["bad"] = True
             current["parts"].append(line.strip())
             blank = False
@@ -184,12 +189,14 @@ def list_items(lines):
             continue
         current = None
     for item in items:
-        if "~~" in " ".join(item["parts"]):
+        joined = " ".join(item["parts"])
+        if "~~" in joined or re.search(r"<(?:del|s|strike)\b", joined, flags=re.I):
             item["bad"] = True
         if item["bad"]:
             unsupported.append(item["raw"].strip())
         else:
-            item["text"] = _normalized(" ".join(item["parts"]))
+            # Inline code is an example or a name, not an instruction.
+            item["text"] = _normalized(re.sub(r"(`+)[^`]*?\1", " ", " ".join(item["parts"])))
     return [item["text"] for item in items if not item["bad"]], unsupported
 
 
@@ -369,11 +376,21 @@ class WorkerEntryCheckerFixtureTests(unittest.TestCase):
             f"- Evidence.\n  > {body}",
             f"- Evidence.\n\n      {body}",
             f"- ~~{body}~~",
+            f"- <del>{body}</del>",
+            f"- Evidence.\n    ```text\n    {body}\n    ```",
+            f"- Evidence.\n\t```text\n\t{body}\n\t```",
+            f"- Evidence.\n\n\t\t{body}",
+            f"- ```text\n  {body}\n  ```",
         ):
-            with self.subTest(wrapped=wrapped[:8]):
+            with self.subTest(wrapped=wrapped):
                 violations = agents_violations(self._agents_with(line, wrapped))
                 self.assertTrue(any("unsupported Markdown" in v for v in violations), violations)
                 self.assertTrue(any("evidence authority" in v for v in violations), violations)
+
+    def test_statement_only_in_inline_code_is_not_counted(self):
+        line = next(l for l in _text(AGENTS).splitlines() if "claims until verified" in l)
+        violations = agents_violations(self._agents_with(line, f"- `{line[2:]}`"))
+        self.assertTrue(any("evidence authority" in v for v in violations), violations)
 
     def test_lazy_and_indented_continuations_are_read(self):
         for continuation in (
@@ -476,12 +493,14 @@ class WorkerEntryCheckerFixtureTests(unittest.TestCase):
             (root / ".claude").mkdir()
             (root / "src").mkdir()
             (root / "CLAUDE.md").write_text("@AGENTS.md\n", encoding="utf-8")
+            (root / "CLAUDE.local.md").write_text("@AGENTS.md\n", encoding="utf-8")
             (root / ".claude" / "CLAUDE.md").write_text("@../AGENTS.md\n", encoding="utf-8")
             self.assertEqual(shadow_violations(root), [])
 
             cases = {
                 "src/CLAUDE.md": "Use tabs.\n",
-                "src/GEMINI.md": "@AGENTS.md\n",
+                "GEMINI.md": "@AGENTS.md\n",
+                "src/GEMINI.md": "@[AGENTS](../AGENTS.md)\n",
                 "src/AGENTS.override.md": "@../AGENTS.md\n",
             }
             for relative, content in cases.items():
