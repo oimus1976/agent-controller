@@ -151,10 +151,6 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
             32767,
         )
 
-    def test_python_cli_parses(self):
-        source = self.cli_path.read_text(encoding="utf-8")
-        ast.parse(source, filename=str(self.cli_path))
-
     def test_planner_has_no_controller_import_before_source_verification(self):
         source = self.cli_path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(self.cli_path))

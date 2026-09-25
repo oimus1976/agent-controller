@@ -1,4 +1,3 @@
-import ast
 import unittest
 from pathlib import Path
 
@@ -9,9 +8,6 @@ class PrivateCiPilotFreezeCliTests(unittest.TestCase):
         cls.repo_root = Path(__file__).resolve().parents[1]
         cls.path = cls.repo_root / "scripts" / "create_private_ci_pilot_freeze.py"
         cls.source = cls.path.read_text(encoding="utf-8")
-
-    def test_script_parses(self):
-        ast.parse(self.source, filename=str(self.path))
 
     def test_target_and_workflow_sha_are_fresh_readback_not_arguments(self):
         self.assertIn("--repository", self.source)

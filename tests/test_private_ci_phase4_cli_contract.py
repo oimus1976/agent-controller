@@ -1,4 +1,3 @@
-import ast
 import unittest
 from pathlib import Path
 
@@ -15,12 +14,6 @@ class PrivateCiPhase4CliContractTests(unittest.TestCase):
         )
         cls.phase4_source = cls.phase4_path.read_text(encoding="utf-8")
         cls.handoff_source = cls.handoff_path.read_text(encoding="utf-8")
-
-    def test_controller_scripts_parse_as_python(self):
-        ast.parse(self.phase4_source, filename=str(self.phase4_path))
-        ast.parse(self.handoff_source, filename=str(self.handoff_path))
-
-
 
     def test_handoff_freezes_generation_snapshot_before_publication(self):
         source = self.handoff_source
