@@ -15,6 +15,29 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-25 — Archive CLI behavior tests replace source-text assertions（Issue #252 / PR #253）
+
+関連: Issue #252, Issue #246, Issue #216, PR #253
+
+### Changed
+
+- `scripts/archive_private_ci_burned_evidence.py` は #216 で実行を控えている burned-evidence archive の入口。plan と elevated apply の保証の多くは、ソースの部分文字列でしか確認していなかった（Linux上の行カバレッジは23%）。
+- `tests/test_private_ci_burned_evidence_archive_cli_behavior.py`（14件）を追加し、実物の `command_plan` と `command_apply_internal` を呼ぶ。
+  - reviewed source は一時ツリー上の実ファイルを、実物のbinding/bound-read処理で固定して使う。出力されたUACコマンドは、`-EncodedCommand` → stub → gzip → bootstrap の順に実際に復号して検証する。
+  - git、Windowsの識別/昇格、Pythonランタイムのbinding、reviewed archive module は記録用のfakeに置き換える。applyでは、git・PowerShell・mutable checkout の検証処理が呼ばれた時点で失敗するようにした。
+- plan で確認する内容：reviewed module を読み込む前にsourceを2回検証すること、その2回の間にdriftがあれば読み込み前に止まること、空のinventoryを成功と報告しないこと、canonicalでないsourceを拒否すること、bootstrapはbindingしたbytesから生成し、binding後の変更は拒否すること、テンプレートのマーカーがちょうど1回ずつであること、復号したbootstrapがreviewed planのbytesとdigestを正確に埋め込んでいること。
+- apply で確認する内容：digestかエンコードが不正なら昇格チェックより前に止まること、昇格チェックに失敗したら何も読み込まず何も適用しないこと、昇格 → module読み込み → planの解析 → runtimeのbinding → apply の順序、runtimeにdriftがあれば適用しないこと、PASSでない結果をPASSと報告しないこと、git・PowerShellを再実行しないこと。PowerShell bootstrap が実際に使う `apply-internal --expected-plan-sha256 … --expected-plan-base64 …` の形を bootstrap のソースから取り出し、実物の `main()` に通して dispatch されることも確認する。
+- これらに置き換わった部分文字列テスト5件と、1件の中の順序比較部分を削除した。静的な境界チェック（plan内に破壊的操作やpilotの経路がないこと、呼び出し側がsource pathを渡せないこと、trusted gitの呼び出し形）と、実行にWindowsが必要なPowerShell bootstrap系のテストは残した。
+- CLIのLinux上の行カバレッジは23%から48%になった。
+
+### Validation / authority boundary
+
+- リポジトリ全体をコピーし、regressionを1件ずつ注入して全スイートを実行した。本物のregression 11件のうち、新スイートはすべて検出し、main上のスイートが検出したのは2件だけだった。main側が見逃したのは、tree driftの無視、空inventoryを成功扱いにする、埋め込むSHAの不一致、重複マーカーの受理、昇格失敗の握りつぶし、digestチェックの無効化、Python SHA driftの無視、PASSでない結果をPASSと報告する、applyからのgit再実行。
+- 無害なローカル変数の改名2件では、新スイートは失敗せず、mainのスイートは2件とも失敗した。どちらのスイートも、regressionを注入しなければpassすることを確認済み。
+- 自己adversarial reviewで、削除した部分文字列テストがCLI引数名（`--expected-plan-sha256`）の唯一の保護になっていたことに気づき、上記のbootstrap呼び出しの再生テストを追加した。フラグ名・サブコマンド名・bootstrap側引数の変更は、いずれも検出できる。また、テンプレート比較が `read_text` の改行変換でWindowsのCRLF checkout上だけ誤って失敗する問題を、bytesのdecodeに直した（CRLF化したコピーで、修正前は失敗し修正後はpassすることを確認済み）。
+- ローカル（Python 3.12.3）では1333件がpassした（Windows専用の104件はskip）。本番コードは変更していない。
+- WOBBUFFETでのarchive plan/applyを承認するものではない。#216の手順どおり、read-onlyのpre-mutation probe、新しいplanの作成、人間による新たな明示的承認が引き続き必要。Ready / merge は ADR #90 により human-final。
+
 ## 2026-09-25 — Guard-specific assertions for fallback-only classification and schema tests（Issue #250 / PR #251）
 
 関連: Issue #250, Issue #246, PR #251

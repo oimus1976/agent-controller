@@ -166,14 +166,8 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
                         alias.name.startswith("agent_controller"),
                         msg=f"top-level controller import: {alias.name}",
                     )
-
-        plan_start = source.index("def command_plan")
-        apply_start = source.index("def command_apply_internal", plan_start)
-        region = source[plan_start:apply_start]
-        first_verify = region.index("_require_controller_source_exact()")
-        module_load = region.index("_load_bound_archive_module(")
-        self.assertLess(first_verify, module_load)
-        self.assertIn("_read_bound_controller_source(", source)
+        # Verification-before-load ordering is exercised by
+        # test_private_ci_burned_evidence_archive_cli_behavior.
 
     def test_plan_is_read_only_and_has_no_live_pilot_surface(self):
         source = self.cli_path.read_text(encoding="utf-8")
@@ -192,47 +186,6 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, region)
-
-    def test_apply_requires_expected_plan_sha_and_elevation(self):
-        source = self.cli_path.read_text(encoding="utf-8")
-        self.assertIn("--expected-plan-sha256", source)
-        self.assertIn("_require_windows_elevated_boundary()", source)
-        self.assertIn("apply_archive_plan(", source)
-
-
-    def test_plan_carries_reviewed_plan_and_encoded_bootstrap_across_uac_boundary(self):
-        source = self.cli_path.read_text(encoding="utf-8")
-        self.assertIn("plan_base64 = base64.b64encode(raw)", source)
-        self.assertIn("_build_uac_bootstrap_transport(", source)
-        self.assertIn("gzip.compress(", source)
-        self.assertIn("GzipStream", source)
-        self.assertIn("UAC_ARGUMENT_SAFE_LIMIT = 30000", source)
-        self.assertIn(
-            "WINDOWS_CREATEPROCESS_COMMAND_LINE_LIMIT = 32767",
-            source,
-        )
-        self.assertIn("-EncodedCommand", source)
-        self.assertIn("__EXPECTED_PLAN_BASE64__", source)
-        self.assertNotIn(
-            "$env:AGENT_CONTROLLER_ARCHIVE_PLAN_BASE64=",
-            source,
-        )
-        self.assertNotIn(" -File ", source)
-        self.assertIn("_decode_reviewed_plan(", source)
-        self.assertIn("parse_archive_plan_bytes(raw)", source)
-
-    def test_encoded_bootstrap_uses_plan_bound_source_bytes(self):
-        source = self.cli_path.read_text(encoding="utf-8")
-        plan_start = source.index("def command_plan")
-        apply_start = source.index("def command_apply_internal", plan_start)
-        region = source[plan_start:apply_start]
-        self.assertIn("bootstrap_binding = plan.controller_sources[0]", region)
-        self.assertIn("_read_bound_controller_source(", region)
-        self.assertIn("bootstrap_binding", region)
-        self.assertNotIn("bootstrap_path.read_text", region)
-        self.assertNotIn("Archive-PrivateCiBurnedEvidence.ps1\").read_text", region)
-        self.assertIn("_build_uac_bootstrap_transport", region)
-        self.assertIn("full_command_chars", region)
 
     def test_planner_uses_trusted_absolute_git_and_canonical_blob_checks(self):
         source = self.cli_path.read_text(encoding="utf-8")
@@ -283,16 +236,6 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertIn('if b"\\r" in normalized', matcher_region)
         self.assertNotIn("check-attr", matcher_region)
         self.assertNotIn("clean=", matcher_region)
-
-    def test_elevated_apply_does_not_rerun_mutable_checkout_git_or_powershell(self):
-        source = self.cli_path.read_text(encoding="utf-8")
-        apply_start = source.index("def command_apply_internal")
-        apply_region = source[apply_start:]
-        self.assertNotIn("_require_controller_source_exact()", apply_region)
-        self.assertNotIn('"git.exe"', apply_region)
-        self.assertNotIn('"powershell.exe"', apply_region)
-        self.assertIn("_require_windows_elevated_boundary()", apply_region)
-
 
     def test_bootstrap_verifies_reviewed_sources_before_elevated_python(self):
         source = self.ps_path.read_text(encoding="utf-8")
@@ -423,22 +366,6 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
         self.assertRegex(
             acl_gate_region[:principal_translation],
             r"Test-MutationCapableFileSystemRights[\s\S]+?continue",
-        )
-
-    def test_read_only_empty_inventory_never_reports_success(self):
-        source = self.cli_path.read_text(encoding="utf-8")
-        plan_start = source.index("def command_plan")
-        apply_start = source.index("def command_apply_internal", plan_start)
-        region = source[plan_start:apply_start]
-        self.assertNotIn("BURNED_CANONICAL_ARCHIVE_NOT_REQUIRED", region)
-        self.assertNotIn("canonical_restart_blocking_artifacts=0", region)
-        self.assertIn(
-            "empty canonical inventory cannot be proven atomically",
-            region,
-        )
-        self.assertIn(
-            "require locked authoritative readback",
-            region,
         )
 
     def test_cli_has_no_caller_supplied_source_path(self):
