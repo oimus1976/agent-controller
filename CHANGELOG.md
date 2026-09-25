@@ -15,6 +15,22 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-25 — Guard-specific assertions for fallback-only classification and schema tests（Issue #250 / PR #PR_NUMBER）
+
+関連: Issue #250, Issue #246, PR #PR_NUMBER
+
+### Changed
+
+- `PublicationStateEvidence.classify()` のテスト3件（invalid observed SHA、provider branch = bound branch、provider branchのない observed SHA）は、最終結果が共通のfallback（`PUBLICATION_AMBIGUOUS`）になる入力しか使っていなかった。そのため、対象のguardを消しても結果が変わらなかった。各ケースに、対象の性質だけが異なるpositive control（`NEW_PROVIDER_BRANCH_EXPOSED` / `WORKSPACE_COMPLETE_PUBLICATION_UNKNOWN` / `BOUND_BRANCH_ADVANCED`）を加え、guardがないと分類が変わる入力に変更した。
+- durable authority のスキーマテスト2件は例外の型しか確認しておらず、後段の別のチェックが同じ型を投げても通っていた。失敗理由を `assertRaisesRegex` で固定した。
+- 部分unique index（`WHERE`付き）の拒否は、前段の schema object 集合チェックが常に先に発火するため、どのテストでも単独では確かめられていなかった。`_validate_schema` を直接呼ぶassertionを追加し、条件なしのunique indexなら通るというpositive controlを1件追加した。
+- 監査で検出0件とされた `test_allowlist_is_exact_and_excludes_authority_files` は、module import時に実行されるdataclass decoratorの引数（`frozen=True` / `slots=True`）がミューテーションの対象になっていただけで、テストの対象とは無関係だった。監査指標の偽陽性と判断し、変更していない。
+
+### Validation / authority boundary
+
+- 完全なコピー上で、対象のguardを1つずつ除去して全スイートを実行した。変更前のスイートは5件中4件を見逃した（invalid observed SHA のguard除去だけは既存の別テストが検出した）。強化後は5件すべてを検出した。いずれのコピーも、guardを除去しない状態では全件passすることを確認済み。
+- ローカル（Python 3.12.3）では、全スイートが1件増えてpassした（Windows専用の104件はskip）。本番コードは変更していない。Ready / merge は ADR #90 により human-final。
+
 ## 2026-09-25 — Phase 4 harness behavior tests replace source-offset ordering tests（Issue #248 / PR #249）
 
 関連: Issue #248, Issue #246, PR #249

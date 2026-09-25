@@ -213,7 +213,10 @@ class DurablePrivateCiAuthorityTests(unittest.TestCase):
         finally:
             connection.close()
 
-        with self.assertRaises(DurablePrivateCiAuthoritySchemaError):
+        with self.assertRaisesRegex(
+            DurablePrivateCiAuthoritySchemaError,
+            "authority schema is partially present",
+        ):
             self.authority()
 
         connection = sqlite3.connect(self.database_path)
@@ -256,7 +259,7 @@ class DurablePrivateCiAuthorityTests(unittest.TestCase):
         with self.assertRaises(DurablePrivateCiAuthoritySchemaError):
             self.authority()
 
-    def test_partial_nonce_unique_index_fails_closed(self):
+    def _create_authority_table_with_nonce_index(self, index_sql):
         connection = sqlite3.connect(self.database_path)
         try:
             connection.execute("CREATE TABLE authority_meta (schema_version INTEGER NOT NULL)")
@@ -278,14 +281,44 @@ class DurablePrivateCiAuthorityTests(unittest.TestCase):
                 )
                 """
             )
-            connection.execute(
-                "CREATE UNIQUE INDEX nonce_reserved_only ON private_ci_authority(runner_nonce) WHERE state = 'RESERVED'"
-            )
+            connection.execute(index_sql)
             connection.commit()
         finally:
             connection.close()
-        with self.assertRaises(DurablePrivateCiAuthoritySchemaError):
+
+    def _validate_schema_directly(self):
+        # Exercise the uniqueness check itself, independent of the earlier
+        # schema-object-set guard that rejects any extra named index first.
+        validator = object.__new__(DurablePrivateCiAuthority)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            validator._validate_schema(connection)
+        finally:
+            connection.close()
+
+    def test_partial_nonce_unique_index_fails_closed(self):
+        self._create_authority_table_with_nonce_index(
+            "CREATE UNIQUE INDEX nonce_reserved_only ON private_ci_authority(runner_nonce) WHERE state = 'RESERVED'"
+        )
+        with self.assertRaisesRegex(
+            DurablePrivateCiAuthoritySchemaError,
+            "authority schema is partially present",
+        ):
             self.authority()
+        with self.assertRaisesRegex(
+            DurablePrivateCiAuthoritySchemaError,
+            "nonce unconditional uniqueness constraint is missing",
+        ):
+            self._validate_schema_directly()
+
+    def test_unconditional_nonce_unique_index_satisfies_uniqueness_check(self):
+        # Positive control for the partial-index case: the same table with an
+        # unconditional unique index passes the uniqueness check, so only the
+        # WHERE clause separates the two.
+        self._create_authority_table_with_nonce_index(
+            "CREATE UNIQUE INDEX nonce_unique ON private_ci_authority(runner_nonce)"
+        )
+        self._validate_schema_directly()
 
     def test_corrupt_persisted_binding_fails_closed(self):
         authority = self.authority()

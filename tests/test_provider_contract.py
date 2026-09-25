@@ -245,29 +245,57 @@ class TestProviderContract(unittest.TestCase):
         self.assertEqual(evidence.classify(), PublicationClassification.PUBLICATION_AMBIGUOUS)
         
     def test_publication_evidence_ambiguous_invalid_observed_sha(self):
-        evidence = PublicationStateEvidence(
-            provider="example-provider",
-            operation_id="op-1",
-            repo="owner/repo",
-            bound_branch="refs/heads/main",
-            authoritative_baseline_bound_sha="a" * 40,
-            authoritative_current_bound_sha="a" * 40,
-            independently_observed_provider_sha="invalid",
+        def evidence(observed_sha):
+            return PublicationStateEvidence(
+                provider="example-provider",
+                operation_id="op-1",
+                repo="owner/repo",
+                bound_branch="refs/heads/main",
+                authoritative_baseline_bound_sha="a" * 40,
+                authoritative_current_bound_sha="a" * 40,
+                provider_reported_branch="refs/heads/provider-work",
+                independently_observed_provider_sha=observed_sha,
+            )
+
+        # Positive control: a valid observed SHA on a distinct provider branch
+        # is a new provider branch, so only SHA validity separates the cases.
+        self.assertEqual(
+            evidence("b" * 40).classify(),
+            PublicationClassification.NEW_PROVIDER_BRANCH_EXPOSED,
         )
-        self.assertEqual(evidence.classify(), PublicationClassification.PUBLICATION_AMBIGUOUS)
+        for invalid in ("invalid", "b" * 39, "B" * 40, ""):
+            with self.subTest(observed_sha=invalid):
+                self.assertEqual(
+                    evidence(invalid).classify(),
+                    PublicationClassification.PUBLICATION_AMBIGUOUS,
+                )
 
     def test_publication_evidence_ambiguous_provider_branch_equals_bound_branch(self):
-        evidence = PublicationStateEvidence(
-            provider="example-provider",
-            operation_id="op-1",
-            repo="owner/repo",
-            bound_branch="refs/heads/main",
-            authoritative_baseline_bound_sha="a" * 40,
-            authoritative_current_bound_sha="a" * 40,
-            provider_reported_branch="refs/heads/main",
-            independently_observed_provider_sha="b" * 40,
+        def evidence(observed_sha):
+            return PublicationStateEvidence(
+                provider="example-provider",
+                operation_id="op-1",
+                repo="owner/repo",
+                bound_branch="refs/heads/main",
+                authoritative_baseline_bound_sha="a" * 40,
+                authoritative_current_bound_sha="a" * 40,
+                provider_reported_completion=True,
+                provider_reported_branch="refs/heads/main",
+                independently_observed_provider_sha=observed_sha,
+            )
+
+        # Positive control: without an independently observed SHA, a completed
+        # workspace reporting the bound branch is only "publication unknown".
+        self.assertEqual(
+            evidence(None).classify(),
+            PublicationClassification.WORKSPACE_COMPLETE_PUBLICATION_UNKNOWN,
         )
-        self.assertEqual(evidence.classify(), PublicationClassification.PUBLICATION_AMBIGUOUS)
+        # An observed SHA attributed to the bound branch itself is ambiguous,
+        # even though completion was reported.
+        self.assertEqual(
+            evidence("b" * 40).classify(),
+            PublicationClassification.PUBLICATION_AMBIGUOUS,
+        )
 
     def test_publication_evidence_conflicting_bound_and_provider_branch_is_ambiguous(self):
         evidence = PublicationStateEvidence(
@@ -286,19 +314,36 @@ class TestProviderContract(unittest.TestCase):
         )
 
     def test_publication_evidence_observed_sha_without_provider_branch_is_ambiguous(self):
-        evidence = PublicationStateEvidence(
-            provider="example-provider",
-            operation_id="op-1",
-            repo="owner/repo",
-            bound_branch="refs/heads/main",
-            authoritative_baseline_bound_sha="a" * 40,
-            authoritative_current_bound_sha="a" * 40,
-            independently_observed_provider_sha="b" * 40,
+        def evidence(observed_sha, current_sha="a" * 40):
+            return PublicationStateEvidence(
+                provider="example-provider",
+                operation_id="op-1",
+                repo="owner/repo",
+                bound_branch="refs/heads/main",
+                authoritative_baseline_bound_sha="a" * 40,
+                authoritative_current_bound_sha=current_sha,
+                provider_reported_completion=True,
+                independently_observed_provider_sha=observed_sha,
+            )
+
+        # Positive controls: the same evidence without an observed SHA is
+        # classified normally, whether or not the bound branch advanced.
+        self.assertEqual(
+            evidence(None).classify(),
+            PublicationClassification.WORKSPACE_COMPLETE_PUBLICATION_UNKNOWN,
         )
         self.assertEqual(
-            evidence.classify(),
-            PublicationClassification.PUBLICATION_AMBIGUOUS,
+            evidence(None, current_sha="c" * 40).classify(),
+            PublicationClassification.BOUND_BRANCH_ADVANCED,
         )
+        # An observed SHA with no provider branch to attribute it to is
+        # ambiguous in both situations.
+        for current_sha in ("a" * 40, "c" * 40):
+            with self.subTest(bound_advanced=current_sha != "a" * 40):
+                self.assertEqual(
+                    evidence("b" * 40, current_sha=current_sha).classify(),
+                    PublicationClassification.PUBLICATION_AMBIGUOUS,
+                )
 
     def test_publication_evidence_malformed_identity_fields_are_ambiguous(self):
         base = dict(
