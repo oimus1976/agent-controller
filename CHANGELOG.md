@@ -15,6 +15,27 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-25 — Worker-neutral entry point and handoff（Issue #256 / PR #PR_NUMBER）
+
+関連: Issue #256, ADR #12, ADR #90, ADR #199, Issue #194, Issue #200, Issue #120
+
+### Changed
+
+- 目的：Codex / Claude Code / Antigravity / Jules / チャット系のどのworkerからでも、GitHub上の状態だけで作業を引き継げるようにする。これまではChatGPTを必ず起点にしていたため、入口が暗黙だった。
+- `AGENTS.md` を短いbootloaderに書き換えた（8 KiB以内）。読む順序（`PROJECT_STATUS.md` → workstream Issueの最新checkpoint → `docs/governance/rules.md`）と、破ってはいけないルール（evidence authority、human-final、独立review、重複実装の禁止、live effectの個別承認、scope）を、それぞれの所有Issue/ADRへのリンク付きで置いた。`CLAUDE.md` / `GEMINI.md` を置かない理由も明記した（`CLAUDE.md` があるとClaude Codeは `AGENTS.md` を読まない）。
+- 旧 `AGENTS.md` のpost-merge closeout規則は、本文を変えずに `docs/governance/post-merge-closeout.md` へ移した。
+- `docs/governance/` を新設：`rules.md`（13規則、各規則に所有記録）、`checkpoint-template.md`（Verified と Agent-reported を分けるhandoff checkpoint）、`review-record.md`（独立性レベルL0–L3と、GitHub identityがownerアカウントに集約されている制約）、`README.md`。
+- 固定のWIP上限2件を廃止し、providerの利用量を確認してから新規作業を始めるcapacity policyに置き換えた（owner決定 2026-09-25）。
+- repo直下に `PROJECT_STATUS.md` を追加した。状態ではなく「どこに権威があるか」の索引であり、PR/CI/review/承認の状態は持たない（表に状態列を置かない）。
+- `.github/pull_request_template.md` を追加し、review record（実装worker・reviewer worker・exact head・独立性レベル）を毎PRで記入させる。
+- `docs/PUBLIC_REPOSITORY_READINESS.md` の分類を、#196 の closeout（2026-09-15）に合わせて `PUBLISHED` に更新した（過去のBLOCKED記述は履歴として残した）。
+
+### Validation / authority boundary
+
+- `tests/test_worker_entry_contract.py`（7件）を追加した：`AGENTS.md` のサイズ上限と必須見出し・必須規則文言、`PROJECT_STATUS.md` が索引である宣言と状態列の不在、各規則の所有記録、入口文書の相対リンク解決、`CLAUDE.md` 等が `AGENTS.md` を覆い隠さないこと。
+- 違反注入（`CLAUDE.md` の追加、Status列の追加、規則文言の削除、サイズ超過、リンク切れ）で、それぞれ失敗することを確認済み。
+- 本番コードは変更していない。`PROJECT_STATUS.md` と checkpoint は指し示すものであって証拠ではなく、事実は引き続きGitHubとCIから再確認する。Ready / merge は ADR #90 により human-final。
+
 ## 2026-09-25 — Archive CLI behavior tests replace source-text assertions（Issue #252 / PR #253）
 
 関連: Issue #252, Issue #246, Issue #216, PR #253
