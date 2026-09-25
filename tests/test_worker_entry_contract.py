@@ -13,8 +13,8 @@ reader, not a full CommonMark parser (the suite uses the standard library
 only). Text inside fenced code blocks or HTML comments does not count, and
 each required statement must sit in a list item of the section where a worker
 will act on it. Inside those sections the reader fails closed: a list item
-that contains a blockquote or an indented code block is reported as
-unsupported instead of being read. Files are read with normalized line
+that contains a blockquote, an indented code block, or strikethrough is
+reported as unsupported instead of being read. Files are read with normalized line
 endings, so a CRLF checkout behaves like an LF one. Each checker is also run
 against small fixtures, so a checker that stops seeing a violation fails.
 """
@@ -54,24 +54,27 @@ AGENTS_REQUIRED_STATEMENTS = {
 }
 
 STATUS_REQUIRED_SECTIONS = ("Main line", "Active workstreams", "Standing decisions")
-STATUS_FORBIDDEN_COLUMNS = ("status", "state", "ci", "review")
+# The Active workstreams table carries pointers only. Any other column, such
+# as "Current status", would invite a second source of truth.
+STATUS_TABLE_COLUMNS = ("workstream", "authority issue", "related issues / prs", "checkpoints")
 
 # The owning records of each numbered rule in docs/governance/rules.md. Each
-# rule's Owner line must link every record listed here. Changing a rule's
-# owner is a deliberate edit to both files.
+# rule's Owner line must name exactly these records: every one of them, and no
+# other linked Issue or document. Changing a rule's owner is a deliberate edit
+# to both files.
 RULE_OWNERS = {
-    1: ("issue:1", "issue:12"),
+    1: ("issue:1", "issue:12", "text:BASELINE §2–3"),
     2: ("issue:90",),
     3: ("issue:199",),
     4: ("issue:194",),
     5: ("issue:200",),
-    6: ("issue:120",),
-    7: ("issue:256",),
+    6: ("issue:120", "doc:workstream-isolation.md"),
+    7: ("issue:256", "issue:168", "issue:55"),
     8: ("issue:216", "issue:195"),
     9: ("text:BASELINE §8",),
     10: ("issue:12", "issue:179"),
     11: ("doc:PUBLIC_REPOSITORY_READINESS.md",),
-    12: ("issue:256",),
+    12: ("issue:256", "doc:post-merge-cleanup-candidates.md"),
     13: ("issue:256",),
 }
 
@@ -153,7 +156,7 @@ def list_items(lines):
     for line in lines:
         marker = LIST_ITEM.match(line)
         if marker:
-            current = {"parts": [line[marker.end():]], "raw": line, "bad": False}
+            current = {"parts": [line[marker.end():]], "raw": line, "bad": False, "column": marker.end()}
             rest = line[marker.end():]
             gap = len(re.match(r"^\s*(?:[-*+]|\d+[.)])(\s*)", line).group(1))
             # Five or more spaces after the marker open an indented code block.
@@ -168,7 +171,10 @@ def list_items(lines):
             blank = True
             continue
         if line.startswith((" ", "\t")):
-            if line.lstrip().startswith(">"):
+            indent = len(line) - len(line.lstrip())
+            # After a blank line, four or more spaces beyond the item's content
+            # column open an indented code block inside the item.
+            if line.lstrip().startswith(">") or (blank and indent >= current["column"] + 4):
                 current["bad"] = True
             current["parts"].append(line.strip())
             blank = False
@@ -178,6 +184,8 @@ def list_items(lines):
             continue
         current = None
     for item in items:
+        if "~~" in " ".join(item["parts"]):
+            item["bad"] = True
         if item["bad"]:
             unsupported.append(item["raw"].strip())
         else:
@@ -218,10 +226,9 @@ def status_violations(text):
     if not table:
         violations.append("Active workstreams has no table")
     else:
-        columns = [cell.strip().lower() for cell in table[0].strip().strip("|").split("|")]
-        for forbidden in STATUS_FORBIDDEN_COLUMNS:
-            if forbidden in columns:
-                violations.append(f"Active workstreams carries a {forbidden!r} column")
+        columns = tuple(cell.strip().lower() for cell in table[0].strip().strip("|").split("|"))
+        if columns != STATUS_TABLE_COLUMNS:
+            violations.append(f"Active workstreams columns {columns} are not {STATUS_TABLE_COLUMNS}")
     return violations
 
 
@@ -258,7 +265,16 @@ def rules_violations(text, rule_owners=RULE_OWNERS):
             continue
         for owner in owners:
             if not any(_owner_matches(line, owner) for line in owner_lines):
-                violations.append(f"{title}: Owner line does not link {owner}")
+                violations.append(f"{title}: Owner line does not name {owner}")
+        expected_issues = {o.split(":", 1)[1] for o in owners if o.startswith("issue:")}
+        expected_docs = {o.split(":", 1)[1] for o in owners if o.startswith("doc:")}
+        for line in owner_lines:
+            for number in re.findall(r"/agent-controller/issues/(\d+)\)", line):
+                if number not in expected_issues:
+                    violations.append(f"{title}: Owner line links unexpected issue #{number}")
+            for target in re.findall(r"\]\((?![a-z]+://)([^)\s#]+\.md)", line):
+                if target.rsplit("/", 1)[-1] not in expected_docs:
+                    violations.append(f"{title}: Owner line links unexpected document {target}")
     return violations
 
 
@@ -347,14 +363,24 @@ class WorkerEntryCheckerFixtureTests(unittest.TestCase):
     def test_statement_nested_in_quote_or_code_inside_list_item_fails_closed(self):
         line = next(l for l in _text(AGENTS).splitlines() if "claims until verified" in l)
         body = line[2:]
-        for wrapped in (f"- > {body}", f"-     {body}", f"- Evidence.\n  > {body}"):
+        for wrapped in (
+            f"- > {body}",
+            f"-     {body}",
+            f"- Evidence.\n  > {body}",
+            f"- Evidence.\n\n      {body}",
+            f"- ~~{body}~~",
+        ):
             with self.subTest(wrapped=wrapped[:8]):
                 violations = agents_violations(self._agents_with(line, wrapped))
                 self.assertTrue(any("unsupported Markdown" in v for v in violations), violations)
                 self.assertTrue(any("evidence authority" in v for v in violations), violations)
 
     def test_lazy_and_indented_continuations_are_read(self):
-        for continuation in ("are claims\nuntil verified.", "are claims\n  until verified."):
+        for continuation in (
+            "are claims\nuntil verified.",
+            "are claims\n  until verified.",
+            "are claims.\n\n  They stay claims until verified.",
+        ):
             with self.subTest(continuation=continuation):
                 text = self._agents_with("are claims until verified.", continuation)
                 self.assertEqual(agents_violations(text), [])
@@ -388,11 +414,13 @@ class WorkerEntryCheckerFixtureTests(unittest.TestCase):
         violations = status_violations(text.replace(declaration, f"<!-- {declaration} -->", 1))
         self.assertIn("preamble does not declare the file an index", violations)
 
-    def test_status_column_is_rejected(self):
-        text = _text(STATUS).replace(
-            "| Workstream | Authority Issue |", "| Workstream | Status | Authority Issue |", 1
-        )
-        self.assertTrue(any("'status' column" in v for v in status_violations(text)))
+    def test_status_table_columns_are_an_allowlist(self):
+        for column in ("Status", "Current status", "Last CI", "Head"):
+            with self.subTest(column=column):
+                text = _text(STATUS).replace(
+                    "| Workstream | Authority Issue |", f"| Workstream | {column} | Authority Issue |", 1
+                )
+                self.assertTrue(any("Active workstreams columns" in v for v in status_violations(text)))
 
     def test_rule_without_owner_link_is_rejected(self):
         text = _text(GOVERNANCE / "rules.md")
@@ -408,6 +436,19 @@ class WorkerEntryCheckerFixtureTests(unittest.TestCase):
             with self.subTest(replacement=replacement):
                 violations = rules_violations(text.replace(owner, replacement, 1))
                 self.assertTrue(any(v.startswith("5. ") for v in violations), violations)
+
+    def test_owner_line_must_name_exactly_the_mapped_records(self):
+        text = _text(GOVERNANCE / "rules.md")
+        owner = next(l for l in text.splitlines() if l.startswith("- Owners: owner decision of 2026-09-25"))
+        trimmed = re.sub(r"; capacity semantics in .*", ".", owner)
+        violations = rules_violations(text.replace(owner, trimmed, 1))
+        self.assertTrue(any("issue:168" in v for v in violations), violations)
+        self.assertTrue(any("issue:55" in v for v in violations), violations)
+        extra = "- Owner: [#200](https://github.com/oimus1976/agent-controller/issues/200)."
+        violations = rules_violations(
+            text.replace(extra, extra[:-1] + ", [#12](https://github.com/oimus1976/agent-controller/issues/12).", 1)
+        )
+        self.assertTrue(any("unexpected issue #12" in v for v in violations), violations)
 
     def test_rule_numbering_must_match_the_owner_map(self):
         text = _text(GOVERNANCE / "rules.md")
