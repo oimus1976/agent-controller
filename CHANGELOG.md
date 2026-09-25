@@ -15,6 +15,27 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-25 — Phase 4 harness behavior tests replace source-offset ordering tests（Issue #248 / PR #PR_NUMBER）
+
+関連: Issue #248, Issue #246, PR #PR_NUMBER
+
+### Changed
+
+- `run_private_ci_phase4.py`（実行可能597行）と `build_private_ci_registration_handoff.py`（270行）は、Linuxの決定論スイートで一度も実行されていなかった（0%）。順序とfail-closedの保証は、ソース中の部分文字列の位置を比べる5件のテストでしか確認していなかった。
+- `tests/test_private_ci_phase4_harness_behavior.py`（13件）を追加した。実物の `command_plan`、`command_apply`、ハンドオフ `main` を呼び出し、Windows・PowerShell・GitHub・ACLの境界だけを記録用のfakeに置き換える。成果物は実際の一時ファイルを使う。そのうえで、次の2点を確認する。
+  - 実際の呼び出し順：generation snapshot → approval → operator gate → ownership → consumption readback → controller/remote/snapshotの再検証 → candidate実行 → probe結果の検証 → result公開。
+  - 失敗したときに後続の効果が一切起きないこと：snapshot drift、ownership取得後の改ざん（plan/handoff/candidate/probe/approval）、consumption後の再検証失敗、昇格helperの失敗、不正なprobe結果、protected handoffの不一致、既存出力の上書き。
+- 上記に置き換わった部分文字列の順序テスト5件を削除した。静的な境界チェック（listener/dispatchの呼び出し口がないこと）の2件は残した。
+- 2つのスクリプトのLinux上の行カバレッジは、0%からそれぞれ42%、34%になった。残りは意図的にfakeに置き換えたWindows・GitHubの境界部分。
+
+### Validation / authority boundary
+
+- スクラッチのコピーにregressionを注入して比較した。新テストは12件の実バグをすべて検出し、旧テストが検出したのは2件だけだった。旧テストが見逃したのは、チェックを `and False` で無効化する、例外を握りつぶす、上書きガードを削除する、などのケース。
+- 無害なリファクタ3件（ローカル変数の改名、引数のタプル化）では、新テストは失敗せず、旧テストは3件とも失敗した。
+- 最初に書いた版では、「昇格helperの失敗を無視する」regressionを見逃した。ownership関数そのものをfakeにしていたのが原因で、実関数を通すテストを追加して検出できるようにした。
+- ローカル（Python 3.12.3）では1323件がpassした（Windows専用の104件はskip）。本番コードは変更していない。
+- Phase 4のplan/apply、live Windows操作、pilotを承認するものではない。Ready / merge は ADR #90 により human-final。
+
 ## 2026-09-25 — Deterministic suite hygiene from test audit（Issue #245 / PR #247）
 
 関連: Issue #245, Issue #246, PR #247
