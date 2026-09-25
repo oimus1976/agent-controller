@@ -15,9 +15,9 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
-## 2026-09-25 — Phase 4 harness behavior tests replace source-offset ordering tests（Issue #248 / PR #PR_NUMBER）
+## 2026-09-25 — Phase 4 harness behavior tests replace source-offset ordering tests（Issue #248 / PR #249）
 
-関連: Issue #248, Issue #246, PR #PR_NUMBER
+関連: Issue #248, Issue #246, PR #249
 
 ### Changed
 
