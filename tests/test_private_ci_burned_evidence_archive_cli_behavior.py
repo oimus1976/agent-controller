@@ -238,7 +238,9 @@ class ArchivePlanBehaviorTests(_ArchiveCliHarness):
         code, stdout = self._plan()
         self.assertEqual(code, 0)
         _, _, _, rendered_raw = _decode_uac_bootstrap(stdout)
-        template = self.bootstrap_path.read_text(encoding="utf-8")
+        # Decode bytes, not read_text(): a Windows CRLF checkout must compare
+        # exactly as the CLI renders it.
+        template = self.bootstrap_path.read_bytes().decode("utf-8")
         expected = (
             template
             .replace("__EXPECTED_PLAN_SHA256__", PLAN_SHA)
@@ -395,6 +397,31 @@ class ArchiveApplyInternalBehaviorTests(_ArchiveCliHarness):
                         "_python_binding": self.recorder.fake("python_binding", binding),
                     })
                 self.assertNotIn("apply_archive_plan", self.recorder.events)
+
+    def test_bootstrap_invocation_dispatches_to_apply_with_reviewed_arguments(self):
+        # The elevated PowerShell bootstrap invokes the CLI with a fixed
+        # argument shape. Replay that exact shape through the real main().
+        bootstrap = self.bootstrap_path.read_bytes().decode("utf-8")
+        invocation = re.search(
+            r"& \$PythonPath -I -S -B -c \$Loader \$SnapshotRoot (.+)",
+            bootstrap,
+        ).group(1).split()
+        argv = [
+            {
+                "$ExpectedPlanSha256": self.plan_sha,
+                "$ExpectedPlanBase64": self.plan_b64,
+            }.get(token, token)
+            for token in invocation
+        ]
+        self.assertEqual(argv[0], "apply-internal")
+
+        stderr = io.StringIO()
+        with mock.patch.object(CLI.sys, "argv", [str(CLI_PATH), *argv]), \
+                contextlib.redirect_stderr(stderr):
+            code, stdout = self._run(CLI.main, self._apply_patches())
+        self.assertEqual(code, 0, stderr.getvalue())
+        self.assertEqual(self.apply_calls[0]["expected_plan_sha256"], self.plan_sha)
+        self.assertIn("PASS_MARKER", stdout)
 
     def test_apply_without_pass_status_is_not_reported_as_pass(self):
         self.result_status = "PARTIAL"
