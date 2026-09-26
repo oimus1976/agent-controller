@@ -1677,7 +1677,25 @@ finally:
             if name.upper() in ("C$", "ADMIN$", "IPC$"):
                 self.assertTrue(share_type & m.STYPE_SPECIAL, msg=name)
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertIs(m._evidence_root_exposed_by_smb(Path(tmp)), False)
+            root = Path(tmp)
+            exposed = m._evidence_root_exposed_by_smb(root)
+            self.assertIsInstance(exposed, bool)
+            # Derive the expectation from this host's shares instead of
+            # assuming %TEMP% is unshared (hosts may legitimately share it).
+            root_forms = [str(root), str(root.resolve(strict=True))]
+            ancestors = [
+                name
+                for name, path, share_type in shares
+                if not share_type & m.STYPE_SPECIAL
+                and (share_type & m.STYPE_MASK) == m.STYPE_DISKTREE
+                and path
+                and any(
+                    m._windows_path_is_same_or_under(form, candidate)
+                    for form in root_forms
+                    for candidate in (path, str(Path(path).resolve(strict=False)))
+                )
+            ]
+            self.assertIs(exposed, bool(ancestors), msg=ancestors)
 
     def test_real_system_process_handles_do_not_block_when_root_not_smb_exposed(self):
         # Issue #263: the System process (PID 4) always holds write-class
@@ -1699,6 +1717,11 @@ finally:
                     if int(entry.UniqueProcessId) in allowed_pids
                 )
 
+            if m._evidence_root_exposed_by_smb(root):
+                self.skipTest(
+                    "temporary evidence root is SMB-exposed on this host; "
+                    "PID 4 handles are correctly not trusted here"
+                )
             handle = m._open_locked_directory(root)
             try:
                 entries = own_and_system_entries()
