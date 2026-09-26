@@ -1589,6 +1589,66 @@ finally:
             finally:
                 handle.close()
 
+    def test_real_system_process_handles_do_not_block_when_root_not_smb_exposed(self):
+        # Issue #263: the System process (PID 4) always holds write-class
+        # kernel File handles (paging file, registry hives) that the broker
+        # cannot inspect. They are trusted kernel handles unless the evidence
+        # root is reachable through a non-administrative SMB share.
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "evidence"
+            root.mkdir()
+            real_system_handle_entries = m._system_handle_entries
+
+            def own_and_system_entries():
+                allowed_pids = {os.getpid(), 4}
+                return tuple(
+                    entry
+                    for entry in real_system_handle_entries()
+                    if int(entry.UniqueProcessId) in allowed_pids
+                )
+
+            handle = m._open_locked_directory(root)
+            try:
+                entries = own_and_system_entries()
+                own_type = [
+                    int(entry.ObjectTypeIndex)
+                    for entry in entries
+                    if int(entry.UniqueProcessId) == os.getpid()
+                    and int(entry.HandleValue) == int(handle.handle)
+                ]
+                self.assertEqual(len(own_type), 1)
+                system_candidates = [
+                    entry
+                    for entry in entries
+                    if int(entry.UniqueProcessId) == 4
+                    and int(entry.ObjectTypeIndex) == own_type[0]
+                    and int(entry.GrantedAccess) & m.DIRECTORY_MUTATION_ACCESS
+                ]
+                # The regression is meaningful only if the runner's System
+                # process really holds write-class File handles.
+                self.assertTrue(system_candidates)
+                with mock.patch.object(
+                    m,
+                    "_system_handle_entries",
+                    side_effect=own_and_system_entries,
+                ):
+                    try:
+                        m._require_no_external_mutation_handles(
+                            handle,
+                            "authoritative evidence root",
+                        )
+                    except RuntimeError as exc:
+                        print(
+                            "::error title=issue263-pid4-quiescence::"
+                            + str(exc).replace("\n", " "),
+                            flush=True,
+                        )
+                        raise
+            finally:
+                handle.close()
+
     def test_query_only_protected_process_candidate_blocks(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
