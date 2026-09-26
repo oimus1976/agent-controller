@@ -336,6 +336,7 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
                     str(probe),
                 ],
                 cwd=self.repo_root,
+                env=self._windows_powershell_env(),
                 check=False,
                 capture_output=True,
                 text=True,
@@ -474,6 +475,17 @@ Write-Output 'ACL_MUTATION_RIGHTS_PASS'
             completed.stdout,
         )
 
+    @staticmethod
+    def _windows_powershell_env() -> dict[str, str]:
+        # Let powershell.exe 5.1 rebuild its own PSModulePath instead of
+        # inheriting a PowerShell 7 module path (the CI step shell), which
+        # makes Microsoft.PowerShell.Security (Get-Acl / Set-Acl) unloadable.
+        return {
+            key: value
+            for key, value in os.environ.items()
+            if key.upper() != "PSMODULEPATH"
+        }
+
     def _run_powershell_file(
         self,
         source: str,
@@ -493,6 +505,7 @@ Write-Output 'ACL_MUTATION_RIGHTS_PASS'
                 str(probe),
             ],
             cwd=self.repo_root,
+            env=self._windows_powershell_env(),
             check=False,
             capture_output=True,
             text=True,
