@@ -86,8 +86,18 @@ RULE_OWNERS = {
 # over AGENTS.md in the same directory. Antigravity reads AGENTS.md itself and
 # adds GEMINI.md cumulatively, and its `@filename` form does not inline the
 # target, so a GEMINI.md cannot be a faithful shim and is not allowed.
-SHIM_ONLY_FILES = frozenset({"CLAUDE.md", "CLAUDE.local.md"})
-FORBIDDEN_FILES = frozenset({"AGENTS.override.md", "GEMINI.md"})
+# Names are compared case-insensitively, because a case-insensitive checkout
+# (Windows, macOS) resolves `claude.md` as `CLAUDE.md`.
+SHIM_ONLY_FILES = frozenset({"claude.md", "claude.local.md"})
+FORBIDDEN_FILES = frozenset({"agents.override.md", "gemini.md"})
+# Provider-only instruction locations that load in addition to AGENTS.md, so
+# they would give one provider rules the others never see. Claude Code loads
+# `.claude/AGENTS.md` and every `.md` under `.claude/rules/` (recursively).
+# Antigravity loads `.agents/AGENTS.md` and the `.md` files in `.agents/rules/`
+# and the legacy `.agent/rules/`; rules there may also be registered from
+# subdirectories, so any depth is rejected.
+PROVIDER_AGENTS_DIRS = frozenset({".claude", ".agents"})
+PROVIDER_RULE_DIRS = frozenset({".claude", ".agents", ".agent"})
 SKIPPED_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__"})
 
 # An inline link destination with an optional title in any of the three
@@ -329,18 +339,34 @@ def link_violations(document, text):
     return violations
 
 
+def _provider_location(parts):
+    """Return why a path (lower-cased parts) is a provider-only location."""
+    *dirs, name = parts
+    if name == "agents.md" and dirs and dirs[-1] in PROVIDER_AGENTS_DIRS:
+        return "is a provider-only instruction file"
+    if name.endswith(".md"):
+        for parent, child in zip(dirs, dirs[1:]):
+            if parent in PROVIDER_RULE_DIRS and child == "rules":
+                return "is in a provider-only rules folder"
+    return None
+
+
 def shadow_violations(root):
     """Return provider instruction files that would shadow root AGENTS.md."""
     agents = root / "AGENTS.md"
     violations = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIPPED_DIRS)
+        dirnames[:] = sorted(d for d in dirnames if d.lower() not in SKIPPED_DIRS)
         for name in sorted(filenames):
             path = Path(dirpath) / name
             relative = path.relative_to(root).as_posix()
-            if name in FORBIDDEN_FILES:
+            folded = name.lower()
+            location = _provider_location(relative.lower().split("/"))
+            if folded in FORBIDDEN_FILES:
                 violations.append(f"{relative} must not exist")
-            elif name in SHIM_ONLY_FILES:
+            elif location:
+                violations.append(f"{relative} {location} and must not exist")
+            elif folded in SHIM_ONLY_FILES:
                 expected = "@" + os.path.relpath(agents, path.parent).replace(os.sep, "/")
                 lines = [line.strip() for line in _text(path).splitlines() if line.strip()]
                 if lines != [expected]:
@@ -542,15 +568,36 @@ class WorkerEntryCheckerFixtureTests(unittest.TestCase):
                 "GEMINI.md": "@AGENTS.md\n",
                 "src/GEMINI.md": "@[AGENTS](../AGENTS.md)\n",
                 "src/AGENTS.override.md": "@../AGENTS.md\n",
+                # Round-6 review: mixed case and provider-only locations.
+                "src/claude.md": "Use tabs.\n",
+                "src/Claude.local.md": "Use tabs.\n",
+                "Gemini.md": "Use tabs.\n",
+                "src/agents.OVERRIDE.md": "Use tabs.\n",
+                ".claude/AGENTS.md": "Use tabs.\n",
+                ".claude/rules/code-style.md": "Use tabs.\n",
+                ".claude/rules/frontend/react.md": "Use tabs.\n",
+                ".claude/rules/CLAUDE.md": "@../../AGENTS.md\n",
+                ".agents/AGENTS.md": "Use tabs.\n",
+                ".agents/rules/code-style.md": "Use tabs.\n",
+                ".agents/rules/sub/code-style.md": "Use tabs.\n",
+                ".agent/rules/code-style.md": "Use tabs.\n",
+                "src/.Agents/Rules/code-style.md": "Use tabs.\n",
+                "src/.claude/agents.md": "Use tabs.\n",
             }
             for relative, content in cases.items():
                 with self.subTest(file=relative):
                     path = root / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(content, encoding="utf-8")
                     try:
                         self.assertTrue(any(v.startswith(relative) for v in shadow_violations(root)))
                     finally:
                         path.unlink()
+
+            # Other files in those folders are not instructions.
+            (root / ".claude" / "settings.json").write_text("{}\n", encoding="utf-8")
+            (root / ".agents" / "rules" / "notes.txt").write_text("x\n", encoding="utf-8")
+            self.assertEqual(shadow_violations(root), [])
 
             (root / ".claude" / "CLAUDE.md").write_text("@AGENTS.md\n", encoding="utf-8")
             self.assertEqual(

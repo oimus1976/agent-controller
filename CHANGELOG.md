@@ -39,6 +39,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - 3回目のCodex再レビュー（同モデル）の指摘4件（MAJOR 2・MINOR 2）も反映した：空行のあとにインデントしたコードブロックや打ち消し線（`~~`）を含むリスト項目も、未対応の書式として失敗させる。Active workstreams表の列は、決めた4列だけを許可する（「Current status」列などを追加させない）。各規則の `Owner:` 行は、決めた所有記録をすべて含み、それ以外のIssueや文書にリンクしないことを確認する。`AGENTS.md` の Claude Code に関する記述を、公式ドキュメントに合わせて「既定では」に直した。
 - 4回目のCodex再レビュー（同モデル）の指摘（MAJOR 2・MINOR 1・NOTE 1）も反映した：リスト項目の中に入れ子にしたフェンスコードブロックも未対応の書式として失敗させ、インラインコード内の文言は数えず、`<del>` 等も失敗させ、タブを展開してからインデントを判定する。`GEMINI.md` はimportのshimとしても認めず禁止にした（Antigravityの `@filename` は内容を読み込まず、`AGENTS.md` は自分で読むため）。
 - 5回目のCodex再レビュー（同モデル）の指摘（MAJOR 1・NOTE 1）も反映した：リンクのタイトルが単一引用符や括弧の形式だと、リンク先が壊れていても検査から漏れていた。CommonMarkの3形式すべてのタイトルを読むようにし、読めない `](` は読み飛ばさず「未対応のリンク書式」として失敗させる。NOTE（構造検査だけでは指示内容の正しさまでは保証しない）は変更不要とし、Ready時の人間レビューで補う。
+- 6回目のCodex再レビュー（同モデル）の指摘（MAJOR 1・NOTE 1）も反映した：shadowファイル検査が大文字小文字の違う名前（`claude.md` など）と、公式ドキュメントで自動読み込みされるproviderごとの場所（Claude Codeの `.claude/AGENTS.md` と `.claude/rules/`、Antigravityの `.agents/AGENTS.md`・`.agents/rules/`・旧 `.agent/rules/`）を見ていなかった。名前は大文字小文字を区別せずに比べ、これらの場所の `.md` は禁止とし、`AGENTS.md` にも1文で明記した。NOTE（意味の正しさは人間レビューで補う）は変更不要とした。
 - 本番コードは変更していない。`PROJECT_STATUS.md` と checkpoint は指し示すものであって証拠ではなく、事実は引き続きGitHubとCIから再確認する。Ready / merge は ADR #90 により human-final。
 
 ## 2026-09-25 — Archive CLI behavior tests replace source-text assertions（Issue #252 / PR #253）
