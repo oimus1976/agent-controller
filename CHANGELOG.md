@@ -15,6 +15,33 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-25 — Worker-neutral entry point and handoff（Issue #256 / PR #257）
+
+関連: Issue #256, ADR #12, ADR #90, ADR #199, Issue #194, Issue #200, Issue #120
+
+### Changed
+
+- 目的：Codex / Claude Code / Antigravity / Jules / チャット系のどのworkerからでも、GitHub上の状態だけで作業を引き継げるようにする。これまではChatGPTを必ず起点にしていたため、入口が暗黙だった。
+- `AGENTS.md` を短いbootloaderに書き換えた（8 KiB以内）。読む順序（`PROJECT_STATUS.md` → workstream Issueの最新checkpoint → `docs/governance/rules.md`）と、破ってはいけないルール（evidence authority、human-final、独立review、重複実装の禁止、live effectの個別承認、scope）を、それぞれの所有Issue/ADRへのリンク付きで置いた。`CLAUDE.md` / `GEMINI.md` を置かない理由も明記した（既定設定では、`CLAUDE.md` があるとClaude Codeは `AGENTS.md` を読まない。Antigravityは `AGENTS.md` を自分で読む）。
+- 旧 `AGENTS.md` のpost-merge closeout規則は、本文を変えずに `docs/governance/post-merge-closeout.md` へ移した。
+- `docs/governance/` を新設：`rules.md`（13規則、各規則に所有記録）、`checkpoint-template.md`（Verified と Agent-reported を分けるhandoff checkpoint）、`review-record.md`（独立性レベルL0–L3と、GitHub identityがownerアカウントに集約されている制約）、`README.md`。
+- 固定のWIP上限2件を廃止し、providerの利用量を確認してから新規作業を始めるcapacity policyに置き換えた（owner決定 2026-09-25）。
+- repo直下に `PROJECT_STATUS.md` を追加した。状態ではなく「どこに権威があるか」の索引であり、PR/CI/review/承認の状態は持たない（表に状態列を置かない）。
+- `.github/pull_request_template.md` を追加し、review record（実装worker・reviewer worker・exact head・独立性レベル）を毎PRで記入させる。
+- `docs/PUBLIC_REPOSITORY_READINESS.md` の分類を、#196 の closeout（2026-09-15）に合わせて `PUBLISHED` に更新した（過去のBLOCKED記述は履歴として残した）。
+
+### Validation / authority boundary
+
+- `tests/test_worker_entry_contract.py`（22件）を追加した：`AGENTS.md` のサイズ上限、必須見出しと必須規則文言（該当セクションのリスト項目にあること）、`PROJECT_STATUS.md` が索引である宣言と状態列の不在、各規則の `Owner:` 行が規則ごとに決めた所有記録へリンクしていること、入口文書の相対リンク（インライン形式と参照形式）の解決、`CLAUDE.md` 等が `AGENTS.md` を覆い隠さないこと（全階層を走査し、`CLAUDE.md` / `CLAUDE.local.md` はimport先が各ファイルの位置から見てrootの `AGENTS.md` を指すこと。`GEMINI.md` と `AGENTS.override.md` は禁止）。コードブロックやHTMLコメント内の文言は数えない。
+- 各チェッカーには違反を含むfixtureでのテストも付け、チェッカーが違反を見逃すようになれば失敗するようにした。
+- Codex（OpenAI、L2、agent-reported）による独立レビューの指摘3件（MAJOR）を反映した：規則5（重複実装の禁止）を #200 の範囲どおりCodexに限定し、フォールバックの条件を明記した。shadowファイル検査を全階層・位置依存のimportに対応させた。契約テストを文字列一致からMarkdown構造の検査に変えた。
+- 新しいheadでのCodex再レビュー（GPT-5.6 Sol・medium、L2、agent-reported）の指摘3件（MAJOR）も反映した：リスト項目の中の引用（`- > …`）やインデントコードに置かれた必須文言は、読まずに「未対応の書式」として失敗させる（fail closed）。一方、正しい書式である行頭からの続き行は受け入れる。各規則の所有記録を規則番号ごとに固定し、`Owner:` 行がその記録にリンクしていることを確認する。ファイルは改行コードを正規化して読むので、WindowsのCRLF checkoutでも同じ結果になる（#253で記録した落とし穴を再発させていた）。
+- 3回目のCodex再レビュー（同モデル）の指摘4件（MAJOR 2・MINOR 2）も反映した：空行のあとにインデントしたコードブロックや打ち消し線（`~~`）を含むリスト項目も、未対応の書式として失敗させる。Active workstreams表の列は、決めた4列だけを許可する（「Current status」列などを追加させない）。各規則の `Owner:` 行は、決めた所有記録をすべて含み、それ以外のIssueや文書にリンクしないことを確認する。`AGENTS.md` の Claude Code に関する記述を、公式ドキュメントに合わせて「既定では」に直した。
+- 4回目のCodex再レビュー（同モデル）の指摘（MAJOR 2・MINOR 1・NOTE 1）も反映した：リスト項目の中に入れ子にしたフェンスコードブロックも未対応の書式として失敗させ、インラインコード内の文言は数えず、`<del>` 等も失敗させ、タブを展開してからインデントを判定する。`GEMINI.md` はimportのshimとしても認めず禁止にした（Antigravityの `@filename` は内容を読み込まず、`AGENTS.md` は自分で読むため）。
+- 5回目のCodex再レビュー（同モデル）の指摘（MAJOR 1・NOTE 1）も反映した：リンクのタイトルが単一引用符や括弧の形式だと、リンク先が壊れていても検査から漏れていた。CommonMarkの3形式すべてのタイトルを読むようにし、読めない `](` は読み飛ばさず「未対応のリンク書式」として失敗させる。NOTE（構造検査だけでは指示内容の正しさまでは保証しない）は変更不要とし、Ready時の人間レビューで補う。
+- 6回目のCodex再レビュー（同モデル）の指摘（MAJOR 1・NOTE 1）も反映した：shadowファイル検査が大文字小文字の違う名前（`claude.md` など）と、公式ドキュメントで自動読み込みされるproviderごとの場所（Claude Codeの `.claude/AGENTS.md` と `.claude/rules/`、Antigravityの `.agents/AGENTS.md`・`.agents/rules/`・旧 `.agent/rules/`）を見ていなかった。名前は大文字小文字を区別せずに比べ、これらの場所の `.md` は禁止とし、`AGENTS.md` にも1文で明記した。NOTE（意味の正しさは人間レビューで補う）は変更不要とした。
+- 本番コードは変更していない。`PROJECT_STATUS.md` と checkpoint は指し示すものであって証拠ではなく、事実は引き続きGitHubとCIから再確認する。Ready / merge は ADR #90 により human-final。
+
 ## 2026-09-25 — Archive CLI behavior tests replace source-text assertions（Issue #252 / PR #253）
 
 関連: Issue #252, Issue #246, Issue #216, PR #253
