@@ -953,12 +953,9 @@ finally:
                 finally:
                     handle.close()
 
-    def test_external_volume_open_handle_does_not_block_quiescence(self):
-        # Issue #261: Windows Search (SearchIndexer.exe) keeps write-class
-        # volume-open handles. A volume open can never be the authoritative
-        # evidence directory, but FileStandardInformation on it fails with
-        # STATUS_INVALID_PARAMETER, which quiescence must classify by proof
-        # instead of failing closed forever.
+    def _quiescence_with_external_volume_holder(self, *, prove_volume=None):
+        """Run quiescence while a separate process holds a write-class
+        volume-open handle. Returns the RuntimeError raised, or None."""
         from agent_controller import private_ci_windows_atomic_archive as m
 
         system_drive = os.environ.get("SystemDrive", "C:")
@@ -1039,20 +1036,28 @@ finally:
                         )
                     handle = m._open_locked_directory(root)
                     try:
+                        patches = []
+                        if prove_volume is not None:
+                            patches.append(
+                                mock.patch.object(
+                                    m,
+                                    "_proven_volume_open",
+                                    return_value=prove_volume,
+                                )
+                            )
+                        for patch in patches:
+                            patch.start()
                         try:
                             m._require_no_external_mutation_handles(
                                 handle,
                                 "authoritative evidence root",
                             )
+                            return None
                         except RuntimeError as exc:
-                            # Surface the real-host classification text as a
-                            # CI annotation; job logs are not always reachable.
-                            print(
-                                "::error title=issue261-volume-quiescence::"
-                                + str(exc).replace("\n", " "),
-                                flush=True,
-                            )
-                            raise
+                            return exc
+                        finally:
+                            for patch in patches:
+                                patch.stop()
                     finally:
                         handle.close()
                 finally:
@@ -1062,6 +1067,29 @@ finally:
                         child.stdout.close()
                     if child.stderr is not None:
                         child.stderr.close()
+
+    def test_external_volume_open_handle_does_not_block_quiescence(self):
+        # Issue #261: Windows Search (SearchIndexer.exe) keeps write-class
+        # volume-open handles. A volume open can never be the authoritative
+        # evidence directory, but FileStandardInformation on it fails with
+        # STATUS_INVALID_PARAMETER, which quiescence must classify by proof
+        # instead of failing closed forever.
+        error = self._quiescence_with_external_volume_holder()
+        if error is not None:
+            # Surface the real classification text as a CI annotation; job
+            # logs are not always reachable from the implementing worker.
+            print(
+                "::error title=issue261-volume-quiescence::"
+                + str(error).replace("\n", " "),
+                flush=True,
+            )
+        self.assertIsNone(error)
+
+    def test_external_volume_open_handle_without_proof_still_blocks(self):
+        error = self._quiescence_with_external_volume_holder(prove_volume=False)
+        self.assertIsNotNone(error)
+        self.assertIn("directory classification unavailable", str(error))
+        self.assertIn("ntstatus=0xc000000d", str(error))
 
     def test_quiescence_enables_debug_and_fails_closed_on_hidden_live_handles(self):
         from agent_controller import private_ci_windows_atomic_archive as m

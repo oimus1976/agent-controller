@@ -4,6 +4,7 @@ import ctypes
 import hashlib
 import os
 import subprocess
+import threading
 from contextlib import ExitStack
 from ctypes import wintypes
 from pathlib import Path
@@ -30,13 +31,18 @@ OBJ_CASE_INSENSITIVE = 0x00000040
 STATUS_NOT_IMPLEMENTED = 0xC0000002
 STATUS_INVALID_INFO_CLASS = 0xC0000003
 STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
+STATUS_INVALID_PARAMETER = 0xC000000D
 STATUS_INVALID_DEVICE_REQUEST = 0xC0000010
+STATUS_BUFFER_OVERFLOW = 0x80000005
 STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034
 STATUS_OBJECT_PATH_NOT_FOUND = 0xC000003A
 SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
 FILE_ID_INFO_CLASS = 0x12
 FILE_STANDARD_INFORMATION_CLASS = 5
 FILE_ID_INFORMATION_CLASS = 59
+OBJECT_NAME_INFORMATION_CLASS = 1
+VOLUME_OPEN_NAME_QUERY_TIMEOUT_SECONDS = 2.0
+OBJECT_NAME_BUFFER_LIMIT = 64 * 1024
 FILE_TYPE_UNKNOWN = 0x0000
 FILE_TYPE_DISK = 0x0001
 FILE_TYPE_CHAR = 0x0002
@@ -238,6 +244,15 @@ if os.name == "nt":
     ]
     _ntdll.NtQueryInformationFile.restype = ctypes.c_long
 
+    _ntdll.NtQueryObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        ctypes.POINTER(wintypes.ULONG),
+    ]
+    _ntdll.NtQueryObject.restype = ctypes.c_long
+
     _kernel32.CreateFileW.argtypes = [
         wintypes.LPCWSTR,
         wintypes.DWORD,
@@ -386,6 +401,83 @@ def _ntstatus_code(status: int) -> int:
     return int(status) & 0xFFFFFFFF
 
 
+class NativeFileQueryError(RuntimeError):
+    """A native file query failed with a specific NTSTATUS."""
+
+    def __init__(self, message: str, ntstatus: int) -> None:
+        super().__init__(message)
+        self.ntstatus = ntstatus
+
+
+def _is_bare_device_object_name(name: str) -> bool:
+    # A bare device name such as \Device\HarddiskVolume3 is a volume open.
+    # Any further path component names a file or directory on that volume.
+    parts = name.split("\\")
+    return (
+        len(parts) == 3
+        and parts[0] == ""
+        and parts[1].lower() == "device"
+        and parts[2] != ""
+    )
+
+
+def _object_name_once(handle_value: int) -> str:
+    size = 4096
+    while True:
+        buffer = ctypes.create_string_buffer(size)
+        returned = wintypes.ULONG(0)
+        status = _ntdll.NtQueryObject(
+            wintypes.HANDLE(handle_value),
+            OBJECT_NAME_INFORMATION_CLASS,
+            buffer,
+            size,
+            ctypes.byref(returned),
+        )
+        code = _ntstatus_code(status)
+        if code in (STATUS_INFO_LENGTH_MISMATCH, STATUS_BUFFER_OVERFLOW):
+            wanted = int(returned.value)
+            if wanted <= size or wanted > OBJECT_NAME_BUFFER_LIMIT:
+                raise RuntimeError(
+                    f"object name size unsupported: {wanted}"
+                )
+            size = wanted
+            continue
+        if code != 0:
+            raise RuntimeError(f"NtQueryObject failed: ntstatus=0x{code:08x}")
+        name = UNICODE_STRING.from_buffer(buffer)
+        length = int(name.Length)
+        if length == 0 or not name.Buffer:
+            return ""
+        return ctypes.wstring_at(name.Buffer, length // 2)
+
+
+def _bounded_object_name(handle_value: int, timeout: float) -> str | None:
+    # Name queries on File objects can block behind another I/O. Run the query
+    # on a daemon thread and treat a timeout or error as "not proven".
+    result: dict[str, str] = {}
+
+    def worker() -> None:
+        try:
+            result["name"] = _object_name_once(handle_value)
+        except Exception:
+            pass
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        return None
+    return result.get("name")
+
+
+def _proven_volume_open(handle_value: int) -> bool:
+    name = _bounded_object_name(
+        handle_value,
+        VOLUME_OPEN_NAME_QUERY_TIMEOUT_SECONDS,
+    )
+    return name is not None and _is_bare_device_object_name(name)
+
+
 def _system_handle_entries() -> tuple[SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX, ...]:
     _require_windows()
     size = 1024 * 1024
@@ -468,9 +560,10 @@ def _native_file_is_directory_once(
     ):
         return None
     if code != 0:
-        raise RuntimeError(
+        raise NativeFileQueryError(
             f"{description} native FileStandardInformation query failed: "
-            f"ntstatus=0x{code:08x}"
+            f"ntstatus=0x{code:08x}",
+            code,
         )
     if int(io_status.Information) < ctypes.sizeof(info):
         raise RuntimeError(
@@ -702,6 +795,7 @@ def _require_no_external_mutation_handles(
             str | None,
         ]
     ] = []
+    directory_status_by_duplicate: dict[int, int] = {}
 
     try:
         for pid, candidates in candidates_by_pid.items():
@@ -799,6 +893,11 @@ def _require_no_external_mutation_handles(
                             )
                         except Exception as exc:
                             directory_error = str(exc)
+                            status = getattr(exc, "ntstatus", None)
+                            if isinstance(status, int):
+                                directory_status_by_duplicate[
+                                    duplicate_value
+                                ] = status
 
                     if duplicate_is_directory is True:
                         try:
@@ -887,6 +986,20 @@ def _require_no_external_mutation_handles(
                 )
             if duplicate_object == original_object:
                 if directory_error is not None:
+                    if (
+                        duplicate_file_type == FILE_TYPE_DISK
+                        and directory_status_by_duplicate.get(duplicate_value)
+                        == STATUS_INVALID_PARAMETER
+                        and _proven_volume_open(duplicate_value)
+                    ):
+                        # Issue #261: a volume open (for example the Windows
+                        # Search change-journal handle) rejects
+                        # FileStandardInformation with
+                        # STATUS_INVALID_PARAMETER. Its object name is a bare
+                        # device path, so it cannot be the authoritative
+                        # evidence directory. Without that positive proof the
+                        # candidate still fails closed below.
+                        continue
                     raise RuntimeError(
                         f"{description} duplicated external mutation handle "
                         f"directory classification unavailable for live "
