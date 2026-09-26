@@ -15,7 +15,8 @@ each required statement must sit in a list item of the section where a worker
 will act on it. Inside those sections the reader fails closed: a list item
 that contains a blockquote, an indented or fenced code block, or
 strikethrough is reported as unsupported instead of being read, and text in
-inline code does not count. Files are read with normalized line
+inline code does not count. A link the reader cannot parse is reported,
+not skipped. Files are read with normalized line
 endings, so a CRLF checkout behaves like an LF one. Each checker is also run
 against small fixtures, so a checker that stops seeing a violation fails.
 """
@@ -89,7 +90,13 @@ SHIM_ONLY_FILES = frozenset({"CLAUDE.md", "CLAUDE.local.md"})
 FORBIDDEN_FILES = frozenset({"AGENTS.override.md", "GEMINI.md"})
 SKIPPED_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__"})
 
-INLINE_LINK = re.compile(r"\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
+# An inline link destination with an optional title in any of the three
+# CommonMark forms: "double", 'single', or (parenthesized). A `](` that this
+# pattern cannot read is reported instead of being skipped.
+INLINE_LINK = re.compile(
+    r"\]\(\s*<?([^)\s>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^()]*\)))?\s*\)"
+)
+INLINE_LINK_OPEN = re.compile(r"\]\(")
 REFERENCE_USE = re.compile(r"\[([^\]]+)\]\[([^\]]*)\]")
 REFERENCE_DEFINITION = re.compile(r"^ {0,3}\[([^\]]+)\]:\s*<?([^\s>]+)>?")
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
@@ -286,7 +293,12 @@ def rules_violations(text, rule_owners=RULE_OWNERS):
 
 
 def link_violations(document, text):
-    """Return unresolved relative links, inline or reference-style."""
+    """Return unresolved relative links, inline or reference-style.
+
+    Every `](` must parse as an inline link. One that does not, such as a link
+    whose title uses an unsupported form, is reported rather than skipped, so a
+    broken destination cannot hide behind link syntax the reader misses.
+    """
     lines = operative_lines(text)
     body = "\n".join(lines)
     definitions = {}
@@ -294,8 +306,15 @@ def link_violations(document, text):
         match = REFERENCE_DEFINITION.match(line)
         if match:
             definitions[match.group(1).strip().lower()] = match.group(2)
-    targets = list(INLINE_LINK.findall(body))
+    targets = []
     violations = []
+    for opening in INLINE_LINK_OPEN.finditer(body):
+        match = INLINE_LINK.match(body, opening.start())
+        if match:
+            targets.append(match.group(1))
+        else:
+            snippet = body[opening.start():opening.start() + 60].split("\n", 1)[0]
+            violations.append(f"unsupported link syntax {snippet}")
     for label_text, label in REFERENCE_USE.findall(body):
         key = (label or label_text).strip().lower()
         if key not in definitions:
@@ -485,6 +504,27 @@ class WorkerEntryCheckerFixtureTests(unittest.TestCase):
             with self.subTest(case=label):
                 self.assertNotEqual(link_violations(document, snippet), [])
         self.assertEqual(link_violations(document, "See [rules][r].\n\n[r]: rules.md"), [])
+
+    def test_broken_link_with_a_title_is_rejected(self):
+        # Round-5 review: a single-quoted title hid a broken bootloader link.
+        target = "](docs/governance/rules.md)"
+        for title in ("\"Governance rules\"", "'Governance rules'", "(Governance rules)"):
+            with self.subTest(title=title):
+                good = self._agents_with(target, f"](docs/governance/rules.md {title})")
+                self.assertEqual(link_violations(AGENTS, good), [])
+                bad = self._agents_with(target, f"](docs/governance/rulez.md {title})")
+                self.assertIn("broken link docs/governance/rulez.md", link_violations(AGENTS, bad))
+
+    def test_unreadable_link_syntax_is_reported_not_skipped(self):
+        target = "](docs/governance/rules.md)"
+        for form in (
+            "](docs/governance/rulez.md 'Governance rules)",
+            "](docs/governance/rulez.md \"Governance\" 'rules')",
+            "](<docs/governance/rulez 2.md>)",
+        ):
+            with self.subTest(form=form):
+                violations = link_violations(AGENTS, self._agents_with(target, form))
+                self.assertTrue(any(v.startswith("unsupported link syntax") for v in violations), violations)
 
     def test_shadow_files_are_found_at_any_depth(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -32,12 +32,13 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ### Validation / authority boundary
 
-- `tests/test_worker_entry_contract.py`（20件）を追加した：`AGENTS.md` のサイズ上限、必須見出しと必須規則文言（該当セクションのリスト項目にあること）、`PROJECT_STATUS.md` が索引である宣言と状態列の不在、各規則の `Owner:` 行が規則ごとに決めた所有記録へリンクしていること、入口文書の相対リンク（インライン形式と参照形式）の解決、`CLAUDE.md` 等が `AGENTS.md` を覆い隠さないこと（全階層を走査し、`CLAUDE.md` / `CLAUDE.local.md` はimport先が各ファイルの位置から見てrootの `AGENTS.md` を指すこと。`GEMINI.md` と `AGENTS.override.md` は禁止）。コードブロックやHTMLコメント内の文言は数えない。
+- `tests/test_worker_entry_contract.py`（22件）を追加した：`AGENTS.md` のサイズ上限、必須見出しと必須規則文言（該当セクションのリスト項目にあること）、`PROJECT_STATUS.md` が索引である宣言と状態列の不在、各規則の `Owner:` 行が規則ごとに決めた所有記録へリンクしていること、入口文書の相対リンク（インライン形式と参照形式）の解決、`CLAUDE.md` 等が `AGENTS.md` を覆い隠さないこと（全階層を走査し、`CLAUDE.md` / `CLAUDE.local.md` はimport先が各ファイルの位置から見てrootの `AGENTS.md` を指すこと。`GEMINI.md` と `AGENTS.override.md` は禁止）。コードブロックやHTMLコメント内の文言は数えない。
 - 各チェッカーには違反を含むfixtureでのテストも付け、チェッカーが違反を見逃すようになれば失敗するようにした。
 - Codex（OpenAI、L2、agent-reported）による独立レビューの指摘3件（MAJOR）を反映した：規則5（重複実装の禁止）を #200 の範囲どおりCodexに限定し、フォールバックの条件を明記した。shadowファイル検査を全階層・位置依存のimportに対応させた。契約テストを文字列一致からMarkdown構造の検査に変えた。
 - 新しいheadでのCodex再レビュー（GPT-5.6 Sol・medium、L2、agent-reported）の指摘3件（MAJOR）も反映した：リスト項目の中の引用（`- > …`）やインデントコードに置かれた必須文言は、読まずに「未対応の書式」として失敗させる（fail closed）。一方、正しい書式である行頭からの続き行は受け入れる。各規則の所有記録を規則番号ごとに固定し、`Owner:` 行がその記録にリンクしていることを確認する。ファイルは改行コードを正規化して読むので、WindowsのCRLF checkoutでも同じ結果になる（#253で記録した落とし穴を再発させていた）。
 - 3回目のCodex再レビュー（同モデル）の指摘4件（MAJOR 2・MINOR 2）も反映した：空行のあとにインデントしたコードブロックや打ち消し線（`~~`）を含むリスト項目も、未対応の書式として失敗させる。Active workstreams表の列は、決めた4列だけを許可する（「Current status」列などを追加させない）。各規則の `Owner:` 行は、決めた所有記録をすべて含み、それ以外のIssueや文書にリンクしないことを確認する。`AGENTS.md` の Claude Code に関する記述を、公式ドキュメントに合わせて「既定では」に直した。
 - 4回目のCodex再レビュー（同モデル）の指摘（MAJOR 2・MINOR 1・NOTE 1）も反映した：リスト項目の中に入れ子にしたフェンスコードブロックも未対応の書式として失敗させ、インラインコード内の文言は数えず、`<del>` 等も失敗させ、タブを展開してからインデントを判定する。`GEMINI.md` はimportのshimとしても認めず禁止にした（Antigravityの `@filename` は内容を読み込まず、`AGENTS.md` は自分で読むため）。
+- 5回目のCodex再レビュー（同モデル）の指摘（MAJOR 1・NOTE 1）も反映した：リンクのタイトルが単一引用符や括弧の形式だと、リンク先が壊れていても検査から漏れていた。CommonMarkの3形式すべてのタイトルを読むようにし、読めない `](` は読み飛ばさず「未対応のリンク書式」として失敗させる。NOTE（構造検査だけでは指示内容の正しさまでは保証しない）は変更不要とし、Ready時の人間レビューで補う。
 - 本番コードは変更していない。`PROJECT_STATUS.md` と checkpoint は指し示すものであって証拠ではなく、事実は引き続きGitHubとCIから再確認する。Ready / merge は ADR #90 により human-final。
 
 ## 2026-09-25 — Archive CLI behavior tests replace source-text assertions（Issue #252 / PR #253）
