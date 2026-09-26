@@ -1524,7 +1524,20 @@ finally:
             finally:
                 handle.close()
 
-    def test_live_pid4_mutation_candidate_blocks_when_uninspectable(self):
+    def _run_fake_uninspectable_candidate(
+        self,
+        *,
+        candidate_pid,
+        extra_live_pids=(),
+        extra_readonly_pids=(),
+        smb_exposure=None,
+    ):
+        """Run quiescence with one fake uninspectable candidate.
+
+        smb_exposure: True/False patches _evidence_root_exposed_by_smb; an
+        Exception instance makes it raise; None leaves it unpatched.
+        Returns the RuntimeError raised, or None.
+        """
         from agent_controller import private_ci_windows_atomic_archive as m
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1538,54 +1551,235 @@ finally:
                 own.ObjectTypeIndex = 7
                 own.GrantedAccess = 0
 
-                system_candidate = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
-                system_candidate.UniqueProcessId = 4
-                system_candidate.HandleValue = 0x77
-                system_candidate.Object = 0x22222222
-                system_candidate.ObjectTypeIndex = 7
-                system_candidate.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+                candidate = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                candidate.UniqueProcessId = candidate_pid
+                candidate.HandleValue = 0x77
+                candidate.Object = 0x22222222
+                candidate.ObjectTypeIndex = 7
+                candidate.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+
+                final = [own, candidate]
+                for index, pid in enumerate(extra_live_pids):
+                    extra = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                    extra.UniqueProcessId = pid
+                    extra.HandleValue = 0x100 + index
+                    extra.Object = 0x22222222
+                    extra.ObjectTypeIndex = 7
+                    extra.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+                    final.append(extra)
+                for index, pid in enumerate(extra_readonly_pids):
+                    reader = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                    reader.UniqueProcessId = pid
+                    reader.HandleValue = 0x200 + index
+                    reader.Object = 0x22222222
+                    reader.ObjectTypeIndex = 7
+                    reader.GrantedAccess = 0x00000001 | 0x00100000
+                    final.append(reader)
 
                 fake_kernel32 = SimpleNamespace(
                     GetCurrentProcess=lambda: 1,
                     OpenProcess=lambda *args: 0,
                     CloseHandle=lambda *args: 1,
                 )
+                exposure_calls = []
+
+                def exposure(path):
+                    exposure_calls.append(path)
+                    if isinstance(smb_exposure, Exception):
+                        raise smb_exposure
+                    return smb_exposure
+
+                patches = [
+                    mock.patch.object(m, "_enable_debug_privilege", return_value=None),
+                    mock.patch.object(
+                        m,
+                        "_system_handle_entries",
+                        side_effect=[(own, candidate), tuple(final)],
+                    ),
+                    mock.patch.object(m, "_file_type_once", return_value=m.FILE_TYPE_DISK),
+                    mock.patch.object(m, "_native_file_is_directory_once", return_value=True),
+                    mock.patch.object(
+                        m,
+                        "_stable_file_id_identity",
+                        return_value=(0xAABBCCDD, b"1" * 16),
+                    ),
+                    mock.patch.object(m, "_kernel32", fake_kernel32),
+                ]
+                if smb_exposure is not None:
+                    patches.append(
+                        mock.patch.object(
+                            m,
+                            "_evidence_root_exposed_by_smb",
+                            side_effect=exposure,
+                        )
+                    )
+                for patch in patches:
+                    patch.start()
+                try:
+                    m._require_no_external_mutation_handles(
+                        handle,
+                        "authoritative evidence root",
+                    )
+                    return None, exposure_calls
+                except RuntimeError as exc:
+                    return exc, exposure_calls
+                finally:
+                    for patch in reversed(patches):
+                        patch.stop()
+            finally:
+                handle.close()
+
+    def test_live_pid4_mutation_candidate_blocks_when_uninspectable(self):
+        # Issue #263 changed this contract: an uninspectable live PID 4
+        # candidate still blocks whenever the evidence root is SMB-exposed.
+        error, calls = self._run_fake_uninspectable_candidate(
+            candidate_pid=4,
+            smb_exposure=True,
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("uninspectable external mutation handle", str(error))
+        self.assertEqual(len(calls), 1)
+
+    def test_live_pid4_candidate_is_trusted_when_root_not_smb_exposed(self):
+        error, calls = self._run_fake_uninspectable_candidate(
+            candidate_pid=4,
+            smb_exposure=False,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(len(calls), 1)
+
+    def test_live_pid4_candidate_blocks_when_smb_exposure_unknown(self):
+        error, _ = self._run_fake_uninspectable_candidate(
+            candidate_pid=4,
+            smb_exposure=RuntimeError("SMB share enumeration failed: status=5"),
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("SMB share enumeration failed", str(error))
+
+    def test_pid4_object_also_live_in_another_process_still_blocks(self):
+        error, calls = self._run_fake_uninspectable_candidate(
+            candidate_pid=4,
+            extra_live_pids=(5555,),
+            smb_exposure=False,
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("uninspectable external mutation handle", str(error))
+        self.assertEqual(calls, [])
+
+    def test_pid4_object_also_held_read_only_elsewhere_still_blocks(self):
+        # Codex P1 on 9e373ed: exclusivity must count every holder of the
+        # Object, not only mutation-capable ones.
+        error, calls = self._run_fake_uninspectable_candidate(
+            candidate_pid=4,
+            extra_readonly_pids=(5555,),
+            smb_exposure=False,
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("uninspectable external mutation handle", str(error))
+        self.assertEqual(calls, [])
+
+    def test_non_system_uninspectable_candidate_still_blocks_without_smb(self):
+        error, calls = self._run_fake_uninspectable_candidate(
+            candidate_pid=5555,
+            smb_exposure=False,
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("uninspectable external mutation handle", str(error))
+        self.assertEqual(calls, [])
+
+    def test_real_share_enumeration_and_temp_root_exposure(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        shares = m._smb_disk_shares()
+        self.assertIsInstance(shares, tuple)
+        for name, path, share_type in shares:
+            self.assertIsInstance(name, str)
+            self.assertIsInstance(path, str)
+            if name.upper() in ("C$", "ADMIN$", "IPC$"):
+                self.assertTrue(share_type & m.STYPE_SPECIAL, msg=name)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exposed = m._evidence_root_exposed_by_smb(root)
+            self.assertIsInstance(exposed, bool)
+            # Derive the expectation from this host's shares instead of
+            # assuming %TEMP% is unshared (hosts may legitimately share it).
+            root_forms = [str(root), str(root.resolve(strict=True))]
+            ancestors = [
+                name
+                for name, path, share_type in shares
+                if not share_type & m.STYPE_SPECIAL
+                and (share_type & m.STYPE_MASK) == m.STYPE_DISKTREE
+                and path
+                and any(
+                    m._windows_path_is_same_or_under(form, candidate)
+                    for form in root_forms
+                    for candidate in (path, str(Path(path).resolve(strict=False)))
+                )
+            ]
+            self.assertIs(exposed, bool(ancestors), msg=ancestors)
+
+    def test_real_system_process_handles_do_not_block_when_root_not_smb_exposed(self):
+        # Issue #263: the System process (PID 4) always holds write-class
+        # kernel File handles (paging file, registry hives) that the broker
+        # cannot inspect. They are trusted kernel handles unless the evidence
+        # root is reachable through a non-administrative SMB share.
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "evidence"
+            root.mkdir()
+            real_system_handle_entries = m._system_handle_entries
+
+            def own_and_system_entries():
+                allowed_pids = {os.getpid(), 4}
+                return tuple(
+                    entry
+                    for entry in real_system_handle_entries()
+                    if int(entry.UniqueProcessId) in allowed_pids
+                )
+
+            if m._evidence_root_exposed_by_smb(root):
+                self.skipTest(
+                    "temporary evidence root is SMB-exposed on this host; "
+                    "PID 4 handles are correctly not trusted here"
+                )
+            handle = m._open_locked_directory(root)
+            try:
+                entries = own_and_system_entries()
+                own_type = [
+                    int(entry.ObjectTypeIndex)
+                    for entry in entries
+                    if int(entry.UniqueProcessId) == os.getpid()
+                    and int(entry.HandleValue) == int(handle.handle)
+                ]
+                self.assertEqual(len(own_type), 1)
+                system_candidates = [
+                    entry
+                    for entry in entries
+                    if int(entry.UniqueProcessId) == 4
+                    and int(entry.ObjectTypeIndex) == own_type[0]
+                    and int(entry.GrantedAccess) & m.DIRECTORY_MUTATION_ACCESS
+                ]
+                # The regression is meaningful only if the runner's System
+                # process really holds write-class File handles.
+                self.assertTrue(system_candidates)
                 with mock.patch.object(
                     m,
-                    "_enable_debug_privilege",
-                    return_value=None,
-                ), mock.patch.object(
-                    m,
                     "_system_handle_entries",
-                    side_effect=[
-                        (own, system_candidate),
-                        (own, system_candidate),
-                    ],
-                ), mock.patch.object(
-                    m,
-                    "_file_type_once",
-                    return_value=m.FILE_TYPE_DISK,
-                ), mock.patch.object(
-                    m,
-                    "_native_file_is_directory_once",
-                    return_value=True,
-                ), mock.patch.object(
-                    m,
-                    "_stable_file_id_identity",
-                    return_value=(0xAABBCCDD, b"1" * 16),
-                ), mock.patch.object(
-                    m,
-                    "_kernel32",
-                    fake_kernel32,
+                    side_effect=own_and_system_entries,
                 ):
-                    with self.assertRaisesRegex(
-                        RuntimeError,
-                        "uninspectable external mutation handle",
-                    ):
+                    try:
                         m._require_no_external_mutation_handles(
                             handle,
                             "authoritative evidence root",
                         )
+                    except RuntimeError as exc:
+                        print(
+                            "::error title=issue263-pid4-quiescence::"
+                            + str(exc).replace("\n", " "),
+                            flush=True,
+                        )
+                        raise
             finally:
                 handle.close()
 
@@ -1604,7 +1798,9 @@ finally:
                 own.GrantedAccess = 0
 
                 protected_candidate = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
-                protected_candidate.UniqueProcessId = 4
+                # A generic protected (non-System) process. PID 4 has its own
+                # SMB-gated contract since Issue #263 and dedicated tests.
+                protected_candidate.UniqueProcessId = os.getpid() + 1000
                 protected_candidate.HandleValue = 0x77
                 protected_candidate.Object = 0x22222222
                 protected_candidate.ObjectTypeIndex = 7

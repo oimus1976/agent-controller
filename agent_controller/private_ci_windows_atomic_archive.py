@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import ntpath
 import os
 import subprocess
 import threading
@@ -56,6 +57,14 @@ SE_PRIVILEGE_ENABLED = 0x00000002
 ERROR_NOT_ALL_ASSIGNED = 1300
 PROCESS_PROTECTION_LEVEL_INFO_CLASS = 7
 PROTECTION_LEVEL_NONE = 0xFFFFFFFE
+SYSTEM_PROCESS_ID = 4
+NERR_SUCCESS = 0
+ERROR_MORE_DATA = 234
+NERR_SERVER_NOT_STARTED = 2114
+MAX_PREFERRED_LENGTH = 0xFFFFFFFF
+STYPE_MASK = 0x000000FF
+STYPE_DISKTREE = 0
+STYPE_SPECIAL = 0x80000000
 FILE_ADD_FILE = 0x00000002
 FILE_ADD_SUBDIRECTORY = 0x00000004
 FILE_DELETE_CHILD = 0x00000040
@@ -147,6 +156,19 @@ class IO_STATUS_BLOCK(ctypes.Structure):
     ]
 
 
+class SHARE_INFO_2(ctypes.Structure):
+    _fields_ = [
+        ("shi2_netname", wintypes.LPWSTR),
+        ("shi2_type", wintypes.DWORD),
+        ("shi2_remark", wintypes.LPWSTR),
+        ("shi2_permissions", wintypes.DWORD),
+        ("shi2_max_uses", wintypes.DWORD),
+        ("shi2_current_uses", wintypes.DWORD),
+        ("shi2_path", wintypes.LPWSTR),
+        ("shi2_passwd", wintypes.LPWSTR),
+    ]
+
+
 class SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX(ctypes.Structure):
     _fields_ = [
         ("Object", wintypes.LPVOID),
@@ -211,6 +233,19 @@ if os.name == "nt":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _ntdll = ctypes.WinDLL("ntdll")
     _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    _netapi32 = ctypes.WinDLL("netapi32")
+    _netapi32.NetShareEnum.argtypes = [
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _netapi32.NetShareEnum.restype = wintypes.DWORD
+    _netapi32.NetApiBufferFree.argtypes = [ctypes.c_void_p]
+    _netapi32.NetApiBufferFree.restype = wintypes.DWORD
 
     _ntdll.NtCreateFile.argtypes = [
         ctypes.POINTER(wintypes.HANDLE),
@@ -385,6 +420,7 @@ else:
     _kernel32 = None
     _ntdll = None
     _advapi32 = None
+    _netapi32 = None
 
 
 def _require_windows() -> None:
@@ -718,6 +754,111 @@ def _handle_entry_key(
     )
 
 
+def _windows_path_is_same_or_under(child: str, parent: str) -> bool:
+    child_norm = ntpath.normcase(ntpath.normpath(child)).rstrip("\\")
+    parent_norm = ntpath.normcase(ntpath.normpath(parent)).rstrip("\\")
+    if not child_norm or not parent_norm:
+        return False
+    return child_norm == parent_norm or child_norm.startswith(
+        parent_norm + "\\"
+    )
+
+
+def _smb_disk_shares() -> tuple[tuple[str, str, int], ...]:
+    """Return (name, path, type) for every share on this host.
+
+    A stopped SMB server exposes nothing. Any other enumeration failure
+    raises, so callers fail closed.
+    """
+    if os.name != "nt" or _netapi32 is None:
+        raise RuntimeError("SMB share enumeration requires Windows")
+    shares: list[tuple[str, str, int]] = []
+    resume = wintypes.DWORD(0)
+    while True:
+        buffer = ctypes.c_void_p()
+        read = wintypes.DWORD(0)
+        total = wintypes.DWORD(0)
+        status = int(
+            _netapi32.NetShareEnum(
+                None,
+                2,
+                ctypes.byref(buffer),
+                MAX_PREFERRED_LENGTH,
+                ctypes.byref(read),
+                ctypes.byref(total),
+                ctypes.byref(resume),
+            )
+        )
+        if status == NERR_SERVER_NOT_STARTED:
+            return ()
+        if status not in (NERR_SUCCESS, ERROR_MORE_DATA):
+            raise RuntimeError(f"SMB share enumeration failed: status={status}")
+        try:
+            if buffer.value:
+                entries = ctypes.cast(buffer, ctypes.POINTER(SHARE_INFO_2))
+                for index in range(int(read.value)):
+                    entry = entries[index]
+                    shares.append(
+                        (
+                            entry.shi2_netname or "",
+                            entry.shi2_path or "",
+                            int(entry.shi2_type),
+                        )
+                    )
+        finally:
+            if buffer.value:
+                _netapi32.NetApiBufferFree(buffer)
+        if status == NERR_SUCCESS:
+            return tuple(shares)
+
+
+def _shares_expose_path(
+    shares: Iterable[tuple[str, str, int]],
+    root_forms: Iterable[str],
+) -> bool:
+    roots = [form for form in root_forms if form]
+    if not roots:
+        raise RuntimeError("SMB exposure check needs a root path")
+    for name, path, share_type in shares:
+        if share_type & STYPE_SPECIAL:
+            # Administrative shares (C$, ADMIN$, IPC$) are reachable only by
+            # administrators, who are already trusted.
+            continue
+        if (share_type & STYPE_MASK) != STYPE_DISKTREE:
+            continue
+        if not path:
+            raise RuntimeError(f"SMB disk share has no path: {name}")
+        for root in roots:
+            if _windows_path_is_same_or_under(root, path):
+                return True
+    return False
+
+
+def _evidence_root_exposed_by_smb(root: Path) -> bool:
+    shares = _smb_disk_shares()
+    expanded: list[tuple[str, str, int]] = []
+    for name, path, share_type in shares:
+        expanded.append((name, path, share_type))
+        if share_type & STYPE_SPECIAL:
+            continue
+        if (share_type & STYPE_MASK) != STYPE_DISKTREE or not path:
+            continue
+        # A share path may be an alias or reparse path whose target is an
+        # ancestor of the root. If it cannot be resolved, exposure cannot be
+        # proven absent, so fail closed.
+        try:
+            resolved = str(Path(path).resolve(strict=False))
+        except OSError as exc:
+            raise RuntimeError(
+                f"SMB share path cannot be resolved: {name}: {exc}"
+            ) from exc
+        if resolved != path:
+            expanded.append((name, resolved, share_type))
+    root_forms = {str(root)}
+    root_forms.add(str(Path(root).resolve(strict=True)))
+    return _shares_expose_path(expanded, root_forms)
+
+
 def _require_no_external_mutation_handles(
     handle: LockedHandle,
     description: str,
@@ -946,6 +1087,10 @@ def _require_no_external_mutation_handles(
 
         final_entries = _system_handle_entries()
         live_by_object: dict[int, set[int]] = {}
+        # Every external holder of an Object, regardless of access. Used only
+        # for the PID 4 exclusivity check (Issue #263): a System handle is
+        # trusted only when no other process holds that Object at all.
+        all_holders_by_object: dict[int, set[int]] = {}
         current_object_by_handle: dict[int, int] = {}
         for current in final_entries:
             pid = int(current.UniqueProcessId)
@@ -957,9 +1102,10 @@ def _require_no_external_mutation_handles(
                 continue
             if int(current.ObjectTypeIndex) != own_type_index:
                 continue
-            if int(current.GrantedAccess) & DIRECTORY_MUTATION_ACCESS == 0:
-                continue
             if object_pointer == 0:
+                continue
+            all_holders_by_object.setdefault(object_pointer, set()).add(pid)
+            if int(current.GrantedAccess) & DIRECTORY_MUTATION_ACCESS == 0:
                 continue
             live_by_object.setdefault(object_pointer, set()).add(pid)
 
@@ -1072,6 +1218,7 @@ def _require_no_external_mutation_handles(
                     + ",".join(str(pid) for pid in sorted(live_pids))
                 )
 
+        system_handles_trusted: bool | None = None
         for pending_kind, entry in pending:
             object_pointer = int(entry.Object or 0)
             if object_pointer == 0:
@@ -1082,6 +1229,25 @@ def _require_no_external_mutation_handles(
             if not live_pids:
                 continue
             original_pid = int(entry.UniqueProcessId)
+            if (
+                pending_kind == "uninspectable"
+                and original_pid == SYSTEM_PROCESS_ID
+                and live_pids == {SYSTEM_PROCESS_ID}
+                and all_holders_by_object.get(object_pointer)
+                == {SYSTEM_PROCESS_ID}
+            ):
+                # Issue #263 (owner decision): the System process always holds
+                # write-class kernel File handles that cannot be inspected.
+                # Kernel handles are trusted like administrators, except that
+                # the SMB server opens files in the System process for remote
+                # clients. Trust them only when a fresh share enumeration
+                # proves no non-administrative disk share reaches the root.
+                if system_handles_trusted is None:
+                    system_handles_trusted = not _evidence_root_exposed_by_smb(
+                        handle.path
+                    )
+                if system_handles_trusted:
+                    continue
             if pending_kind == "uninspectable":
                 raise RuntimeError(
                     f"{description} has uninspectable external mutation handle: "
