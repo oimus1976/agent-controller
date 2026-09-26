@@ -407,6 +407,73 @@ Write-Output 'ACL_MUTATION_RIGHTS_PASS'
         )
         self.assertIn("ACL_MUTATION_RIGHTS_PASS", completed.stdout)
 
+    def _production_loader_line(self) -> str:
+        source = self.script.read_text(encoding="utf-8")
+        lines = [
+            line.strip()
+            for line in source.splitlines()
+            if line.strip().startswith("$Loader = ")
+        ]
+        self.assertEqual(len(lines), 1, msg=lines)
+        return lines[0]
+
+    def test_elevated_python_loader_survives_powershell_51_native_arguments(self):
+        # Issue #259: Windows PowerShell 5.1 does not escape embedded double
+        # quotes when it passes an argument to a native executable. The
+        # production loader must still reach the snapshot entry point.
+        loader_line = self._production_loader_line()
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = Path(tmp) / "snapshot"
+            (snapshot / "scripts").mkdir(parents=True)
+            (snapshot / "scripts" / "archive_private_ci_burned_evidence.py").write_text(
+                "import json, sys\n"
+                "print('LOADER_STUB_OK ' + json.dumps(sys.argv[1:]))\n",
+                encoding="utf-8",
+            )
+            python = sys.executable.replace("'", "''")
+            snapshot_literal = str(snapshot).replace("'", "''")
+            probe = Path(tmp) / "loader-probe.ps1"
+            probe.write_text(
+                "$ErrorActionPreference = 'Stop'\n"
+                f"$PythonPath = '{python}'\n"
+                f"$SnapshotRoot = '{snapshot_literal}'\n"
+                "$ExpectedPlanSha256 = 'probe-sha'\n"
+                "$ExpectedPlanBase64 = 'probe-base64'\n"
+                f"{loader_line}\n"
+                "& $PythonPath -I -S -B -c $Loader $SnapshotRoot apply-internal "
+                "--expected-plan-sha256 $ExpectedPlanSha256 "
+                "--expected-plan-base64 $ExpectedPlanBase64\n"
+                "exit $LASTEXITCODE\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    self.powershell,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(probe),
+                ],
+                cwd=self.repo_root,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=completed.stdout + "\n" + completed.stderr,
+        )
+        self.assertIn(
+            'LOADER_STUB_OK ["apply-internal", "--expected-plan-sha256", '
+            '"probe-sha", "--expected-plan-base64", "probe-base64"]',
+            completed.stdout,
+        )
+
     def test_apply_bridge_parses_under_windows_powershell_51(self):
         quoted = str(self.script).replace("'", "''")
         command = (
