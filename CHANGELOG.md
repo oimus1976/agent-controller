@@ -15,6 +15,33 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-26 — Archive quiescence classifies external volume-open handles by proof（Issue #261 / PR #262, Draft・未merge）
+
+関連: Issue #261, Issue #216, Issue #259, PR #260, PR #262
+
+### Background（WOBBUFFET実機, canonical main `9b13edab`）
+
+- #260後のread-onlyのpre-mutation probe（script SHA-256 `2f9f1471…557568`）はPASSした。新しいplan `7f8df70b…225b35` を独立に検証したうえで、ownerの明示的承認（UACコマンド SHA-256 `f134d2c4…70b3a19c`、1回のみ）でapplyした。archiveの効果はゼロ。承認は消費済みで、再利用しない。
+- #259の診断記録（`stage=child`、`child_exit_code=2`）により、#259のローダー修正で子プロセスが `apply-internal` まで到達したことを確認した。そのうえで、静止確認（quiescence）が次の理由でfail-closedしていた。
+  - pid 1420（`SearchIndexer.exe`、Windows Searchサービス `WSearch`）が、書き込み系権限付きのファイルハンドルを保持していた。
+  - そのハンドルへの `FileStandardInformation` 問い合わせが `STATUS_INVALID_PARAMETER`（0xc000000d）を返し、ディレクトリかどうか判定できなかった。
+
+### Changed
+
+- ボリュームそのものを開いたハンドル（volume open）は、`FileStandardInformation` を `STATUS_INVALID_PARAMETER` で拒否する。Windows Searchは変更ジャーナルのために、このハンドルを書き込み系権限付きで保持している。
+- 同一Objectと確認済みのディスク系の候補で、このステータスが返った場合に限り、複製したハンドルのオブジェクト名を `NtQueryObject` で問い合わせるようにした。問い合わせはタイムアウト付き（2秒）のdaemonスレッドで行う。
+  - 名前がパスを持たないデバイス名そのもの（例：`\Device\HarddiskVolume3`）で、問い合わせが完了した場合だけを「volume openである」という証明とみなし、その候補を除外する。volume openはエビデンスルートのディレクトリにはなりえない。
+  - タイムアウト、問い合わせの失敗、パスを含む名前の場合は、従来どおりfail-closedする。
+  - `STATUS_INVALID_PARAMETER` を無条件に「ディレクトリではない」とみなすことはしない。非ディスクハンドルの扱いと、エビデンスルートそのものへのハンドルの検出は変えていない。
+
+### Validation / authority boundary
+
+- RED→GREEN：別プロセスが書き込み系権限付きのvolume openハンドル（`\\.\<SystemDrive>`）を保持した状態で、実物の静止確認を実行するWindows回帰テストを追加した。RED commit `0b6bf85`（CI #1047）では、実機と同一のエラー（`FileStandardInformation` の `ntstatus=0xc000000d`）で失敗した。修正後の `e45426a`（CI #1048）ではunittest・windows-junctionともsuccessになった。
+- 証明が得られない場合（`_proven_volume_open` がFalse）には、同じvolume openハンドルでも従来のエラーで止まることを、Windows回帰テストで確認する。名前判定、タイムアウト、問い合わせ失敗は、Linuxでも走るテストで確認する。
+- 既存の静止確認の回帰テスト（エビデンスルートへの外部ハンドルがあると止まること、保護プロセス、PID 4、スロット再利用など）はすべてsuccessのまま。
+- 実装workerの自己確認はL0。独立reviewはまだ行っていない。
+- WOBBUFFETでのarchive plan/applyを承認するものではない。merge後は、canonical mainへの同期 → read-onlyのpre-mutation probe → 新しいplan → 独立したplanのreview → 人間による新たな明示的承認、の順。消費済みのplan `0eef230d…`、`89ca4496…`、`7f8df70b…` は再利用しない。Ready / merge は ADR #90 により human-final。
+
 ## 2026-09-26 — Archive bootstrap loader quoting fix and durable elevated diagnostics（Issue #259 / PR #260, Draft・未merge）
 
 関連: Issue #259, Issue #216, Issue #243, PR #244, PR #260
