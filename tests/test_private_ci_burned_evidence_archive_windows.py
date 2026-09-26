@@ -1754,7 +1754,9 @@ finally:
                 own.GrantedAccess = 0
 
                 protected_candidate = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
-                protected_candidate.UniqueProcessId = 4
+                # A generic protected (non-System) process. PID 4 has its own
+                # SMB-gated contract since Issue #263 and dedicated tests.
+                protected_candidate.UniqueProcessId = os.getpid() + 1000
                 protected_candidate.HandleValue = 0x77
                 protected_candidate.Object = 0x22222222
                 protected_candidate.ObjectTypeIndex = 7
