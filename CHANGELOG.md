@@ -15,6 +15,35 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-26 — Archive bootstrap loader quoting fix and durable elevated diagnostics（Issue #259 / PR #260, Draft・未merge）
+
+関連: Issue #259, Issue #216, Issue #243, PR #244, PR #260
+
+### Background（WOBBUFFET実機, canonical main `1c291878`）
+
+- #244後のread-onlyのpre-mutation probe（script SHA-256 `b499541e…ecf0b4`）はPASSした。本番の `Assert-TrustedPythonRuntime` ゲートは実機でも通る。
+- 新しいarchive plan `89ca4496…771479` を生成し、独立に検証した。ownerの明示的承認（UACコマンド SHA-256 `5f4ee5a1…a2b0d3`、1回のみ）でapplyしたが、archiveの効果はゼロだった（canonical 5件は残存、archiveディレクトリなし、evidence rootのACLは元のまま）。分類は `BLOCKED_OR_UNCERTAIN`。この承認は消費済みで、再利用しない。
+- read-onlyの突き合わせ（script SHA-256 `1e773d1d…2b2987`）により、失敗箇所を絞り込んだ。事前ゲートはすべて通過し、失敗したのはsnapshotのコピー、evidence rootのロック、Python子プロセスをまたぐ約0.4秒の区間。エラー本文は閉じた昇格ウィンドウにしか出ていなかった。
+
+### Changed
+
+- 原因：Windows PowerShell 5.1は、ネイティブコマンドに渡す引数に含まれる `"` をエスケープしない。昇格側のPythonローダー（`r"\scripts\…"`、`run_name="__main__"`）はクォートを失い、Pythonに `SyntaxError` として届いていた。#244以前の試行はランタイムACLゲートで止まっていたため、ここまで到達していなかった。
+- ローダーはPythonの単一引用符リテラルだけを使うように変えた。
+- 昇格側の診断を耐久化した。host/identity/昇格の確認より後の昇格実行は、必ず1件の終端記録（PASSまたはFAILED）を残す。記録の中身は、stage、例外の型とメッセージ、cleanupのエラー、Python子プロセスの終了コード、上限付きのstdout/stderr。記録先はAdministrators/SYSTEM専用のbootstrap親ディレクトリの下にある `diagnostics`。ここには期待するbroker identityだけに読み取りACEを付け、低権限SIDには何も与えない。
+  - 記録ファイルはcreate-newで作る。名前はplan SHAを接頭辞にした一意のもの。
+  - `diagnostics` がreparse point（junction等）なら拒否する。
+  - 記録の書き込みに失敗しても、失敗をPASSに変えず、元のエラーも隠さない。
+- Python子プロセスのstdout/stderrはファイルに捕捉する。PS 5.1がネイティブのstderrを終了エラー（`NativeCommandError`）に昇格させないようにし、成否は実際の終了コードだけで判定する。
+- UAC引数の大きさ：代表planで23099文字から28435文字に増えた。実際のplan（前回23655文字）では約29000文字の見込みで、安全上限30000は変えていない。
+
+### Validation / authority boundary
+
+- RED→GREEN：本物のPS 5.1でローダー行を実行する回帰テストは、RED commit `dfbc97d`（CI #1043）で失敗し、修正後の `600305a`（CI #1044）で `ok` になった。
+- Windows CIの回帰テストは、本番の子プロセスブロックをそのまま切り出して実行する（成功時のstdout捕捉、失敗時のstderr捕捉と終了コード）。ほかに、診断ディレクトリのACL（保護ありで低権限SIDなし、readerは読み取りのみ、親ディレクトリにはreaderなし）、junctionの拒否、記録のcreate-newと上限、bootstrap失敗時にFAILED記録を残したうえで失敗し続けることを確認する。
+- CI #1044の失敗3件は、テスト環境の問題だった。PowerShell 7のPSModulePathが5.1に引き継がれ、`Set-Acl` を読み込めなかった。既存の `_windows_powershell_env` の慣例に合わせてPSModulePathを除いて起動し、CI #1045（`56169c6`）でunittest・windows-junctionともsuccessになった。
+- 実装workerの自己確認はL0。独立reviewはまだ行っていない。
+- WOBBUFFETでのarchive plan/applyを承認するものではない。merge後は、canonical mainへの同期 → read-onlyのpre-mutation probe → 新しいplan → 独立したplanのreview → 人間による新たな明示的承認、の順。消費済みのplan `0eef230d…` と `89ca4496…` は再利用しない。Ready / merge は ADR #90 により human-final。
+
 ## 2026-09-25 — Worker-neutral entry point and handoff（Issue #256 / PR #257）
 
 関連: Issue #256, ADR #12, ADR #90, ADR #199, Issue #194, Issue #200, Issue #120
