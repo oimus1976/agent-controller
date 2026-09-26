@@ -15,6 +15,33 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-26 — Archive quiescence trusts System (PID 4) handles only without SMB exposure（Issue #263 / PR #264, Draft・未merge）
+
+関連: Issue #263, Issue #216, Issue #261, PR #262, PR #264
+
+### Background（WOBBUFFET実機, canonical main `b261ecb1`）
+
+- #262後のread-onlyのpre-mutation probe（script SHA-256 `febbec55…6af3b2a5`）はPASSした。新しいplan `e3de750c…eb8045` を独立に検証したうえで、ownerの明示的承認（UACコマンド SHA-256 `ca683d7b…0f6ddf5`、1回のみ）でapplyした。archiveの効果はゼロ。承認は消費済みで、再利用しない。
+- #259の診断記録で、#262によってWindows Searchのボリュームハンドルは通過したことを確認した。そのうえで、`uninspectable external mutation handle: pid=4 live_pids=4` でfail-closedしていた。
+- pid 4はSystemプロセス。ページファイルやレジストリハイブなどのカーネルのファイルハンドルを、書き込み系権限付きで常に保持しており、brokerからは複製して調べられない。従来の設計では、実機のWindowsではarchiveが一度も通らない。CIの回帰テストはpid 4を意図的に除外していたため、実機で初めて表面化した。
+
+### Changed（owner決定：選択肢1）
+
+- 調べられない（uninspectable）候補を除外するのは、次の条件をすべて満たす場合だけにした。
+  - 元のPIDが4で、そのObjectを保持しているliveなPIDが `{4}` だけであること。
+  - その場で行う `NetShareEnum`（level 2）の結果で、エビデンスルートそのもの、またはその祖先をパスに持つ「管理用ではない」ディスク共有が1つもないことを証明できること。パスは生の形と解決後の形の両方で比べる。
+- カーネルとドライバーは、管理者と同じく信頼の基盤（TCB）に含まれる。ただし、SMBサーバーはリモートのクライアントに代わってSystemプロセス内でファイルを開く。そのため、SMB共有でエビデンスルートに届く場合は信頼しない。管理用の特殊共有（`C$`、`ADMIN$` など）は管理者しか使えないので、信頼する側に含める。
+- SMBサーバーが停止している（`NERR_ServerNotStarted`）場合は、公開なしとみなす。それ以外の列挙エラーはfail-closedする。
+- pid 4以外のuninspectable、保護プロセス、複製できないハンドル、他プロセスへ引き渡されたハンドルは、従来どおりfail-closedする。
+
+### Validation / authority boundary
+
+- RED→GREEN：自プロセスとpid 4の実際のハンドルだけを対象に、実物の静止確認を実行するWindows回帰テストを追加した。このテストは、pid 4が書き込み系のファイルハンドルを実際に持っていることを先に確かめる。RED commit `04f4c4f`（CI #1050）では、実機と同一のエラー（`pid=4 live_pids=4`）で失敗した。
+- 既存のpid 4ガードテストは、新しい契約に合わせて「SMB公開がある場合は止まる」ことを確認する形に変えた。追加したテストは次のとおり：SMB公開なしなら通る、公開の有無が不明なら止まる、pid 4のObjectが他プロセスにも渡っていれば止まる、pid 4以外は止まる、実際の共有列挙が動く。パスと共有の判定はLinuxでも走るテストで確認する。
+- 修正後の最初のCI（#1051）は、既存テスト `test_query_only_protected_process_candidate_blocks` がpid 4を「保護プロセス一般」の代表として使っていたため失敗した。このテストの意図を保つため、pidをSystem以外に変えた。CI #1052（`e186494`）でunittest・windows-junctionともsuccessになった。
+- 実装workerの自己確認はL0。独立reviewはまだ行っていない。
+- WOBBUFFETでのarchive plan/applyを承認するものではない。merge後は、canonical mainへの同期 → read-onlyのpre-mutation probe → 新しいplan → 独立したplanのreview → 人間による新たな明示的承認、の順。消費済みのplan `0eef230d…`、`89ca4496…`、`7f8df70b…`、`e3de750c…` は再利用しない。Ready / merge は ADR #90 により human-final。
+
 ## 2026-09-26 — Archive quiescence classifies external volume-open handles by proof（Issue #261 / PR #262, Draft・未merge）
 
 関連: Issue #261, Issue #216, Issue #259, PR #260, PR #262
