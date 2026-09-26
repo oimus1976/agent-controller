@@ -474,6 +474,274 @@ Write-Output 'ACL_MUTATION_RIGHTS_PASS'
             completed.stdout,
         )
 
+    def _run_powershell_file(
+        self,
+        source: str,
+        directory: Path,
+        name: str,
+    ) -> subprocess.CompletedProcess[str]:
+        probe = directory / name
+        probe.write_text(source, encoding="utf-8")
+        return subprocess.run(
+            [
+                self.powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(probe),
+            ],
+            cwd=self.repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+    def _production_child_block(self) -> str:
+        source = self.script.read_text(encoding="utf-8")
+        start = source.index("# BEGIN ELEVATED PYTHON CHILD")
+        end = source.index("# END ELEVATED PYTHON CHILD", start)
+        return source[start:end]
+
+    def _run_production_child_block(
+        self,
+        stub_source: str,
+    ) -> tuple[subprocess.CompletedProcess[str], str, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "snapshot"
+            (snapshot / "scripts").mkdir(parents=True)
+            (snapshot / "scripts" / "archive_private_ci_burned_evidence.py").write_text(
+                stub_source,
+                encoding="utf-8",
+            )
+            diagnostics = root / "diagnostics"
+            diagnostics.mkdir()
+            python = sys.executable.replace("'", "''")
+            source = (
+                "$ErrorActionPreference = 'Stop'\n"
+                "Set-StrictMode -Version Latest\n"
+                f"$PythonPath = '{python}'\n"
+                f"$SnapshotRoot = '{str(snapshot).replace(chr(39), chr(39) * 2)}'\n"
+                f"$DiagnosticsRoot = '{str(diagnostics).replace(chr(39), chr(39) * 2)}'\n"
+                "$DiagnosticsPrefix = 'probeprefix'\n"
+                "$ExpectedPlanSha256 = 'probe-sha'\n"
+                "$ExpectedPlanBase64 = 'probe-base64'\n"
+                "$ChildExitCode = $null\n"
+                + self._production_child_block()
+                + "\nWrite-Output ('CHILD_EXIT=' + $ChildExitCode)\n"
+                "Write-Output ('EAP_RESTORED=' + ($ErrorActionPreference -eq 'Stop'))\n"
+            )
+            completed = self._run_powershell_file(source, root, "child-probe.ps1")
+            stdout_file = diagnostics / "probeprefix-child-stdout.txt"
+            stderr_file = diagnostics / "probeprefix-child-stderr.txt"
+            captured_out = (
+                stdout_file.read_bytes().decode("utf-16")
+                if stdout_file.exists() and stdout_file.read_bytes()[:2] == b"\xff\xfe"
+                else (stdout_file.read_text(encoding="utf-8", errors="replace") if stdout_file.exists() else "<missing>")
+            )
+            captured_err = (
+                stderr_file.read_bytes().decode("utf-16")
+                if stderr_file.exists() and stderr_file.read_bytes()[:2] == b"\xff\xfe"
+                else (stderr_file.read_text(encoding="utf-8", errors="replace") if stderr_file.exists() else "<missing>")
+            )
+        return completed, captured_out, captured_err
+
+    def test_production_child_block_captures_stdout_and_success_exit(self):
+        completed, captured_out, _ = self._run_production_child_block(
+            "import json, sys\n"
+            "print('CHILD_STUB_OK ' + json.dumps(sys.argv[1:]))\n"
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=completed.stdout + "\n" + completed.stderr,
+        )
+        self.assertIn("CHILD_EXIT=0", completed.stdout)
+        self.assertIn("EAP_RESTORED=True", completed.stdout)
+        self.assertIn(
+            'CHILD_STUB_OK ["apply-internal", "--expected-plan-sha256", '
+            '"probe-sha", "--expected-plan-base64", "probe-base64"]',
+            captured_out,
+        )
+
+    def test_production_child_block_captures_stderr_without_native_command_error(self):
+        completed, _, captured_err = self._run_production_child_block(
+            "import sys\n"
+            "sys.stderr.write('CHILD_STDERR_MARKER boom\\n')\n"
+            "sys.stderr.flush()\n"
+            "raise SystemExit(3)\n"
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=completed.stdout + "\n" + completed.stderr,
+        )
+        self.assertIn("CHILD_EXIT=3", completed.stdout)
+        self.assertIn("EAP_RESTORED=True", completed.stdout)
+        self.assertIn("CHILD_STDERR_MARKER boom", captured_err)
+
+    def test_diagnostics_directory_is_private_with_reader_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "bootstrap-parent"
+            completed = self._run_bootstrap_prefix_probe(
+                "$Reader = [Security.Principal.WindowsIdentity]::GetCurrent().Name\n"
+                f"$Parent = '{str(parent).replace(chr(39), chr(39) * 2)}'\n"
+                r"""
+$Root = Initialize-ArchiveDiagnostics -BootstrapParent $Parent -ReaderAccount $Reader
+if ($Root -ne (Join-Path $Parent 'diagnostics')) { throw "unexpected diagnostics root: $Root" }
+$ReaderSid = (New-Object Security.Principal.NTAccount($Reader)).Translate([Security.Principal.SecurityIdentifier]).Value
+foreach ($Path in @($Parent, $Root)) {
+    $Acl = Get-Acl -LiteralPath $Path
+    if (-not $Acl.AreAccessRulesProtected) { throw "ACL not protected: $Path" }
+    foreach ($Rule in $Acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if (@('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545') -contains $Rule.IdentityReference.Value) {
+            throw "low-privilege ACE present on $Path"
+        }
+    }
+}
+$ReaderRules = @((Get-Acl -LiteralPath $Root).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -eq $ReaderSid })
+if ($ReaderRules.Count -ne 1) { throw "expected one reader ACE, got $($ReaderRules.Count)" }
+if (Test-MutationCapableFileSystemRights -Rights $ReaderRules[0].FileSystemRights) { throw 'reader ACE is mutation-capable' }
+if (($ReaderRules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::ReadData) -eq 0) { throw 'reader ACE cannot read' }
+$ParentReader = @((Get-Acl -LiteralPath $Parent).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -eq $ReaderSid })
+if ($ParentReader.Count -ne 0) { throw 'reader must not gain access to the bootstrap parent' }
+Write-Output 'DIAGNOSTICS_ACL_PASS'
+"""
+            )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=completed.stdout + "\n" + completed.stderr,
+        )
+        self.assertIn("DIAGNOSTICS_ACL_PASS", completed.stdout)
+
+    def test_diagnostics_directory_reparse_point_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "bootstrap-parent"
+            parent.mkdir()
+            target = Path(tmp) / "elsewhere"
+            target.mkdir()
+            subprocess.run(
+                ["cmd.exe", "/c", "mklink", "/J", str(parent / "diagnostics"), str(target)],
+                check=True,
+                capture_output=True,
+            )
+            completed = self._run_bootstrap_prefix_probe(
+                "$Reader = [Security.Principal.WindowsIdentity]::GetCurrent().Name\n"
+                f"$Parent = '{str(parent).replace(chr(39), chr(39) * 2)}'\n"
+                "Initialize-ArchiveDiagnostics -BootstrapParent $Parent -ReaderAccount $Reader | Out-Null\n"
+                "Write-Output 'UNEXPECTED_DIAGNOSTICS_ACCEPTED'\n"
+            )
+            self.assertEqual(list(target.iterdir()), [])
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("UNEXPECTED_DIAGNOSTICS_ACCEPTED", completed.stdout)
+        self.assertIn(
+            "Directory is a reparse point",
+            completed.stdout + "\n" + completed.stderr,
+        )
+
+    def test_diagnostic_record_is_create_new_bounded_and_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stderr_file = root / "stderr.txt"
+            stderr_file.write_text("E" * 20000 + "\nTAIL_NOT_INCLUDED", encoding="utf-8")
+            completed = self._run_bootstrap_prefix_probe(
+                f"$Root = '{str(root).replace(chr(39), chr(39) * 2)}'\n"
+                f"$Stderr = '{str(stderr_file).replace(chr(39), chr(39) * 2)}'\n"
+                r"""
+$ExpectedPlanSha256 = 'a' * 64
+$DiagnosticsRoot = $Root
+$DiagnosticsPrefix = 'fixedprefix'
+$DiagnosticsStartedUtc = '2026-09-26T00:00:00Z'
+$Stage = 'child'
+$CleanupFailureText = ''
+$ChildExitCode = 1
+$ChildStdoutPath = $null
+$ChildStderrPath = $Stderr
+try { throw "line one`r`nline two" } catch { $Failure = $_ }
+$Record = Write-ArchiveDiagnosticRecord -Status 'FAILED' -Failure $Failure
+Write-Output "RECORD=$Record"
+try {
+    Write-ArchiveDiagnosticRecord -Status 'FAILED' -Failure $Failure | Out-Null
+    Write-Output 'UNEXPECTED_OVERWRITE'
+}
+catch {
+    Write-Output 'CREATE_NEW_ENFORCED'
+}
+"""
+            )
+            record = root / "fixedprefix-failed.log"
+            raw = record.read_bytes() if record.exists() else b""
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=completed.stdout + "\n" + completed.stderr,
+        )
+        self.assertIn("CREATE_NEW_ENFORCED", completed.stdout)
+        self.assertNotIn("UNEXPECTED_OVERWRITE", completed.stdout)
+        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
+        text = raw.decode("utf-8-sig")
+        for expected in (
+            "schema=agent-controller.private-ci-archive-bootstrap-diagnostic.v1",
+            "status=FAILED",
+            "plan_sha256=" + "a" * 64,
+            "stage=child",
+            "error_type=System.Management.Automation.RuntimeException",
+            "error_message=line one | line two",
+            "child_exit_code=1",
+            "<not captured>",
+            "<truncated: total_chars=",
+        ):
+            self.assertIn(expected, text)
+        self.assertNotIn("TAIL_NOT_INCLUDED", text)
+
+    def test_bootstrap_failure_writes_durable_record_and_still_fails(self):
+        source = self.script.read_text(encoding="utf-8")
+        prefix_end = source.index("$ObservedHost =")
+        main_start = source.index("$DiagnosticsStartedUtc =")
+        parent_line = (
+            "$BootstrapParent = Join-Path $CommonData "
+            "'agent-controller-private-ci-archive-bootstrap'"
+        )
+        self.assertEqual(source.count(parent_line), 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "bootstrap-parent"
+            main = source[main_start:].replace(
+                parent_line,
+                f"$BootstrapParent = '{str(parent).replace(chr(39), chr(39) * 2)}'",
+            )
+            probe_source = (
+                source[:prefix_end]
+                .replace("__EXPECTED_PLAN_SHA256__", "b" * 64)
+                .replace("__EXPECTED_PLAN_BASE64__", "%%not-base64%%")
+                + "\n$ExpectedIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name\n"
+                + main
+            )
+            completed = self._run_powershell_file(
+                probe_source,
+                Path(tmp),
+                "bootstrap-failure-probe.ps1",
+            )
+            records = sorted((parent / "diagnostics").glob("*-failed.log"))
+            passes = sorted((parent / "diagnostics").glob("*-pass.log"))
+            text = records[0].read_bytes().decode("utf-8-sig") if len(records) == 1 else ""
+        combined = completed.stdout + "\n" + completed.stderr
+        self.assertNotEqual(completed.returncode, 0, msg=combined)
+        self.assertNotIn("BURNED_CANONICAL_ARCHIVE_UAC_BRIDGE_PASS", completed.stdout)
+        self.assertIn("Reviewed archive plan base64 is invalid.", combined)
+        self.assertIn("ARCHIVE_BOOTSTRAP_DIAGNOSTIC=", completed.stdout)
+        self.assertEqual(len(records), 1, msg=combined)
+        self.assertEqual(passes, [])
+        self.assertIn("status=FAILED", text)
+        self.assertIn("stage=plan_verification", text)
+        self.assertIn("error_message=Reviewed archive plan base64 is invalid.", text)
+        self.assertIn("child_exit_code=<not reached>", text)
+        self.assertTrue(records[0].name.startswith("b" * 16 + "-"))
+
     def test_apply_bridge_parses_under_windows_powershell_51(self):
         quoted = str(self.script).replace("'", "''")
         command = (
