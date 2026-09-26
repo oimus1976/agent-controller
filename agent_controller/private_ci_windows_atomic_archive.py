@@ -1087,6 +1087,10 @@ def _require_no_external_mutation_handles(
 
         final_entries = _system_handle_entries()
         live_by_object: dict[int, set[int]] = {}
+        # Every external holder of an Object, regardless of access. Used only
+        # for the PID 4 exclusivity check (Issue #263): a System handle is
+        # trusted only when no other process holds that Object at all.
+        all_holders_by_object: dict[int, set[int]] = {}
         current_object_by_handle: dict[int, int] = {}
         for current in final_entries:
             pid = int(current.UniqueProcessId)
@@ -1098,9 +1102,10 @@ def _require_no_external_mutation_handles(
                 continue
             if int(current.ObjectTypeIndex) != own_type_index:
                 continue
-            if int(current.GrantedAccess) & DIRECTORY_MUTATION_ACCESS == 0:
-                continue
             if object_pointer == 0:
+                continue
+            all_holders_by_object.setdefault(object_pointer, set()).add(pid)
+            if int(current.GrantedAccess) & DIRECTORY_MUTATION_ACCESS == 0:
                 continue
             live_by_object.setdefault(object_pointer, set()).add(pid)
 
@@ -1228,6 +1233,8 @@ def _require_no_external_mutation_handles(
                 pending_kind == "uninspectable"
                 and original_pid == SYSTEM_PROCESS_ID
                 and live_pids == {SYSTEM_PROCESS_ID}
+                and all_holders_by_object.get(object_pointer)
+                == {SYSTEM_PROCESS_ID}
             ):
                 # Issue #263 (owner decision): the System process always holds
                 # write-class kernel File handles that cannot be inspected.

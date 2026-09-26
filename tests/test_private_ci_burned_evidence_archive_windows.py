@@ -1529,6 +1529,7 @@ finally:
         *,
         candidate_pid,
         extra_live_pids=(),
+        extra_readonly_pids=(),
         smb_exposure=None,
     ):
         """Run quiescence with one fake uninspectable candidate.
@@ -1566,6 +1567,14 @@ finally:
                     extra.ObjectTypeIndex = 7
                     extra.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
                     final.append(extra)
+                for index, pid in enumerate(extra_readonly_pids):
+                    reader = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                    reader.UniqueProcessId = pid
+                    reader.HandleValue = 0x200 + index
+                    reader.Object = 0x22222222
+                    reader.ObjectTypeIndex = 7
+                    reader.GrantedAccess = 0x00000001 | 0x00100000
+                    final.append(reader)
 
                 fake_kernel32 = SimpleNamespace(
                     GetCurrentProcess=lambda: 1,
@@ -1651,6 +1660,18 @@ finally:
         error, calls = self._run_fake_uninspectable_candidate(
             candidate_pid=4,
             extra_live_pids=(5555,),
+            smb_exposure=False,
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("uninspectable external mutation handle", str(error))
+        self.assertEqual(calls, [])
+
+    def test_pid4_object_also_held_read_only_elsewhere_still_blocks(self):
+        # Codex P1 on 9e373ed: exclusivity must count every holder of the
+        # Object, not only mutation-capable ones.
+        error, calls = self._run_fake_uninspectable_candidate(
+            candidate_pid=4,
+            extra_readonly_pids=(5555,),
             smb_exposure=False,
         )
         self.assertIsNotNone(error)
