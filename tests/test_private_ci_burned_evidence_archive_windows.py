@@ -953,6 +953,116 @@ finally:
                 finally:
                     handle.close()
 
+    def test_external_volume_open_handle_does_not_block_quiescence(self):
+        # Issue #261: Windows Search (SearchIndexer.exe) keeps write-class
+        # volume-open handles. A volume open can never be the authoritative
+        # evidence directory, but FileStandardInformation on it fails with
+        # STATUS_INVALID_PARAMETER, which quiescence must classify by proof
+        # instead of failing closed forever.
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        system_drive = os.environ.get("SystemDrive", "C:")
+        volume_path = "\\\\.\\" + system_drive
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "evidence"
+            root.mkdir()
+            child_code = r"""
+import ctypes
+import sys
+import time
+from ctypes import wintypes
+
+path = sys.argv[1]
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.CreateFileW.argtypes = [
+    wintypes.LPCWSTR,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    wintypes.LPVOID,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    wintypes.HANDLE,
+]
+kernel32.CreateFileW.restype = wintypes.HANDLE
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.restype = wintypes.BOOL
+
+handle = kernel32.CreateFileW(
+    path,
+    0x80000000 | 0x40000000,
+    0x00000001 | 0x00000002,
+    None,
+    3,
+    0,
+    None,
+)
+if handle == ctypes.c_void_p(-1).value:
+    raise ctypes.WinError(ctypes.get_last_error())
+print("READY", flush=True)
+try:
+    while True:
+        time.sleep(60)
+finally:
+    kernel32.CloseHandle(handle)
+"""
+            child = subprocess.Popen(
+                [sys.executable, "-c", child_code, volume_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            real_system_handle_entries = m._system_handle_entries
+
+            def controlled_system_handle_entries():
+                allowed_pids = {os.getpid(), child.pid}
+                return tuple(
+                    entry
+                    for entry in real_system_handle_entries()
+                    if int(entry.UniqueProcessId) in allowed_pids
+                )
+
+            with mock.patch.object(
+                m,
+                "_system_handle_entries",
+                side_effect=controlled_system_handle_entries,
+            ):
+                try:
+                    ready = child.stdout.readline().strip()
+                    if ready != "READY":
+                        child.kill()
+                        self.fail(
+                            "volume holder did not start: "
+                            + ready
+                            + child.stderr.read()
+                        )
+                    handle = m._open_locked_directory(root)
+                    try:
+                        try:
+                            m._require_no_external_mutation_handles(
+                                handle,
+                                "authoritative evidence root",
+                            )
+                        except RuntimeError as exc:
+                            # Surface the real-host classification text as a
+                            # CI annotation; job logs are not always reachable.
+                            print(
+                                "::error title=issue261-volume-quiescence::"
+                                + str(exc).replace("\n", " "),
+                                flush=True,
+                            )
+                            raise
+                    finally:
+                        handle.close()
+                finally:
+                    child.terminate()
+                    child.wait(timeout=10)
+                    if child.stdout is not None:
+                        child.stdout.close()
+                    if child.stderr is not None:
+                        child.stderr.close()
+
     def test_quiescence_enables_debug_and_fails_closed_on_hidden_live_handles(self):
         from agent_controller import private_ci_windows_atomic_archive as m
 
