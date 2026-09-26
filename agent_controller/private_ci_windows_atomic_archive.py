@@ -839,13 +839,21 @@ def _evidence_root_exposed_by_smb(root: Path) -> bool:
     expanded: list[tuple[str, str, int]] = []
     for name, path, share_type in shares:
         expanded.append((name, path, share_type))
-        if path:
-            try:
-                resolved = str(Path(path).resolve(strict=False))
-            except OSError:
-                resolved = ""
-            if resolved and resolved != path:
-                expanded.append((name, resolved, share_type))
+        if share_type & STYPE_SPECIAL:
+            continue
+        if (share_type & STYPE_MASK) != STYPE_DISKTREE or not path:
+            continue
+        # A share path may be an alias or reparse path whose target is an
+        # ancestor of the root. If it cannot be resolved, exposure cannot be
+        # proven absent, so fail closed.
+        try:
+            resolved = str(Path(path).resolve(strict=False))
+        except OSError as exc:
+            raise RuntimeError(
+                f"SMB share path cannot be resolved: {name}: {exc}"
+            ) from exc
+        if resolved != path:
+            expanded.append((name, resolved, share_type))
     root_forms = {str(root)}
     root_forms.add(str(Path(root).resolve(strict=True)))
     return _shares_expose_path(expanded, root_forms)

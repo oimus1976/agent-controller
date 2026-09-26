@@ -6,6 +6,8 @@ enumeration regressions live in
 """
 
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from agent_controller import private_ci_windows_atomic_archive as m
 
@@ -80,6 +82,80 @@ class SharesExposePathTests(unittest.TestCase):
     def test_missing_root_fails_closed(self):
         with self.assertRaisesRegex(RuntimeError, "needs a root path"):
             m._shares_expose_path((), ["", ""])
+
+
+class EvidenceRootExposureTests(unittest.TestCase):
+    """_evidence_root_exposed_by_smb with enumeration and resolution patched."""
+
+    def setUp(self):
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name) / "evidence"
+        self.root.mkdir()
+        self.real_resolve = Path.resolve
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _resolve_with(self, overrides):
+        real_resolve = self.real_resolve
+
+        def fake_resolve(path_self, strict=False):
+            key = str(path_self)
+            if key in overrides:
+                value = overrides[key]
+                if isinstance(value, Exception):
+                    raise value
+                return Path(value)
+            return real_resolve(path_self, strict=strict)
+
+        return fake_resolve
+
+    def test_unresolvable_relevant_share_fails_closed(self):
+        shares = (("alias", "ALIAS-SHARE-PATH", m.STYPE_DISKTREE),)
+        with mock.patch.object(m, "_smb_disk_shares", return_value=shares), \
+                mock.patch.object(
+                    Path,
+                    "resolve",
+                    self._resolve_with({"ALIAS-SHARE-PATH": OSError("target offline")}),
+                ):
+            with self.assertRaisesRegex(RuntimeError, "cannot be resolved: alias"):
+                m._evidence_root_exposed_by_smb(self.root)
+
+    def test_unresolvable_special_or_non_disk_share_is_ignored(self):
+        shares = (
+            ("C$", "SPECIAL-PATH", m.STYPE_SPECIAL | m.STYPE_DISKTREE),
+            ("printer", "PRINTER-PATH", 1),
+        )
+        overrides = {
+            "SPECIAL-PATH": OSError("unused"),
+            "PRINTER-PATH": OSError("unused"),
+        }
+        with mock.patch.object(m, "_smb_disk_shares", return_value=shares), \
+                mock.patch.object(Path, "resolve", self._resolve_with(overrides)):
+            self.assertIs(m._evidence_root_exposed_by_smb(self.root), False)
+
+    def test_resolved_share_target_above_root_exposes(self):
+        parent = str(self.real_resolve(self.root.parent, strict=True))
+        shares = (("alias", "ALIAS-SHARE-PATH", m.STYPE_DISKTREE),)
+        with mock.patch.object(m, "_smb_disk_shares", return_value=shares), \
+                mock.patch.object(
+                    Path,
+                    "resolve",
+                    self._resolve_with({"ALIAS-SHARE-PATH": parent}),
+                ):
+            self.assertIs(m._evidence_root_exposed_by_smb(self.root), True)
+
+    def test_unrelated_resolved_share_does_not_expose(self):
+        shares = (("data", "DATA-SHARE-PATH", m.STYPE_DISKTREE),)
+        with mock.patch.object(m, "_smb_disk_shares", return_value=shares), \
+                mock.patch.object(
+                    Path,
+                    "resolve",
+                    self._resolve_with({"DATA-SHARE-PATH": "/unrelated/data"}),
+                ):
+            self.assertIs(m._evidence_root_exposed_by_smb(self.root), False)
 
 
 class ShareEnumerationPlatformTests(unittest.TestCase):
