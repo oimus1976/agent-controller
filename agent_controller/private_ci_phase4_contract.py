@@ -398,6 +398,14 @@ PHASE4_AUTHORITY_ROOT = r"C:\ProgramData\agent-controller-private-ci-authority"
 PHASE4_TARGET_TIMEOUT_SECONDS = 60
 PHASE4_HEARTBEAT_SECONDS = 5
 PHASE4_TRUSTED_GH_PATH = r"C:\Program Files\GitHub CLI\gh.exe"
+# Comment sentinels delimit candidate blocks that real Windows regressions
+# execute in isolation. Comments carry no AST effect.
+PHASE4_ACL_BLOCK_BEGIN = "# BEGIN agent-controller:phase4-acl-preparation"
+PHASE4_ACL_BLOCK_END = "# END agent-controller:phase4-acl-preparation"
+PHASE4_CREDENTIAL_BLOCK_BEGIN = (
+    "# BEGIN agent-controller:phase4-credential-validation"
+)
+PHASE4_CREDENTIAL_BLOCK_END = "# END agent-controller:phase4-credential-validation"
 
 
 def _ps_single_quoted(value: str) -> str:
@@ -546,9 +554,11 @@ def render_phase4_target_environment_candidate(
         "$BridgeCopiedProbeHash = (Get-FileHash -LiteralPath $BridgeTargetProbePath -Algorithm SHA256).Hash",
         "if ($BridgeCopiedProbeHash -ine $BridgeTargetProbeSha256) { throw 'Phase 4 copied target probe hash mismatch' }",
         "",
+        PHASE4_ACL_BLOCK_BEGIN,
         "icacls.exe $BridgeRunnerRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' ('*' + $BridgeTargetSid + ':(OI)(CI)(M)') /T /C | Write-Host",
         "$BridgeAclExitCode = $LASTEXITCODE",
         "if ($BridgeAclExitCode -ne 0) { throw 'Phase 4 runner-root ACL preparation failed' }",
+        PHASE4_ACL_BLOCK_END,
         "",
         "$BridgeTargetCredential = Get-Credential -UserName $BridgeQualifiedTargetIdentity -Message 'Enter the local ac-runner credential for the reviewed Phase 4 plan.'",
         "if ($null -eq $BridgeTargetCredential) { throw 'Phase 4 target credential was not supplied' }",

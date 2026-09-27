@@ -390,6 +390,59 @@ class PrivateCiPhase4CandidateRedTests(unittest.TestCase):
                 target_probe_sha256="short",
             )
 
+    def test_target_credential_is_validated_before_any_phase4_mutation(self):
+        # #265: a wrong ac-runner password must fail before the probe copy and
+        # the runner-root ACL change, never after them.
+        module = contract_module()
+        handoff = valid_handoff(module)
+        candidate = module.render_phase4_target_environment_candidate(
+            handoff.binding,
+            handoff,
+            target_probe_sha256="b" * 64,
+        )
+        lines = candidate.splitlines()
+
+        def index_of(predicate, description):
+            for index, line in enumerate(lines):
+                if predicate(line):
+                    return index
+            self.fail(f"candidate is missing {description}")
+
+        credential_begin = index_of(
+            lambda line: line == module.PHASE4_CREDENTIAL_BLOCK_BEGIN,
+            "the credential-validation block",
+        )
+        credential_end = index_of(
+            lambda line: line == module.PHASE4_CREDENTIAL_BLOCK_END,
+            "the end of the credential-validation block",
+        )
+        get_credential = index_of(
+            lambda line: "Get-Credential" in line,
+            "Get-Credential",
+        )
+        probe_copy = index_of(
+            lambda line: line.startswith("Copy-Item "),
+            "the target probe copy",
+        )
+        acl_begin = index_of(
+            lambda line: line == module.PHASE4_ACL_BLOCK_BEGIN,
+            "the ACL preparation block",
+        )
+        target_launch = index_of(
+            lambda line: line.startswith("$BridgeChild = Start-Process"),
+            "the target probe launch",
+        )
+
+        self.assertLess(get_credential, credential_begin)
+        self.assertLess(credential_begin, credential_end)
+        self.assertLess(credential_end, probe_copy)
+        self.assertLess(credential_end, acl_begin)
+        self.assertLess(acl_begin, target_launch)
+        block = "\n".join(lines[credential_begin:credential_end])
+        self.assertIn("-Credential $BridgeTargetCredential", block)
+        self.assertIn("-Wait", block)
+        self.assertIn(".ExitCode", block)
+
     def test_phase4_candidate_uses_exact_protected_registration_marker_path(self):
         module = contract_module()
         handoff = valid_handoff(module)
