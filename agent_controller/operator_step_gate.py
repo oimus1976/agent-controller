@@ -14,6 +14,7 @@ AUTHORITATIVE_EVIDENCE_ROOT = r"C:\Users\Public\Documents\agent-controller-hando
 PRIVATE_LOCAL_CI_WORKSTREAM = "private-local-ci-host"
 WINDOWS_POWERSHELL_51 = "Windows PowerShell 5.1"
 WINDOWS_POWERSHELL_PARSER = "System.Management.Automation.Language.Parser"
+START_PROCESS_CREDENTIAL_REJECTED = "START_PROCESS_CREDENTIAL_REJECTED"
 
 
 class OperatorEffectClass(str, Enum):
@@ -756,6 +757,10 @@ def _attestation_reason_codes(
             reasons.append("AST_READ_ONLY_EFFECT_PRESENT")
     elif not observed_effects.issubset(allowed_effects):
         reasons.append("AST_EFFECT_NOT_ALLOWED")
+    # #270: a child started with Start-Process -Credential cannot be waited on
+    # or read by a non-elevated broker. No spec may allow that shape.
+    if START_PROCESS_CREDENTIAL_REJECTED in observed_effects:
+        reasons.append("AST_START_PROCESS_CREDENTIAL_REJECTED")
 
     if report.automatic_variable_collisions:
         reasons.append("AST_AUTOMATIC_VARIABLE_COLLISION")

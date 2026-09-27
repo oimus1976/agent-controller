@@ -15,6 +15,39 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-27 — Target children are launched with Process.Start so the non-elevated broker keeps the process handle（Issue #270 / PR #271、Draft・未merge）
+
+関連: Issue #270, Issue #216, Issue #265, PR #267, PR #271
+
+### Background（WOBBUFFET実機, canonical main `79cfd53e`）
+
+- 昇格していない broker から `Start-Process -Credential` で target(ac-runner)の子プロセスを起動すると、PowerShell 5.1 は作成時のハンドルを持たない `Process` を返す(PID から作り直す)。`-Wait`、実行中の `HasExited`、`ExitCode` は、そのたびに target 所有のプロセスを `OpenProcess` し直し、アクセス拒否(5)になる。`Stop-Process -Id` も同じ理由で失敗する。
+- 影響:#267 で追加した Phase 4 の資格情報確認は、正しいパスワードでも必ず失敗する(Phase 4 の承認を消費したうえで)。Phase 4 の target probe、Phase 5 の security probe と runner、`Test-PrivateCiTargetCredential.ps1` も同じ形だった。
+- オーナーが実機で切り分けた(diag1〜4、#270)。.NET の `Process.Start`(`ProcessStartInfo` の `UserName`/`Domain`/`Password`)は作成時のハンドルを保持し、待機、終了コード、出力の取得が昇格なしで動くことを確認した。
+- #265 の CI 回帰テストは、資格情報の確認ブロックを昇格した管理者のまま実行していたため、表面化しなかった。
+
+### Changed（オーナー承認の設計 #270 comment 5852616248、方針 1）
+
+- Phase 4 の資格情報確認と target probe、Phase 5 の security probe と runner を、`New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{…}` と `[System.Diagnostics.Process]::Start(…)` で起動するようにした。タイムアウト時は、保持しているハンドルで `Kill()` する(`Stop-Process -Id` をやめた)。
+  - probe の標準出力と標準エラーは .NET のパイプ(`ReadToEndAsync`)で読み、終了後に broker が従来と同じパスへ `Set-Content -Encoding UTF8` で書く。
+  - Phase 5 の runner は、長時間動くのでパイプを使わない。`cmd.exe /d /s /c "run.cmd 1>"<stdout>" 2>"<stderr>""` で、target 自身が出力ファイルを書く。パスは Python 側で、`"%^&|<>!` と制御文字を含まないことを確かめる。probe の引数に埋め込む値も、`"` と制御文字を含まず、末尾が `\` でないことを確かめる。
+  - Phase 5 は、broker が security probe の出力を書くので、許可する効果に `FILESYSTEM_WRITE_MUTATION` を加えた。
+- operator-step AST gate に、決まった形だけを許可として加えた。変数名は `BridgeChild`、`BridgeSecurityProbeChild`、`BridgeCredentialCheck` と、それぞれに `StartInfo` を付けたものに限る。
+  - `ProcessStartInfo` の作成(効果なし):キーは 11 個の許可リストのみ。値は文字列定数、修飾なしの変数、変数のメンバー読み取りのみ。ルートでの代入に限る。
+  - ルートでの `$<n> = [System.Diagnostics.Process]::Start($<n>StartInfo)`(PROCESS_LAUNCH)、`$<n>.Kill()`(PROCESS_CONTROL)、`$<n>.StandardOutput/StandardError.ReadToEndAsync()` と `$<n>.WaitForExit()`(読み取り)。
+  - `Set-Content -LiteralPath <変数> -Value <変数> -Encoding UTF8`(FILESYSTEM_WRITE_MUTATION)。
+  - これらの名前に別の値を代入した場合、引数・型・キー・値の形が違う場合、ルート以外で起動した場合は、従来どおり `DYNAMIC_OR_UNKNOWN_COMMAND` になる。
+  - 子プロセスの終了コードとハートビートの証明は、`Start-Process -PassThru` に加えて、この `Process::Start` の形も受け付ける。
+- `Start-Process` に `-Credential`(省略形と別名 `-RunAs`、スプラッティングを含む)を付けると、gate は `START_PROCESS_CREDENTIAL_REJECTED` を出す。Python 側は、spec の許可リストにかかわらず `AST_START_PROCESS_CREDENTIAL_REJECTED` で止める。
+- `scripts/Test-PrivateCiTargetCredential.ps1` も同じ .NET の形にした(gate の対象外)。失敗時は `reason=win32_<コード>` とメッセージを出す。ログオン後に whoami の出力が期待した identity と一致することも確かめる。
+
+### Validation / authority boundary
+
+- RED(commit `a6067ec`):CI の Windows ランナーで、非管理者の broker として実行した資格情報確認ブロックが実機と同じ `Start-Process : Access is denied`(Win32Exception)で失敗し、オペレーター用スクリプトも正しいパスワードを `TARGET_CREDENTIAL_INVALID` と判定した。従来の `-Wait` の形が broker では native 5 になることを、特性テストとして固定した。gate の許可形はすべて `DYNAMIC_OR_UNKNOWN_COMMAND` になり、`Start-Process -Credential` は拒否されなかった。
+- GREEN:資格情報確認ブロック、Phase 4 の probe 起動ブロック(新しい区切りコメント `phase4-target-launch`)、オペレーター用スクリプトを、非管理者の broker として実行する。終了コードと出力が読めること、非 0 の終了で止まること、タイムアウト時に probe が `Kill()` で終了することを確かめる。
+- Phase 6 の `Stop-Process -Id $BridgeRunnerProcessId` は対象外(Phase 6 が昇格して動くかどうかの確認は別途)。
+- この修正の merge は、Phase 4 の再試行を承認するものではない。次の試行は、merge 後の `main` から、まったく新しい identity freeze で始める。
+
 ## 2026-09-27 — Phase 4 ACL preparation keeps broker access with a verified read-back, and validates the target credential before any mutation（Issue #265 / PR #267）
 
 関連: Issue #265, Issue #216, PR #267

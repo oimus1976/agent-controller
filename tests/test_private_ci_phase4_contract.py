@@ -469,7 +469,7 @@ class PrivateCiPhase4CandidateRedTests(unittest.TestCase):
         )
         self.assertNotIn("Start-Process", candidate)
         self.assertNotIn("Stop-Process", candidate)
-        self.assertNotIn("-Credential", candidate)
+        self.assertNotRegex(candidate, r"\s-Credential\b")
         self.assertEqual(candidate.count("[System.Diagnostics.Process]::Start("), 2)
         self.assertIn("UserName = 'ac-runner'", candidate)
         self.assertIn("Domain = 'WOBBUFFET'", candidate)

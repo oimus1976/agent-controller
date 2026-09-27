@@ -406,6 +406,60 @@ PHASE4_CREDENTIAL_BLOCK_BEGIN = (
     "# BEGIN agent-controller:phase4-credential-validation"
 )
 PHASE4_CREDENTIAL_BLOCK_END = "# END agent-controller:phase4-credential-validation"
+PHASE4_TARGET_LAUNCH_BLOCK_BEGIN = "# BEGIN agent-controller:phase4-target-launch"
+PHASE4_TARGET_LAUNCH_BLOCK_END = "# END agent-controller:phase4-target-launch"
+# Characters that would break a double-quoted Windows command-line argument.
+_UNSAFE_QUOTED_ARGUMENT_CHARACTERS = frozenset('"\r\n\t\x00')
+
+
+def quoted_argument_value(value: str) -> str:
+    """Return ``value`` if it is safe inside a double-quoted argument.
+
+    Target children are started through ``ProcessStartInfo.Arguments``, a
+    single command line (#270). A value embedded as ``"value"`` must not carry
+    a double quote or control character, and must not end with a backslash,
+    which would escape the closing quote.
+    """
+    if type(value) is not str or not value:
+        raise ValueError("argument value must be a non-empty string")
+    if any(character in _UNSAFE_QUOTED_ARGUMENT_CHARACTERS for character in value):
+        raise ValueError("argument value contains a quote or control character")
+    if value.endswith("\\"):
+        raise ValueError("argument value must not end with a backslash")
+    return value
+
+
+def target_launch_start_info_lines(
+    variable: str,
+    *,
+    file_name: str,
+    arguments: str | None,
+    user_name: str,
+    domain: str,
+    password: str,
+    load_user_profile: bool,
+    working_directory: str,
+    redirect_output: bool,
+) -> list[str]:
+    """Render the one ProcessStartInfo shape the AST gate accepts (#270).
+
+    Every value is a single-quoted literal or a plain variable/member read;
+    the gate rejects member assignment, so all properties are set at creation.
+    """
+    first = f"    FileName = {file_name}"
+    if arguments is not None:
+        first += f"; Arguments = {arguments}"
+    lines = [
+        f"${variable}StartInfo = New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{{",
+        first,
+        f"    UserName = {_ps_single_quoted(user_name)}; Domain = {_ps_single_quoted(domain)}",
+        f"    Password = {password}; LoadUserProfile = ${'true' if load_user_profile else 'false'}",
+        f"    UseShellExecute = $false; CreateNoWindow = $true; WorkingDirectory = {working_directory}",
+    ]
+    if redirect_output:
+        lines.append("    RedirectStandardOutput = $true; RedirectStandardError = $true")
+    lines.append("}")
+    return lines
 
 
 def _ps_single_quoted(value: str) -> str:
@@ -468,6 +522,15 @@ def render_phase4_target_environment_candidate(
     work_path = str(PureWindowsPath(binding.runner_root) / binding.work_folder)
     marker_path = _phase4_registration_marker_path(handoff)
     qualified_target = f"{binding.host}\\{binding.target_identity}"
+    for argument_value in (
+        copied_probe,
+        binding.host,
+        qualified_target,
+        marker_path,
+        probe_result,
+        PHASE4_TRUSTED_GH_PATH,
+    ):
+        quoted_argument_value(argument_value)
 
     lines = [
         f"$BridgeRepository = {_ps_single_quoted(binding.repository)}",
@@ -554,8 +617,24 @@ def render_phase4_target_environment_candidate(
         PHASE4_CREDENTIAL_BLOCK_BEGIN,
         "$BridgeCredentialCheckDirectory = $env:SystemRoot + '\\System32'",
         "$BridgeCredentialCheckPath = $BridgeCredentialCheckDirectory + '\\whoami.exe'",
-        "$BridgeCredentialCheck = Start-Process -FilePath $BridgeCredentialCheckPath -Credential $BridgeTargetCredential -WorkingDirectory $BridgeCredentialCheckDirectory -Wait -PassThru",
-        "if ($null -eq $BridgeCredentialCheck -or $BridgeCredentialCheck.ExitCode -ne 0) { throw 'Phase 4 target credential validation failed' }",
+        # #270: Start-Process -Credential cannot be waited on by a non-elevated
+        # broker; Process.Start keeps the creation handle. A wrong password
+        # makes Process.Start throw before anything else runs.
+        *target_launch_start_info_lines(
+            "BridgeCredentialCheck",
+            file_name="$BridgeCredentialCheckPath",
+            arguments=None,
+            user_name=binding.target_identity,
+            domain=binding.host,
+            password="$BridgeTargetCredential.Password",
+            load_user_profile=False,
+            working_directory="$BridgeCredentialCheckDirectory",
+            redirect_output=False,
+        ),
+        "$BridgeCredentialCheck = [System.Diagnostics.Process]::Start($BridgeCredentialCheckStartInfo)",
+        "if ($null -eq $BridgeCredentialCheck) { throw 'Phase 4 target credential validation did not start' }",
+        "$BridgeCredentialCheck.WaitForExit()",
+        "if ($BridgeCredentialCheck.ExitCode -ne 0) { throw 'Phase 4 target credential validation failed' }",
         "Write-Host 'progress phase=phase4 step=target-credential-validated'",
         PHASE4_CREDENTIAL_BLOCK_END,
         "",
@@ -634,27 +713,51 @@ def render_phase4_target_environment_candidate(
         "Write-Host ('progress phase=phase4 step=runner-acl-verified items=' + $BridgeAclItems.Count)",
         PHASE4_ACL_BLOCK_END,
         "",
+        PHASE4_TARGET_LAUNCH_BLOCK_BEGIN,
+        # #270: launch the probe with Process.Start so the non-elevated broker
+        # keeps the creation handle (HasExited, ExitCode, Kill). Output is read
+        # through pipes and written by the broker once the probe has exited.
+        (
+            "$BridgeTargetProbeArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass"
+            " -File \"' + $BridgeTargetProbePath + '\"'"
+            " + ' -ExpectedHost \"' + $BridgeHost + '\"'"
+            " + ' -ExpectedIdentity \"' + $BridgeQualifiedTargetIdentity + '\"'"
+            " + ' -AuthorityMarkerPath \"' + $BridgeRegistrationMarkerPath + '\"'"
+            " + ' -ResultPath \"' + $BridgeTargetProbeResultPath + '\"'"
+            " + ' -TrustedGhPath \"' + $BridgeTrustedGhPath + '\"'"
+        ),
+        *target_launch_start_info_lines(
+            "BridgeChild",
+            file_name="'powershell.exe'",
+            arguments="$BridgeTargetProbeArguments",
+            user_name=binding.target_identity,
+            domain=binding.host,
+            password="$BridgeTargetCredential.Password",
+            load_user_profile=True,
+            working_directory="$BridgeRunnerRoot",
+            redirect_output=True,
+        ),
         "$BridgeStartedAt = Get-Date",
-        "$BridgeChild = Start-Process -FilePath 'powershell.exe' -ArgumentList @(",
-        "    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',",
-        "    '-File', $BridgeTargetProbePath,",
-        "    '-ExpectedHost', $BridgeHost,",
-        "    '-ExpectedIdentity', $BridgeQualifiedTargetIdentity,",
-        "    '-AuthorityMarkerPath', $BridgeRegistrationMarkerPath,",
-        "    '-ResultPath', $BridgeTargetProbeResultPath,",
-        "    '-TrustedGhPath', $BridgeTrustedGhPath",
-        ") -Credential $BridgeTargetCredential -LoadUserProfile -WorkingDirectory $BridgeRunnerRoot -RedirectStandardOutput $BridgeTargetProbeStdoutPath -RedirectStandardError $BridgeTargetProbeStderrPath -PassThru",
+        "$BridgeChild = [System.Diagnostics.Process]::Start($BridgeChildStartInfo)",
+        "$BridgeChildStdoutTask = $BridgeChild.StandardOutput.ReadToEndAsync()",
+        "$BridgeChildStderrTask = $BridgeChild.StandardError.ReadToEndAsync()",
         "while (-not $BridgeChild.HasExited) {",
         "    $BridgeElapsedSeconds = [int]((Get-Date) - $BridgeStartedAt).TotalSeconds",
         '    Write-Host ("heartbeat phase=phase4 elapsed_seconds={0}" -f $BridgeElapsedSeconds)',
         "    if ($BridgeElapsedSeconds -ge $BridgeTargetTimeoutSeconds) {",
-        "        Stop-Process -Id $BridgeChild.Id -Force -ErrorAction Stop",
+        "        $BridgeChild.Kill()",
         "        throw 'Phase 4 target probe timeout'",
         "    }",
         "    Start-Sleep -Seconds 5",
         "}",
+        "$BridgeChild.WaitForExit()",
+        "$BridgeChildStdoutText = $BridgeChildStdoutTask.Result",
+        "$BridgeChildStderrText = $BridgeChildStderrTask.Result",
+        "Set-Content -LiteralPath $BridgeTargetProbeStdoutPath -Value $BridgeChildStdoutText -Encoding UTF8",
+        "Set-Content -LiteralPath $BridgeTargetProbeStderrPath -Value $BridgeChildStderrText -Encoding UTF8",
         "$BridgeChildExitCode = $BridgeChild.ExitCode",
         "if ($BridgeChildExitCode -ne 0) { throw 'Phase 4 target probe failed' }",
+        PHASE4_TARGET_LAUNCH_BLOCK_END,
         "",
         "if (-not (Test-Path -LiteralPath $BridgeTargetProbeResultPath -PathType Leaf)) { throw 'Phase 4 target probe result missing' }",
         "$BridgeProbeResult = Get-Content -LiteralPath $BridgeTargetProbeResultPath -Raw -Encoding UTF8 | ConvertFrom-Json",

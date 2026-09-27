@@ -175,7 +175,7 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
         self.assertNotIn("-UseNewEnvironment", candidate)
         self.assertNotIn("Start-Process", candidate)
         self.assertNotIn("Stop-Process", candidate)
-        self.assertNotIn("-Credential", candidate)
+        self.assertNotRegex(candidate, r"\s-Credential\b")
 
     def test_target_launches_keep_the_creation_handle(self):
         # #270: both target launches use ProcessStartInfo + Process.Start so a
