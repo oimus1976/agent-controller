@@ -31,7 +31,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 - ACL の準備で、broker 自身の SID に Modify(継承あり)を付与するようにした。SID は `whoami.exe /user` から取得し、名前が binding の broker identity と一致することを確かめる。ACL は SYSTEM と Administrators がフルコントロール、broker と target が Modify になる。
 - ACL の付け方を変えた。`/grant:r … (OI)(CI) … /T` で全要素に同じ許可を付けるのをやめ、root だけを保護して 4 者を継承付きで許可し、配下は `icacls <root>\* /reset /T` で「root から継承するだけ」に戻す。CI で確かめたところ、従来の再帰付与は、継承フラグを付けられないファイルを「処理成功」と報告しながら、エントリのない保護 DACL(`D:PAI`)にしていた。
-- icacls の exit code を信用せず、runner ツリーの全要素について `Get-Acl` の SDDL を読み戻して検証する。失敗時は、その要素の SDDL をメッセージに含める。root は継承が保護されていること、各要素について、許可エントリだけで上記 4 者がちょうどその権限を持ち、それ以外の主体がいないこと。列挙できない要素があれば、その時点で止まる。
+- icacls の exit code を信用せず、runner ツリーの全要素について `Get-Acl` の SDDL を読み戻して検証する。root は保護され、エントリはすべて明示の `OI`+`CI` であること。配下は保護されておらず、エントリはすべて root から継承したもの(フォルダは `OI`+`CI`+`ID`、ファイルは `ID`)であること。継承専用(`IO`)のエントリはどこにあっても失敗にする(Codex P1 の指摘:`/reset` が黙って失敗したフォルダに、明示エントリと継承専用の Everyone が残っていても通ってしまっていた)。失敗時は、その要素の SDDL をメッセージに含める。root は継承が保護されていること、各要素について、許可エントリだけで上記 4 者がちょうどその権限を持ち、それ以外の主体がいないこと。列挙できない要素があれば、その時点で止まる。
 - `Get-Credential` の直後、probe のコピーと ACL の変更より前に、`whoami.exe` を target として `Start-Process -Credential -Wait` で起動し、ログオンできることを確かめる。出力ファイルは作らない。
 - 承認を発行する前にオペレーターが実行する `scripts/Test-PrivateCiTargetCredential.ps1` を追加した。承認は消費せず、ファイルも書かない。Phase 4 の証跡としては扱わない。
 - operator-step AST gate の読み取り専用コマンドの許可リストに `Get-Acl` を加えた(`Set-Acl` は従来どおり `ACL_MUTATION` として扱う)。gate はメソッド呼び出しを未知の効果として扱うため、candidate はメソッドを使わず、演算子だけで SDDL を解析する。
