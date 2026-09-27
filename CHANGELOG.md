@@ -15,6 +15,33 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-27 — Phase 4 ACL preparation keeps broker access with a verified read-back, and validates the target credential before any mutation（Issue #265 / PR #267, Draft・未merge）
+
+関連: Issue #265, Issue #216, PR #267
+
+### Background（WOBBUFFET実機, canonical main `9ef5ebf7`）
+
+- 新しい pilot identity `ac-pilot-4370190227c56b37` は、freeze、Phase 0、登録(runner id 24)、registration handoff まで通った。Phase 4 の apply は承認を消費した(consumption `9b188769…`)が、candidate が exit 1 で終了し、Phase 4 の result は作られなかった。この identity は手作業で退役させた(ランナーの登録解除、世代ディレクトリの削除、スロットの退避)。
+- candidate の不具合は 2 つ。
+  1. 昇格していない broker が `icacls … /inheritance:r /grant:r … /T /C` を実行すると、root 自体は処理できるが、その時点で broker 自身のアクセス権がなくなり、`runner\*` への再帰がアクセス拒否で失敗した。それでも icacls は **exit 0** を返したため、`$LASTEXITCODE` のチェックでは検出できなかった(fail-open)。
+  2. 資格情報の確認が、承認の消費と ACL の変更の後にしか行われなかった。そのため、ac-runner のパスワードを打ち間違えると、承認が失われ、ACL も書き換わったまま残る。
+- さらに、Phase 4 の ACL には broker が含まれていなかった。Phase 4 apply は probe の出力を読み戻し、Phase 5 は runner の出力ファイルを作って読むが、どちらも昇格していない broker が runner ツリーの中で行う。つまり、パスワードが正しくても後続の処理で必ず失敗する設計だった。CI の Windows ランナーは昇格した管理者で動くので、Administrators のフルコントロールに隠れて表面化しなかった。
+
+### Changed
+
+- ACL の準備で、broker 自身の SID に Modify(継承あり)を付与するようにした。SID は `whoami.exe /user` から取得し、名前が binding の broker identity と一致することを確かめる。ACL は SYSTEM と Administrators がフルコントロール、broker と target が Modify になる。
+- icacls の exit code を信用せず、runner ツリーの全要素について `Get-Acl` の SDDL を読み戻して検証する。root は継承が保護されていること、各要素について、許可エントリだけで上記 4 者がちょうどその権限を持ち、それ以外の主体がいないこと。列挙できない要素があれば、その時点で止まる。
+- `Get-Credential` の直後、probe のコピーと ACL の変更より前に、`whoami.exe` を target として `Start-Process -Credential -Wait` で起動し、ログオンできることを確かめる。出力ファイルは作らない。
+- 承認を発行する前にオペレーターが実行する `scripts/Test-PrivateCiTargetCredential.ps1` を追加した。承認は消費せず、ファイルも書かない。Phase 4 の証跡としては扱わない。
+- operator-step AST gate の読み取り専用コマンドの許可リストに `Get-Acl` を加えた(`Set-Acl` は従来どおり `ACL_MUTATION` として扱う)。gate はメソッド呼び出しを未知の効果として扱うため、candidate はメソッドを使わず、演算子だけで SDDL を解析する。
+
+### Validation / authority boundary
+
+- RED→GREEN:使い捨ての非管理者 broker と target のローカルアカウントを CI の中で作成・削除し、レンダリングされた ACL ブロックをその broker として実行する Windows 回帰テストを追加した。RED commit `93a8ebc` / `00ded5d` では、実機と同じ 2 つの現象が annotation に出た。broker が ACL ブロックの後に `config.cmd` を読めない(`Access … is denied`)ことと、ロックしたサブツリーがあると `Failed processing 2 files` でも exit 0 でブロックが完了してしまうこと。
+- 資格情報の確認ブロックについて、誤ったパスワードでは止まり、正しいパスワードでは通ることを確かめた。オペレーター用スクリプトについても、valid と invalid を正しく判定することを確かめた。Linux の契約テストでは、資格情報の確認が probe のコピーと ACL の変更より前にあることを確かめる。
+- 既存の Phase 4 隔離検査(target probe の 6 項目)と、効果の分類(ACL_MUTATION、FILESYSTEM_WRITE_MUTATION、PROCESS_CONTROL、PROCESS_LAUNCH)は変えていない。
+- この修正の merge は、Phase 4 の再試行を承認するものではない。次の試行は、merge 後の `main` から、まったく新しい identity freeze で始める。
+
 ## 2026-09-26 — Archive quiescence trusts System (PID 4) handles only without SMB exposure（Issue #263 / PR #264, Draft・未merge）
 
 関連: Issue #263, Issue #216, Issue #261, PR #262, PR #264

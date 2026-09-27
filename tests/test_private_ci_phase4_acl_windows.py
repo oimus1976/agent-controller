@@ -373,6 +373,7 @@ class PrivateCiPhase4AclWindowsTests(_AnnotatedTestCase):
                 "$ErrorActionPreference = 'Stop'",
                 f"$BridgeRunnerRoot = {_ps_quote(str(runner))}",
                 f"$BridgeTargetSid = {_ps_quote(self.target_sid)}",
+                f"$BridgeBrokerIdentity = {_ps_quote(os.environ.get('COMPUTERNAME', '.') + chr(92) + self.broker_name)}",
                 block,
                 "Write-Output 'ACL_BLOCK_COMPLETED'",
             ]
@@ -441,6 +442,7 @@ class PrivateCiPhase4AclWindowsTests(_AnnotatedTestCase):
                 "$ErrorActionPreference = 'Stop'",
                 f"$BridgeRunnerRoot = {_ps_quote(str(runner))}",
                 f"$BridgeTargetSid = {_ps_quote(self.target_sid)}",
+                f"$BridgeBrokerIdentity = {_ps_quote(os.environ.get('COMPUTERNAME', '.') + chr(92) + self.broker_name)}",
                 block,
                 "Write-Output 'ACL_BLOCK_COMPLETED'",
             ]
