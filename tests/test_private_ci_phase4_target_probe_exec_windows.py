@@ -145,10 +145,13 @@ def _annotate(title: str, message: str) -> None:
 
 class _AnnotatedTestCase(unittest.TestCase):
     def run(self, result=None):
-        failures_before = len(result.failures) + len(result.errors) if result is not None else 0
+        if result is None:
+            return super().run(result)
+        failures_before = len(result.failures)
+        errors_before = len(result.errors)
         outcome = super().run(result)
-        if result is not None and len(result.failures) + len(result.errors) > failures_before:
-            _test, trace = (result.failures + result.errors)[-1]
+        # Annotate only this test's own new failures/errors.
+        for _test, trace in result.failures[failures_before:] + result.errors[errors_before:]:
             _annotate(self._testMethodName, trace.strip().splitlines()[-1] + " || " + trace[-1200:])
         return outcome
 
@@ -448,11 +451,15 @@ foreach ($Path in @(Get-Content -LiteralPath $env:AC273_GUARD_LIST -Encoding UTF
             }
         }
         if ($Native) {
-            $Findings.Add($Path + '|' + $Command.Extent.StartLineNumber + '|' + $Command.Extent.Text)
+            $Findings.Add($Path + '|' + $Command.Extent.StartLineNumber + '|' + ($Command.Extent.Text -replace '\s+', ' '))
         }
     }
 }
-@(,$Findings.ToArray()) | ConvertTo-Json -Compress
+# One line per finding; ConvertTo-Json serializes arrays differently in 5.1 and 7.
+foreach ($Finding in $Findings) {
+    Write-Output ('FINDING|' + $Finding)
+}
+Write-Output ('GUARD_DONE|' + $Findings.Count)
 """
 
 # Existing redirections already evaluated under a local
@@ -586,14 +593,12 @@ class NativeStderrRedirectionGuardWindowsTests(_AnnotatedTestCase):
                 env=environment,
                 timeout=300,
             )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        text = completed.stdout.strip()
-        if not text:
-            return []
-        findings = json.loads(text.splitlines()[-1])
-        if isinstance(findings, str):
-            findings = [findings]
-        return list(findings)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+        findings = [line[len("FINDING|") :] for line in lines if line.startswith("FINDING|")]
+        done = [line for line in lines if line.startswith("GUARD_DONE|")]
+        self.assertEqual(done, [f"GUARD_DONE|{len(findings)}"], completed.stdout + completed.stderr)
+        return findings
 
     def test_guard_detects_the_burned_shape(self):
         # Keep the guard honest: it must flag native redirections and ignore cmdlets.
