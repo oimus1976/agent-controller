@@ -78,8 +78,45 @@ foreach ($CredentialRoot in $BrokerCredentialRoots) {
 if (-not (Test-Path -LiteralPath $TrustedGhPath -PathType Leaf)) {
     throw "trusted gh executable missing: $TrustedGhPath"
 }
-& $TrustedGhPath auth status --hostname github.com *> $null
-if ($LASTEXITCODE -eq 0) {
+# #273: under Windows PowerShell 5.1 with 'Stop', redirecting a native
+# command's stderr turns each stderr line into a terminating
+# NativeCommandError, so gh's correct "not logged in" result killed the probe.
+# Launch gh directly with its streams captured instead, and bound the wait.
+# Only a clean non-zero exit counts as unauthenticated; exit 0, a timeout, or a
+# launch failure fails closed.
+$GhStartInfo = New-Object -TypeName System.Diagnostics.ProcessStartInfo
+$GhStartInfo.FileName = $TrustedGhPath
+$GhStartInfo.Arguments = 'auth status --hostname github.com'
+$GhStartInfo.UseShellExecute = $false
+$GhStartInfo.CreateNoWindow = $true
+$GhStartInfo.RedirectStandardInput = $true
+$GhStartInfo.RedirectStandardOutput = $true
+$GhStartInfo.RedirectStandardError = $true
+$GhProcess = [System.Diagnostics.Process]::Start($GhStartInfo)
+if ($null -eq $GhProcess) {
+    throw 'target probe gh auth check did not start'
+}
+try {
+    $GhProcess.StandardInput.Close()
+    $GhStdoutTask = $GhProcess.StandardOutput.ReadToEndAsync()
+    $GhStderrTask = $GhProcess.StandardError.ReadToEndAsync()
+    if (-not $GhProcess.WaitForExit(30000)) {
+        try {
+            $GhProcess.Kill()
+        }
+        catch {
+        }
+        throw 'target probe gh auth check timed out'
+    }
+    $GhProcess.WaitForExit()
+    [void]$GhStdoutTask.Wait(5000)
+    [void]$GhStderrTask.Wait(5000)
+    $GhExitCode = $GhProcess.ExitCode
+}
+finally {
+    $GhProcess.Dispose()
+}
+if ($GhExitCode -eq 0) {
     throw 'target identity unexpectedly has usable gh authentication'
 }
 
