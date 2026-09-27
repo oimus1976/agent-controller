@@ -15,6 +15,31 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-28 — The Phase 4 target probe checks gh without native stderr redirection, and is now executed under PS 5.1 in CI（Issue #273 / PR #274、Draft・未merge）
+
+関連: Issue #273, Issue #216, Issue #265, Issue #270
+
+### Background（WOBBUFFET実機, canonical main `21ec440a`）
+
+- 2 回目の pilot identity `ac-pilot-0351dfe703139932` は、Phase 4 で失敗して退役した(Phase 4 の承認は消費済み)。#265 と #270 の修正は実機で機能した(資格情報の確認が変更より前、ACL の再設定と SDDL の読み戻しが成功、broker から読める)。
+- 原因:target probe の `& $TrustedGhPath auth status --hostname github.com *> $null`。Windows PowerShell 5.1 では、`$ErrorActionPreference = 'Stop'` の状態でネイティブコマンドの stderr をリダイレクトすると、stderr の各行が終了エラー `NativeCommandError` になる。ac-runner の gh が出した正しい結果(未ログイン)で、probe が `$LASTEXITCODE` を読む前に自分で終了した。authority マーカーへの書き込み拒否の確認は、実機では一度も実行されていない。
+- 既存の `test_private_ci_phase4_target_probe_windows.py` は構文解析と文字列の照合だけで、probe を実行していなかった。
+
+### Changed
+
+- `scripts/Invoke-PrivateCiPhase4TargetProbe.ps1`:gh の確認を、`ProcessStartInfo` + `[System.Diagnostics.Process]::Start` による起動に変えた。stdin・stdout・stderr はリダイレクトして非同期に読み、待機は 30 秒まで。exit 0、タイムアウト(子プロセスは Kill する)、起動の失敗は、いずれも fail-closed。完了して 0 以外で終わった場合だけ、未認証とみなす。result の schema は変えていない。Phase 5 の security probe も同じファイルを使うので、Phase 5 も同じ修正を受ける。
+- 新しいテスト `tests/test_private_ci_phase4_target_probe_exec_windows.py`(Windows ジョブの最後のステップ。ジョブのタイムアウトは 10 分 → 15 分):
+  - 追跡中の probe を、使い捨ての非管理者ローカルユーザーとして PS 5.1 で**実際に実行する**。gh は、コンパイルしたスタブ(未認証、認証済み、stderr にも出力する認証済み、応答しない)と、ランナーイメージにある本物の未認証 gh を使う。authority マーカーに書き込める場合は fail-closed になることも確かめる。
+  - PS 5.1 の AST で、`scripts/*.ps1` のすべてと、生成した Phase 4/5/6 の candidate を調べ、ネイティブコマンドへの `2>`・`*>` のリダイレクトを拒否する静的ガード。既存の `Archive-PrivateCiBurnedEvidence.ps1`(#259)の 1 か所だけは、直前でローカルに `Continue` にしている間に限って許可する。
+
+### Validation / authority boundary
+
+- RED(`620bdd3`):未認証スタブと本物の gh の両方で、実機と同じ `NativeCommandError`(probe の 81 行目)になった。stderr にも出力する認証済みスタブと、書き込めるマーカーのケースは、誤った理由(同じ行)で失敗した。応答しない gh では probe が戻らなかった。静的ガードは probe の 81 行目を検出した。
+- GREEN(`060b739`):同じテストがすべて成功。
+- Phase 4/5 の spec と target probe のハッシュは変わる。この修正の merge は、Phase 4 の再試行を承認するものではない。次の試行は、merge 後の `main` から、まったく新しい identity freeze で始める。
+
+---
+
 ## 2026-09-27 — Target children are launched with Process.Start so the non-elevated broker keeps the process handle（Issue #270 / PR #271、Draft・未merge）
 
 関連: Issue #270, Issue #216, Issue #265, PR #267, PR #271
