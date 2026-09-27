@@ -169,12 +169,30 @@ def _new_password() -> str:
     return "Aa1!" + secrets.token_hex(12)
 
 
+def _annotate(title: str, message: str) -> None:
+    # CI job logs cannot be downloaded from every review surface; surface the
+    # failure as a GitHub check-run annotation instead.
+    flat = " ".join(str(message).split())[:1500]
+    print(f"::error title=issue265-{title}::{flat}", flush=True)
+
+
+class _AnnotatedTestCase(unittest.TestCase):
+    def run(self, result=None):
+        failures_before = len(result.failures) + len(result.errors) if result is not None else 0
+        outcome = super().run(result)
+        if result is not None and len(result.failures) + len(result.errors) > failures_before:
+            _test, trace = (result.failures + result.errors)[-1]
+            _annotate(self._testMethodName, trace.strip().splitlines()[-1] + " || " + trace[-1200:])
+        return outcome
+
+
 @unittest.skipUnless(os.name == "nt", "real Windows Phase 4 ACL regression")
-class PrivateCiPhase4AclWindowsTests(unittest.TestCase):
+class PrivateCiPhase4AclWindowsTests(_AnnotatedTestCase):
     @classmethod
     def setUpClass(cls):
         if not _is_elevated_admin():
             if os.environ.get("CI", "").lower() == "true":
+                _annotate("setup", "Phase 4 ACL regressions must run elevated under CI")
                 raise AssertionError("Phase 4 ACL regressions must run elevated under CI")
             raise unittest.SkipTest("requires an elevated administrator to create test accounts")
 
@@ -203,6 +221,7 @@ class PrivateCiPhase4AclWindowsTests(unittest.TestCase):
         )
         if created.returncode != 0:
             cls._remove_accounts()
+            _annotate("setup", "test account creation failed: " + created.stderr)
             raise AssertionError("test account creation failed: " + created.stderr)
         sids = json.loads(created.stdout.strip().splitlines()[-1])
         cls.broker_sid = sids["broker_sid"]
