@@ -15,7 +15,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
-## 2026-09-28 — The Phase 4 target probe checks gh without native stderr redirection, and is now executed under PS 5.1 in CI（Issue #273 / PR #274、Draft・未merge）
+## 2026-09-28 — The Phase 4 target probe checks gh without native stderr redirection, and is now executed under PS 5.1 in CI（Issue #273 / PR #274）
 
 関連: Issue #273, Issue #216, Issue #265, Issue #270
 
@@ -40,7 +40,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
-## 2026-09-27 — Target children are launched with Process.Start so the non-elevated broker keeps the process handle（Issue #270 / PR #271、Draft・未merge）
+## 2026-09-27 — Target children are launched with Process.Start so the non-elevated broker keeps the process handle（Issue #270 / PR #271）
 
 関連: Issue #270, Issue #216, Issue #265, PR #267, PR #271
 
