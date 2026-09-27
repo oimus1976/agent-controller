@@ -556,6 +556,15 @@ class PrivateCiPhase4AclWindowsTests(_AnnotatedTestCase):
             _annotate("secondary-logon-unusable", "broker cannot start a target child on this runner: " + detail)
             raise unittest.SkipTest("Secondary Logon from the broker is unusable on this runner: " + detail)
 
+    def _retarget(self, block: str) -> str:
+        """Point a block rendered for the real target at the throwaway account."""
+        user = "UserName = " + _ps_quote(_binding().target_identity)
+        domain = "Domain = " + _ps_quote(_binding().host)
+        self.assertIn(user, block)
+        self.assertIn(domain, block)
+        block = block.replace(user, "UserName = " + _ps_quote(self.target_name))
+        return block.replace(domain, "Domain = " + _ps_quote(os.environ.get("COMPUTERNAME", ".")))
+
     def _target_credential_line(self, password: str) -> str:
         return f"$BridgeTargetCredential = {self._credential_expression(self.target_name, password)}"
 
@@ -588,7 +597,7 @@ class PrivateCiPhase4AclWindowsTests(_AnnotatedTestCase):
             [
                 "$ErrorActionPreference = 'Stop'",
                 self._target_credential_line(password),
-                block,
+                self._retarget(block),
                 f"Write-Output 'CREDENTIAL_BLOCK_COMPLETED {label}'",
             ]
         )
@@ -641,14 +650,10 @@ class PrivateCiPhase4AclWindowsTests(_AnnotatedTestCase):
                 f"$BridgeTargetProbeStdoutPath = {_ps_quote(str(stdout_path))}",
                 f"$BridgeTargetProbeStderrPath = {_ps_quote(str(stderr_path))}",
                 f"$BridgeTargetTimeoutSeconds = {timeout_seconds}",
-                block,
+                self._retarget(block),
                 f"Write-Output 'LAUNCH_BLOCK_COMPLETED {label}'",
             ]
         )
-        # The block is rendered for the real target identity; point it at the
-        # throwaway target account instead.
-        script = script.replace("UserName = 'ac-runner'", f"UserName = {_ps_quote(self.target_name)}")
-        script = script.replace("Domain = 'WOBBUFFET'", f"Domain = {_ps_quote(computer)}")
         code, out, err = self._run_as(self.broker_name, self.broker_password, script, f"launch-{label}")
         return code, out, err, stdout_path, stderr_path
 
