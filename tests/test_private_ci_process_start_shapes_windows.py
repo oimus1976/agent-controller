@@ -22,6 +22,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_controller.private_ci_phase4_contract import target_launch_start_info_lines
+
 
 def _annotate(title: str, message: str) -> None:
     # CI job logs cannot be downloaded from every review surface; surface the
@@ -52,6 +54,56 @@ START_INFO = (
     "}\n"
 )
 START = "$BridgeChild = [System.Diagnostics.Process]::Start($BridgeChildStartInfo)\n"
+
+
+def rendered_start_info(name: str, shape: str) -> str:
+    """ProcessStartInfo text exactly as the Phase 4/5 renderer emits it."""
+    options = {
+        "credential": dict(
+            file_name="$BridgeCredentialCheckPath",
+            arguments=None,
+            load_user_profile=False,
+            working_directory="$BridgeCredentialCheckDirectory",
+            redirect_output=False,
+        ),
+        "probe": dict(
+            file_name="'powershell.exe'",
+            arguments="$BridgeTargetProbeArguments",
+            load_user_profile=True,
+            working_directory="$BridgeRunnerRoot",
+            redirect_output=True,
+        ),
+        "runner": dict(
+            file_name="'cmd.exe'",
+            arguments="'/d /s /c \"run.cmd 1>\"C:\\x\\out.log\" 2>\"C:\\x\\err.log\"\"'",
+            load_user_profile=True,
+            working_directory="$BridgeRunnerRoot",
+            redirect_output=False,
+        ),
+    }[shape]
+    lines = target_launch_start_info_lines(
+        name,
+        user_name="ac-runner",
+        domain="WOBBUFFET",
+        password="$BridgeTargetCredential.Password",
+        **options,
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _drop(start_info: str, key: str) -> str:
+    """Remove one ``Key = value`` pair from rendered start-info text."""
+    import re
+
+    result, count = re.subn(r"(;\s*)?\b" + key + r" = [^;\n]+(;\s*)?", _drop_join, start_info)
+    if count != 1:
+        raise AssertionError(f"key {key!r} not found exactly once")
+    return result
+
+
+def _drop_join(match) -> str:
+    # Keep a separator only when the key sat between two others on one line.
+    return "; " if match.group(1) and match.group(2) else ""
 
 
 @unittest.skipUnless(os.name == "nt", "Windows PowerShell 5.1 AST gate regression")
@@ -133,16 +185,78 @@ class PrivateCiProcessStartShapeWindowsTests(_AnnotatedTestCase):
             {"FILESYSTEM_WRITE_MUTATION"},
         )
 
-    def test_all_three_launch_names_are_accepted(self):
-        for name in ("BridgeChild", "BridgeSecurityProbeChild", "BridgeCredentialCheck"):
-            with self.subTest(name=name):
+    def test_each_launch_name_accepts_exactly_its_rendered_shape(self):
+        # The shapes are taken from the renderer the Phase 4/5 contracts use,
+        # so the gate and the candidates cannot drift apart.
+        for name, shape in (
+            ("BridgeCredentialCheck", "credential"),
+            ("BridgeSecurityProbeChild", "probe"),
+            ("BridgeChild", "probe"),
+            ("BridgeChild", "runner"),
+        ):
+            with self.subTest(name=name, shape=shape):
                 extra = (
-                    START_INFO.replace("$BridgeChildStartInfo", f"${name}StartInfo")
+                    rendered_start_info(name, shape)
                     + f"${name} = [System.Diagnostics.Process]::Start(${name}StartInfo)\n"
                     + f"${name}.WaitForExit()\n"
                     + f"${name}.Kill()\n"
                 )
                 self.assertEqual(self.effects(extra), {"PROCESS_LAUNCH", "PROCESS_CONTROL"})
+
+    def test_start_info_must_match_the_full_shape_for_its_name(self):
+        # Codex P1 on ea13afd: a subset of the allowed keys (no UserName /
+        # Domain / Password) would start the child as the broker.
+        def launch(name, info):
+            return info + f"${name} = [System.Diagnostics.Process]::Start(${name}StartInfo)\n"
+
+        probe = rendered_start_info("BridgeChild", "probe")
+        runner = rendered_start_info("BridgeChild", "runner")
+        credential = rendered_start_info("BridgeCredentialCheck", "credential")
+        cases = {
+            "subset without identity": launch(
+                "BridgeChild",
+                "$BridgeChildStartInfo = New-Object -TypeName System.Diagnostics.ProcessStartInfo "
+                "-Property @{ FileName = 'cmd.exe'; Arguments = '/c exit' }\n",
+            ),
+            "missing UserName": launch("BridgeChild", _drop(probe, "UserName")),
+            "missing Domain": launch("BridgeChild", _drop(probe, "Domain")),
+            "missing Password": launch("BridgeChild", _drop(probe, "Password")),
+            "missing UseShellExecute": launch("BridgeChild", _drop(probe, "UseShellExecute")),
+            "missing CreateNoWindow": launch("BridgeChild", _drop(probe, "CreateNoWindow")),
+            "missing WorkingDirectory": launch("BridgeChild", _drop(probe, "WorkingDirectory")),
+            "probe with one redirect": launch("BridgeChild", _drop(probe, "RedirectStandardError")),
+            "shell execute": launch("BridgeChild", probe.replace("UseShellExecute = $false", "UseShellExecute = $true")),
+            "window": launch("BridgeChild", probe.replace("CreateNoWindow = $true", "CreateNoWindow = $false")),
+            "redirect false": launch("BridgeChild", probe.replace("RedirectStandardOutput = $true", "RedirectStandardOutput = $false")),
+            "probe without profile": launch("BridgeChild", probe.replace("LoadUserProfile = $true", "LoadUserProfile = $false")),
+            "empty user": launch("BridgeChild", probe.replace("UserName = 'ac-runner'", "UserName = ''")),
+            "variable user": launch("BridgeChild", probe.replace("UserName = 'ac-runner'", "UserName = $BridgeTargetIdentity")),
+            "empty domain": launch("BridgeChild", probe.replace("Domain = 'WOBBUFFET'", "Domain = ''")),
+            "password literal": launch("BridgeChild", probe.replace("Password = $BridgeTargetCredential.Password", "Password = 'x'")),
+            "password other member": launch("BridgeChild", probe.replace("Password = $BridgeTargetCredential.Password", "Password = $BridgeTargetCredential.UserName")),
+            "password plain variable": launch("BridgeChild", probe.replace("Password = $BridgeTargetCredential.Password", "Password = $BridgeTargetPassword")),
+            "runner without arguments": launch("BridgeChild", _drop(runner, "Arguments")),
+            "credential with redirect": launch(
+                "BridgeCredentialCheck",
+                credential.replace("}\n", "    RedirectStandardOutput = $true; RedirectStandardError = $true\n}\n"),
+            ),
+            "credential with arguments": launch(
+                "BridgeCredentialCheck",
+                credential.replace("FileName = $BridgeCredentialCheckPath", "FileName = $BridgeCredentialCheckPath; Arguments = '/all'"),
+            ),
+            "credential with profile": launch("BridgeCredentialCheck", credential.replace("LoadUserProfile = $false", "LoadUserProfile = $true")),
+            "security probe with runner shape": launch(
+                "BridgeSecurityProbeChild",
+                runner.replace("$BridgeChildStartInfo", "$BridgeSecurityProbeChildStartInfo"),
+            ),
+            "security probe with credential shape": launch(
+                "BridgeSecurityProbeChild",
+                credential.replace("$BridgeCredentialCheckStartInfo", "$BridgeSecurityProbeChildStartInfo"),
+            ),
+        }
+        for label, extra in cases.items():
+            with self.subTest(case=label):
+                self.assertIn(DYNAMIC, self.effects(extra))
 
     def test_process_start_child_proves_exit_code_heartbeat_and_fail_fast(self):
         report = self.run_producer(
