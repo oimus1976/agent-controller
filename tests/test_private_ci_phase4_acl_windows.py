@@ -29,6 +29,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_controller import private_ci_phase4_contract as phase4_contract
 from agent_controller.private_ci_phase4_contract import (
     PHASE4_ACL_BLOCK_BEGIN,
     PHASE4_ACL_BLOCK_END,
@@ -488,52 +489,241 @@ class PrivateCiPhase4AclWindowsTests(_AnnotatedTestCase):
         self.assertNotEqual(code, 0, "ACL block accepted a descendant with explicit / inherit-only entries: " + out)
         self.assertNotIn("ACL_BLOCK_COMPLETED", out)
 
-    def _run_credential_block(self, password: str, label: str) -> subprocess.CompletedProcess[str]:
-        block = _candidate_block(PHASE4_CREDENTIAL_BLOCK_BEGIN, PHASE4_CREDENTIAL_BLOCK_END)
-        return _run_powershell(
+    # --- #270: target launches from the non-elevated broker -------------
+    #
+    # The credential block, the target-probe launch block and the operator
+    # credential check all run on the owner machine as the non-elevated broker.
+    # Running them as the elevated CI administrator hides #270, because an
+    # administrator may open the target-owned child process. They therefore run
+    # as the non-administrator broker account here.
+
+    def _prepare_shared_tree(self) -> Path:
+        """Runner tree plus scripts/out folders the broker and target can use."""
+        runner = self._prepare_runner_tree()
+        grant = _run_powershell(
             "\n".join(
                 [
                     "$ErrorActionPreference = 'Stop'",
-                    f"$BridgeTargetCredential = {self._credential_expression(self.target_name, password)}",
-                    block,
-                    f"Write-Output 'CREDENTIAL_BLOCK_COMPLETED {label}'",
+                    f"icacls.exe {_ps_quote(str(self.base))} /grant ('*{self.target_sid}:(OI)(CI)(M)') /T /C /Q | Out-Null",
+                    "if ($LASTEXITCODE -ne 0) { throw 'target grant failed' }",
                 ]
             ),
             directory=self.work,
         )
+        self.assertEqual(grant.returncode, 0, grant.stderr)
+        return runner
+
+    def _require_secondary_logon_from_broker(self) -> None:
+        """Skip (with an annotation) if the hosted runner cannot nest a logon.
+
+        The broker is itself started through Secondary Logon. If the hosted
+        runner cannot start a target child from that broker at all, the #270
+        integration cannot be exercised here and the owner-machine logs
+        (diag1-4 on #270) remain the evidence.
+        """
+        cached = getattr(type(self), "_secondary_logon_state", None)
+        if cached is None:
+            self._prepare_shared_tree()
+            script = "\n".join(
+                [
+                    "$ErrorActionPreference = 'Stop'",
+                    f"$Credential = {self._credential_expression(self.target_name, self.target_password)}",
+                    "$Parts = $Credential.UserName -split '\\\\', 2",
+                    "try {",
+                    "    $Info = New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{",
+                    "        FileName = 'cmd.exe'; Arguments = '/d /c exit 7'; UserName = $Parts[1]; Domain = $Parts[0]",
+                    "        Password = $Credential.Password; LoadUserProfile = $true; UseShellExecute = $false",
+                    f"        CreateNoWindow = $true; WorkingDirectory = {_ps_quote(str(self.base / 'scripts'))}",
+                    "    }",
+                    "    $Child = [System.Diagnostics.Process]::Start($Info)",
+                    "}",
+                    "catch {",
+                    "    Write-Output ('CANARY_START_FAILED ' + $_.Exception.Message)",
+                    "    exit 0",
+                    "}",
+                    "$Child.WaitForExit()",
+                    "Write-Output ('CANARY_EXIT=' + $Child.ExitCode)",
+                ]
+            )
+            code, out, err = self._run_as(self.broker_name, self.broker_password, script, "secondary-logon-canary")
+            if "CANARY_EXIT=7" in out:
+                cached = ("ok", "")
+            else:
+                cached = ("unusable", (out + " " + err).strip())
+            type(self)._secondary_logon_state = cached
+        state, detail = cached
+        if state != "ok":
+            _annotate("secondary-logon-unusable", "broker cannot start a target child on this runner: " + detail)
+            raise unittest.SkipTest("Secondary Logon from the broker is unusable on this runner: " + detail)
+
+    def _target_credential_line(self, password: str) -> str:
+        return f"$BridgeTargetCredential = {self._credential_expression(self.target_name, password)}"
+
+    def test_old_start_process_credential_wait_is_access_denied_for_the_broker(self):
+        # Characterizes #270 (host diag1/diag3): the former credential-check
+        # shape cannot be waited on by a non-elevated broker.
+        self._require_secondary_logon_from_broker()
+        script = "\n".join(
+            [
+                "$ErrorActionPreference = 'Stop'",
+                self._target_credential_line(self.target_password),
+                "try {",
+                "    $Check = Start-Process -FilePath ($env:SystemRoot + '\\System32\\whoami.exe') -Credential $BridgeTargetCredential -WorkingDirectory ($env:SystemRoot + '\\System32') -Wait -PassThru",
+                "    Write-Output ('OLD_SHAPE_EXIT=' + $Check.ExitCode)",
+                "}",
+                "catch {",
+                "    $Inner = $_.Exception",
+                "    while ($null -ne $Inner.InnerException) { $Inner = $Inner.InnerException }",
+                "    Write-Output ('OLD_SHAPE_ERROR native=' + $Inner.NativeErrorCode + ' type=' + $Inner.GetType().FullName)",
+                "}",
+            ]
+        )
+        code, out, err = self._run_as(self.broker_name, self.broker_password, script, "old-shape")
+        self.assertIn("OLD_SHAPE_ERROR native=5", out, out + err)
+
+    def _run_credential_block(self, password: str, label: str) -> tuple[int, str, str]:
+        self._require_secondary_logon_from_broker()
+        block = _candidate_block(PHASE4_CREDENTIAL_BLOCK_BEGIN, PHASE4_CREDENTIAL_BLOCK_END)
+        script = "\n".join(
+            [
+                "$ErrorActionPreference = 'Stop'",
+                self._target_credential_line(password),
+                block,
+                f"Write-Output 'CREDENTIAL_BLOCK_COMPLETED {label}'",
+            ]
+        )
+        return self._run_as(self.broker_name, self.broker_password, script, f"credential-block-{label}")
 
     def test_credential_block_rejects_a_wrong_password(self):
-        completed = self._run_credential_block(_new_password(), "wrong")
-        self.assertNotEqual(completed.returncode, 0, completed.stdout)
-        self.assertNotIn("CREDENTIAL_BLOCK_COMPLETED", completed.stdout)
+        code, out, err = self._run_credential_block(_new_password(), "wrong")
+        self.assertNotEqual(code, 0, out)
+        self.assertNotIn("CREDENTIAL_BLOCK_COMPLETED", out)
 
-    def test_credential_block_accepts_the_right_password(self):
-        completed = self._run_credential_block(self.target_password, "right")
-        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-        self.assertIn("CREDENTIAL_BLOCK_COMPLETED right", completed.stdout)
+    def test_credential_block_accepts_the_right_password_as_non_admin_broker(self):
+        code, out, err = self._run_credential_block(self.target_password, "right")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("CREDENTIAL_BLOCK_COMPLETED right", out)
 
-    def _run_credential_script(self, password: str) -> subprocess.CompletedProcess[str]:
-        self.assertTrue(CREDENTIAL_CHECK_SCRIPT.is_file(), "operator credential check script is missing")
-        expected = os.environ.get("COMPUTERNAME", ".") + "\\" + self.target_name
-        return _run_powershell(
+    def _fake_probe(self, name: str, body: str) -> Path:
+        path = self.base / "scripts" / name
+        path.write_text(
             "\n".join(
                 [
-                    f"$Credential = {self._credential_expression(self.target_name, password)}",
-                    f"& {_ps_quote(str(CREDENTIAL_CHECK_SCRIPT))} -ExpectedIdentity {_ps_quote(expected)} -Credential $Credential",
-                    "exit $LASTEXITCODE",
+                    "param([string]$ExpectedHost, [string]$ExpectedIdentity, [string]$AuthorityMarkerPath, [string]$ResultPath, [string]$TrustedGhPath)",
+                    f"Set-Content -LiteralPath {_ps_quote(str(self.base / 'out' / (name + '.pid')))} -Value $PID -Encoding ASCII",
+                    body,
                 ]
             ),
+            encoding="ascii",
+        )
+        return path
+
+    def _run_launch_block(self, probe: Path, runner: Path, label: str, timeout_seconds: int = 60) -> tuple[int, str, str, Path, Path]:
+        self._require_secondary_logon_from_broker()
+        begin = getattr(phase4_contract, "PHASE4_TARGET_LAUNCH_BLOCK_BEGIN", None)
+        end = getattr(phase4_contract, "PHASE4_TARGET_LAUNCH_BLOCK_END", None)
+        self.assertIsNotNone(begin, "Phase 4 candidate has no target-launch block sentinel")
+        block = _candidate_block(begin, end)
+        stdout_path = self.base / "out" / f"{label}-stdout.log"
+        stderr_path = self.base / "out" / f"{label}-stderr.log"
+        computer = os.environ.get("COMPUTERNAME", ".")
+        script = "\n".join(
+            [
+                "$ErrorActionPreference = 'Stop'",
+                self._target_credential_line(self.target_password),
+                f"$BridgeRunnerRoot = {_ps_quote(str(runner))}",
+                f"$BridgeHost = {_ps_quote(computer)}",
+                f"$BridgeQualifiedTargetIdentity = {_ps_quote(computer + chr(92) + self.target_name)}",
+                f"$BridgeTargetProbePath = {_ps_quote(str(probe))}",
+                f"$BridgeRegistrationMarkerPath = {_ps_quote(str(self.base / 'out' / 'marker.json'))}",
+                f"$BridgeTargetProbeResultPath = {_ps_quote(str(self.base / 'out' / (label + '-result.json')))}",
+                "$BridgeTrustedGhPath = 'C:\\Program Files\\GitHub CLI\\gh.exe'",
+                f"$BridgeTargetProbeStdoutPath = {_ps_quote(str(stdout_path))}",
+                f"$BridgeTargetProbeStderrPath = {_ps_quote(str(stderr_path))}",
+                f"$BridgeTargetTimeoutSeconds = {timeout_seconds}",
+                block,
+                f"Write-Output 'LAUNCH_BLOCK_COMPLETED {label}'",
+            ]
+        )
+        # The block is rendered for the real target identity; point it at the
+        # throwaway target account instead.
+        script = script.replace("UserName = 'ac-runner'", f"UserName = {_ps_quote(self.target_name)}")
+        script = script.replace("Domain = 'WOBBUFFET'", f"Domain = {_ps_quote(computer)}")
+        code, out, err = self._run_as(self.broker_name, self.broker_password, script, f"launch-{label}")
+        return code, out, err, stdout_path, stderr_path
+
+    def test_target_probe_launch_block_reads_exit_code_and_output_as_broker(self):
+        runner = self._prepare_shared_tree()
+        probe = self._fake_probe(
+            "probe-pass.ps1",
+            "\n".join(
+                [
+                    "Write-Output ('probe-identity=' + [Security.Principal.WindowsIdentity]::GetCurrent().Name)",
+                    "[Console]::Error.WriteLine('probe-stderr-line')",
+                    "Start-Sleep -Seconds 2",
+                    "exit 0",
+                ]
+            ),
+        )
+        code, out, err, stdout_path, stderr_path = self._run_launch_block(probe, runner, "pass")
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("LAUNCH_BLOCK_COMPLETED pass", out)
+        self.assertIn(
+            "probe-identity=" + os.environ.get("COMPUTERNAME", ".").lower() + "\\" + self.target_name,
+            stdout_path.read_text(encoding="utf-8-sig").lower(),
+        )
+        self.assertIn("probe-stderr-line", stderr_path.read_text(encoding="utf-8-sig"))
+
+    def test_target_probe_launch_block_fails_closed_on_nonzero_exit(self):
+        runner = self._prepare_shared_tree()
+        probe = self._fake_probe("probe-fail.ps1", "exit 3")
+        code, out, err, stdout_path, _ = self._run_launch_block(probe, runner, "fail")
+        self.assertNotEqual(code, 0, out)
+        self.assertNotIn("LAUNCH_BLOCK_COMPLETED", out)
+        self.assertIn("Phase 4 target probe failed", out + err)
+        self.assertTrue(stdout_path.exists(), "probe output must be kept for a failed probe")
+
+    def test_target_probe_launch_block_kills_the_probe_on_timeout(self):
+        runner = self._prepare_shared_tree()
+        probe = self._fake_probe("probe-hang.ps1", "Start-Sleep -Seconds 120\nexit 0")
+        code, out, err, _, _ = self._run_launch_block(probe, runner, "hang", timeout_seconds=3)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("Phase 4 target probe timeout", out + err)
+        pid_file = self.base / "out" / "probe-hang.ps1.pid"
+        self.assertTrue(pid_file.exists(), "hanging probe never started")
+        pid = int(pid_file.read_text(encoding="ascii").strip())
+        alive = _run_powershell(
+            f"if ($null -ne (Get-Process -Id {pid} -ErrorAction SilentlyContinue)) {{ 'ALIVE' }} else {{ 'GONE' }}",
             directory=self.work,
         )
+        self.assertIn("GONE", alive.stdout, "timed-out probe was not killed through the held handle")
 
-    def test_operator_credential_check_reports_valid_and_invalid(self):
-        valid = self._run_credential_script(self.target_password)
-        self.assertEqual(valid.returncode, 0, valid.stdout + valid.stderr)
-        self.assertIn("TARGET_CREDENTIAL_VALID", valid.stdout)
-        invalid = self._run_credential_script(_new_password())
-        self.assertNotEqual(invalid.returncode, 0, invalid.stdout)
-        self.assertIn("TARGET_CREDENTIAL_INVALID", invalid.stdout)
-        self.assertNotIn("TARGET_CREDENTIAL_VALID", invalid.stdout)
+    def _run_credential_script(self, password: str) -> tuple[int, str, str]:
+        self.assertTrue(CREDENTIAL_CHECK_SCRIPT.is_file(), "operator credential check script is missing")
+        self._require_secondary_logon_from_broker()
+        # The operator runs the script from a non-elevated shell: copy it where
+        # the broker can read it and run it as the broker.
+        script_copy = self.base / "scripts" / CREDENTIAL_CHECK_SCRIPT.name
+        shutil.copyfile(CREDENTIAL_CHECK_SCRIPT, script_copy)
+        expected = os.environ.get("COMPUTERNAME", ".") + "\\" + self.target_name
+        script = "\n".join(
+            [
+                f"$Credential = {self._credential_expression(self.target_name, password)}",
+                f"& {_ps_quote(str(script_copy))} -ExpectedIdentity {_ps_quote(expected)} -Credential $Credential",
+                "exit $LASTEXITCODE",
+            ]
+        )
+        return self._run_as(self.broker_name, self.broker_password, script, "credential-script-" + secrets.token_hex(3))
+
+    def test_operator_credential_check_reports_valid_and_invalid_as_non_admin_broker(self):
+        code, out, err = self._run_credential_script(self.target_password)
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("TARGET_CREDENTIAL_VALID", out)
+        code, out, err = self._run_credential_script(_new_password())
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("TARGET_CREDENTIAL_INVALID", out)
+        self.assertIn("reason=win32_1326", out)
+        self.assertNotIn("TARGET_CREDENTIAL_VALID", out)
 
 
 if __name__ == "__main__":

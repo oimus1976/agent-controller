@@ -348,10 +348,11 @@ class PrivateCiPhase4CandidateRedTests(unittest.TestCase):
             "Get-Credential",
             "Copy-Item",
             "icacls.exe",
-            "Start-Process",
-            "-Credential",
-            "-LoadUserProfile",
-            "-PassThru",
+            "New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{",
+            "$BridgeChild = [System.Diagnostics.Process]::Start($BridgeChildStartInfo)",
+            "Password = $BridgeTargetCredential.Password",
+            "LoadUserProfile = $true",
+            "$BridgeChild.Kill()",
             "heartbeat phase=phase4",
             "$BridgeChild.ExitCode",
             "PHASE4_TARGET_ENVIRONMENT_PASS",
@@ -362,6 +363,8 @@ class PrivateCiPhase4CandidateRedTests(unittest.TestCase):
 
         forbidden = (
             "-UseNewEnvironment",
+            "Start-Process",
+            "Stop-Process",
             "workflow run",
             "/dispatches",
             "config.cmd",
@@ -429,7 +432,9 @@ class PrivateCiPhase4CandidateRedTests(unittest.TestCase):
             "the ACL preparation block",
         )
         target_launch = index_of(
-            lambda line: line.startswith("$BridgeChild = Start-Process"),
+            lambda line: line.startswith(
+                "$BridgeChild = [System.Diagnostics.Process]::Start("
+            ),
             "the target probe launch",
         )
 
@@ -439,9 +444,56 @@ class PrivateCiPhase4CandidateRedTests(unittest.TestCase):
         self.assertLess(credential_end, acl_begin)
         self.assertLess(acl_begin, target_launch)
         block = "\n".join(lines[credential_begin:credential_end])
-        self.assertIn("-Credential $BridgeTargetCredential", block)
-        self.assertIn("-Wait", block)
-        self.assertIn(".ExitCode", block)
+        self.assertIn("Password = $BridgeTargetCredential.Password", block)
+        self.assertIn(
+            "$BridgeCredentialCheck = [System.Diagnostics.Process]::Start("
+            "$BridgeCredentialCheckStartInfo)",
+            block,
+        )
+        self.assertIn("$BridgeCredentialCheck.WaitForExit()", block)
+        self.assertIn("$BridgeCredentialCheck.ExitCode", block)
+        self.assertNotIn("Start-Process", block)
+
+    def test_target_launches_keep_the_creation_handle(self):
+        # #270: Start-Process -Credential hands a non-elevated broker a Process
+        # rebuilt from the PID, so -Wait, HasExited and ExitCode fail with
+        # ERROR_ACCESS_DENIED and Stop-Process -Id cannot open the child either.
+        # Every target launch uses ProcessStartInfo + Process.Start, and the
+        # timeout path kills through the held handle.
+        module = contract_module()
+        handoff = valid_handoff(module)
+        candidate = module.render_phase4_target_environment_candidate(
+            handoff.binding,
+            handoff,
+            target_probe_sha256="b" * 64,
+        )
+        self.assertNotIn("Start-Process", candidate)
+        self.assertNotIn("Stop-Process", candidate)
+        self.assertNotIn("-Credential", candidate)
+        self.assertEqual(candidate.count("[System.Diagnostics.Process]::Start("), 2)
+        self.assertIn("UserName = 'ac-runner'", candidate)
+        self.assertIn("Domain = 'WOBBUFFET'", candidate)
+        self.assertIn(
+            "$BridgeChildStdoutTask = $BridgeChild.StandardOutput.ReadToEndAsync()",
+            candidate,
+        )
+        self.assertIn(
+            "$BridgeChildStderrTask = $BridgeChild.StandardError.ReadToEndAsync()",
+            candidate,
+        )
+        self.assertIn(
+            "Set-Content -LiteralPath $BridgeTargetProbeStdoutPath "
+            "-Value $BridgeChildStdoutText -Encoding UTF8",
+            candidate,
+        )
+        self.assertIn(
+            "Set-Content -LiteralPath $BridgeTargetProbeStderrPath "
+            "-Value $BridgeChildStderrText -Encoding UTF8",
+            candidate,
+        )
+        lines = candidate.splitlines()
+        kill = lines.index("        $BridgeChild.Kill()")
+        self.assertEqual(lines[kill + 1], "        throw 'Phase 4 target probe timeout'")
 
     def test_phase4_candidate_uses_exact_protected_registration_marker_path(self):
         module = contract_module()

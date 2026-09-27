@@ -79,6 +79,7 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
         self.assertEqual(
             spec.allowed_effect_families,
             (
+                "FILESYSTEM_WRITE_MUTATION",
                 "HTTP_API_ACCESS",
                 "PROCESS_CONTROL",
                 "PROCESS_LAUNCH",
@@ -124,10 +125,11 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
             evidence.binding.runner_root,
             evidence.binding.target_identity,
             "run.cmd",
-            "Start-Process",
-            "-Credential",
-            "-LoadUserProfile",
-            "-PassThru",
+            "New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{",
+            "$BridgeChild = [System.Diagnostics.Process]::Start($BridgeChildStartInfo)",
+            "Password = $BridgeTargetCredential.Password",
+            "LoadUserProfile = $true",
+            "$BridgeChild.Kill()",
             "gh.exe api ",
             "event=workflow_dispatch&branch=main&status=queued&per_page=100",
             "event=workflow_dispatch&branch=main&status=in_progress&per_page=100",
@@ -171,6 +173,57 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
         self.assertNotIn("return_run_details", candidate)
         self.assertNotIn("SELF_HOSTED_PRIVATE_CI_PASS", candidate)
         self.assertNotIn("-UseNewEnvironment", candidate)
+        self.assertNotIn("Start-Process", candidate)
+        self.assertNotIn("Stop-Process", candidate)
+        self.assertNotIn("-Credential", candidate)
+
+    def test_target_launches_keep_the_creation_handle(self):
+        # #270: both target launches use ProcessStartInfo + Process.Start so a
+        # non-elevated broker keeps the creation handle for HasExited, ExitCode
+        # and Kill(). The long-running listener writes its own output files
+        # through cmd.exe redirection instead of broker-held pipes.
+        m = module()
+        evidence = phase4_evidence()
+        digest = hashlib.sha256(phase4_result_bytes(evidence)).hexdigest()
+        candidate = m.render_phase5_exactly_one_job_candidate(
+            evidence.binding,
+            phase4_result_sha256=digest,
+            target_probe_sha256=evidence.target_probe_sha256,
+        )
+        root = evidence.binding.runner_root
+        self.assertEqual(candidate.count("[System.Diagnostics.Process]::Start("), 2)
+        self.assertIn(
+            "$BridgeSecurityProbeChild = [System.Diagnostics.Process]::Start("
+            "$BridgeSecurityProbeChildStartInfo)",
+            candidate,
+        )
+        self.assertIn("$BridgeSecurityProbeChild.Kill()", candidate)
+        self.assertIn(
+            "Set-Content -LiteralPath $BridgeSecurityProbeStdoutPath "
+            "-Value $BridgeSecurityProbeChildStdoutText -Encoding UTF8",
+            candidate,
+        )
+        self.assertIn(
+            "Arguments = '/d /s /c \"run.cmd 1>\"" + root
+            + "\\issue225-phase5-runner-stdout.log\" 2>\"" + root
+            + "\\issue225-phase5-runner-stderr.log\"\"'",
+            candidate,
+        )
+        runner_block = candidate[candidate.index("$BridgeChildStartInfo = New-Object"):]
+        runner_block = runner_block[: runner_block.index("}")]
+        self.assertNotIn("RedirectStandardOutput", runner_block)
+        self.assertNotIn("RedirectStandardError", runner_block)
+
+    def test_cmd_redirection_paths_reject_cmd_metacharacters(self):
+        m = module()
+        for bad in ('C:\\a"b', "C:\\a%b", "C:\\a^b", "C:\\a&b", "C:\\a|b", "C:\\a<b", "C:\\a>b", "C:\\a!b"):
+            with self.subTest(path=bad):
+                with self.assertRaises(ValueError):
+                    m.cmd_redirection_path(bad)
+        self.assertEqual(
+            m.cmd_redirection_path("C:\\ProgramData\\x\\out.log"),
+            "C:\\ProgramData\\x\\out.log",
+        )
 
 
     def test_candidate_revalidates_target_security_context_before_listener(self):
@@ -183,13 +236,15 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
             phase4_result_sha256=digest,
             target_probe_sha256=evidence.target_probe_sha256,
         )
-        probe = candidate.index("$BridgeSecurityProbeChild = Start-Process")
+        probe = candidate.index(
+            "$BridgeSecurityProbeChild = [System.Diagnostics.Process]::Start("
+        )
         probe_pass = candidate.index(
             "PHASE5_SECURITY_CONTEXT_REVALIDATED",
             probe,
         )
         listener = candidate.index(
-            "$BridgeChild = Start-Process -FilePath 'cmd.exe'",
+            "$BridgeChild = [System.Diagnostics.Process]::Start(",
             probe_pass,
         )
         self.assertLess(probe, probe_pass)

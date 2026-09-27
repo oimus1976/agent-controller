@@ -53,6 +53,9 @@ jobs:
         run: python -m unittest discover -s tests -p "test_private_ci_phase4_candidate_windows.py" -v
       - name: Run real Windows Phase 4 ACL and credential-gate regressions (#265)
         run: python -m unittest discover -s tests -p "test_private_ci_phase4_acl_windows.py" -v
+      - name: Run real Windows PowerShell 5.1 target-launch AST shape regressions (#270)
+        if: ${{ !cancelled() }}
+        run: python -m unittest discover -s tests -p "test_private_ci_process_start_shapes_windows.py" -v
       - name: Run real Windows PowerShell 5.1 Phase 5 candidate regressions
         run: python -m unittest discover -s tests -p "test_private_ci_phase5_candidate_windows.py" -v
       - name: Run real Windows PowerShell 5.1 Phase 6 candidate regressions

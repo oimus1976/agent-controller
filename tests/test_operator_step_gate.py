@@ -284,6 +284,36 @@ class OperatorStepGateTests(unittest.TestCase):
         self.assertIs(result.status, OperatorGateStatus.BLOCKED)
         self.assertIn("AST_EFFECT_NOT_ALLOWED", result.reason_codes)
 
+    def test_start_process_credential_is_rejected_even_if_a_spec_allowlists_it(self):
+        # #270: Start-Process -Credential returns a Process without the creation
+        # handle, so a non-elevated broker can neither wait on nor read the exit
+        # code of the child. No spec may make that shape executable.
+        spec = make_mutation_spec(
+            allowed_effect_families=(
+                "PROCESS_LAUNCH",
+                "START_PROCESS_CREDENTIAL_REJECTED",
+            ),
+        )
+        candidate = make_candidate("Start-Process -FilePath x.exe -Credential $C")
+        ast_capability = authenticate_report(
+            make_report(
+                spec,
+                candidate,
+                observed_effect_families=(
+                    "PROCESS_LAUNCH",
+                    "START_PROCESS_CREDENTIAL_REJECTED",
+                ),
+            )
+        )
+        result = validate_operator_step(
+            spec,
+            candidate,
+            ast_attestation=ast_capability,
+            prior_evidence_capability=authenticate_evidence_for(spec),
+        )
+        self.assertIs(result.status, OperatorGateStatus.BLOCKED)
+        self.assertIn("AST_START_PROCESS_CREDENTIAL_REJECTED", result.reason_codes)
+
     def test_authenticated_prior_evidence_is_bound_and_consumed_once(self):
         spec = make_mutation_spec()
         candidate = make_candidate("# authenticated AST reports runner registration")
