@@ -15,7 +15,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
-## 2026-09-27 — Phase 4 ACL preparation keeps broker access with a verified read-back, and validates the target credential before any mutation（Issue #265 / PR #267, Draft・未merge）
+## 2026-09-27 — Phase 4 ACL preparation keeps broker access with a verified read-back, and validates the target credential before any mutation（Issue #265 / PR #267）
 
 関連: Issue #265, Issue #216, PR #267
 
@@ -43,7 +43,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - 既存の Phase 4 隔離検査(target probe の 6 項目)と、効果の分類(ACL_MUTATION、FILESYSTEM_WRITE_MUTATION、PROCESS_CONTROL、PROCESS_LAUNCH)は変えていない。
 - この修正の merge は、Phase 4 の再試行を承認するものではない。次の試行は、merge 後の `main` から、まったく新しい identity freeze で始める。
 
-## 2026-09-26 — Archive quiescence trusts System (PID 4) handles only without SMB exposure（Issue #263 / PR #264, Draft・未merge）
+## 2026-09-26 — Archive quiescence trusts System (PID 4) handles only without SMB exposure（Issue #263 / PR #264）
 
 関連: Issue #263, Issue #216, Issue #261, PR #262, PR #264
 
@@ -74,7 +74,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
   - 対応後の `a95339c` でCodexは「Didn't find any major issues」。
 - WOBBUFFETでのarchive plan/applyを承認するものではない。merge後は、canonical mainへの同期 → read-onlyのpre-mutation probe → 新しいplan → 独立したplanのreview → 人間による新たな明示的承認、の順。消費済みのplan `0eef230d…`、`89ca4496…`、`7f8df70b…`、`e3de750c…` は再利用しない。Ready / merge は ADR #90 により human-final。
 
-## 2026-09-26 — Archive quiescence classifies external volume-open handles by proof（Issue #261 / PR #262, Draft・未merge）
+## 2026-09-26 — Archive quiescence classifies external volume-open handles by proof（Issue #261 / PR #262）
 
 関連: Issue #261, Issue #216, Issue #259, PR #260, PR #262
 
@@ -101,7 +101,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - 実装workerの自己確認はL0。独立reviewはまだ行っていない。
 - WOBBUFFETでのarchive plan/applyを承認するものではない。merge後は、canonical mainへの同期 → read-onlyのpre-mutation probe → 新しいplan → 独立したplanのreview → 人間による新たな明示的承認、の順。消費済みのplan `0eef230d…`、`89ca4496…`、`7f8df70b…` は再利用しない。Ready / merge は ADR #90 により human-final。
 
-## 2026-09-26 — Archive bootstrap loader quoting fix and durable elevated diagnostics（Issue #259 / PR #260, Draft・未merge）
+## 2026-09-26 — Archive bootstrap loader quoting fix and durable elevated diagnostics（Issue #259 / PR #260）
 
 関連: Issue #259, Issue #216, Issue #243, PR #244, PR #260
 
