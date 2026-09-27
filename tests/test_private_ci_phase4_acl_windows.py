@@ -451,6 +451,43 @@ class PrivateCiPhase4AclWindowsTests(_AnnotatedTestCase):
         self.assertNotEqual(code, 0, "ACL block passed although a subtree could not be prepared: " + out)
         self.assertNotIn("ACL_BLOCK_COMPLETED", out)
 
+    def test_acl_block_rejects_a_descendant_that_kept_explicit_or_inherit_only_entries(self):
+        # Codex P1 on 5a884d2: if /reset silently fails on a protected leaf
+        # directory, the read-back must not accept the four expected explicit
+        # grants plus an extra inherit-only grant (it would reach files that
+        # Phase 5 creates later).
+        runner = self._prepare_runner_tree()
+        sticky = runner / "externals" / "sticky"
+        lock = _run_powershell(
+            "\n".join(
+                [
+                    "$ErrorActionPreference = 'Stop'",
+                    f"$Sticky = {_ps_quote(str(sticky))}",
+                    "New-Item -ItemType Directory -Path $Sticky | Out-Null",
+                    "icacls.exe $Sticky /setowner '*S-1-5-32-544' /C /Q | Out-Null",
+                    "icacls.exe $Sticky /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' "
+                    f"'*{self.broker_sid}:(OI)(CI)(M)' '*{self.target_sid}:(OI)(CI)(M)' '*S-1-1-0:(OI)(CI)(IO)(RX)' /C /Q | Out-Null",
+                    "if ($LASTEXITCODE -ne 0) { throw 'sticky ACL failed' }",
+                ]
+            ),
+            directory=self.work,
+        )
+        self.assertEqual(lock.returncode, 0, lock.stderr)
+        block = _candidate_block(PHASE4_ACL_BLOCK_BEGIN, PHASE4_ACL_BLOCK_END)
+        script = "\n".join(
+            [
+                "$ErrorActionPreference = 'Stop'",
+                f"$BridgeRunnerRoot = {_ps_quote(str(runner))}",
+                f"$BridgeTargetSid = {_ps_quote(self.target_sid)}",
+                f"$BridgeBrokerIdentity = {_ps_quote(os.environ.get('COMPUTERNAME', '.') + chr(92) + self.broker_name)}",
+                block,
+                "Write-Output 'ACL_BLOCK_COMPLETED'",
+            ]
+        )
+        code, out, err = self._run_as(self.broker_name, self.broker_password, script, "acl-block-sticky")
+        self.assertNotEqual(code, 0, "ACL block accepted a descendant with explicit / inherit-only entries: " + out)
+        self.assertNotIn("ACL_BLOCK_COMPLETED", out)
+
     def _run_credential_block(self, password: str, label: str) -> subprocess.CompletedProcess[str]:
         block = _candidate_block(PHASE4_CREDENTIAL_BLOCK_BEGIN, PHASE4_CREDENTIAL_BLOCK_END)
         return _run_powershell(
