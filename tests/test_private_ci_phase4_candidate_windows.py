@@ -108,6 +108,7 @@ class PrivateCiPhase4CandidateWindowsTests(unittest.TestCase):
             set(report["observed_effect_families"]),
             {
                 "ACL_MUTATION",
+                "EVIDENCE_OUTPUT_WRITE",
                 "FILESYSTEM_WRITE_MUTATION",
                 "PROCESS_CONTROL",
                 "PROCESS_LAUNCH",

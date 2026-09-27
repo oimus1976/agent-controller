@@ -4,25 +4,28 @@ A non-elevated broker cannot wait on, read the exit code of, or stop a child
 started with ``Start-Process -Credential``: PowerShell 5.1 returns a Process
 rebuilt from the PID, and every later ``OpenProcess`` on the target-owned child
 fails with ERROR_ACCESS_DENIED. The Phase 4/5 candidates therefore launch
-target children through ``ProcessStartInfo`` + ``[System.Diagnostics.Process]::Start``
-and keep the creation handle.
+target children through ``[System.Diagnostics.Process]::Start`` with an inline
+``ProcessStartInfo`` and keep the creation handle.
 
 The operator-step AST gate treats every method invocation and member
 assignment as ``DYNAMIC_OR_UNKNOWN_COMMAND``. These tests pin the exact shapes
-the owner approved as exceptions (#270 comment 5852616248) and prove that any
-variation stays unknown, and that ``Start-Process -Credential`` is rejected.
+allowed as exceptions (#270 comment 5852616248, revised by owner-approved
+option A after Codex review) and prove that every variation stays unknown.
+
+The gate classifies effect families; it is defense in depth. Payload and
+identity integrity are owned by the exact canonical candidate comparison in
+the Python contracts/runtimes.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-
-from agent_controller.private_ci_phase4_contract import target_launch_start_info_lines
 
 
 def _annotate(title: str, message: str) -> None:
@@ -44,58 +47,66 @@ class _AnnotatedTestCase(unittest.TestCase):
 
 DYNAMIC = "DYNAMIC_OR_UNKNOWN_COMMAND"
 REJECTED = "START_PROCESS_CREDENTIAL_REJECTED"
+OUTPUT_WRITE = "EVIDENCE_OUTPUT_WRITE"
 
-START_INFO = (
-    "$BridgeChildStartInfo = New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{\n"
-    "    FileName = 'powershell.exe'; Arguments = '-NoProfile -Command exit'; UserName = 'ac-runner'; Domain = 'WOBBUFFET'\n"
-    "    Password = $BridgeTargetCredential.Password; LoadUserProfile = $true\n"
-    "    UseShellExecute = $false; CreateNoWindow = $true; WorkingDirectory = $BridgeRunnerRoot\n"
-    "    RedirectStandardOutput = $true; RedirectStandardError = $true\n"
-    "}\n"
-)
-START = "$BridgeChild = [System.Diagnostics.Process]::Start($BridgeChildStartInfo)\n"
+RUNNER_ARGUMENTS = "'/d /s /c \"run.cmd 1>\"C:\\x\\out.log\" 2>\"C:\\x\\err.log\"\"'"
+
+SHAPES = {
+    "credential": dict(
+        file_name="$BridgeCredentialCheckPath",
+        arguments=None,
+        load_user_profile=False,
+        working_directory="$BridgeCredentialCheckDirectory",
+        redirect_output=False,
+    ),
+    "probe": dict(
+        file_name="'powershell.exe'",
+        arguments="$BridgeTargetProbeArguments",
+        load_user_profile=True,
+        working_directory="$BridgeRunnerRoot",
+        redirect_output=True,
+    ),
+    "security": dict(
+        file_name="'powershell.exe'",
+        arguments="$BridgeSecurityProbeArguments",
+        load_user_profile=True,
+        working_directory="$BridgeRunnerRoot",
+        redirect_output=True,
+    ),
+    "runner": dict(
+        file_name="'cmd.exe'",
+        arguments=RUNNER_ARGUMENTS,
+        load_user_profile=True,
+        working_directory="$BridgeRunnerRoot",
+        redirect_output=False,
+    ),
+}
+SHAPE_NAME = {
+    "credential": "BridgeCredentialCheck",
+    "probe": "BridgeChild",
+    "security": "BridgeSecurityProbeChild",
+    "runner": "BridgeChild",
+}
 
 
-def rendered_start_info(name: str, shape: str) -> str:
-    """ProcessStartInfo text exactly as the Phase 4/5 renderer emits it."""
-    options = {
-        "credential": dict(
-            file_name="$BridgeCredentialCheckPath",
-            arguments=None,
-            load_user_profile=False,
-            working_directory="$BridgeCredentialCheckDirectory",
-            redirect_output=False,
-        ),
-        "probe": dict(
-            file_name="'powershell.exe'",
-            arguments="$BridgeTargetProbeArguments",
-            load_user_profile=True,
-            working_directory="$BridgeRunnerRoot",
-            redirect_output=True,
-        ),
-        "runner": dict(
-            file_name="'cmd.exe'",
-            arguments="'/d /s /c \"run.cmd 1>\"C:\\x\\out.log\" 2>\"C:\\x\\err.log\"\"'",
-            load_user_profile=True,
-            working_directory="$BridgeRunnerRoot",
-            redirect_output=False,
-        ),
-    }[shape]
-    lines = target_launch_start_info_lines(
-        name,
+def launch(shape: str, name: str | None = None) -> str:
+    """Launch text exactly as the Phase 4/5 renderer emits it."""
+    # Imported lazily so the Linux suite still loads this module.
+    from agent_controller.private_ci_phase4_contract import target_launch_lines
+
+    lines = target_launch_lines(
+        name or SHAPE_NAME[shape],
         user_name="ac-runner",
         domain="WOBBUFFET",
         password="$BridgeTargetCredential.Password",
-        **options,
+        **SHAPES[shape],
     )
     return "\n".join(lines) + "\n"
 
 
-def _drop(start_info: str, key: str) -> str:
-    """Remove one ``Key = value`` pair from rendered start-info text."""
-    import re
-
-    result, count = re.subn(r"(;\s*)?\b" + key + r" = [^;\n]+(;\s*)?", _drop_join, start_info)
+def drop(text: str, key: str) -> str:
+    """Remove one ``Key = value`` pair from rendered launch text."""
+    result, count = re.subn(r"(;\s*)?\b" + key + r" = [^;\n]+(;\s*)?", _drop_join, text)
     if count != 1:
         raise AssertionError(f"key {key!r} not found exactly once")
     return result
@@ -104,6 +115,12 @@ def _drop(start_info: str, key: str) -> str:
 def _drop_join(match) -> str:
     # Keep a separator only when the key sat between two others on one line.
     return "; " if match.group(1) and match.group(2) else ""
+
+
+def swap(text: str, old: str, new: str) -> str:
+    if text.count(old) != 1:
+        raise AssertionError(f"{old!r} not found exactly once")
+    return text.replace(old, new)
 
 
 @unittest.skipUnless(os.name == "nt", "Windows PowerShell 5.1 AST gate regression")
@@ -156,22 +173,16 @@ class PrivateCiProcessStartShapeWindowsTests(_AnnotatedTestCase):
 
     # --- allowed shapes -------------------------------------------------
 
-    def test_start_info_alone_has_no_effect(self):
-        self.assertEqual(self.effects(START_INFO), set())
-
-    def test_root_level_process_start_is_a_process_launch(self):
-        self.assertEqual(self.effects(START_INFO + START), {"PROCESS_LAUNCH"})
-
-    def test_kill_through_the_held_handle_is_process_control(self):
-        self.assertEqual(
-            self.effects(START_INFO + START + "$BridgeChild.Kill()\n"),
-            {"PROCESS_LAUNCH", "PROCESS_CONTROL"},
-        )
+    def test_each_rendered_launch_shape_is_a_process_launch(self):
+        for shape in SHAPES:
+            with self.subTest(shape=shape):
+                name = SHAPE_NAME[shape]
+                extra = launch(shape) + f"${name}.WaitForExit()\n" + f"${name}.Kill()\n"
+                self.assertEqual(self.effects(extra), {"PROCESS_LAUNCH", "PROCESS_CONTROL"})
 
     def test_pipe_reads_and_wait_are_read_only(self):
         extra = (
-            START_INFO
-            + START
+            launch("probe")
             + "$BridgeChildStdoutTask = $BridgeChild.StandardOutput.ReadToEndAsync()\n"
             + "$BridgeChildStderrTask = $BridgeChild.StandardError.ReadToEndAsync()\n"
             + "$BridgeChild.WaitForExit()\n"
@@ -179,90 +190,25 @@ class PrivateCiProcessStartShapeWindowsTests(_AnnotatedTestCase):
         )
         self.assertEqual(self.effects(extra), {"PROCESS_LAUNCH"})
 
-    def test_exact_set_content_shape_is_a_filesystem_write(self):
-        self.assertEqual(
-            self.effects("Set-Content -LiteralPath $BridgeOutPath -Value $BridgeOutText -Encoding UTF8\n"),
-            {"FILESYSTEM_WRITE_MUTATION"},
-        )
-
-    def test_each_launch_name_accepts_exactly_its_rendered_shape(self):
-        # The shapes are taken from the renderer the Phase 4/5 contracts use,
-        # so the gate and the candidates cannot drift apart.
-        for name, shape in (
-            ("BridgeCredentialCheck", "credential"),
-            ("BridgeSecurityProbeChild", "probe"),
-            ("BridgeChild", "probe"),
-            ("BridgeChild", "runner"),
+    def test_exact_output_capture_write_is_its_own_narrow_family(self):
+        # Option A: the broker-written probe output is not a general
+        # FILESYSTEM_WRITE_MUTATION, so Phase 5 does not have to allow Copy-Item.
+        for path, value in (
+            ("BridgeTargetProbeStdoutPath", "BridgeChildStdoutText"),
+            ("BridgeTargetProbeStderrPath", "BridgeChildStderrText"),
+            ("BridgeSecurityProbeStdoutPath", "BridgeSecurityProbeChildStdoutText"),
+            ("BridgeSecurityProbeStderrPath", "BridgeSecurityProbeChildStderrText"),
         ):
-            with self.subTest(name=name, shape=shape):
-                extra = (
-                    rendered_start_info(name, shape)
-                    + f"${name} = [System.Diagnostics.Process]::Start(${name}StartInfo)\n"
-                    + f"${name}.WaitForExit()\n"
-                    + f"${name}.Kill()\n"
+            with self.subTest(path=path):
+                self.assertEqual(
+                    self.effects(f"Set-Content -LiteralPath ${path} -Value ${value} -Encoding UTF8\n"),
+                    {OUTPUT_WRITE},
                 )
-                self.assertEqual(self.effects(extra), {"PROCESS_LAUNCH", "PROCESS_CONTROL"})
-
-    def test_start_info_must_match_the_full_shape_for_its_name(self):
-        # Codex P1 on ea13afd: a subset of the allowed keys (no UserName /
-        # Domain / Password) would start the child as the broker.
-        def launch(name, info):
-            return info + f"${name} = [System.Diagnostics.Process]::Start(${name}StartInfo)\n"
-
-        probe = rendered_start_info("BridgeChild", "probe")
-        runner = rendered_start_info("BridgeChild", "runner")
-        credential = rendered_start_info("BridgeCredentialCheck", "credential")
-        cases = {
-            "subset without identity": launch(
-                "BridgeChild",
-                "$BridgeChildStartInfo = New-Object -TypeName System.Diagnostics.ProcessStartInfo "
-                "-Property @{ FileName = 'cmd.exe'; Arguments = '/c exit' }\n",
-            ),
-            "missing UserName": launch("BridgeChild", _drop(probe, "UserName")),
-            "missing Domain": launch("BridgeChild", _drop(probe, "Domain")),
-            "missing Password": launch("BridgeChild", _drop(probe, "Password")),
-            "missing UseShellExecute": launch("BridgeChild", _drop(probe, "UseShellExecute")),
-            "missing CreateNoWindow": launch("BridgeChild", _drop(probe, "CreateNoWindow")),
-            "missing WorkingDirectory": launch("BridgeChild", _drop(probe, "WorkingDirectory")),
-            "probe with one redirect": launch("BridgeChild", _drop(probe, "RedirectStandardError")),
-            "shell execute": launch("BridgeChild", probe.replace("UseShellExecute = $false", "UseShellExecute = $true")),
-            "window": launch("BridgeChild", probe.replace("CreateNoWindow = $true", "CreateNoWindow = $false")),
-            "redirect false": launch("BridgeChild", probe.replace("RedirectStandardOutput = $true", "RedirectStandardOutput = $false")),
-            "probe without profile": launch("BridgeChild", probe.replace("LoadUserProfile = $true", "LoadUserProfile = $false")),
-            "empty user": launch("BridgeChild", probe.replace("UserName = 'ac-runner'", "UserName = ''")),
-            "variable user": launch("BridgeChild", probe.replace("UserName = 'ac-runner'", "UserName = $BridgeTargetIdentity")),
-            "empty domain": launch("BridgeChild", probe.replace("Domain = 'WOBBUFFET'", "Domain = ''")),
-            "password literal": launch("BridgeChild", probe.replace("Password = $BridgeTargetCredential.Password", "Password = 'x'")),
-            "password other member": launch("BridgeChild", probe.replace("Password = $BridgeTargetCredential.Password", "Password = $BridgeTargetCredential.UserName")),
-            "password plain variable": launch("BridgeChild", probe.replace("Password = $BridgeTargetCredential.Password", "Password = $BridgeTargetPassword")),
-            "runner without arguments": launch("BridgeChild", _drop(runner, "Arguments")),
-            "credential with redirect": launch(
-                "BridgeCredentialCheck",
-                credential.replace("}\n", "    RedirectStandardOutput = $true; RedirectStandardError = $true\n}\n"),
-            ),
-            "credential with arguments": launch(
-                "BridgeCredentialCheck",
-                credential.replace("FileName = $BridgeCredentialCheckPath", "FileName = $BridgeCredentialCheckPath; Arguments = '/all'"),
-            ),
-            "credential with profile": launch("BridgeCredentialCheck", credential.replace("LoadUserProfile = $false", "LoadUserProfile = $true")),
-            "security probe with runner shape": launch(
-                "BridgeSecurityProbeChild",
-                runner.replace("$BridgeChildStartInfo", "$BridgeSecurityProbeChildStartInfo"),
-            ),
-            "security probe with credential shape": launch(
-                "BridgeSecurityProbeChild",
-                credential.replace("$BridgeCredentialCheckStartInfo", "$BridgeSecurityProbeChildStartInfo"),
-            ),
-        }
-        for label, extra in cases.items():
-            with self.subTest(case=label):
-                self.assertIn(DYNAMIC, self.effects(extra))
 
     def test_process_start_child_proves_exit_code_heartbeat_and_fail_fast(self):
         report = self.run_producer(
-            START_INFO
-            + "$BridgeStartedAt = Get-Date\n"
-            + START
+            "$BridgeStartedAt = Get-Date\n"
+            + launch("probe")
             + "while (-not $BridgeChild.HasExited) {\n"
             + "  $BridgeElapsedSeconds = [int]((Get-Date) - $BridgeStartedAt).TotalSeconds\n"
             + "  Write-Host (\"heartbeat phase=phase4 elapsed_seconds={0}\" -f $BridgeElapsedSeconds)\n"
@@ -275,53 +221,143 @@ class PrivateCiProcessStartShapeWindowsTests(_AnnotatedTestCase):
         self.assertTrue(report["child_exit_code_proven"])
         self.assertTrue(report["fail_fast_proven"])
 
-    # --- variations stay unknown ---------------------------------------
+    # --- the start info must be the exact inline shape ----------------
 
-    def test_variations_of_the_allowed_shapes_stay_dynamic(self):
+    def test_start_info_must_be_inline_and_match_the_shape_for_its_name(self):
+        probe = launch("probe")
+        runner = launch("runner")
+        credential = launch("credential")
+        security = launch("security")
         cases = {
-            "other method": START_INFO + START + "$BridgeChild.Refresh()",
-            "kill with argument": START_INFO + START + "$BridgeChild.Kill($true)",
-            "wait with timeout": START_INFO + START + "$BridgeChild.WaitForExit(1000)",
-            "other variable kill": START_INFO + START + "$BridgeOther.Kill()",
-            "other stream method": START_INFO + START + "$BridgeChild.StandardInput.WriteLine('x')",
-            "other static method": "[System.Diagnostics.Process]::GetProcessById(4)",
-            "short type name": START_INFO + "$BridgeChild = [Diagnostics.Process]::Start($BridgeChildStartInfo)",
-            "other type": START_INFO + "$BridgeChild = [System.IO.File]::Start($BridgeChildStartInfo)",
-            "string start": "$BridgeChild = [System.Diagnostics.Process]::Start('cmd.exe')",
-            "mismatched start info": START_INFO + "$BridgeSecurityProbeChild = [System.Diagnostics.Process]::Start($BridgeChildStartInfo)",
-            "other launch name": (
-                START_INFO.replace("$BridgeChildStartInfo", "$EvilStartInfo")
-                + "$Evil = [System.Diagnostics.Process]::Start($EvilStartInfo)"
+            # Codex P1 on ea13afd: a key subset starts the child as the broker.
+            "subset without identity": (
+                "$BridgeChild = [System.Diagnostics.Process]::Start((New-Object -TypeName "
+                "System.Diagnostics.ProcessStartInfo -Property @{ FileName = 'cmd.exe'; Arguments = '/c exit' }))"
             ),
-            "non-root start": START_INFO + "if ($true) { $BridgeChild = [System.Diagnostics.Process]::Start($BridgeChildStartInfo) }",
-            "piped start": START_INFO + "$BridgeChild = [System.Diagnostics.Process]::Start($BridgeChildStartInfo) | Select-Object -First 1",
-            "start not assigned": START_INFO + "[System.Diagnostics.Process]::Start($BridgeChildStartInfo)",
-            "scoped start target": START_INFO + "$script:BridgeChild = [System.Diagnostics.Process]::Start($BridgeChildStartInfo)",
-            "child rebound": START_INFO + START + "$BridgeChild = Get-Item -LiteralPath C:\\x\n$BridgeChild.Kill()",
-            "start info rebound": START_INFO + "$BridgeChildStartInfo = Get-Item -LiteralPath C:\\x\n" + START,
-            "extra key": START_INFO.replace("CreateNoWindow = $true", "CreateNoWindow = $true; Verb = 'runas'"),
-            "expression key": START_INFO.replace("CreateNoWindow = $true", "('Create' + 'NoWindow') = $true"),
-            "invocation value": START_INFO.replace("FileName = 'powershell.exe'", "FileName = (Get-Command powershell.exe)"),
-            "subexpression value": START_INFO.replace("Arguments = '-NoProfile -Command exit'", 'Arguments = "$(Get-Date)"'),
-            "expandable value": START_INFO.replace("Arguments = '-NoProfile -Command exit'", 'Arguments = "-x $BridgeRunnerRoot"'),
-            "environment value": START_INFO.replace("FileName = 'powershell.exe'", "FileName = $env:ComSpec"),
-            "method value": START_INFO.replace("Password = $BridgeTargetCredential.Password", "Password = $BridgeTargetCredential.GetNetworkCredential()"),
-            "static member value": START_INFO.replace("FileName = 'powershell.exe'", "FileName = [Environment]::SystemDirectory"),
-            "other new-object type": "$BridgeChildStartInfo = New-Object -TypeName System.Net.WebClient",
-            "new-object positional": "$BridgeChildStartInfo = New-Object System.Diagnostics.ProcessStartInfo -Property @{ FileName = 'x' }",
-            "new-object argument list": "$BridgeChildStartInfo = New-Object -TypeName System.Diagnostics.ProcessStartInfo -ArgumentList 'x'",
-            "new-object not assigned": "New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{ FileName = 'x' }",
-            "member assignment": START_INFO + "$BridgeChildStartInfo.FileName = 'cmd.exe'",
-            "set-content path": "Set-Content -Path $BridgeOutPath -Value $BridgeOutText -Encoding UTF8",
-            "set-content expression value": "Set-Content -LiteralPath $BridgeOutPath -Value (Get-Date) -Encoding UTF8",
-            "set-content literal path": "Set-Content -LiteralPath C:\\x -Value $BridgeOutText -Encoding UTF8",
-            "set-content other encoding": "Set-Content -LiteralPath $BridgeOutPath -Value $BridgeOutText -Encoding ASCII",
-            "set-content extra parameter": "Set-Content -LiteralPath $BridgeOutPath -Value $BridgeOutText -Encoding UTF8 -Force",
-            "set-content pipeline": "$BridgeOutText | Set-Content -LiteralPath $BridgeOutPath -Value $BridgeOutText -Encoding UTF8",
+            "missing UserName": drop(probe, "UserName"),
+            "missing Domain": drop(probe, "Domain"),
+            "missing Password": drop(probe, "Password"),
+            "missing UseShellExecute": drop(probe, "UseShellExecute"),
+            "missing CreateNoWindow": drop(probe, "CreateNoWindow"),
+            "missing WorkingDirectory": drop(probe, "WorkingDirectory"),
+            "probe with one redirect": drop(probe, "RedirectStandardError"),
+            "runner without arguments": drop(runner, "Arguments"),
+            "extra key": swap(probe, "CreateNoWindow = $true", "CreateNoWindow = $true; Verb = 'runas'"),
+            "expression key": swap(probe, "CreateNoWindow = $true", "('Create' + 'NoWindow') = $true"),
+            "shell execute": swap(probe, "UseShellExecute = $false", "UseShellExecute = $true"),
+            "window": swap(probe, "CreateNoWindow = $true", "CreateNoWindow = $false"),
+            "redirect false": swap(probe, "RedirectStandardOutput = $true", "RedirectStandardOutput = $false"),
+            "probe without profile": swap(probe, "LoadUserProfile = $true", "LoadUserProfile = $false"),
+            "credential with profile": swap(credential, "LoadUserProfile = $false", "LoadUserProfile = $true"),
+            "empty user": swap(probe, "UserName = 'ac-runner'", "UserName = ''"),
+            "variable user": swap(probe, "UserName = 'ac-runner'", "UserName = $BridgeTargetIdentity"),
+            "empty domain": swap(probe, "Domain = 'WOBBUFFET'", "Domain = ''"),
+            # Codex P1 on 53b4c5e: launch values must be the rendered ones.
+            "password literal": swap(probe, "Password = $BridgeTargetCredential.Password", "Password = 'x'"),
+            "password other variable": swap(probe, "Password = $BridgeTargetCredential.Password", "Password = $BridgeOtherCredential.Password"),
+            "password other member": swap(probe, "Password = $BridgeTargetCredential.Password", "Password = $BridgeTargetCredential.UserName"),
+            "probe other file": swap(probe, "FileName = 'powershell.exe'", "FileName = 'cmd.exe'"),
+            "probe file variable": swap(probe, "FileName = 'powershell.exe'", "FileName = $BridgeProbeFile"),
+            "probe other arguments": swap(probe, "Arguments = $BridgeTargetProbeArguments", "Arguments = $BridgeOtherArguments"),
+            "probe literal arguments": swap(probe, "Arguments = $BridgeTargetProbeArguments", "Arguments = '-Command evil'"),
+            "probe other directory": swap(probe, "WorkingDirectory = $BridgeRunnerRoot", "WorkingDirectory = $BridgeOtherRoot"),
+            "security with probe arguments": swap(security, "Arguments = $BridgeSecurityProbeArguments", "Arguments = $BridgeTargetProbeArguments"),
+            "runner as powershell": swap(runner, "FileName = 'cmd.exe'", "FileName = 'powershell.exe'"),
+            "runner other command": swap(runner, "run.cmd 1>", "evil.cmd 1>"),
+            "runner chained command": swap(runner, "run.cmd 1>", "run.cmd & calc 1>"),
+            "runner variable arguments": swap(runner, "Arguments = " + RUNNER_ARGUMENTS, "Arguments = $BridgeRunnerArguments"),
+            "runner metacharacter path": swap(runner, "C:\\x\\out.log", "C:\\x\\%TEMP_OUT%.log"),
+            "credential other file": swap(credential, "FileName = $BridgeCredentialCheckPath", "FileName = 'cmd.exe'"),
+            "credential other directory": swap(credential, "WorkingDirectory = $BridgeCredentialCheckDirectory", "WorkingDirectory = $BridgeRunnerRoot"),
+            "credential with redirect": swap(
+                credential, "\n}))", "\n    RedirectStandardOutput = $true; RedirectStandardError = $true\n}))"
+            ),
+            "security probe as runner": launch("runner", "BridgeSecurityProbeChild"),
+            "credential name with probe shape": launch("probe", "BridgeCredentialCheck"),
+            "child name with credential shape": launch("credential", "BridgeChild"),
+            # A start-info variable is no longer accepted at all: a variable can
+            # be rebound (param default, -OutVariable, the Variable provider).
+            "start info variable": (
+                "$BridgeChildStartInfo = New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{ FileName = 'x' }\n"
+                "$BridgeChild = [System.Diagnostics.Process]::Start($BridgeChildStartInfo)"
+            ),
+            "param start info": (
+                "param($BridgeChildStartInfo = 'cmd.exe')\n"
+                "$BridgeChild = [System.Diagnostics.Process]::Start($BridgeChildStartInfo)"
+            ),
+            "string start": "$BridgeChild = [System.Diagnostics.Process]::Start('cmd.exe')",
+            "new-object alone": "New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{ FileName = 'x' }",
+            "new-object positional": swap(probe, "New-Object -TypeName System.Diagnostics.ProcessStartInfo", "New-Object System.Diagnostics.ProcessStartInfo"),
+            "other new-object type": swap(probe, "System.Diagnostics.ProcessStartInfo", "System.Net.WebClient"),
         }
         for label, extra in cases.items():
             with self.subTest(case=label):
                 self.assertIn(DYNAMIC, self.effects(extra + "\n"))
+
+    # --- the launch name must be bound exactly once ---------------------
+
+    def test_launch_name_must_be_bound_only_by_the_validated_start(self):
+        probe = launch("probe")
+        cases = {
+            "rebound by assignment": probe + "$BridgeChild = [pscustomobject]@{ HasExited = $true; ExitCode = 0 }\n$BridgeChild.Kill()",
+            "assigned twice": probe + probe,
+            "scoped assignment": probe + "$script:BridgeChild = $null\n$BridgeChild.Kill()",
+            "param binding": "param($BridgeChild)\n" + probe,
+            "function param binding": probe + "function Get-Child { param($BridgeChild) }",
+            "foreach binding": probe + "foreach ($BridgeChild in @(1)) { Write-Output x }",
+            "out-variable": probe + "Write-Output 1 -OutVariable BridgeChild",
+            "out-variable append": probe + "Write-Output 1 -OutVariable +BridgeChild",
+            "out-variable alias": probe + "Write-Output 1 -ov BridgeChild",
+            "out-variable prefix": probe + "Write-Output 1 -OutVar BridgeChild",
+            "out-variable colon": probe + "Write-Output 1 -OutVariable:BridgeChild",
+            "out-variable computed": probe + "$BridgeName = 'Bridge' + 'Child'\nWrite-Output 1 -OutVariable $BridgeName",
+            "error-variable": probe + "Get-Item -LiteralPath C:\\x -ErrorVariable BridgeChild",
+            "warning-variable": probe + "Write-Output 1 -WarningVariable BridgeChild",
+            "information-variable": probe + "Write-Output 1 -InformationVariable BridgeChild",
+            "pipeline-variable": probe + "Get-ChildItem -LiteralPath C:\\x -PipelineVariable BridgeChild | Write-Output",
+            "pipeline-variable alias": probe + "Get-ChildItem -LiteralPath C:\\x -pv BridgeChild | Write-Output",
+            "non-root start": "if ($true) {\n" + probe + "}",
+            "piped start": swap(probe, "\n}))", "\n})) | Select-Object -First 1"),
+            "scoped start target": swap(probe, "$BridgeChild = ", "$script:BridgeChild = "),
+            "other launch name": swap(probe, "$BridgeChild = ", "$Evil = "),
+            "short type name": swap(probe, "[System.Diagnostics.Process]", "[Diagnostics.Process]"),
+            "other type": swap(probe, "[System.Diagnostics.Process]", "[System.IO.File]"),
+            "other method": probe + "$BridgeChild.Refresh()",
+            "kill with argument": probe + "$BridgeChild.Kill($true)",
+            "wait with timeout": probe + "$BridgeChild.WaitForExit(1000)",
+            "other variable kill": probe + "$BridgeOther.Kill()",
+            "other stream method": probe + "$BridgeChild.StandardInput.WriteLine('x')",
+            "other static method": "[System.Diagnostics.Process]::GetProcessById(4)",
+            "member assignment": probe + "$BridgeChild.EnableRaisingEvents = $true",
+        }
+        for label, extra in cases.items():
+            with self.subTest(case=label):
+                self.assertIn(DYNAMIC, self.effects(extra + "\n"))
+
+    def test_variable_binding_parameters_are_allowed_without_a_launch(self):
+        # The binding rule only applies once a classified launch exists.
+        effects = self.effects("Get-Item -LiteralPath C:\\x -ErrorVariable BridgeReadErrors\n")
+        self.assertNotIn(DYNAMIC, effects)
+
+    # --- output capture write ------------------------------------------
+
+    def test_output_capture_write_variations_stay_dynamic(self):
+        cases = {
+            "path": "Set-Content -Path $BridgeChildStdoutPath -Value $BridgeChildStdoutText -Encoding UTF8",
+            "other path variable": "Set-Content -LiteralPath $BridgeRunnerRoot -Value $BridgeChildStdoutText -Encoding UTF8",
+            "other value variable": "Set-Content -LiteralPath $BridgeTargetProbeStdoutPath -Value $BridgeTargetSha -Encoding UTF8",
+            "expression value": "Set-Content -LiteralPath $BridgeTargetProbeStdoutPath -Value (Get-Date) -Encoding UTF8",
+            "literal path": "Set-Content -LiteralPath C:\\x -Value $BridgeChildStdoutText -Encoding UTF8",
+            "other encoding": "Set-Content -LiteralPath $BridgeTargetProbeStdoutPath -Value $BridgeChildStdoutText -Encoding ASCII",
+            "extra parameter": "Set-Content -LiteralPath $BridgeTargetProbeStdoutPath -Value $BridgeChildStdoutText -Encoding UTF8 -Force",
+            "pipeline": "$BridgeChildStdoutText | Set-Content -LiteralPath $BridgeTargetProbeStdoutPath -Value $BridgeChildStdoutText -Encoding UTF8",
+            "scoped path": "Set-Content -LiteralPath $env:BridgeTargetProbeStdoutPath -Value $BridgeChildStdoutText -Encoding UTF8",
+        }
+        for label, extra in cases.items():
+            with self.subTest(case=label):
+                self.assertIn(DYNAMIC, self.effects(extra + "\n"))
+
+    # --- Start-Process -Credential --------------------------------------
 
     def test_start_process_with_credential_is_rejected(self):
         cases = (

@@ -273,6 +273,7 @@ class PrivateCiPhase4OperatorSpecRedTests(unittest.TestCase):
             spec.allowed_effect_families,
             (
                 "ACL_MUTATION",
+                "EVIDENCE_OUTPUT_WRITE",
                 "FILESYSTEM_WRITE_MUTATION",
                 "PROCESS_CONTROL",
                 "PROCESS_LAUNCH",
@@ -348,8 +349,7 @@ class PrivateCiPhase4CandidateRedTests(unittest.TestCase):
             "Get-Credential",
             "Copy-Item",
             "icacls.exe",
-            "New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{",
-            "$BridgeChild = [System.Diagnostics.Process]::Start($BridgeChildStartInfo)",
+            "$BridgeChild = [System.Diagnostics.Process]::Start((New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{",
             "Password = $BridgeTargetCredential.Password",
             "LoadUserProfile = $true",
             "$BridgeChild.Kill()",
@@ -446,10 +446,10 @@ class PrivateCiPhase4CandidateRedTests(unittest.TestCase):
         block = "\n".join(lines[credential_begin:credential_end])
         self.assertIn("Password = $BridgeTargetCredential.Password", block)
         self.assertIn(
-            "$BridgeCredentialCheck = [System.Diagnostics.Process]::Start("
-            "$BridgeCredentialCheckStartInfo)",
+            "$BridgeCredentialCheck = [System.Diagnostics.Process]::Start((New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{",
             block,
         )
+        self.assertNotIn("StartInfo", block)
         self.assertIn("$BridgeCredentialCheck.WaitForExit()", block)
         self.assertIn("$BridgeCredentialCheck.ExitCode", block)
         self.assertNotIn("Start-Process", block)

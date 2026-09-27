@@ -79,7 +79,7 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
         self.assertEqual(
             spec.allowed_effect_families,
             (
-                "FILESYSTEM_WRITE_MUTATION",
+                "EVIDENCE_OUTPUT_WRITE",
                 "HTTP_API_ACCESS",
                 "PROCESS_CONTROL",
                 "PROCESS_LAUNCH",
@@ -125,8 +125,7 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
             evidence.binding.runner_root,
             evidence.binding.target_identity,
             "run.cmd",
-            "New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{",
-            "$BridgeChild = [System.Diagnostics.Process]::Start($BridgeChildStartInfo)",
+            "$BridgeChild = [System.Diagnostics.Process]::Start((New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{",
             "Password = $BridgeTargetCredential.Password",
             "LoadUserProfile = $true",
             "$BridgeChild.Kill()",
@@ -193,10 +192,11 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
         root = evidence.binding.runner_root
         self.assertEqual(candidate.count("[System.Diagnostics.Process]::Start("), 2)
         self.assertIn(
-            "$BridgeSecurityProbeChild = [System.Diagnostics.Process]::Start("
-            "$BridgeSecurityProbeChildStartInfo)",
+            "$BridgeSecurityProbeChild = [System.Diagnostics.Process]::Start((New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{",
             candidate,
         )
+        # Option A: no start-info variable exists that could be rebound.
+        self.assertNotIn("StartInfo", candidate)
         self.assertIn("$BridgeSecurityProbeChild.Kill()", candidate)
         self.assertIn(
             "Set-Content -LiteralPath $BridgeSecurityProbeStdoutPath "
@@ -209,8 +209,8 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
             + "\\issue225-phase5-runner-stderr.log\"\"'",
             candidate,
         )
-        runner_block = candidate[candidate.index("$BridgeChildStartInfo = New-Object"):]
-        runner_block = runner_block[: runner_block.index("}")]
+        runner_block = candidate[candidate.index("$BridgeChild = [System.Diagnostics.Process]::Start((New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{"):]
+        runner_block = runner_block[: runner_block.index("}))")]
         self.assertNotIn("RedirectStandardOutput", runner_block)
         self.assertNotIn("RedirectStandardError", runner_block)
 
