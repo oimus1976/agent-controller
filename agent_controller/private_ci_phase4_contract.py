@@ -575,9 +575,16 @@ def render_phase4_target_environment_candidate(
         "if ($BridgeBrokerUserFields.Count -ne 2 -or $BridgeBrokerUserFields[0] -ine $BridgeBrokerIdentity -or $BridgeBrokerUserFields[1] -notlike 'S-1-5-*') { throw 'Phase 4 broker SID readback failed' }",
         "$BridgeBrokerSid = $BridgeBrokerUserFields[1]",
         "if ($BridgeBrokerSid -eq $BridgeTargetSid) { throw 'Phase 4 broker and target identities must be distinct' }",
-        "icacls.exe $BridgeRunnerRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' ('*' + $BridgeBrokerSid + ':(OI)(CI)(M)') ('*' + $BridgeTargetSid + ':(OI)(CI)(M)') /T /C | Write-Host",
+        # Protect the root and grant the four principals as inheritable entries,
+        # then reset every descendant to inherit only from the root. A recursive
+        # /grant:r with (OI)(CI) leaves files with an empty protected DACL,
+        # because inheritance flags cannot be applied to files.
+        "icacls.exe $BridgeRunnerRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' ('*' + $BridgeBrokerSid + ':(OI)(CI)(M)') ('*' + $BridgeTargetSid + ':(OI)(CI)(M)') /C | Write-Host",
         "$BridgeAclExitCode = $LASTEXITCODE",
         "if ($BridgeAclExitCode -ne 0) { throw 'Phase 4 runner-root ACL preparation failed' }",
+        "icacls.exe ($BridgeRunnerRoot + '\\*') /reset /T /C | Write-Host",
+        "$BridgeAclResetExitCode = $LASTEXITCODE",
+        "if ($BridgeAclResetExitCode -ne 0) { throw 'Phase 4 runner-tree ACL reset failed' }",
         # icacls /T /C can report exit 0 after per-item failures: prove the
         # result by reading back every item instead of trusting the exit code.
         "$BridgeAclSidAlias = @{ 'SY' = 'S-1-5-18'; 'BA' = 'S-1-5-32-544' }",
