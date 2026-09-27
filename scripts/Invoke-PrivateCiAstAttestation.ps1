@@ -363,29 +363,33 @@ function Test-PlainParameterElement {
     )
 }
 
-function Test-ProcessStartInfoValue {
+# Returns the value expression of one -Property entry, or $null when the value
+# is anything but a string constant, a plain variable, or a plain member read.
+function Get-ProcessStartInfoValueExpression {
     param($Statement)
 
-    $Expression = $null
     $Element = $Statement
     if ($Element -is [System.Management.Automation.Language.PipelineAst]) {
         if ($Element.PipelineElements.Count -ne 1) {
-            return $false
+            return $null
         }
         $Element = $Element.PipelineElements[0]
     }
     if ($Element -isnot [System.Management.Automation.Language.CommandExpressionAst]) {
-        return $false
+        return $null
     }
     if ($Element.Redirections.Count -ne 0) {
-        return $false
+        return $null
     }
     $Expression = $Element.Expression
     if ($Expression -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
-        return $true
+        return $Expression
     }
     if ($Expression -is [System.Management.Automation.Language.VariableExpressionAst]) {
-        return ($null -ne (Get-PlainVariableName -Node $Expression))
+        if ($null -ne (Get-PlainVariableName -Node $Expression)) {
+            return $Expression
+        }
+        return $null
     }
     if (
         $Expression -is [System.Management.Automation.Language.MemberExpressionAst] -and
@@ -394,10 +398,39 @@ function Test-ProcessStartInfoValue {
         $Expression.Member -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
         $null -ne (Get-PlainVariableName -Node $Expression.Expression)
     ) {
-        return $true
+        return $Expression
     }
-    return $false
+    return $null
 }
+
+function Test-BooleanLiteral {
+    param($Expression, [bool]$Expected)
+
+    $Name = Get-PlainVariableName -Node $Expression
+    if ($Expected) {
+        return ($Name -ieq 'true')
+    }
+    return ($Name -ieq 'false')
+}
+
+function Test-NonEmptyStringLiteral {
+    param($Expression)
+
+    return (
+        $Expression -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+        -not [string]::IsNullOrWhiteSpace($Expression.Value)
+    )
+}
+
+# Each start-info name must carry exactly one of the rendered key sets (Codex
+# P1 on ea13afd): a subset could drop UserName/Domain/Password and start the
+# child as the broker.
+$StartInfoCredentialKeys = @(
+    'createnowindow', 'domain', 'filename', 'loaduserprofile', 'password',
+    'useshellexecute', 'username', 'workingdirectory'
+)
+$StartInfoRunnerKeys = @($StartInfoCredentialKeys + @('arguments') | Sort-Object)
+$StartInfoProbeKeys = @($StartInfoRunnerKeys + @('redirectstandarderror', 'redirectstandardoutput') | Sort-Object)
 
 function Test-ProcessStartInfoShape {
     param($CommandAst)
@@ -421,7 +454,7 @@ function Test-ProcessStartInfoShape {
     if ($Elements[4] -isnot [System.Management.Automation.Language.HashtableAst]) {
         return $false
     }
-    $SeenKeys = @{}
+    $Values = @{}
     foreach ($Pair in $Elements[4].KeyValuePairs) {
         $Key = $Pair.Item1
         if ($Key -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) {
@@ -431,20 +464,72 @@ function Test-ProcessStartInfoShape {
             return $false
         }
         $KeyId = $Key.Value.ToLowerInvariant()
-        if ($SeenKeys.ContainsKey($KeyId)) {
+        if ($Values.ContainsKey($KeyId)) {
             return $false
         }
-        $SeenKeys[$KeyId] = $true
-        if (-not (Test-ProcessStartInfoValue -Statement $Pair.Item2)) {
+        $ValueExpression = Get-ProcessStartInfoValueExpression -Statement $Pair.Item2
+        if ($null -eq $ValueExpression) {
             return $false
         }
+        $Values[$KeyId] = $ValueExpression
     }
     $Assignment = Get-DirectRootAssignment -Node $CommandAst
     if ($null -eq $Assignment) {
         return $false
     }
     $LeftName = Get-PlainVariableName -Node $Assignment.Left
-    return ($null -ne $LeftName -and $ProcessStartInfoNames -contains $LeftName)
+    if ($null -eq $LeftName -or $ProcessStartInfoNames -notcontains $LeftName) {
+        return $false
+    }
+
+    $ObservedKeys = (@($Values.Keys) | Sort-Object) -join ','
+    $IsCredentialShape = $ObservedKeys -ceq (($StartInfoCredentialKeys | Sort-Object) -join ',')
+    $IsRunnerShape = $ObservedKeys -ceq ($StartInfoRunnerKeys -join ',')
+    $IsProbeShape = $ObservedKeys -ceq ($StartInfoProbeKeys -join ',')
+    if ($LeftName -ieq 'BridgeCredentialCheckStartInfo') {
+        $ShapeAllowed = $IsCredentialShape
+        $ExpectedProfile = $false
+    }
+    elseif ($LeftName -ieq 'BridgeSecurityProbeChildStartInfo') {
+        $ShapeAllowed = $IsProbeShape
+        $ExpectedProfile = $true
+    }
+    else {
+        $ShapeAllowed = $IsProbeShape -or $IsRunnerShape
+        $ExpectedProfile = $true
+    }
+    if (-not $ShapeAllowed) {
+        return $false
+    }
+
+    if (-not (Test-NonEmptyStringLiteral -Expression $Values['username'])) {
+        return $false
+    }
+    if (-not (Test-NonEmptyStringLiteral -Expression $Values['domain'])) {
+        return $false
+    }
+    $PasswordExpression = $Values['password']
+    if (
+        $PasswordExpression -isnot [System.Management.Automation.Language.MemberExpressionAst] -or
+        $PasswordExpression.Member.Value -ine 'Password'
+    ) {
+        return $false
+    }
+    if (-not (Test-BooleanLiteral -Expression $Values['useshellexecute'] -Expected $false)) {
+        return $false
+    }
+    if (-not (Test-BooleanLiteral -Expression $Values['createnowindow'] -Expected $true)) {
+        return $false
+    }
+    if (-not (Test-BooleanLiteral -Expression $Values['loaduserprofile'] -Expected $ExpectedProfile)) {
+        return $false
+    }
+    foreach ($RedirectKey in @('redirectstandardoutput', 'redirectstandarderror')) {
+        if ($Values.ContainsKey($RedirectKey) -and -not (Test-BooleanLiteral -Expression $Values[$RedirectKey] -Expected $true)) {
+            return $false
+        }
+    }
+    return $true
 }
 
 # Returns PROCESS_LAUNCH, PROCESS_CONTROL, READ, or $null for anything else.

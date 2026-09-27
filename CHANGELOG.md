@@ -33,7 +33,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
   - Phase 5 の runner は、長時間動くのでパイプを使わない。`cmd.exe /d /s /c "run.cmd 1>"<stdout>" 2>"<stderr>""` で、target 自身が出力ファイルを書く。パスは Python 側で、`"%^&|<>!` と制御文字を含まないことを確かめる。probe の引数に埋め込む値も、`"` と制御文字を含まず、末尾が `\` でないことを確かめる。
   - Phase 5 は、broker が security probe の出力を書くので、許可する効果に `FILESYSTEM_WRITE_MUTATION` を加えた。
 - operator-step AST gate に、決まった形だけを許可として加えた。変数名は `BridgeChild`、`BridgeSecurityProbeChild`、`BridgeCredentialCheck` と、それぞれに `StartInfo` を付けたものに限る。
-  - `ProcessStartInfo` の作成(効果なし):キーは 11 個の許可リストのみ。値は文字列定数、修飾なしの変数、変数のメンバー読み取りのみ。ルートでの代入に限る。
+  - `ProcessStartInfo` の作成(効果なし):ルートでの代入に限る。キーの集合は、起動名ごとにレンダリングされる形と**完全に一致**しなければならない(資格情報確認は 8 キー、probe は 11 キー、Phase 5 の runner は 9 キー)。値は文字列定数、修飾なしの変数、変数のメンバー読み取りのみで、さらに `UserName`/`Domain` は空でない文字列定数、`Password` は `$<変数>.Password`、`UseShellExecute = $false`、`CreateNoWindow = $true`、Redirect* は `$true`、`LoadUserProfile` は資格情報確認だけ `$false` に固定する(Codex P1:キーの部分集合だと broker のアカウントで起動できてしまう)。
   - ルートでの `$<n> = [System.Diagnostics.Process]::Start($<n>StartInfo)`(PROCESS_LAUNCH)、`$<n>.Kill()`(PROCESS_CONTROL)、`$<n>.StandardOutput/StandardError.ReadToEndAsync()` と `$<n>.WaitForExit()`(読み取り)。
   - `Set-Content -LiteralPath <変数> -Value <変数> -Encoding UTF8`(FILESYSTEM_WRITE_MUTATION)。
   - これらの名前に別の値を代入した場合、引数・型・キー・値の形が違う場合、ルート以外で起動した場合は、従来どおり `DYNAMIC_OR_UNKNOWN_COMMAND` になる。
