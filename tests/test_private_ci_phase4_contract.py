@@ -449,7 +449,7 @@ class PrivateCiPhase4CandidateRedTests(unittest.TestCase):
             "$BridgeCredentialCheck = [System.Diagnostics.Process]::Start((New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{",
             block,
         )
-        self.assertNotIn("StartInfo", block)
+        self.assertNotRegex(block, r"\$\w*StartInfo\b")
         self.assertIn("$BridgeCredentialCheck.WaitForExit()", block)
         self.assertIn("$BridgeCredentialCheck.ExitCode", block)
         self.assertNotIn("Start-Process", block)

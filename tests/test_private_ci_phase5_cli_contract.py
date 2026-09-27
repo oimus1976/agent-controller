@@ -60,16 +60,14 @@ class PrivateCiPhase5CliContractRedTests(unittest.TestCase):
         )
         self.assertLess(
             probe,
-            contract.index(
-                '"$BridgeSecurityProbeChild = [System.Diagnostics.Process]::Start('
-            ),
+            contract.index('"BridgeSecurityProbeChild",'),
         )
         probe_pass = contract.index(
             "PHASE5_SECURITY_CONTEXT_REVALIDATED",
             probe,
         )
         listener = contract.index(
-            '"$BridgeChild = [System.Diagnostics.Process]::Start(',
+            '"BridgeChild",',
             probe_pass,
         )
         self.assertLess(probe, probe_pass)

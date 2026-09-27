@@ -341,6 +341,8 @@ PHASE4_TRANSCRIPT_FILENAME = "issue225-phase4-target-environment.log"
 PHASE4_SUCCESS_MARKER = "PHASE4_TARGET_ENVIRONMENT_PASS"
 PHASE4_EFFECTS = (
     "ACL_MUTATION",
+    # #270: the broker writes the target-probe output it read through pipes.
+    "EVIDENCE_OUTPUT_WRITE",
     "FILESYSTEM_WRITE_MUTATION",
     "PROCESS_CONTROL",
     "PROCESS_LAUNCH",
@@ -429,7 +431,7 @@ def quoted_argument_value(value: str) -> str:
     return value
 
 
-def target_launch_start_info_lines(
+def target_launch_lines(
     variable: str,
     *,
     file_name: str,
@@ -441,16 +443,19 @@ def target_launch_start_info_lines(
     working_directory: str,
     redirect_output: bool,
 ) -> list[str]:
-    """Render the one ProcessStartInfo shape the AST gate accepts (#270).
+    """Render the one target-launch shape the AST gate accepts (#270).
 
-    Every value is a single-quoted literal or a plain variable/member read;
-    the gate rejects member assignment, so all properties are set at creation.
+    ``$<variable> = [System.Diagnostics.Process]::Start((New-Object ...))``:
+    the ProcessStartInfo is passed inline, so no start-info variable exists
+    that a param default, -OutVariable or the Variable provider could rebind.
+    Every value is a single-quoted literal or a plain variable/member read,
+    and the gate pins each one per launch shape.
     """
     first = f"    FileName = {file_name}"
     if arguments is not None:
         first += f"; Arguments = {arguments}"
     lines = [
-        f"${variable}StartInfo = New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{{",
+        f"${variable} = [System.Diagnostics.Process]::Start((New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{{",
         first,
         f"    UserName = {_ps_single_quoted(user_name)}; Domain = {_ps_single_quoted(domain)}",
         f"    Password = {password}; LoadUserProfile = ${'true' if load_user_profile else 'false'}",
@@ -458,7 +463,7 @@ def target_launch_start_info_lines(
     ]
     if redirect_output:
         lines.append("    RedirectStandardOutput = $true; RedirectStandardError = $true")
-    lines.append("}")
+    lines.append("}))")
     return lines
 
 
@@ -620,7 +625,7 @@ def render_phase4_target_environment_candidate(
         # #270: Start-Process -Credential cannot be waited on by a non-elevated
         # broker; Process.Start keeps the creation handle. A wrong password
         # makes Process.Start throw before anything else runs.
-        *target_launch_start_info_lines(
+        *target_launch_lines(
             "BridgeCredentialCheck",
             file_name="$BridgeCredentialCheckPath",
             arguments=None,
@@ -631,7 +636,6 @@ def render_phase4_target_environment_candidate(
             working_directory="$BridgeCredentialCheckDirectory",
             redirect_output=False,
         ),
-        "$BridgeCredentialCheck = [System.Diagnostics.Process]::Start($BridgeCredentialCheckStartInfo)",
         "if ($null -eq $BridgeCredentialCheck) { throw 'Phase 4 target credential validation did not start' }",
         "$BridgeCredentialCheck.WaitForExit()",
         "if ($BridgeCredentialCheck.ExitCode -ne 0) { throw 'Phase 4 target credential validation failed' }",
@@ -726,7 +730,8 @@ def render_phase4_target_environment_candidate(
             " + ' -ResultPath \"' + $BridgeTargetProbeResultPath + '\"'"
             " + ' -TrustedGhPath \"' + $BridgeTrustedGhPath + '\"'"
         ),
-        *target_launch_start_info_lines(
+        "$BridgeStartedAt = Get-Date",
+        *target_launch_lines(
             "BridgeChild",
             file_name="'powershell.exe'",
             arguments="$BridgeTargetProbeArguments",
@@ -737,8 +742,6 @@ def render_phase4_target_environment_candidate(
             working_directory="$BridgeRunnerRoot",
             redirect_output=True,
         ),
-        "$BridgeStartedAt = Get-Date",
-        "$BridgeChild = [System.Diagnostics.Process]::Start($BridgeChildStartInfo)",
         "$BridgeChildStdoutTask = $BridgeChild.StandardOutput.ReadToEndAsync()",
         "$BridgeChildStderrTask = $BridgeChild.StandardError.ReadToEndAsync()",
         "while (-not $BridgeChild.HasExited) {",

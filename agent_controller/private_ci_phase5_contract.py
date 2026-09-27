@@ -18,7 +18,7 @@ from agent_controller.private_ci_phase4_contract import (
     PrivateCiPilotBinding,
     pilot_binding_reason_codes,
     quoted_argument_value,
-    target_launch_start_info_lines,
+    target_launch_lines,
 )
 
 
@@ -30,7 +30,8 @@ PHASE5_TRANSCRIPT_FILENAME = "issue225-phase5-exactly-one-job.log"
 PHASE5_SUCCESS_MARKER = "PHASE5_EXACTLY_ONE_JOB_ATTEMPT_COMPLETE"
 PHASE5_EFFECTS = (
     # #270: the broker writes the security-probe output it read through pipes.
-    "FILESYSTEM_WRITE_MUTATION",
+    # A narrow family: Phase 5 still allows no general filesystem write.
+    "EVIDENCE_OUTPUT_WRITE",
     "HTTP_API_ACCESS",
     "PROCESS_CONTROL",
     "PROCESS_LAUNCH",
@@ -340,7 +341,8 @@ def render_phase5_exactly_one_job_candidate(
             " + ' -ResultPath \"' + $BridgeSecurityProbeResultPath + '\"'"
             " + ' -TrustedGhPath \"' + $BridgeTrustedGhPath + '\"'"
         ),
-        *target_launch_start_info_lines(
+        "$BridgeSecurityProbeStartedAt = Get-Date",
+        *target_launch_lines(
             "BridgeSecurityProbeChild",
             file_name="'powershell.exe'",
             arguments="$BridgeSecurityProbeArguments",
@@ -351,8 +353,6 @@ def render_phase5_exactly_one_job_candidate(
             working_directory="$BridgeRunnerRoot",
             redirect_output=True,
         ),
-        "$BridgeSecurityProbeStartedAt = Get-Date",
-        "$BridgeSecurityProbeChild = [System.Diagnostics.Process]::Start($BridgeSecurityProbeChildStartInfo)",
         "$BridgeSecurityProbeChildStdoutTask = $BridgeSecurityProbeChild.StandardOutput.ReadToEndAsync()",
         "$BridgeSecurityProbeChildStderrTask = $BridgeSecurityProbeChild.StandardError.ReadToEndAsync()",
         "while (-not $BridgeSecurityProbeChild.HasExited) {",
@@ -389,7 +389,7 @@ def render_phase5_exactly_one_job_candidate(
         # #270: the long-running listener keeps no broker pipes; cmd.exe (as
         # the target) writes its output files. The broker holds the creation
         # handle for HasExited, ExitCode and Kill().
-        *target_launch_start_info_lines(
+        *target_launch_lines(
             "BridgeChild",
             file_name="'cmd.exe'",
             arguments=_ps_single_quoted(runner_arguments),
@@ -400,7 +400,6 @@ def render_phase5_exactly_one_job_candidate(
             working_directory="$BridgeRunnerRoot",
             redirect_output=False,
         ),
-        "$BridgeChild = [System.Diagnostics.Process]::Start($BridgeChildStartInfo)",
         "Start-Sleep -Seconds 1",
         "if ($BridgeChild.HasExited) {",
         "    $BridgeChildExitCode = $BridgeChild.ExitCode",

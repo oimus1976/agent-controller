@@ -196,7 +196,7 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
             candidate,
         )
         # Option A: no start-info variable exists that could be rebound.
-        self.assertNotIn("StartInfo", candidate)
+        self.assertNotRegex(candidate, r"\$\w*StartInfo\b")
         self.assertIn("$BridgeSecurityProbeChild.Kill()", candidate)
         self.assertIn(
             "Set-Content -LiteralPath $BridgeSecurityProbeStdoutPath "

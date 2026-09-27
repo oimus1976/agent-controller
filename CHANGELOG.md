@@ -26,17 +26,18 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - オーナーが実機で切り分けた(diag1〜4、#270)。.NET の `Process.Start`(`ProcessStartInfo` の `UserName`/`Domain`/`Password`)は作成時のハンドルを保持し、待機、終了コード、出力の取得が昇格なしで動くことを確認した。
 - #265 の CI 回帰テストは、資格情報の確認ブロックを昇格した管理者のまま実行していたため、表面化しなかった。
 
-### Changed（オーナー承認の設計 #270 comment 5852616248、方針 1）
+### Changed（オーナー承認の設計 #270 comment 5852616248、方針 1。Codex レビュー後にオーナー承認の案 A で改訂）
 
-- Phase 4 の資格情報確認と target probe、Phase 5 の security probe と runner を、`New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{…}` と `[System.Diagnostics.Process]::Start(…)` で起動するようにした。タイムアウト時は、保持しているハンドルで `Kill()` する(`Stop-Process -Id` をやめた)。
+- Phase 4 の資格情報確認と target probe、Phase 5 の security probe と runner を、`$<n> = [System.Diagnostics.Process]::Start((New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{…}))` で起動するようにした。`ProcessStartInfo` は変数に入れずインラインで渡す(案 A:param の既定値、`-OutVariable`、Variable プロバイダーで差し替えられる変数を作らない)。タイムアウト時は、保持しているハンドルで `Kill()` する(`Stop-Process -Id` をやめた)。
   - probe の標準出力と標準エラーは .NET のパイプ(`ReadToEndAsync`)で読み、終了後に broker が従来と同じパスへ `Set-Content -Encoding UTF8` で書く。
   - Phase 5 の runner は、長時間動くのでパイプを使わない。`cmd.exe /d /s /c "run.cmd 1>"<stdout>" 2>"<stderr>""` で、target 自身が出力ファイルを書く。パスは Python 側で、`"%^&|<>!` と制御文字を含まないことを確かめる。probe の引数に埋め込む値も、`"` と制御文字を含まず、末尾が `\` でないことを確かめる。
-  - Phase 5 は、broker が security probe の出力を書くので、許可する効果に `FILESYSTEM_WRITE_MUTATION` を加えた。
-- operator-step AST gate に、決まった形だけを許可として加えた。変数名は `BridgeChild`、`BridgeSecurityProbeChild`、`BridgeCredentialCheck` と、それぞれに `StartInfo` を付けたものに限る。
-  - `ProcessStartInfo` の作成(効果なし):ルートでの代入に限る。キーの集合は、起動名ごとにレンダリングされる形と**完全に一致**しなければならない(資格情報確認は 8 キー、probe は 11 キー、Phase 5 の runner は 9 キー)。値は文字列定数、修飾なしの変数、変数のメンバー読み取りのみで、さらに `UserName`/`Domain` は空でない文字列定数、`Password` は `$<変数>.Password`、`UseShellExecute = $false`、`CreateNoWindow = $true`、Redirect* は `$true`、`LoadUserProfile` は資格情報確認だけ `$false` に固定する(Codex P1:キーの部分集合だと broker のアカウントで起動できてしまう)。
-  - ルートでの `$<n> = [System.Diagnostics.Process]::Start($<n>StartInfo)`(PROCESS_LAUNCH)、`$<n>.Kill()`(PROCESS_CONTROL)、`$<n>.StandardOutput/StandardError.ReadToEndAsync()` と `$<n>.WaitForExit()`(読み取り)。
-  - `Set-Content -LiteralPath <変数> -Value <変数> -Encoding UTF8`(FILESYSTEM_WRITE_MUTATION)。
-  - これらの名前に別の値を代入した場合、引数・型・キー・値の形が違う場合、ルート以外で起動した場合は、従来どおり `DYNAMIC_OR_UNKNOWN_COMMAND` になる。
+  - broker が書く probe の出力は、新しい狭い効果の種類 `EVIDENCE_OUTPUT_WRITE` とした。Phase 4 と Phase 5 の許可リストに加えた。Phase 5 には `FILESYSTEM_WRITE_MUTATION`(`Copy-Item` も含む)を与えない(案 A:途中の head `53b4c5e` で一時的に Phase 5 へ加えていた退行を戻した)。
+- operator-step AST gate に、決まった形だけを許可として加えた。起動名は `BridgeChild`、`BridgeSecurityProbeChild`、`BridgeCredentialCheck` に限る。
+  - ルートでの `$<n> = [System.Diagnostics.Process]::Start((New-Object …))`(PROCESS_LAUNCH)。インラインの `ProcessStartInfo` は、起動名と形ごとにキーの集合が**完全に一致**し(資格情報確認 8、probe 11、Phase 5 runner 9)、値も固定する:`FileName`・`Arguments`・`WorkingDirectory` は形ごとの値(資格情報確認は `$BridgeCredentialCheckPath`/`$BridgeCredentialCheckDirectory`、Phase 4 probe は `'powershell.exe'`/`$BridgeTargetProbeArguments`/`$BridgeRunnerRoot`、Phase 5 security probe は `'powershell.exe'`/`$BridgeSecurityProbeArguments`/`$BridgeRunnerRoot`、runner は `'cmd.exe'`/上記の形の文字列定数/`$BridgeRunnerRoot`)、`Password` は `$BridgeTargetCredential.Password`、`UserName`/`Domain` は空でない文字列定数、`UseShellExecute = $false`、`CreateNoWindow = $true`、Redirect* は `$true`、`LoadUserProfile` は資格情報確認だけ `$false`(Codex P1 × 2)。
+  - `$<n>.Kill()`(PROCESS_CONTROL)、`$<n>.StandardOutput/StandardError.ReadToEndAsync()` と `$<n>.WaitForExit()`(読み取り)。
+  - 起動名は、検証済みのルートの起動でちょうど 1 回だけ束縛されなければならない。別の代入、スコープ付きの代入、param(関数の param を含む)、foreach、変数を束縛する共通パラメーター(`-OutVariable`/`-ErrorVariable`/`-WarningVariable`/`-InformationVariable`/`-PipelineVariable`、別名・省略形・`+` 付き・計算した値を含む)は `DYNAMIC_OR_UNKNOWN_COMMAND` にする(Codex P1)。
+  - `Set-Content -LiteralPath $Bridge…Std(out|err)Path -Value $Bridge…Std(out|err)Text -Encoding UTF8`(EVIDENCE_OUTPUT_WRITE)。
+  - 上記以外のメソッド呼び出し、`New-Object`、`Set-Content` は、従来どおり `DYNAMIC_OR_UNKNOWN_COMMAND`。
   - 子プロセスの終了コードとハートビートの証明は、`Start-Process -PassThru` に加えて、この `Process::Start` の形も受け付ける。
 - `Start-Process` に `-Credential`(省略形と別名 `-RunAs`、スプラッティングを含む)を付けると、gate は `START_PROCESS_CREDENTIAL_REJECTED` を出す。Python 側は、spec の許可リストにかかわらず `AST_START_PROCESS_CREDENTIAL_REJECTED` で止める。
 - `scripts/Test-PrivateCiTargetCredential.ps1` も同じ .NET の形にした(gate の対象外)。失敗時は `reason=win32_<コード>` とメッセージを出す。ログオン後に whoami の出力が期待した identity と一致することも確かめる。
@@ -45,6 +46,8 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 - RED(commit `a6067ec`):CI の Windows ランナーで、非管理者の broker として実行した資格情報確認ブロックが実機と同じ `Start-Process : Access is denied`(Win32Exception)で失敗し、オペレーター用スクリプトも正しいパスワードを `TARGET_CREDENTIAL_INVALID` と判定した。従来の `-Wait` の形が broker では native 5 になることを、特性テストとして固定した。gate の許可形はすべて `DYNAMIC_OR_UNKNOWN_COMMAND` になり、`Start-Process -Credential` は拒否されなかった。
 - GREEN:資格情報確認ブロック、Phase 4 の probe 起動ブロック(新しい区切りコメント `phase4-target-launch`)、オペレーター用スクリプトを、非管理者の broker として実行する。終了コードと出力が読めること、非 0 の終了で止まること、タイムアウト時に probe が `Kill()` で終了することを確かめる。
+- gate の役割:gate は効果の種類を分類する多層防御の一層であり、実行内容や identity の完全性は保証しない(引数を見ない `Start-Process` も PROCESS_LAUNCH になる)。完全性は、Python 側の candidate の正規形との完全一致の照合(Phase 4 plan と runtime、Phase 5 runtime)が担う。Variable プロバイダー経由の変数の差し替え(`Copy-Item`/`New-Item` と `variable:`)と、`using assembly`/`using module` は gate では検出できず、別 Issue で扱う。
+- Codex round 1(`ea13afd`)の P1(キーの部分集合)は RED `b798aad` → GREEN `53b4c5e`。round 2(`53b4c5e`)の P1 × 2(start info 変数の差し替え、値の差し替え)と、敵対的見直しで見つけた Phase 5 の許可範囲の退行は、RED `c9911ac` → 案 A で修正。
 - Phase 6 の `Stop-Process -Id $BridgeRunnerProcessId` は対象外(Phase 6 が昇格して動くかどうかの確認は別途)。
 - この修正の merge は、Phase 4 の再試行を承認するものではない。次の試行は、merge 後の `main` から、まったく新しい identity freeze で始める。
 
