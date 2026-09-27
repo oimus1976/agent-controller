@@ -296,6 +296,494 @@ foreach ($ForEachAst in $ForEachAsts) {
     }
 }
 
+# #270: fixed target-launch shapes. A non-elevated broker cannot wait on or
+# read a child started with Start-Process -Credential, so Phase 4/5 launch the
+# target through [System.Diagnostics.Process]::Start with an inline
+# ProcessStartInfo and keep the creation handle. Only the exact shapes below
+# are classified; any other method invocation stays DYNAMIC_OR_UNKNOWN_COMMAND.
+#
+# This gate classifies effect families and is defense in depth. It does not
+# prove payload or identity integrity: the exact canonical candidate
+# comparison in the Python contracts/runtimes owns that (Start-Process with an
+# arbitrary FilePath is also only PROCESS_LAUNCH here).
+$ProcessLaunchNames = @('BridgeChild', 'BridgeSecurityProbeChild', 'BridgeCredentialCheck')
+$ProcessStartInfoKeys = @(
+    'FileName', 'Arguments', 'UserName', 'Domain', 'Password', 'LoadUserProfile',
+    'UseShellExecute', 'CreateNoWindow', 'WorkingDirectory',
+    'RedirectStandardOutput', 'RedirectStandardError'
+)
+# Each launch name must carry exactly one of the rendered key sets (Codex P1 on
+# ea13afd: a subset could drop UserName/Domain/Password and start the child as
+# the broker).
+$StartInfoCredentialKeys = @(
+    'createnowindow', 'domain', 'filename', 'loaduserprofile', 'password',
+    'useshellexecute', 'username', 'workingdirectory'
+)
+$StartInfoRunnerKeys = @($StartInfoCredentialKeys + @('arguments'))
+$StartInfoProbeKeys = @($StartInfoRunnerKeys + @('redirectstandarderror', 'redirectstandardoutput'))
+# The Phase 5 listener writes its own output files through cmd.exe
+# redirection; the paths carry no cmd.exe metacharacter.
+$RunnerArgumentsPattern = '^/d /s /c "run\.cmd 1>"[^"%^&|<>!\r\n\t]+" 2>"[^"%^&|<>!\r\n\t]+""$'
+# Common parameters that bind a variable by name (about_CommonParameters).
+$VariableBindingParameterNames = @('outvariable', 'errorvariable', 'warningvariable', 'informationvariable', 'pipelinevariable')
+$VariableBindingParameterAliases = @('ov', 'ev', 'wv', 'iv', 'pv')
+
+function Get-PlainVariableName {
+    param($Node)
+
+    if ($Node -isnot [System.Management.Automation.Language.VariableExpressionAst]) {
+        return $null
+    }
+    if ($Node.Splatted) {
+        return $null
+    }
+    $UserPath = $Node.VariablePath.UserPath
+    if ($UserPath.IndexOf(':') -ge 0) {
+        return $null
+    }
+    return $UserPath
+}
+
+function Get-DirectRootAssignment {
+    param($Node)
+
+    $Current = $Node.Parent
+    if ($Current -is [System.Management.Automation.Language.CommandExpressionAst]) {
+        if (-not [object]::ReferenceEquals($Current.Expression, $Node) -or $Current.Redirections.Count -ne 0) {
+            return $null
+        }
+        $Current = $Current.Parent
+    }
+    if ($Current -is [System.Management.Automation.Language.PipelineAst]) {
+        if ($Current.PipelineElements.Count -ne 1) {
+            return $null
+        }
+        $Current = $Current.Parent
+    }
+    if ($Current -isnot [System.Management.Automation.Language.AssignmentStatementAst]) {
+        return $null
+    }
+    if ($Current.Operator -ne [System.Management.Automation.Language.TokenKind]::Equals) {
+        return $null
+    }
+    if ($RootStatements -notcontains $Current) {
+        return $null
+    }
+    return $Current
+}
+
+function Test-PlainParameterElement {
+    param($Element, [string]$Name)
+
+    return (
+        $Element -is [System.Management.Automation.Language.CommandParameterAst] -and
+        $Element.ParameterName -ieq $Name -and
+        $null -eq $Element.Argument
+    )
+}
+
+# Returns the value expression of one -Property entry, or $null when the value
+# is anything but a string constant, a plain variable, or a plain member read.
+function Get-ProcessStartInfoValueExpression {
+    param($Statement)
+
+    $Element = $Statement
+    if ($Element -is [System.Management.Automation.Language.PipelineAst]) {
+        if ($Element.PipelineElements.Count -ne 1) {
+            return $null
+        }
+        $Element = $Element.PipelineElements[0]
+    }
+    if ($Element -isnot [System.Management.Automation.Language.CommandExpressionAst]) {
+        return $null
+    }
+    if ($Element.Redirections.Count -ne 0) {
+        return $null
+    }
+    $Expression = $Element.Expression
+    if ($Expression -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
+        return $Expression
+    }
+    if ($Expression -is [System.Management.Automation.Language.VariableExpressionAst]) {
+        if ($null -ne (Get-PlainVariableName -Node $Expression)) {
+            return $Expression
+        }
+        return $null
+    }
+    if (
+        $Expression -is [System.Management.Automation.Language.MemberExpressionAst] -and
+        $Expression -isnot [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+        -not $Expression.Static -and
+        $Expression.Member -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+        $null -ne (Get-PlainVariableName -Node $Expression.Expression)
+    ) {
+        return $Expression
+    }
+    return $null
+}
+
+function Test-BooleanLiteral {
+    param($Expression, [bool]$Expected)
+
+    $Name = Get-PlainVariableName -Node $Expression
+    if ($Expected) {
+        return ($Name -ieq 'true')
+    }
+    return ($Name -ieq 'false')
+}
+
+function Test-NonEmptyStringLiteral {
+    param($Expression)
+
+    return (
+        $Expression -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+        -not [string]::IsNullOrWhiteSpace($Expression.Value)
+    )
+}
+
+function Test-VariableValue {
+    param($Expression, [string]$Name)
+
+    $ObservedName = Get-PlainVariableName -Node $Expression
+    return ($null -ne $ObservedName -and $ObservedName -ieq $Name)
+}
+
+function Test-StringValue {
+    param($Expression, [string]$Value)
+
+    return (
+        $Expression -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+        $Expression.Value -ieq $Value
+    )
+}
+
+function Test-KeySet {
+    param($Values, $ExpectedKeys)
+
+    $Observed = (@($Values.Keys) | Sort-Object) -join ','
+    $Expected = (@($ExpectedKeys) | Sort-Object) -join ','
+    return ($Observed -ceq $Expected)
+}
+
+# The inline New-Object passed as the single argument of Process.Start.
+function Get-InlineStartInfoCommand {
+    param($InvokeNode)
+
+    if ($null -eq $InvokeNode.Arguments -or $InvokeNode.Arguments.Count -ne 1) {
+        return $null
+    }
+    $Paren = $InvokeNode.Arguments[0]
+    if ($Paren -isnot [System.Management.Automation.Language.ParenExpressionAst]) {
+        return $null
+    }
+    $Pipeline = $Paren.Pipeline
+    if ($Pipeline -isnot [System.Management.Automation.Language.PipelineAst] -or $Pipeline.PipelineElements.Count -ne 1) {
+        return $null
+    }
+    $Command = $Pipeline.PipelineElements[0]
+    if ($Command -isnot [System.Management.Automation.Language.CommandAst] -or $Command.Redirections.Count -ne 0) {
+        return $null
+    }
+    if ($Command.InvocationOperator -ne [System.Management.Automation.Language.TokenKind]::Unknown) {
+        return $null
+    }
+    if ($Command.GetCommandName() -ine 'New-Object') {
+        return $null
+    }
+    return $Command
+}
+
+function Test-ProcessStartInfoShape {
+    param($CommandAst, [string]$LaunchName)
+
+    $Elements = $CommandAst.CommandElements
+    if ($Elements.Count -ne 5) {
+        return $false
+    }
+    if (-not (Test-PlainParameterElement -Element $Elements[1] -Name 'TypeName')) {
+        return $false
+    }
+    if (
+        $Elements[2] -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or
+        $Elements[2].Value -ine 'System.Diagnostics.ProcessStartInfo'
+    ) {
+        return $false
+    }
+    if (-not (Test-PlainParameterElement -Element $Elements[3] -Name 'Property')) {
+        return $false
+    }
+    if ($Elements[4] -isnot [System.Management.Automation.Language.HashtableAst]) {
+        return $false
+    }
+    $Values = @{}
+    foreach ($Pair in $Elements[4].KeyValuePairs) {
+        $Key = $Pair.Item1
+        if ($Key -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) {
+            return $false
+        }
+        if ($ProcessStartInfoKeys -notcontains $Key.Value) {
+            return $false
+        }
+        $KeyId = $Key.Value.ToLowerInvariant()
+        if ($Values.ContainsKey($KeyId)) {
+            return $false
+        }
+        $ValueExpression = Get-ProcessStartInfoValueExpression -Statement $Pair.Item2
+        if ($null -eq $ValueExpression) {
+            return $false
+        }
+        $Values[$KeyId] = $ValueExpression
+    }
+
+    # Per launch name and shape: exact key set and exact launch values.
+    if ($LaunchName -ieq 'BridgeCredentialCheck') {
+        if (-not (Test-KeySet -Values $Values -ExpectedKeys $StartInfoCredentialKeys)) {
+            return $false
+        }
+        $ExpectedProfile = $false
+        $ShapeValuesOk = (
+            (Test-VariableValue -Expression $Values['filename'] -Name 'BridgeCredentialCheckPath') -and
+            (Test-VariableValue -Expression $Values['workingdirectory'] -Name 'BridgeCredentialCheckDirectory')
+        )
+    }
+    elseif ($LaunchName -ieq 'BridgeSecurityProbeChild') {
+        if (-not (Test-KeySet -Values $Values -ExpectedKeys $StartInfoProbeKeys)) {
+            return $false
+        }
+        $ExpectedProfile = $true
+        $ShapeValuesOk = (
+            (Test-StringValue -Expression $Values['filename'] -Value 'powershell.exe') -and
+            (Test-VariableValue -Expression $Values['arguments'] -Name 'BridgeSecurityProbeArguments') -and
+            (Test-VariableValue -Expression $Values['workingdirectory'] -Name 'BridgeRunnerRoot')
+        )
+    }
+    elseif ($LaunchName -ieq 'BridgeChild') {
+        $ExpectedProfile = $true
+        if (Test-KeySet -Values $Values -ExpectedKeys $StartInfoProbeKeys) {
+            $ShapeValuesOk = (
+                (Test-StringValue -Expression $Values['filename'] -Value 'powershell.exe') -and
+                (Test-VariableValue -Expression $Values['arguments'] -Name 'BridgeTargetProbeArguments') -and
+                (Test-VariableValue -Expression $Values['workingdirectory'] -Name 'BridgeRunnerRoot')
+            )
+        }
+        elseif (Test-KeySet -Values $Values -ExpectedKeys $StartInfoRunnerKeys) {
+            $RunnerArguments = $Values['arguments']
+            $ShapeValuesOk = (
+                (Test-StringValue -Expression $Values['filename'] -Value 'cmd.exe') -and
+                $RunnerArguments -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+                $RunnerArguments.Value -cmatch $RunnerArgumentsPattern -and
+                (Test-VariableValue -Expression $Values['workingdirectory'] -Name 'BridgeRunnerRoot')
+            )
+        }
+        else {
+            return $false
+        }
+    }
+    else {
+        return $false
+    }
+    if (-not $ShapeValuesOk) {
+        return $false
+    }
+
+    if (-not (Test-NonEmptyStringLiteral -Expression $Values['username'])) {
+        return $false
+    }
+    if (-not (Test-NonEmptyStringLiteral -Expression $Values['domain'])) {
+        return $false
+    }
+    $PasswordExpression = $Values['password']
+    if (
+        $PasswordExpression -isnot [System.Management.Automation.Language.MemberExpressionAst] -or
+        $PasswordExpression.Member.Value -ine 'Password' -or
+        -not (Test-VariableValue -Expression $PasswordExpression.Expression -Name 'BridgeTargetCredential')
+    ) {
+        return $false
+    }
+    if (-not (Test-BooleanLiteral -Expression $Values['useshellexecute'] -Expected $false)) {
+        return $false
+    }
+    if (-not (Test-BooleanLiteral -Expression $Values['createnowindow'] -Expected $true)) {
+        return $false
+    }
+    if (-not (Test-BooleanLiteral -Expression $Values['loaduserprofile'] -Expected $ExpectedProfile)) {
+        return $false
+    }
+    foreach ($RedirectKey in @('redirectstandardoutput', 'redirectstandarderror')) {
+        if ($Values.ContainsKey($RedirectKey) -and -not (Test-BooleanLiteral -Expression $Values[$RedirectKey] -Expected $true)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+# Returns PROCESS_LAUNCH, PROCESS_CONTROL, READ, or $null for anything else.
+function Get-AllowedInvokeMemberEffect {
+    param($Node)
+
+    if ($Node.Member -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) {
+        return $null
+    }
+    $MemberName = $Node.Member.Value
+    $ArgumentCount = 0
+    if ($null -ne $Node.Arguments) {
+        $ArgumentCount = $Node.Arguments.Count
+    }
+
+    if ($Node.Static) {
+        if ($Node.Expression -isnot [System.Management.Automation.Language.TypeExpressionAst]) {
+            return $null
+        }
+        if ($Node.Expression.TypeName.FullName -ine 'System.Diagnostics.Process') {
+            return $null
+        }
+        if ($MemberName -ine 'Start' -or $ArgumentCount -ne 1) {
+            return $null
+        }
+        $Assignment = Get-DirectRootAssignment -Node $Node
+        if ($null -eq $Assignment) {
+            return $null
+        }
+        $LeftName = Get-PlainVariableName -Node $Assignment.Left
+        if ($null -eq $LeftName -or $ProcessLaunchNames -notcontains $LeftName) {
+            return $null
+        }
+        $StartInfoCommand = Get-InlineStartInfoCommand -InvokeNode $Node
+        if ($null -eq $StartInfoCommand) {
+            return $null
+        }
+        if (-not (Test-ProcessStartInfoShape -CommandAst $StartInfoCommand -LaunchName $LeftName)) {
+            return $null
+        }
+        return 'PROCESS_LAUNCH'
+    }
+
+    if ($ArgumentCount -ne 0) {
+        return $null
+    }
+    $Target = $Node.Expression
+    if ($MemberName -ieq 'ReadToEndAsync') {
+        if (
+            $Target -isnot [System.Management.Automation.Language.MemberExpressionAst] -or
+            $Target -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -or
+            $Target.Static -or
+            $Target.Member -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or
+            @('StandardOutput', 'StandardError') -notcontains $Target.Member.Value
+        ) {
+            return $null
+        }
+        $Target = $Target.Expression
+        $Effect = 'READ'
+    }
+    elseif ($MemberName -ieq 'WaitForExit') {
+        $Effect = 'READ'
+    }
+    elseif ($MemberName -ieq 'Kill') {
+        $Effect = 'PROCESS_CONTROL'
+    }
+    else {
+        return $null
+    }
+    $TargetName = Get-PlainVariableName -Node $Target
+    if ($null -eq $TargetName -or $ProcessLaunchNames -notcontains $TargetName) {
+        return $null
+    }
+    return $Effect
+}
+
+# A New-Object is classified only as the inline start info of an allowed launch.
+function Test-InlineStartInfoPosition {
+    param($CommandAst)
+
+    $Pipeline = $CommandAst.Parent
+    if ($Pipeline -isnot [System.Management.Automation.Language.PipelineAst]) {
+        return $false
+    }
+    $Paren = $Pipeline.Parent
+    if ($Paren -isnot [System.Management.Automation.Language.ParenExpressionAst]) {
+        return $false
+    }
+    $Invoke = $Paren.Parent
+    if ($Invoke -isnot [System.Management.Automation.Language.InvokeMemberExpressionAst]) {
+        return $false
+    }
+    if ((Get-AllowedInvokeMemberEffect -Node $Invoke) -ne 'PROCESS_LAUNCH') {
+        return $false
+    }
+    return [object]::ReferenceEquals((Get-InlineStartInfoCommand -InvokeNode $Invoke), $CommandAst)
+}
+
+# Broker-written target output (option A): a narrow family so Phase 5 need not
+# allow FILESYSTEM_WRITE_MUTATION (which also covers Copy-Item).
+function Test-OutputCaptureWriteShape {
+    param($CommandAst)
+
+    $Elements = $CommandAst.CommandElements
+    if ($Elements.Count -ne 7 -or $CommandAst.Redirections.Count -ne 0) {
+        return $false
+    }
+    if (
+        $CommandAst.Parent -isnot [System.Management.Automation.Language.PipelineAst] -or
+        $CommandAst.Parent.PipelineElements.Count -ne 1
+    ) {
+        return $false
+    }
+    $PathName = Get-PlainVariableName -Node $Elements[2]
+    $ValueName = Get-PlainVariableName -Node $Elements[4]
+    return (
+        (Test-PlainParameterElement -Element $Elements[1] -Name 'LiteralPath') -and
+        $null -ne $PathName -and
+        $PathName -cmatch '^Bridge[A-Za-z]*Std(out|err)Path$' -and
+        (Test-PlainParameterElement -Element $Elements[3] -Name 'Value') -and
+        $null -ne $ValueName -and
+        $ValueName -cmatch '^Bridge[A-Za-z]*Std(out|err)Text$' -and
+        (Test-PlainParameterElement -Element $Elements[5] -Name 'Encoding') -and
+        $Elements[6] -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+        $Elements[6].Value -ieq 'UTF8'
+    )
+}
+
+function Test-VariableBindingParameter {
+    param($Element)
+
+    if ($Element -isnot [System.Management.Automation.Language.CommandParameterAst]) {
+        return $false
+    }
+    $ParameterName = $Element.ParameterName.ToLowerInvariant()
+    if ($ParameterName.Length -eq 0) {
+        return $false
+    }
+    if ($VariableBindingParameterAliases -contains $ParameterName) {
+        return $true
+    }
+    foreach ($FullName in $VariableBindingParameterNames) {
+        if ($FullName.StartsWith($ParameterName)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Test-StartProcessCredential {
+    param($CommandAst)
+
+    foreach ($Element in $CommandAst.CommandElements) {
+        if ($Element -is [System.Management.Automation.Language.VariableExpressionAst] -and $Element.Splatted) {
+            return $true
+        }
+        if ($Element -is [System.Management.Automation.Language.CommandParameterAst]) {
+            $ParameterName = $Element.ParameterName.ToLowerInvariant()
+            if ($ParameterName -eq 'runas') {
+                return $true
+            }
+            if ($ParameterName.Length -gt 0 -and 'credential'.StartsWith($ParameterName)) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
 $ObservedEffects = New-Object System.Collections.Generic.List[string]
 $CommandAsts = $Ast.FindAll({
     param($Node)
@@ -354,6 +842,24 @@ foreach ($CommandAst in $CommandAsts) {
     elseif ($LowerName -eq 'start-process') {
         if (-not $ObservedEffects.Contains('PROCESS_LAUNCH')) {
             $ObservedEffects.Add('PROCESS_LAUNCH')
+        }
+        if ((Test-StartProcessCredential -CommandAst $CommandAst) -and -not $ObservedEffects.Contains('START_PROCESS_CREDENTIAL_REJECTED')) {
+            $ObservedEffects.Add('START_PROCESS_CREDENTIAL_REJECTED')
+        }
+    }
+    elseif ($LowerName -eq 'new-object') {
+        if (-not (Test-InlineStartInfoPosition -CommandAst $CommandAst) -and -not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+            $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+        }
+    }
+    elseif ($LowerName -eq 'set-content') {
+        if (Test-OutputCaptureWriteShape -CommandAst $CommandAst) {
+            if (-not $ObservedEffects.Contains('EVIDENCE_OUTPUT_WRITE')) {
+                $ObservedEffects.Add('EVIDENCE_OUTPUT_WRITE')
+            }
+        }
+        elseif (-not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+            $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
         }
     }
     elseif ($LowerName -eq 'stop-process') {
@@ -475,8 +981,111 @@ $InvokeMemberAsts = $Ast.FindAll({
     param($Node)
     $Node -is [System.Management.Automation.Language.InvokeMemberExpressionAst]
 }, $true)
-if ($InvokeMemberAsts.Count -gt 0 -and -not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
-    $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+$UsedLaunchNames = New-Object System.Collections.Generic.List[string]
+foreach ($InvokeMemberAst in $InvokeMemberAsts) {
+    $InvokeEffect = Get-AllowedInvokeMemberEffect -Node $InvokeMemberAst
+    if ($null -eq $InvokeEffect) {
+        if (-not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+            $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+        }
+        continue
+    }
+    if ($InvokeEffect -ne 'READ' -and -not $ObservedEffects.Contains($InvokeEffect)) {
+        $ObservedEffects.Add($InvokeEffect)
+    }
+    if ($InvokeMemberAst.Static) {
+        $UsedLaunchName = Get-PlainVariableName -Node (Get-DirectRootAssignment -Node $InvokeMemberAst).Left
+    }
+    elseif ($InvokeMemberAst.Member.Value -ieq 'ReadToEndAsync') {
+        $UsedLaunchName = Get-PlainVariableName -Node $InvokeMemberAst.Expression.Expression
+    }
+    else {
+        $UsedLaunchName = Get-PlainVariableName -Node $InvokeMemberAst.Expression
+    }
+    foreach ($LaunchName in $ProcessLaunchNames) {
+        if ($LaunchName -ieq $UsedLaunchName -and -not $UsedLaunchNames.Contains($LaunchName)) {
+            $UsedLaunchNames.Add($LaunchName)
+        }
+    }
+}
+
+# A launch name that receives a classified method call must be bound exactly
+# once, by the validated root Process.Start. Any other binding (assignment,
+# scoped assignment, param, foreach, or a variable-binding common parameter,
+# whose value may even be computed) is unknown. Rebinding through the
+# Variable provider (Copy-Item/New-Item on variable:) is not detectable here;
+# the canonical candidate comparison owns that.
+if ($UsedLaunchNames.Count -gt 0) {
+    $LaunchBindingCounts = @{}
+    foreach ($LaunchName in $UsedLaunchNames) {
+        $LaunchBindingCounts[$LaunchName] = 0
+    }
+    foreach ($AssignmentAst in $AssignmentAsts) {
+        $AssignedNames = @($AssignmentAst.Left.FindAll({
+            param($Node)
+            $Node -is [System.Management.Automation.Language.VariableExpressionAst]
+        }, $true) | ForEach-Object { Get-NormalizedVariableUserPath -UserPath $_.VariablePath.UserPath })
+        if ($AssignmentAst.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
+            $AssignedNames += Get-NormalizedVariableUserPath -UserPath $AssignmentAst.Left.VariablePath.UserPath
+        }
+        $TouchedLaunchName = $null
+        foreach ($AssignedName in $AssignedNames) {
+            foreach ($LaunchName in $UsedLaunchNames) {
+                if ($AssignedName -ieq $LaunchName) {
+                    $TouchedLaunchName = $LaunchName
+                }
+            }
+        }
+        if ($null -eq $TouchedLaunchName) {
+            continue
+        }
+        $LeftName = Get-PlainVariableName -Node $AssignmentAst.Left
+        $RightNode = $AssignmentAst.Right
+        if ($RightNode -is [System.Management.Automation.Language.PipelineAst] -and $RightNode.PipelineElements.Count -eq 1) {
+            $RightNode = $RightNode.PipelineElements[0]
+        }
+        if ($RightNode -is [System.Management.Automation.Language.CommandExpressionAst]) {
+            $RightNode = $RightNode.Expression
+        }
+        if (
+            $null -ne $LeftName -and
+            $LeftName -ieq $TouchedLaunchName -and
+            $RightNode -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+            (Get-AllowedInvokeMemberEffect -Node $RightNode) -eq 'PROCESS_LAUNCH'
+        ) {
+            $LaunchBindingCounts[$TouchedLaunchName] = [int]$LaunchBindingCounts[$TouchedLaunchName] + 1
+        }
+        elseif (-not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+            $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+        }
+    }
+    foreach ($LaunchName in $UsedLaunchNames) {
+        if ([int]$LaunchBindingCounts[$LaunchName] -ne 1 -and -not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+            $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+        }
+    }
+    foreach ($ForEachAst in $ForEachAsts) {
+        if ($null -eq $ForEachAst.Variable) {
+            continue
+        }
+        $ForEachName = Get-NormalizedVariableUserPath -UserPath $ForEachAst.Variable.VariablePath.UserPath
+        if ($UsedLaunchNames -contains $ForEachName -and -not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+            $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+        }
+    }
+    foreach ($ParameterAst in $ParameterAsts) {
+        $ParameterVariableName = Get-NormalizedVariableUserPath -UserPath $ParameterAst.Name.VariablePath.UserPath
+        if ($UsedLaunchNames -contains $ParameterVariableName -and -not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+            $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+        }
+    }
+    foreach ($CommandAst in $CommandAsts) {
+        foreach ($Element in $CommandAst.CommandElements) {
+            if ((Test-VariableBindingParameter -Element $Element) -and -not $ObservedEffects.Contains('DYNAMIC_OR_UNKNOWN_COMMAND')) {
+                $ObservedEffects.Add('DYNAMIC_OR_UNKNOWN_COMMAND')
+            }
+        }
+    }
 }
 
 foreach ($AssignmentAst in $AssignmentAsts) {
@@ -546,7 +1155,20 @@ foreach ($AssignmentAst in $AssignmentAsts) {
             $Name = $Node.GetCommandName()
             return (-not [string]::IsNullOrWhiteSpace($Name)) -and ($Name -ieq 'Start-Process')
         }, $true))
-        if ($StartProcessCommands.Count -eq 1) {
+        $ProcessStartRight = $AssignmentAst.Right
+        if ($ProcessStartRight -is [System.Management.Automation.Language.PipelineAst] -and $ProcessStartRight.PipelineElements.Count -eq 1) {
+            $ProcessStartRight = $ProcessStartRight.PipelineElements[0]
+        }
+        if ($ProcessStartRight -is [System.Management.Automation.Language.CommandExpressionAst]) {
+            $ProcessStartRight = $ProcessStartRight.Expression
+        }
+        if (
+            $ProcessStartRight -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+            (Get-AllowedInvokeMemberEffect -Node $ProcessStartRight) -eq 'PROCESS_LAUNCH'
+        ) {
+            $ChildProcessAssigned = $true
+        }
+        elseif ($StartProcessCommands.Count -eq 1) {
             $HasPassThru = $false
             foreach ($Element in $StartProcessCommands[0].CommandElements) {
                 if (

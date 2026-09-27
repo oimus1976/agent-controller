@@ -56,14 +56,18 @@ class PrivateCiPhase5CliContractRedTests(unittest.TestCase):
             / "private_ci_phase5_contract.py"
         ).read_text(encoding="utf-8")
         probe = contract.index(
-            '"$BridgeSecurityProbeChild = Start-Process'
+            "\"$BridgeSecurityProbeArguments = '-NoProfile"
+        )
+        self.assertLess(
+            probe,
+            contract.index('"BridgeSecurityProbeChild",'),
         )
         probe_pass = contract.index(
             "PHASE5_SECURITY_CONTEXT_REVALIDATED",
             probe,
         )
         listener = contract.index(
-            "\"$BridgeChild = Start-Process -FilePath 'cmd.exe'",
+            '"BridgeChild",',
             probe_pass,
         )
         self.assertLess(probe, probe_pass)
