@@ -328,7 +328,7 @@ foreach ($CommandAst in $CommandAsts) {
         'hostname.exe', 'whoami.exe', 'get-localuser', 'get-localgroupmember',
         'test-path', 'get-item', 'get-childitem', 'get-ciminstance',
         'get-scheduledtask', 'get-filehash', 'get-credential', 'get-content',
-        'convertfrom-json', 'select-object', 'where-object'
+        'convertfrom-json', 'select-object', 'where-object', 'get-acl'
     )) {
         continue
     }
