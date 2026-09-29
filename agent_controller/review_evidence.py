@@ -315,6 +315,9 @@ def canonical_review_from_mapping(
         return None
     if complete and any(not item.complete for item in providers):
         return None
+    if any(item.complete and item.verdict == "BLOCKING" for item in providers):
+        if verdict != "BLOCKING":
+            return None
     return CanonicalReviewEvidence(
         schema=CANONICAL_REVIEW_SCHEMA,
         repo=repo,

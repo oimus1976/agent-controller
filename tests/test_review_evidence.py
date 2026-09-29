@@ -151,6 +151,40 @@ class ReviewEvidenceTests(unittest.TestCase):
                     )
                 )
 
+    def test_serialized_clean_verdict_cannot_hide_blocking_provider(self):
+        blocking_provider = jules(
+            activities=activities(verdict="BLOCKING", findings=["P1: regression"])
+        )
+        snapshot = build_canonical_review_evidence(
+            repo=REPO,
+            pr_number=255,
+            head_sha=HEAD,
+            reviews=[],
+            issue_comments=[],
+            review_threads_graphql=[],
+            surfaces=surfaces(),
+            provider_review_evidence=(blocking_provider,),
+        ).to_dict()
+        self.assertEqual("BLOCKING", snapshot["verdict"])
+        self.assertIsNotNone(
+            canonical_review_from_mapping(
+                snapshot,
+                repo=REPO,
+                pr=255,
+                head_sha=HEAD,
+            )
+        )
+
+        snapshot["verdict"] = "CLEAN"
+        self.assertIsNone(
+            canonical_review_from_mapping(
+                snapshot,
+                repo=REPO,
+                pr=255,
+                head_sha=HEAD,
+            )
+        )
+
     def test_owner_relayed_jules_prose_is_not_provider_evidence(self):
         canonical = build_canonical_review_evidence(
             repo=REPO,
