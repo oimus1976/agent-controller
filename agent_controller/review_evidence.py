@@ -17,6 +17,8 @@ REQUIRED_GITHUB_SURFACES = (
     "reactions",
 )
 VALID_VERDICTS = frozenset({"CLEAN", "BLOCKING", "PENDING", "ABSENT", "UNCERTAIN"})
+VERIFIED_PROVIDER_REVIEW_INDEPENDENCE = frozenset({"VERIFIED_DIFFERENT_OPERATION"})
+VERIFIED_PROVIDER_REVIEW_BINDINGS = frozenset({"CONTROLLER_PRE_DISPATCH_EXACT_HEAD"})
 
 
 @dataclass(frozen=True)
@@ -300,8 +302,18 @@ def canonical_review_from_mapping(
         or not item.binding_strength
         or any(not isinstance(error, str) for error in item.errors)
         or (item.complete and item.errors)
+        or (
+            item.complete
+            and item.independence not in VERIFIED_PROVIDER_REVIEW_INDEPENDENCE
+        )
+        or (
+            item.complete
+            and item.binding_strength not in VERIFIED_PROVIDER_REVIEW_BINDINGS
+        )
         for item in providers
     ):
+        return None
+    if complete and any(not item.complete for item in providers):
         return None
     return CanonicalReviewEvidence(
         schema=CANONICAL_REVIEW_SCHEMA,

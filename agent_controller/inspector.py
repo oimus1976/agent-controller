@@ -109,6 +109,14 @@ def _github_graphql_request(
         raise Exception(f"GitHub GraphQL API Error: {e.code} {e.reason}")
 
 
+def _require_complete_graphql_response(response):
+    if not isinstance(response, dict):
+        raise Exception("GraphQL response structure unexpected: response is not an object")
+    if response.get("errors"):
+        raise Exception("GraphQL response contains top-level errors")
+    return response
+
+
 def get_pr_review_threads_graphql(owner, repo, pr_number):
     query = """
     query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
@@ -164,7 +172,9 @@ def get_pr_review_threads_graphql(owner, repo, pr_number):
             "pr": pr_number,
             "cursor": thread_cursor,
         }
-        response = _github_graphql_request(query, variables)
+        response = _require_complete_graphql_response(
+            _github_graphql_request(query, variables)
+        )
 
         try:
             threads_data = response["data"]["repository"]["pullRequest"]["reviewThreads"]
@@ -175,7 +185,9 @@ def get_pr_review_threads_graphql(owner, repo, pr_number):
 
                 while has_next_comment:
                     c_vars = {"threadId": thread["id"], "cursor": comment_cursor}
-                    c_resp = _github_graphql_request(comment_query, c_vars)
+                    c_resp = _require_complete_graphql_response(
+                        _github_graphql_request(comment_query, c_vars)
+                    )
                     c_data = c_resp["data"]["node"]["comments"]
                     thread["comments"]["nodes"].extend(c_data["nodes"])
                     has_next_comment = c_data["pageInfo"]["hasNextPage"]

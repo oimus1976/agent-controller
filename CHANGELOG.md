@@ -26,6 +26,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - Jules review evidenceは、Controller-boundなfresh review operation、completeなsession/activity read、exact expected head、structured clean/finding result、実装operationとの独立性を別々に検証する。owner名義で転載したJules文面だけはadvisoryのまま。
 - Codex review activityの `PENDING` / `BLOCKING` 判定もcurrent headだけに束縛し、GraphQLのbot login表現を正規化した。旧headのcomment/review/reaction、dismiss済みreview、人間起点threadへのbot replyはcurrent-head findingにならない。
 - remediation plannerとmutation直前gateは同じcanonical snapshotを必須にし、raw review/threadの部分読みからremediationを認可しない。reaction取得はcurrent-head marker付き `@codex review` commentだけに限定し、無関係なcomment数によるAPI call増幅を除いた。
+- GraphQLがusableな `data` とtop-level `errors` を同時に返す部分応答は、thread/commentのどのpageでも取得完了とせずfail closedにした。serialized provider snapshotも、検証済みの別operationと既存のexact-head bindingをcomplete evidenceとして示す場合だけconsumer boundaryを通る。
 
 ### Authority boundary
 

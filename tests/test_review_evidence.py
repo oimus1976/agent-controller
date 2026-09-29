@@ -11,6 +11,7 @@ from agent_controller.review_evidence import (
     REQUIRED_GITHUB_SURFACES,
     ReviewSurfaceStatus,
     build_jules_review_evidence,
+    canonical_review_from_mapping,
 )
 
 
@@ -121,6 +122,34 @@ class ReviewEvidenceTests(unittest.TestCase):
         self.assertTrue(canonical.collection_complete)
         self.assertEqual("CLEAN", canonical.verdict)
         self.assertEqual("REVIEW_READY", classify_pr(evidence))
+
+    def test_serialized_complete_provider_requires_verified_independence_and_binding(self):
+        canonical = build_canonical_review_evidence(
+            repo=REPO,
+            pr_number=255,
+            head_sha=HEAD,
+            reviews=[],
+            issue_comments=[],
+            review_threads_graphql=[],
+            surfaces=surfaces(),
+            provider_review_evidence=(jules(),),
+        ).to_dict()
+
+        for field, value in (
+            ("independence", "SELF_REVIEW"),
+            ("binding_strength", "UNVERIFIED"),
+        ):
+            with self.subTest(field=field):
+                snapshot = json.loads(json.dumps(canonical))
+                snapshot["provider_reviews"][0][field] = value
+                self.assertIsNone(
+                    canonical_review_from_mapping(
+                        snapshot,
+                        repo=REPO,
+                        pr=255,
+                        head_sha=HEAD,
+                    )
+                )
 
     def test_owner_relayed_jules_prose_is_not_provider_evidence(self):
         canonical = build_canonical_review_evidence(

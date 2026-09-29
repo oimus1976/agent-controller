@@ -267,6 +267,50 @@ class TestInspector(unittest.TestCase):
         self.assertEqual(threads[0]['comments']['nodes'][1]['body'], 'c2')
         self.assertEqual(len(threads[1]['comments']['nodes']), 1)
 
+    @patch('agent_controller.inspector._github_graphql_request')
+    def test_graphql_rejects_partial_thread_page_with_top_level_errors(self, mock_gql):
+        from agent_controller.inspector import get_pr_review_threads_graphql
+
+        mock_gql.return_value = {
+            'data': {'repository': {'pullRequest': {'reviewThreads': {
+                'pageInfo': {'hasNextPage': False, 'endCursor': None},
+                'nodes': [],
+            }}}},
+            'errors': [{'message': 'reviewThreads was only partially resolved'}],
+        }
+
+        with self.assertRaisesRegex(Exception, 'top-level errors'):
+            get_pr_review_threads_graphql('owner', 'repo', 1)
+
+    @patch('agent_controller.inspector._github_graphql_request')
+    def test_graphql_rejects_partial_comment_page_with_top_level_errors(self, mock_gql):
+        from agent_controller.inspector import get_pr_review_threads_graphql
+
+        thread_page = {
+            'data': {'repository': {'pullRequest': {'reviewThreads': {
+                'pageInfo': {'hasNextPage': False, 'endCursor': None},
+                'nodes': [{
+                    'id': 't1',
+                    'isResolved': False,
+                    'comments': {
+                        'pageInfo': {'hasNextPage': True, 'endCursor': 'c1'},
+                        'nodes': [{'body': 'first'}],
+                    },
+                }],
+            }}}},
+        }
+        partial_comment_page = {
+            'data': {'node': {'comments': {
+                'pageInfo': {'hasNextPage': False, 'endCursor': None},
+                'nodes': [{'body': 'partial'}],
+            }}},
+            'errors': [{'message': 'comments was only partially resolved'}],
+        }
+        mock_gql.side_effect = [thread_page, partial_comment_page]
+
+        with self.assertRaisesRegex(Exception, 'top-level errors'):
+            get_pr_review_threads_graphql('owner', 'repo', 1)
+
     def test_classify_pr_current_head_review_binding(self):
         head_sha = "b201119ec5b82aef81630ec375d208d2c113f033"
         evidence = {
