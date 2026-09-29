@@ -98,3 +98,13 @@ Implementation and review must remain independent.
 - When the set of workstreams, the main line, or a standing policy changes, update [`PROJECT_STATUS.md`](../../PROJECT_STATUS.md) in the same PR.
 - Record meaningful semantic changes in [`CHANGELOG.md`](../../CHANGELOG.md), following its recording policy.
 - Owner: [#256](https://github.com/oimus1976/agent-controller/issues/256).
+
+## 14. Personal-development economics
+
+- Unless the owner explicitly changes the context, treat Agent Controller as personal, single-owner development.
+- Optimize first for cost-effectiveness and time to a usable release. Prefer the smallest reliable mechanism that addresses a concrete, likely, material failure mode.
+- Prefer an existing supported path or a concise human step when another Controller mechanism would cost more to build and maintain than the recurring burden or realistic loss it removes.
+- Defer speculative automation, organization-scale governance, audit infrastructure, and defenses against threat models that do not match this personal-development context.
+- A proposal for new ceremony or control code must state the recurring burden, realistic loss, or release blocker it removes and why that benefit exceeds implementation and maintenance cost.
+- This decision priority does not relax human-final authority, credential and secret protection, destructive-action boundaries, consumed-authority rules, or evidence integrity. Those remain hard constraints.
+- Owners: [#279](https://github.com/oimus1976/agent-controller/issues/279), [ADR #90](https://github.com/oimus1976/agent-controller/issues/90).
