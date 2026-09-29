@@ -185,6 +185,28 @@ class ReviewEvidenceTests(unittest.TestCase):
             )
         )
 
+    def test_serialized_complete_provider_requires_conclusive_verdict(self):
+        snapshot = build_canonical_review_evidence(
+            repo=REPO,
+            pr_number=255,
+            head_sha=HEAD,
+            reviews=[],
+            issue_comments=[],
+            review_threads_graphql=[],
+            surfaces=surfaces(),
+            provider_review_evidence=(jules(),),
+        ).to_dict()
+        snapshot["provider_reviews"][0]["verdict"] = "UNCERTAIN"
+
+        self.assertIsNone(
+            canonical_review_from_mapping(
+                snapshot,
+                repo=REPO,
+                pr=255,
+                head_sha=HEAD,
+            )
+        )
+
     def test_owner_relayed_jules_prose_is_not_provider_evidence(self):
         canonical = build_canonical_review_evidence(
             repo=REPO,

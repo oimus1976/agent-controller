@@ -302,6 +302,7 @@ def canonical_review_from_mapping(
         or not item.binding_strength
         or any(not isinstance(error, str) for error in item.errors)
         or (item.complete and item.errors)
+        or (item.complete and item.verdict not in {"CLEAN", "BLOCKING"})
         or (
             item.complete
             and item.independence not in VERIFIED_PROVIDER_REVIEW_INDEPENDENCE
