@@ -262,6 +262,20 @@ class ReviewEvidenceTests(unittest.TestCase):
                 self.assertFalse(provider.complete)
                 self.assertEqual("UNCERTAIN", provider.verdict)
 
+    def test_jules_completeness_flags_must_be_boolean_true(self):
+        cases = (
+            ({"activities_complete": "false"}, "ACTIVITIES_INCOMPLETE"),
+            ({"activities_complete": 1}, "ACTIVITIES_INCOMPLETE"),
+            ({"fresh_session": "unknown"}, "REVIEW_SESSION_NOT_FRESH"),
+            ({"fresh_session": 1}, "REVIEW_SESSION_NOT_FRESH"),
+        )
+        for overrides, expected_error in cases:
+            with self.subTest(overrides=overrides):
+                provider = jules(**overrides)
+                self.assertFalse(provider.complete)
+                self.assertEqual("UNCERTAIN", provider.verdict)
+                self.assertIn(expected_error, provider.errors)
+
     def test_current_head_blocking_jules_finding_overrides_clean_codex(self):
         blocking = jules(
             activities=activities(verdict="BLOCKING", findings=["P1: regression"])

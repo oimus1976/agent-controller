@@ -130,9 +130,9 @@ def build_jules_review_evidence(
         errors.append("SESSION_IDENTITY_MISMATCH")
     if session_state != "COMPLETED":
         errors.append("SESSION_NOT_COMPLETED")
-    if not activities_complete:
+    if activities_complete is not True:
         errors.append("ACTIVITIES_INCOMPLETE")
-    if not fresh_session:
+    if fresh_session is not True:
         errors.append("REVIEW_SESSION_NOT_FRESH")
 
     expected_prefix = f"sessions/{session_id}/activities/"
