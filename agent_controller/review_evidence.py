@@ -60,6 +60,7 @@ class CanonicalReviewEvidence:
     verdict: str
     surfaces: tuple[ReviewSurfaceStatus, ...]
     provider_reviews: tuple[ProviderReviewEvidence, ...]
+    codex_blocking: bool = False
     errors: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -70,6 +71,7 @@ class CanonicalReviewEvidence:
             "observed_head_sha": self.observed_head_sha,
             "collection_complete": self.collection_complete,
             "verdict": self.verdict,
+            "codex_blocking": self.codex_blocking,
             "surfaces": [asdict(item) for item in self.surfaces],
             "provider_reviews": [item.to_dict() for item in self.provider_reviews],
             "errors": list(self.errors),
@@ -241,7 +243,12 @@ def canonical_review_from_mapping(
         return None
     verdict = value.get("verdict")
     complete = value.get("collection_complete")
-    if verdict not in VALID_VERDICTS or not isinstance(complete, bool):
+    codex_blocking = value.get("codex_blocking", False)
+    if (
+        verdict not in VALID_VERDICTS
+        or not isinstance(complete, bool)
+        or type(codex_blocking) is not bool
+    ):
         return None
 
     surfaces_raw = value.get("surfaces")
@@ -322,6 +329,8 @@ def canonical_review_from_mapping(
     if any(item.complete and item.verdict == "CLEAN" for item in providers):
         if verdict not in {"CLEAN", "BLOCKING"}:
             return None
+    if complete and codex_blocking and verdict != "BLOCKING":
+        return None
     return CanonicalReviewEvidence(
         schema=CANONICAL_REVIEW_SCHEMA,
         repo=repo,
@@ -331,5 +340,6 @@ def canonical_review_from_mapping(
         verdict=verdict,
         surfaces=surfaces,
         provider_reviews=providers,
+        codex_blocking=codex_blocking,
         errors=tuple(errors_raw),
     )

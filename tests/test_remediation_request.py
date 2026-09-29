@@ -9,6 +9,7 @@ from agent_controller.remediation_request import (
 from agent_controller.remediation_request_mutator import codex_remediation_request_marker
 from agent_controller.inspector import build_canonical_review_evidence
 from agent_controller.review_evidence import (
+    ProviderReviewEvidence,
     REQUIRED_GITHUB_SURFACES,
     ReviewSurfaceStatus,
 )
@@ -111,6 +112,35 @@ def inspection(**overrides):
     return value
 
 
+def provider_only_blocking_inspection():
+    value = inspection(reviews=[], review_threads_graphql=[])
+    provider = ProviderReviewEvidence(
+        provider="jules",
+        provider_operation_id="session-review-111",
+        repo=REPO,
+        pr=111,
+        reviewed_head_sha=HEAD,
+        verdict="BLOCKING",
+        complete=True,
+        independence="VERIFIED_DIFFERENT_OPERATION",
+        binding_strength="CONTROLLER_PRE_DISPATCH_EXACT_HEAD",
+    )
+    value["canonical_review_evidence"] = build_canonical_review_evidence(
+        repo=REPO,
+        pr_number=111,
+        head_sha=HEAD,
+        reviews=[],
+        issue_comments=[],
+        review_threads_graphql=[],
+        surfaces=tuple(
+            ReviewSurfaceStatus(name, "COMPLETE", True)
+            for name in REQUIRED_GITHUB_SURFACES
+        ),
+        provider_review_evidence=(provider,),
+    ).to_dict()
+    return value
+
+
 def safe_pr(head_sha=HEAD, head_ref="mvp-111-codex-remediation-request"):
     return {
         "head": {
@@ -156,6 +186,30 @@ class RemediationRequestPlanTests(unittest.TestCase):
         )
         self.assertEqual("BLOCKED", plan["decision"])
         self.assertEqual("REVIEW_EVIDENCE_UNAVAILABLE", plan["reason"])
+
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    def test_provider_only_blocker_does_not_authorize_codex_remediation(self, _load):
+        evidence = provider_only_blocking_inspection()
+        self.assertEqual(
+            "BLOCKING", evidence["canonical_review_evidence"]["verdict"]
+        )
+        self.assertFalse(
+            evidence["canonical_review_evidence"]["codex_blocking"]
+        )
+
+        plan = plan_codex_remediation_request(
+            owner="oimus1976",
+            repo="agent-controller",
+            pr_number=111,
+            policy_path="policy.json",
+            scope_policy=SCOPE,
+            inspection=evidence,
+        )
+
+        self.assertEqual("NOOP", plan["decision"])
+        self.assertEqual(
+            "NO_UNRESOLVED_CURRENT_HEAD_CODEX_FINDING", plan["reason"]
+        )
 
     @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
     def test_resolved_or_old_head_finding_does_not_authorize(self, _load):
@@ -513,6 +567,34 @@ class RemediationRequestExecutionTests(unittest.TestCase):
         self.canonical_inspection.return_value = inspection(
             review_threads_graphql=[finding_thread(resolved=True)], reviews=[]
         )
+        with patch(
+            "agent_controller.remediation_request.post_codex_remediation_request"
+        ) as post:
+            result = execute_codex_remediation_request(
+                plan=self.executable_plan(),
+                owner="oimus1976",
+                repo="agent-controller",
+                pr_number=111,
+                policy_path="policy.json",
+                apply=True,
+            )
+
+        post.assert_not_called()
+        self.assertEqual("NOOP", result["final_outcome"])
+        self.assertEqual(
+            "NO_UNRESOLVED_CURRENT_HEAD_CODEX_FINDING", result["failure_reason"]
+        )
+
+    @patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="oimus1976")
+    @patch("agent_controller.remediation_request.get_pr_details")
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    @patch("agent_controller.remediation_request.plan_codex_remediation_request")
+    def test_provider_only_blocker_at_final_gate_blocks_before_post(
+        self, fresh_plan, _load, get_pr, _identity
+    ):
+        fresh_plan.return_value = self.executable_plan()
+        get_pr.return_value = safe_pr()
+        self.canonical_inspection.return_value = provider_only_blocking_inspection()
         with patch(
             "agent_controller.remediation_request.post_codex_remediation_request"
         ) as post:

@@ -459,6 +459,7 @@ def build_canonical_review_evidence(
     clean, blocking, seen, parse_error = _codex_review_flags(
         head_sha, reviews, issue_comments, review_threads_graphql
     )
+    codex_blocking = blocking
     if parse_error:
         errors.append(parse_error)
         complete = False
@@ -504,6 +505,7 @@ def build_canonical_review_evidence(
         verdict=verdict,
         surfaces=tuple(surfaces),
         provider_reviews=tuple(providers),
+        codex_blocking=codex_blocking,
         errors=tuple(dict.fromkeys(errors)),
     )
 

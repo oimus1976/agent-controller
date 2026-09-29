@@ -317,7 +317,10 @@ def plan_codex_remediation_request(
             plan["decision"] = "NOOP"
             plan["reason"] = "REMEDIATION_ALREADY_REQUESTED_FOR_SOURCE_HEAD"
             return plan
-        if canonical_review.verdict != "BLOCKING":
+        if (
+            canonical_review.verdict != "BLOCKING"
+            or not canonical_review.codex_blocking
+        ):
             plan["decision"] = "NOOP"
             plan["reason"] = "NO_UNRESOLVED_CURRENT_HEAD_CODEX_FINDING"
             return plan
@@ -480,7 +483,10 @@ def execute_codex_remediation_request(
         if final_canonical is None or not final_canonical.collection_complete:
             result["failure_reason"] = "REVIEW_EVIDENCE_UNAVAILABLE"
             return result
-        if final_canonical.verdict != "BLOCKING":
+        if (
+            final_canonical.verdict != "BLOCKING"
+            or not final_canonical.codex_blocking
+        ):
             result["final_outcome"] = "NOOP"
             result["failure_reason"] = "NO_UNRESOLVED_CURRENT_HEAD_CODEX_FINDING"
             return result
