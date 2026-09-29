@@ -150,7 +150,14 @@ def classify_attention(observation: Mapping[str, object]) -> AttentionItem:
         category = AttentionCategory.NEEDS_ATTENTION
         reason = "REVIEW_OR_REMEDIATION_REQUIRED"
     elif classification == "IMPLEMENTATION_READY":
-        if transition:
+        if (
+            canonical_review is None
+            or not canonical_review.collection_complete
+            or canonical_review.verdict != "ABSENT"
+        ):
+            category = AttentionCategory.NEEDS_ATTENTION
+            reason = "CONTRADICTORY_IMPLEMENTATION_READY_EVIDENCE"
+        elif transition:
             category = AttentionCategory.IN_PROGRESS
             reason = "IMPLEMENTATION_READY_FOR_NEXT_AUTOMATED_STEP"
         else:

@@ -38,14 +38,14 @@ def observation(
         "transition": transition,
         "transition_reasons": list(reasons),
     }
-    if classification == "REVIEW_READY" and head_sha is not None:
+    if classification in {"REVIEW_READY", "IMPLEMENTATION_READY"} and head_sha is not None:
         value["canonical_review_evidence"] = {
             "schema": "agent-controller/review-evidence/v1",
             "repo": repo,
             "pr": pr,
             "observed_head_sha": head_sha,
             "collection_complete": True,
-            "verdict": "CLEAN",
+            "verdict": "CLEAN" if classification == "REVIEW_READY" else "ABSENT",
             "surfaces": [
                 {"surface": name, "status": "COMPLETE", "pagination_exhausted": True, "error": None}
                 for name in ("formal_reviews", "issue_comments", "inline_threads", "reactions")
@@ -201,6 +201,38 @@ class AttentionQueueTests(unittest.TestCase):
             observation(classification="IMPLEMENTATION_READY", transition=False, reasons=())
         )
         self.assertEqual(AttentionCategory.NO_CHANGE, item.category)
+
+    def test_implementation_ready_requires_complete_current_absence_evidence(self):
+        cases = {}
+
+        missing = observation(classification="IMPLEMENTATION_READY")
+        missing.pop("canonical_review_evidence")
+        cases["missing"] = missing
+
+        malformed = observation(classification="IMPLEMENTATION_READY")
+        malformed["canonical_review_evidence"] = {}
+        cases["malformed"] = malformed
+
+        incomplete = observation(classification="IMPLEMENTATION_READY")
+        incomplete["canonical_review_evidence"]["collection_complete"] = False
+        cases["incomplete"] = incomplete
+
+        stale = observation(classification="IMPLEMENTATION_READY")
+        stale["canonical_review_evidence"]["observed_head_sha"] = "stale-head"
+        cases["stale"] = stale
+
+        wrong_verdict = observation(classification="IMPLEMENTATION_READY")
+        wrong_verdict["canonical_review_evidence"]["verdict"] = "CLEAN"
+        cases["wrong_verdict"] = wrong_verdict
+
+        for name, value in cases.items():
+            with self.subTest(name=name):
+                item = classify_attention(value)
+                self.assertEqual(AttentionCategory.NEEDS_ATTENTION, item.category)
+                self.assertEqual(
+                    "CONTRADICTORY_IMPLEMENTATION_READY_EVIDENCE", item.reason
+                )
+                self.assertIsNone(item.human_action)
 
     def test_needs_review_requires_attention_even_when_stable(self):
         item = classify_attention(

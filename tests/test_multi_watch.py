@@ -172,14 +172,14 @@ def _observation(
         "transition": True,
         "transition_reasons": ["CLASSIFICATION_CHANGED"],
     }
-    if classification == "REVIEW_READY":
+    if classification in {"REVIEW_READY", "IMPLEMENTATION_READY"}:
         value["canonical_review_evidence"] = {
             "schema": "agent-controller/review-evidence/v1",
             "repo": repo,
             "pr": pr,
             "observed_head_sha": f"sha-{pr}",
             "collection_complete": True,
-            "verdict": "CLEAN",
+            "verdict": "CLEAN" if classification == "REVIEW_READY" else "ABSENT",
             "surfaces": [
                 {"surface": name, "status": "COMPLETE", "pagination_exhausted": True, "error": None}
                 for name in ("formal_reviews", "issue_comments", "inline_threads", "reactions")
