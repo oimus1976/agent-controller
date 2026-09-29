@@ -336,6 +336,7 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
                     str(probe),
                 ],
                 cwd=self.repo_root,
+                env=self._windows_powershell_env(),
                 check=False,
                 capture_output=True,
                 text=True,
@@ -406,6 +407,353 @@ Write-Output 'ACL_MUTATION_RIGHTS_PASS'
             msg=completed.stdout + "\n" + completed.stderr,
         )
         self.assertIn("ACL_MUTATION_RIGHTS_PASS", completed.stdout)
+
+    def _production_loader_line(self) -> str:
+        source = self.script.read_text(encoding="utf-8")
+        lines = [
+            line.strip()
+            for line in source.splitlines()
+            if line.strip().startswith("$Loader = ")
+        ]
+        self.assertEqual(len(lines), 1, msg=lines)
+        return lines[0]
+
+    def test_elevated_python_loader_survives_powershell_51_native_arguments(self):
+        # Issue #259: Windows PowerShell 5.1 does not escape embedded double
+        # quotes when it passes an argument to a native executable. The
+        # production loader must still reach the snapshot entry point.
+        loader_line = self._production_loader_line()
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = Path(tmp) / "snapshot"
+            (snapshot / "scripts").mkdir(parents=True)
+            (snapshot / "scripts" / "archive_private_ci_burned_evidence.py").write_text(
+                "import json, sys\n"
+                "print('LOADER_STUB_OK ' + json.dumps(sys.argv[1:]))\n",
+                encoding="utf-8",
+            )
+            python = sys.executable.replace("'", "''")
+            snapshot_literal = str(snapshot).replace("'", "''")
+            probe = Path(tmp) / "loader-probe.ps1"
+            probe.write_text(
+                "$ErrorActionPreference = 'Stop'\n"
+                f"$PythonPath = '{python}'\n"
+                f"$SnapshotRoot = '{snapshot_literal}'\n"
+                "$ExpectedPlanSha256 = 'probe-sha'\n"
+                "$ExpectedPlanBase64 = 'probe-base64'\n"
+                f"{loader_line}\n"
+                "& $PythonPath -I -S -B -c $Loader $SnapshotRoot apply-internal "
+                "--expected-plan-sha256 $ExpectedPlanSha256 "
+                "--expected-plan-base64 $ExpectedPlanBase64\n"
+                "exit $LASTEXITCODE\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    self.powershell,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(probe),
+                ],
+                cwd=self.repo_root,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=completed.stdout + "\n" + completed.stderr,
+        )
+        self.assertIn(
+            'LOADER_STUB_OK ["apply-internal", "--expected-plan-sha256", '
+            '"probe-sha", "--expected-plan-base64", "probe-base64"]',
+            completed.stdout,
+        )
+
+    @staticmethod
+    def _windows_powershell_env() -> dict[str, str]:
+        # Let powershell.exe 5.1 rebuild its own PSModulePath instead of
+        # inheriting a PowerShell 7 module path (the CI step shell), which
+        # makes Microsoft.PowerShell.Security (Get-Acl / Set-Acl) unloadable.
+        return {
+            key: value
+            for key, value in os.environ.items()
+            if key.upper() != "PSMODULEPATH"
+        }
+
+    def _run_powershell_file(
+        self,
+        source: str,
+        directory: Path,
+        name: str,
+    ) -> subprocess.CompletedProcess[str]:
+        probe = directory / name
+        probe.write_text(source, encoding="utf-8")
+        return subprocess.run(
+            [
+                self.powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(probe),
+            ],
+            cwd=self.repo_root,
+            env=self._windows_powershell_env(),
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+    def _production_child_block(self) -> str:
+        source = self.script.read_text(encoding="utf-8")
+        start = source.index("# BEGIN ELEVATED PYTHON CHILD")
+        end = source.index("# END ELEVATED PYTHON CHILD", start)
+        return source[start:end]
+
+    def _run_production_child_block(
+        self,
+        stub_source: str,
+    ) -> tuple[subprocess.CompletedProcess[str], str, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot = root / "snapshot"
+            (snapshot / "scripts").mkdir(parents=True)
+            (snapshot / "scripts" / "archive_private_ci_burned_evidence.py").write_text(
+                stub_source,
+                encoding="utf-8",
+            )
+            diagnostics = root / "diagnostics"
+            diagnostics.mkdir()
+            python = sys.executable.replace("'", "''")
+            source = (
+                "$ErrorActionPreference = 'Stop'\n"
+                "Set-StrictMode -Version Latest\n"
+                f"$PythonPath = '{python}'\n"
+                f"$SnapshotRoot = '{str(snapshot).replace(chr(39), chr(39) * 2)}'\n"
+                f"$DiagnosticsRoot = '{str(diagnostics).replace(chr(39), chr(39) * 2)}'\n"
+                "$DiagnosticsPrefix = 'probeprefix'\n"
+                "$ExpectedPlanSha256 = 'probe-sha'\n"
+                "$ExpectedPlanBase64 = 'probe-base64'\n"
+                "$ChildExitCode = $null\n"
+                + self._production_child_block()
+                + "\nWrite-Output ('CHILD_EXIT=' + $ChildExitCode)\n"
+                "Write-Output ('EAP_RESTORED=' + ($ErrorActionPreference -eq 'Stop'))\n"
+            )
+            completed = self._run_powershell_file(source, root, "child-probe.ps1")
+            stdout_file = diagnostics / "probeprefix-child-stdout.txt"
+            stderr_file = diagnostics / "probeprefix-child-stderr.txt"
+            captured_out = (
+                stdout_file.read_bytes().decode("utf-16")
+                if stdout_file.exists() and stdout_file.read_bytes()[:2] == b"\xff\xfe"
+                else (stdout_file.read_text(encoding="utf-8", errors="replace") if stdout_file.exists() else "<missing>")
+            )
+            captured_err = (
+                stderr_file.read_bytes().decode("utf-16")
+                if stderr_file.exists() and stderr_file.read_bytes()[:2] == b"\xff\xfe"
+                else (stderr_file.read_text(encoding="utf-8", errors="replace") if stderr_file.exists() else "<missing>")
+            )
+        return completed, captured_out, captured_err
+
+    def test_production_child_block_captures_stdout_and_success_exit(self):
+        completed, captured_out, _ = self._run_production_child_block(
+            "import json, sys\n"
+            "print('CHILD_STUB_OK ' + json.dumps(sys.argv[1:]))\n"
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=completed.stdout + "\n" + completed.stderr,
+        )
+        self.assertIn("CHILD_EXIT=0", completed.stdout)
+        self.assertIn("EAP_RESTORED=True", completed.stdout)
+        self.assertIn(
+            'CHILD_STUB_OK ["apply-internal", "--expected-plan-sha256", '
+            '"probe-sha", "--expected-plan-base64", "probe-base64"]',
+            captured_out,
+        )
+
+    def test_production_child_block_captures_stderr_without_native_command_error(self):
+        completed, _, captured_err = self._run_production_child_block(
+            "import sys\n"
+            "sys.stderr.write('CHILD_STDERR_MARKER boom\\n')\n"
+            "sys.stderr.flush()\n"
+            "raise SystemExit(3)\n"
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=completed.stdout + "\n" + completed.stderr,
+        )
+        self.assertIn("CHILD_EXIT=3", completed.stdout)
+        self.assertIn("EAP_RESTORED=True", completed.stdout)
+        self.assertIn("CHILD_STDERR_MARKER boom", captured_err)
+
+    def test_diagnostics_directory_is_private_with_reader_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "bootstrap-parent"
+            completed = self._run_bootstrap_prefix_probe(
+                "$Reader = [Security.Principal.WindowsIdentity]::GetCurrent().Name\n"
+                f"$Parent = '{str(parent).replace(chr(39), chr(39) * 2)}'\n"
+                r"""
+$Root = Initialize-ArchiveDiagnostics -BootstrapParent $Parent -ReaderAccount $Reader
+if ($Root -ne (Join-Path $Parent 'diagnostics')) { throw "unexpected diagnostics root: $Root" }
+$ReaderSid = (New-Object Security.Principal.NTAccount($Reader)).Translate([Security.Principal.SecurityIdentifier]).Value
+foreach ($Path in @($Parent, $Root)) {
+    $Acl = Get-Acl -LiteralPath $Path
+    if (-not $Acl.AreAccessRulesProtected) { throw "ACL not protected: $Path" }
+    foreach ($Rule in $Acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if (@('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545') -contains $Rule.IdentityReference.Value) {
+            throw "low-privilege ACE present on $Path"
+        }
+    }
+}
+$ReaderRules = @((Get-Acl -LiteralPath $Root).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -eq $ReaderSid })
+if ($ReaderRules.Count -ne 1) { throw "expected one reader ACE, got $($ReaderRules.Count)" }
+if (Test-MutationCapableFileSystemRights -Rights $ReaderRules[0].FileSystemRights) { throw 'reader ACE is mutation-capable' }
+if (($ReaderRules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::ReadData) -eq 0) { throw 'reader ACE cannot read' }
+$ParentReader = @((Get-Acl -LiteralPath $Parent).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference.Value -eq $ReaderSid })
+if ($ParentReader.Count -ne 0) { throw 'reader must not gain access to the bootstrap parent' }
+Write-Output 'DIAGNOSTICS_ACL_PASS'
+"""
+            )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=completed.stdout + "\n" + completed.stderr,
+        )
+        self.assertIn("DIAGNOSTICS_ACL_PASS", completed.stdout)
+
+    def test_diagnostics_directory_reparse_point_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "bootstrap-parent"
+            parent.mkdir()
+            target = Path(tmp) / "elsewhere"
+            target.mkdir()
+            subprocess.run(
+                ["cmd.exe", "/c", "mklink", "/J", str(parent / "diagnostics"), str(target)],
+                check=True,
+                capture_output=True,
+            )
+            completed = self._run_bootstrap_prefix_probe(
+                "$Reader = [Security.Principal.WindowsIdentity]::GetCurrent().Name\n"
+                f"$Parent = '{str(parent).replace(chr(39), chr(39) * 2)}'\n"
+                "Initialize-ArchiveDiagnostics -BootstrapParent $Parent -ReaderAccount $Reader | Out-Null\n"
+                "Write-Output 'UNEXPECTED_DIAGNOSTICS_ACCEPTED'\n"
+            )
+            self.assertEqual(list(target.iterdir()), [])
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("UNEXPECTED_DIAGNOSTICS_ACCEPTED", completed.stdout)
+        self.assertIn(
+            "Directory is a reparse point",
+            completed.stdout + "\n" + completed.stderr,
+        )
+
+    def test_diagnostic_record_is_create_new_bounded_and_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stderr_file = root / "stderr.txt"
+            stderr_file.write_text("E" * 20000 + "\nTAIL_NOT_INCLUDED", encoding="utf-8")
+            completed = self._run_bootstrap_prefix_probe(
+                f"$Root = '{str(root).replace(chr(39), chr(39) * 2)}'\n"
+                f"$Stderr = '{str(stderr_file).replace(chr(39), chr(39) * 2)}'\n"
+                r"""
+$ExpectedPlanSha256 = 'a' * 64
+$DiagnosticsRoot = $Root
+$DiagnosticsPrefix = 'fixedprefix'
+$DiagnosticsStartedUtc = '2026-09-26T00:00:00Z'
+$Stage = 'child'
+$CleanupFailureText = ''
+$ChildExitCode = 1
+$ChildStdoutPath = $null
+$ChildStderrPath = $Stderr
+try { throw "line one`r`nline two" } catch { $Failure = $_ }
+$Record = Write-ArchiveDiagnosticRecord -Status 'FAILED' -Failure $Failure
+Write-Output "RECORD=$Record"
+try {
+    Write-ArchiveDiagnosticRecord -Status 'FAILED' -Failure $Failure | Out-Null
+    Write-Output 'UNEXPECTED_OVERWRITE'
+}
+catch {
+    Write-Output 'CREATE_NEW_ENFORCED'
+}
+"""
+            )
+            record = root / "fixedprefix-failed.log"
+            raw = record.read_bytes() if record.exists() else b""
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=completed.stdout + "\n" + completed.stderr,
+        )
+        self.assertIn("CREATE_NEW_ENFORCED", completed.stdout)
+        self.assertNotIn("UNEXPECTED_OVERWRITE", completed.stdout)
+        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))
+        text = raw.decode("utf-8-sig")
+        for expected in (
+            "schema=agent-controller.private-ci-archive-bootstrap-diagnostic.v1",
+            "status=FAILED",
+            "plan_sha256=" + "a" * 64,
+            "stage=child",
+            "error_type=System.Management.Automation.RuntimeException",
+            "error_message=line one | line two",
+            "child_exit_code=1",
+            "<not captured>",
+            "<truncated: total_chars=",
+        ):
+            self.assertIn(expected, text)
+        self.assertNotIn("TAIL_NOT_INCLUDED", text)
+
+    def test_bootstrap_failure_writes_durable_record_and_still_fails(self):
+        source = self.script.read_text(encoding="utf-8")
+        prefix_end = source.index("$ObservedHost =")
+        main_start = source.index("$DiagnosticsStartedUtc =")
+        parent_line = (
+            "$BootstrapParent = Join-Path $CommonData "
+            "'agent-controller-private-ci-archive-bootstrap'"
+        )
+        self.assertEqual(source.count(parent_line), 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "bootstrap-parent"
+            main = source[main_start:].replace(
+                parent_line,
+                f"$BootstrapParent = '{str(parent).replace(chr(39), chr(39) * 2)}'",
+            )
+            probe_source = (
+                source[:prefix_end]
+                .replace("__EXPECTED_PLAN_SHA256__", "b" * 64)
+                .replace("__EXPECTED_PLAN_BASE64__", "%%not-base64%%")
+                + "\n$ExpectedIdentity = [Security.Principal.WindowsIdentity]::GetCurrent().Name\n"
+                + main
+            )
+            completed = self._run_powershell_file(
+                probe_source,
+                Path(tmp),
+                "bootstrap-failure-probe.ps1",
+            )
+            records = sorted((parent / "diagnostics").glob("*-failed.log"))
+            passes = sorted((parent / "diagnostics").glob("*-pass.log"))
+            text = records[0].read_bytes().decode("utf-8-sig") if len(records) == 1 else ""
+        combined = completed.stdout + "\n" + completed.stderr
+        self.assertNotEqual(completed.returncode, 0, msg=combined)
+        self.assertNotIn("BURNED_CANONICAL_ARCHIVE_UAC_BRIDGE_PASS", completed.stdout)
+        self.assertIn("Reviewed archive plan base64 is invalid.", combined)
+        self.assertIn("ARCHIVE_BOOTSTRAP_DIAGNOSTIC=", completed.stdout)
+        self.assertEqual(len(records), 1, msg=combined)
+        self.assertEqual(passes, [])
+        self.assertIn("status=FAILED", text)
+        self.assertIn("stage=plan_verification", text)
+        self.assertIn("error_message=Reviewed archive plan base64 is invalid.", text)
+        self.assertIn("child_exit_code=<not reached>", text)
+        self.assertTrue(records[0].name.startswith("b" * 16 + "-"))
 
     def test_apply_bridge_parses_under_windows_powershell_51(self):
         quoted = str(self.script).replace("'", "''")
@@ -604,6 +952,144 @@ finally:
                     )
                 finally:
                     handle.close()
+
+    def _quiescence_with_external_volume_holder(self, *, prove_volume=None):
+        """Run quiescence while a separate process holds a write-class
+        volume-open handle. Returns the RuntimeError raised, or None."""
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        system_drive = os.environ.get("SystemDrive", "C:")
+        volume_path = "\\\\.\\" + system_drive
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "evidence"
+            root.mkdir()
+            child_code = r"""
+import ctypes
+import sys
+import time
+from ctypes import wintypes
+
+path = sys.argv[1]
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.CreateFileW.argtypes = [
+    wintypes.LPCWSTR,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    wintypes.LPVOID,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    wintypes.HANDLE,
+]
+kernel32.CreateFileW.restype = wintypes.HANDLE
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.restype = wintypes.BOOL
+
+handle = kernel32.CreateFileW(
+    path,
+    0x80000000 | 0x40000000,
+    0x00000001 | 0x00000002,
+    None,
+    3,
+    0,
+    None,
+)
+if handle == ctypes.c_void_p(-1).value:
+    raise ctypes.WinError(ctypes.get_last_error())
+print("READY", flush=True)
+try:
+    while True:
+        time.sleep(60)
+finally:
+    kernel32.CloseHandle(handle)
+"""
+            child = subprocess.Popen(
+                [sys.executable, "-c", child_code, volume_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            real_system_handle_entries = m._system_handle_entries
+
+            def controlled_system_handle_entries():
+                allowed_pids = {os.getpid(), child.pid}
+                return tuple(
+                    entry
+                    for entry in real_system_handle_entries()
+                    if int(entry.UniqueProcessId) in allowed_pids
+                )
+
+            with mock.patch.object(
+                m,
+                "_system_handle_entries",
+                side_effect=controlled_system_handle_entries,
+            ):
+                try:
+                    ready = child.stdout.readline().strip()
+                    if ready != "READY":
+                        child.kill()
+                        self.fail(
+                            "volume holder did not start: "
+                            + ready
+                            + child.stderr.read()
+                        )
+                    handle = m._open_locked_directory(root)
+                    try:
+                        patches = []
+                        if prove_volume is not None:
+                            patches.append(
+                                mock.patch.object(
+                                    m,
+                                    "_proven_volume_open",
+                                    return_value=prove_volume,
+                                )
+                            )
+                        for patch in patches:
+                            patch.start()
+                        try:
+                            m._require_no_external_mutation_handles(
+                                handle,
+                                "authoritative evidence root",
+                            )
+                            return None
+                        except RuntimeError as exc:
+                            return exc
+                        finally:
+                            for patch in patches:
+                                patch.stop()
+                    finally:
+                        handle.close()
+                finally:
+                    child.terminate()
+                    child.wait(timeout=10)
+                    if child.stdout is not None:
+                        child.stdout.close()
+                    if child.stderr is not None:
+                        child.stderr.close()
+
+    def test_external_volume_open_handle_does_not_block_quiescence(self):
+        # Issue #261: Windows Search (SearchIndexer.exe) keeps write-class
+        # volume-open handles. A volume open can never be the authoritative
+        # evidence directory, but FileStandardInformation on it fails with
+        # STATUS_INVALID_PARAMETER, which quiescence must classify by proof
+        # instead of failing closed forever.
+        error = self._quiescence_with_external_volume_holder()
+        if error is not None:
+            # Surface the real classification text as a CI annotation; job
+            # logs are not always reachable from the implementing worker.
+            print(
+                "::error title=issue261-volume-quiescence::"
+                + str(error).replace("\n", " "),
+                flush=True,
+            )
+        self.assertIsNone(error)
+
+    def test_external_volume_open_handle_without_proof_still_blocks(self):
+        error = self._quiescence_with_external_volume_holder(prove_volume=False)
+        self.assertIsNotNone(error)
+        self.assertIn("directory classification unavailable", str(error))
+        self.assertIn("ntstatus=0xc000000d", str(error))
 
     def test_quiescence_enables_debug_and_fails_closed_on_hidden_live_handles(self):
         from agent_controller import private_ci_windows_atomic_archive as m
@@ -1038,7 +1524,20 @@ finally:
             finally:
                 handle.close()
 
-    def test_live_pid4_mutation_candidate_blocks_when_uninspectable(self):
+    def _run_fake_uninspectable_candidate(
+        self,
+        *,
+        candidate_pid,
+        extra_live_pids=(),
+        extra_readonly_pids=(),
+        smb_exposure=None,
+    ):
+        """Run quiescence with one fake uninspectable candidate.
+
+        smb_exposure: True/False patches _evidence_root_exposed_by_smb; an
+        Exception instance makes it raise; None leaves it unpatched.
+        Returns the RuntimeError raised, or None.
+        """
         from agent_controller import private_ci_windows_atomic_archive as m
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1052,54 +1551,235 @@ finally:
                 own.ObjectTypeIndex = 7
                 own.GrantedAccess = 0
 
-                system_candidate = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
-                system_candidate.UniqueProcessId = 4
-                system_candidate.HandleValue = 0x77
-                system_candidate.Object = 0x22222222
-                system_candidate.ObjectTypeIndex = 7
-                system_candidate.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+                candidate = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                candidate.UniqueProcessId = candidate_pid
+                candidate.HandleValue = 0x77
+                candidate.Object = 0x22222222
+                candidate.ObjectTypeIndex = 7
+                candidate.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+
+                final = [own, candidate]
+                for index, pid in enumerate(extra_live_pids):
+                    extra = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                    extra.UniqueProcessId = pid
+                    extra.HandleValue = 0x100 + index
+                    extra.Object = 0x22222222
+                    extra.ObjectTypeIndex = 7
+                    extra.GrantedAccess = m.DIRECTORY_MUTATION_ACCESS
+                    final.append(extra)
+                for index, pid in enumerate(extra_readonly_pids):
+                    reader = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
+                    reader.UniqueProcessId = pid
+                    reader.HandleValue = 0x200 + index
+                    reader.Object = 0x22222222
+                    reader.ObjectTypeIndex = 7
+                    reader.GrantedAccess = 0x00000001 | 0x00100000
+                    final.append(reader)
 
                 fake_kernel32 = SimpleNamespace(
                     GetCurrentProcess=lambda: 1,
                     OpenProcess=lambda *args: 0,
                     CloseHandle=lambda *args: 1,
                 )
+                exposure_calls = []
+
+                def exposure(path):
+                    exposure_calls.append(path)
+                    if isinstance(smb_exposure, Exception):
+                        raise smb_exposure
+                    return smb_exposure
+
+                patches = [
+                    mock.patch.object(m, "_enable_debug_privilege", return_value=None),
+                    mock.patch.object(
+                        m,
+                        "_system_handle_entries",
+                        side_effect=[(own, candidate), tuple(final)],
+                    ),
+                    mock.patch.object(m, "_file_type_once", return_value=m.FILE_TYPE_DISK),
+                    mock.patch.object(m, "_native_file_is_directory_once", return_value=True),
+                    mock.patch.object(
+                        m,
+                        "_stable_file_id_identity",
+                        return_value=(0xAABBCCDD, b"1" * 16),
+                    ),
+                    mock.patch.object(m, "_kernel32", fake_kernel32),
+                ]
+                if smb_exposure is not None:
+                    patches.append(
+                        mock.patch.object(
+                            m,
+                            "_evidence_root_exposed_by_smb",
+                            side_effect=exposure,
+                        )
+                    )
+                for patch in patches:
+                    patch.start()
+                try:
+                    m._require_no_external_mutation_handles(
+                        handle,
+                        "authoritative evidence root",
+                    )
+                    return None, exposure_calls
+                except RuntimeError as exc:
+                    return exc, exposure_calls
+                finally:
+                    for patch in reversed(patches):
+                        patch.stop()
+            finally:
+                handle.close()
+
+    def test_live_pid4_mutation_candidate_blocks_when_uninspectable(self):
+        # Issue #263 changed this contract: an uninspectable live PID 4
+        # candidate still blocks whenever the evidence root is SMB-exposed.
+        error, calls = self._run_fake_uninspectable_candidate(
+            candidate_pid=4,
+            smb_exposure=True,
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("uninspectable external mutation handle", str(error))
+        self.assertEqual(len(calls), 1)
+
+    def test_live_pid4_candidate_is_trusted_when_root_not_smb_exposed(self):
+        error, calls = self._run_fake_uninspectable_candidate(
+            candidate_pid=4,
+            smb_exposure=False,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(len(calls), 1)
+
+    def test_live_pid4_candidate_blocks_when_smb_exposure_unknown(self):
+        error, _ = self._run_fake_uninspectable_candidate(
+            candidate_pid=4,
+            smb_exposure=RuntimeError("SMB share enumeration failed: status=5"),
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("SMB share enumeration failed", str(error))
+
+    def test_pid4_object_also_live_in_another_process_still_blocks(self):
+        error, calls = self._run_fake_uninspectable_candidate(
+            candidate_pid=4,
+            extra_live_pids=(5555,),
+            smb_exposure=False,
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("uninspectable external mutation handle", str(error))
+        self.assertEqual(calls, [])
+
+    def test_pid4_object_also_held_read_only_elsewhere_still_blocks(self):
+        # Codex P1 on 9e373ed: exclusivity must count every holder of the
+        # Object, not only mutation-capable ones.
+        error, calls = self._run_fake_uninspectable_candidate(
+            candidate_pid=4,
+            extra_readonly_pids=(5555,),
+            smb_exposure=False,
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("uninspectable external mutation handle", str(error))
+        self.assertEqual(calls, [])
+
+    def test_non_system_uninspectable_candidate_still_blocks_without_smb(self):
+        error, calls = self._run_fake_uninspectable_candidate(
+            candidate_pid=5555,
+            smb_exposure=False,
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("uninspectable external mutation handle", str(error))
+        self.assertEqual(calls, [])
+
+    def test_real_share_enumeration_and_temp_root_exposure(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        shares = m._smb_disk_shares()
+        self.assertIsInstance(shares, tuple)
+        for name, path, share_type in shares:
+            self.assertIsInstance(name, str)
+            self.assertIsInstance(path, str)
+            if name.upper() in ("C$", "ADMIN$", "IPC$"):
+                self.assertTrue(share_type & m.STYPE_SPECIAL, msg=name)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exposed = m._evidence_root_exposed_by_smb(root)
+            self.assertIsInstance(exposed, bool)
+            # Derive the expectation from this host's shares instead of
+            # assuming %TEMP% is unshared (hosts may legitimately share it).
+            root_forms = [str(root), str(root.resolve(strict=True))]
+            ancestors = [
+                name
+                for name, path, share_type in shares
+                if not share_type & m.STYPE_SPECIAL
+                and (share_type & m.STYPE_MASK) == m.STYPE_DISKTREE
+                and path
+                and any(
+                    m._windows_path_is_same_or_under(form, candidate)
+                    for form in root_forms
+                    for candidate in (path, str(Path(path).resolve(strict=False)))
+                )
+            ]
+            self.assertIs(exposed, bool(ancestors), msg=ancestors)
+
+    def test_real_system_process_handles_do_not_block_when_root_not_smb_exposed(self):
+        # Issue #263: the System process (PID 4) always holds write-class
+        # kernel File handles (paging file, registry hives) that the broker
+        # cannot inspect. They are trusted kernel handles unless the evidence
+        # root is reachable through a non-administrative SMB share.
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "evidence"
+            root.mkdir()
+            real_system_handle_entries = m._system_handle_entries
+
+            def own_and_system_entries():
+                allowed_pids = {os.getpid(), 4}
+                return tuple(
+                    entry
+                    for entry in real_system_handle_entries()
+                    if int(entry.UniqueProcessId) in allowed_pids
+                )
+
+            if m._evidence_root_exposed_by_smb(root):
+                self.skipTest(
+                    "temporary evidence root is SMB-exposed on this host; "
+                    "PID 4 handles are correctly not trusted here"
+                )
+            handle = m._open_locked_directory(root)
+            try:
+                entries = own_and_system_entries()
+                own_type = [
+                    int(entry.ObjectTypeIndex)
+                    for entry in entries
+                    if int(entry.UniqueProcessId) == os.getpid()
+                    and int(entry.HandleValue) == int(handle.handle)
+                ]
+                self.assertEqual(len(own_type), 1)
+                system_candidates = [
+                    entry
+                    for entry in entries
+                    if int(entry.UniqueProcessId) == 4
+                    and int(entry.ObjectTypeIndex) == own_type[0]
+                    and int(entry.GrantedAccess) & m.DIRECTORY_MUTATION_ACCESS
+                ]
+                # The regression is meaningful only if the runner's System
+                # process really holds write-class File handles.
+                self.assertTrue(system_candidates)
                 with mock.patch.object(
                     m,
-                    "_enable_debug_privilege",
-                    return_value=None,
-                ), mock.patch.object(
-                    m,
                     "_system_handle_entries",
-                    side_effect=[
-                        (own, system_candidate),
-                        (own, system_candidate),
-                    ],
-                ), mock.patch.object(
-                    m,
-                    "_file_type_once",
-                    return_value=m.FILE_TYPE_DISK,
-                ), mock.patch.object(
-                    m,
-                    "_native_file_is_directory_once",
-                    return_value=True,
-                ), mock.patch.object(
-                    m,
-                    "_stable_file_id_identity",
-                    return_value=(0xAABBCCDD, b"1" * 16),
-                ), mock.patch.object(
-                    m,
-                    "_kernel32",
-                    fake_kernel32,
+                    side_effect=own_and_system_entries,
                 ):
-                    with self.assertRaisesRegex(
-                        RuntimeError,
-                        "uninspectable external mutation handle",
-                    ):
+                    try:
                         m._require_no_external_mutation_handles(
                             handle,
                             "authoritative evidence root",
                         )
+                    except RuntimeError as exc:
+                        print(
+                            "::error title=issue263-pid4-quiescence::"
+                            + str(exc).replace("\n", " "),
+                            flush=True,
+                        )
+                        raise
             finally:
                 handle.close()
 
@@ -1118,7 +1798,9 @@ finally:
                 own.GrantedAccess = 0
 
                 protected_candidate = m.SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX()
-                protected_candidate.UniqueProcessId = 4
+                # A generic protected (non-System) process. PID 4 has its own
+                # SMB-gated contract since Issue #263 and dedicated tests.
+                protected_candidate.UniqueProcessId = os.getpid() + 1000
                 protected_candidate.HandleValue = 0x77
                 protected_candidate.Object = 0x22222222
                 protected_candidate.ObjectTypeIndex = 7

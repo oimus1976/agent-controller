@@ -15,6 +15,209 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-28 — The Phase 4 target probe checks gh without native stderr redirection, and is now executed under PS 5.1 in CI（Issue #273 / PR #274）
+
+関連: Issue #273, Issue #216, Issue #265, Issue #270
+
+### Background（WOBBUFFET実機, canonical main `21ec440a`）
+
+- 2 回目の pilot identity `ac-pilot-0351dfe703139932` は、Phase 4 で失敗して退役した(Phase 4 の承認は消費済み)。#265 と #270 の修正は実機で機能した(資格情報の確認が変更より前、ACL の再設定と SDDL の読み戻しが成功、broker から読める)。
+- 原因:target probe の `& $TrustedGhPath auth status --hostname github.com *> $null`。Windows PowerShell 5.1 では、`$ErrorActionPreference = 'Stop'` の状態でネイティブコマンドの stderr をリダイレクトすると、stderr の各行が終了エラー `NativeCommandError` になる。ac-runner の gh が出した正しい結果(未ログイン)で、probe が `$LASTEXITCODE` を読む前に自分で終了した。authority マーカーへの書き込み拒否の確認は、実機では一度も実行されていない。
+- 既存の `test_private_ci_phase4_target_probe_windows.py` は構文解析と文字列の照合だけで、probe を実行していなかった。
+
+### Changed
+
+- `scripts/Invoke-PrivateCiPhase4TargetProbe.ps1`:gh の確認を、`ProcessStartInfo` + `[System.Diagnostics.Process]::Start` による起動に変えた。stdin・stdout・stderr はリダイレクトして非同期に読み、待機は 30 秒まで。exit 0、タイムアウト(子プロセスは Kill する)、起動の失敗は、いずれも fail-closed。完了して 0 以外で終わった場合だけ、未認証とみなす。result の schema は変えていない。Phase 5 の security probe も同じファイルを使うので、Phase 5 も同じ修正を受ける。
+- 新しいテスト `tests/test_private_ci_phase4_target_probe_exec_windows.py`(Windows ジョブの最後のステップ。ジョブのタイムアウトは 10 分 → 15 分):
+  - 追跡中の probe を、使い捨ての非管理者ローカルユーザーとして PS 5.1 で**実際に実行する**。gh は、コンパイルしたスタブ(未認証、認証済み、stderr にも出力する認証済み、応答しない)と、ランナーイメージにある本物の未認証 gh を使う。authority マーカーに書き込める場合は fail-closed になることも確かめる。
+  - PS 5.1 の AST で、`scripts/*.ps1` のすべてと、生成した Phase 4/5/6 の candidate を調べ、ネイティブコマンドへの `2>`・`*>` のリダイレクトを拒否する静的ガード。既存の `Archive-PrivateCiBurnedEvidence.ps1`(#259)の 1 か所だけは、直前でローカルに `Continue` にしている間に限って許可する。
+
+### Validation / authority boundary
+
+- RED(`620bdd3`):未認証スタブと本物の gh の両方で、実機と同じ `NativeCommandError`(probe の 81 行目)になった。stderr にも出力する認証済みスタブと、書き込めるマーカーのケースは、誤った理由(同じ行)で失敗した。応答しない gh では probe が戻らなかった。静的ガードは probe の 81 行目を検出した。
+- GREEN(`060b739`):同じテストがすべて成功。
+- Phase 4/5 の spec と target probe のハッシュは変わる。この修正の merge は、Phase 4 の再試行を承認するものではない。次の試行は、merge 後の `main` から、まったく新しい identity freeze で始める。
+
+---
+
+## 2026-09-27 — Target children are launched with Process.Start so the non-elevated broker keeps the process handle（Issue #270 / PR #271）
+
+関連: Issue #270, Issue #216, Issue #265, PR #267, PR #271
+
+### Background（WOBBUFFET実機, canonical main `79cfd53e`）
+
+- 昇格していない broker から `Start-Process -Credential` で target(ac-runner)の子プロセスを起動すると、PowerShell 5.1 は作成時のハンドルを持たない `Process` を返す(PID から作り直す)。`-Wait`、実行中の `HasExited`、`ExitCode` は、そのたびに target 所有のプロセスを `OpenProcess` し直し、アクセス拒否(5)になる。`Stop-Process -Id` も同じ理由で失敗する。
+- 影響:#267 で追加した Phase 4 の資格情報確認は、正しいパスワードでも必ず失敗する(Phase 4 の承認を消費したうえで)。Phase 4 の target probe、Phase 5 の security probe と runner、`Test-PrivateCiTargetCredential.ps1` も同じ形だった。
+- オーナーが実機で切り分けた(diag1〜4、#270)。.NET の `Process.Start`(`ProcessStartInfo` の `UserName`/`Domain`/`Password`)は作成時のハンドルを保持し、待機、終了コード、出力の取得が昇格なしで動くことを確認した。
+- #265 の CI 回帰テストは、資格情報の確認ブロックを昇格した管理者のまま実行していたため、表面化しなかった。
+
+### Changed（オーナー承認の設計 #270 comment 5852616248、方針 1。Codex レビュー後にオーナー承認の案 A で改訂）
+
+- Phase 4 の資格情報確認と target probe、Phase 5 の security probe と runner を、`$<n> = [System.Diagnostics.Process]::Start((New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{…}))` で起動するようにした。`ProcessStartInfo` は変数に入れずインラインで渡す(案 A:param の既定値、`-OutVariable`、Variable プロバイダーで差し替えられる変数を作らない)。タイムアウト時は、保持しているハンドルで `Kill()` する(`Stop-Process -Id` をやめた)。
+  - probe の標準出力と標準エラーは .NET のパイプ(`ReadToEndAsync`)で読み、終了後に broker が従来と同じパスへ `Set-Content -Encoding UTF8` で書く。
+  - Phase 5 の runner は、長時間動くのでパイプを使わない。`cmd.exe /d /s /c "run.cmd 1>"<stdout>" 2>"<stderr>""` で、target 自身が出力ファイルを書く。パスは Python 側で、`"%^&|<>!` と制御文字を含まないことを確かめる。probe の引数に埋め込む値も、`"` と制御文字を含まず、末尾が `\` でないことを確かめる。
+  - broker が書く probe の出力は、新しい狭い効果の種類 `EVIDENCE_OUTPUT_WRITE` とした。Phase 4 と Phase 5 の許可リストに加えた。Phase 5 には `FILESYSTEM_WRITE_MUTATION`(`Copy-Item` も含む)を与えない(案 A:途中の head `53b4c5e` で一時的に Phase 5 へ加えていた退行を戻した)。
+- operator-step AST gate に、決まった形だけを許可として加えた。起動名は `BridgeChild`、`BridgeSecurityProbeChild`、`BridgeCredentialCheck` に限る。
+  - ルートでの `$<n> = [System.Diagnostics.Process]::Start((New-Object …))`(PROCESS_LAUNCH)。インラインの `ProcessStartInfo` は、起動名と形ごとにキーの集合が**完全に一致**し(資格情報確認 8、probe 11、Phase 5 runner 9)、値も固定する:`FileName`・`Arguments`・`WorkingDirectory` は形ごとの値(資格情報確認は `$BridgeCredentialCheckPath`/`$BridgeCredentialCheckDirectory`、Phase 4 probe は `'powershell.exe'`/`$BridgeTargetProbeArguments`/`$BridgeRunnerRoot`、Phase 5 security probe は `'powershell.exe'`/`$BridgeSecurityProbeArguments`/`$BridgeRunnerRoot`、runner は `'cmd.exe'`/上記の形の文字列定数/`$BridgeRunnerRoot`)、`Password` は `$BridgeTargetCredential.Password`、`UserName`/`Domain` は空でない文字列定数、`UseShellExecute = $false`、`CreateNoWindow = $true`、Redirect* は `$true`、`LoadUserProfile` は資格情報確認だけ `$false`(Codex P1 × 2)。
+  - `$<n>.Kill()`(PROCESS_CONTROL)、`$<n>.StandardOutput/StandardError.ReadToEndAsync()` と `$<n>.WaitForExit()`(読み取り)。
+  - 起動名は、検証済みのルートの起動でちょうど 1 回だけ束縛されなければならない。別の代入、スコープ付きの代入、param(関数の param を含む)、foreach、変数を束縛する共通パラメーター(`-OutVariable`/`-ErrorVariable`/`-WarningVariable`/`-InformationVariable`/`-PipelineVariable`、別名・省略形・`+` 付き・計算した値を含む)は `DYNAMIC_OR_UNKNOWN_COMMAND` にする(Codex P1)。
+  - `Set-Content -LiteralPath $Bridge…Std(out|err)Path -Value $Bridge…Std(out|err)Text -Encoding UTF8`(EVIDENCE_OUTPUT_WRITE)。
+  - 上記以外のメソッド呼び出し、`New-Object`、`Set-Content` は、従来どおり `DYNAMIC_OR_UNKNOWN_COMMAND`。
+  - 子プロセスの終了コードとハートビートの証明は、`Start-Process -PassThru` に加えて、この `Process::Start` の形も受け付ける。
+- `Start-Process` に `-Credential`(省略形と別名 `-RunAs`、スプラッティングを含む)を付けると、gate は `START_PROCESS_CREDENTIAL_REJECTED` を出す。Python 側は、spec の許可リストにかかわらず `AST_START_PROCESS_CREDENTIAL_REJECTED` で止める。
+- `scripts/Test-PrivateCiTargetCredential.ps1` も同じ .NET の形にした(gate の対象外)。失敗時は `reason=win32_<コード>` とメッセージを出す。ログオン後に whoami の出力が期待した identity と一致することも確かめる。
+
+### Validation / authority boundary
+
+- RED(commit `a6067ec`):CI の Windows ランナーで、非管理者の broker として実行した資格情報確認ブロックが実機と同じ `Start-Process : Access is denied`(Win32Exception)で失敗し、オペレーター用スクリプトも正しいパスワードを `TARGET_CREDENTIAL_INVALID` と判定した。従来の `-Wait` の形が broker では native 5 になることを、特性テストとして固定した。gate の許可形はすべて `DYNAMIC_OR_UNKNOWN_COMMAND` になり、`Start-Process -Credential` は拒否されなかった。
+- GREEN:資格情報確認ブロック、Phase 4 の probe 起動ブロック(新しい区切りコメント `phase4-target-launch`)、オペレーター用スクリプトを、非管理者の broker として実行する。終了コードと出力が読めること、非 0 の終了で止まること、タイムアウト時に probe が `Kill()` で終了することを確かめる。
+- gate の役割:gate は効果の種類を分類する多層防御の一層であり、実行内容や identity の完全性は保証しない(引数を見ない `Start-Process` も PROCESS_LAUNCH になる)。完全性は、Python 側の candidate の正規形との完全一致の照合(Phase 4 plan と runtime、Phase 5 runtime)が担う。Variable プロバイダー経由の変数の差し替え(`Copy-Item`/`New-Item` と `variable:`)と、`using assembly`/`using module` は gate では検出できず、別 Issue で扱う。
+- Codex round 1(`ea13afd`)の P1(キーの部分集合)は RED `b798aad` → GREEN `53b4c5e`。round 2(`53b4c5e`)の P1 × 2(start info 変数の差し替え、値の差し替え)と、敵対的見直しで見つけた Phase 5 の許可範囲の退行は、RED `c9911ac` → 案 A で修正。
+- Phase 6 の `Stop-Process -Id $BridgeRunnerProcessId` は対象外(Phase 6 が昇格して動くかどうかの確認は別途)。
+- この修正の merge は、Phase 4 の再試行を承認するものではない。次の試行は、merge 後の `main` から、まったく新しい identity freeze で始める。
+
+## 2026-09-27 — Phase 4 ACL preparation keeps broker access with a verified read-back, and validates the target credential before any mutation（Issue #265 / PR #267）
+
+関連: Issue #265, Issue #216, PR #267
+
+### Background（WOBBUFFET実機, canonical main `9ef5ebf7`）
+
+- 新しい pilot identity `ac-pilot-4370190227c56b37` は、freeze、Phase 0、登録(runner id 24)、registration handoff まで通った。Phase 4 の apply は承認を消費した(consumption `9b188769…`)が、candidate が exit 1 で終了し、Phase 4 の result は作られなかった。この identity は手作業で退役させた(ランナーの登録解除、世代ディレクトリの削除、スロットの退避)。
+- candidate の不具合は 2 つ。
+  1. 昇格していない broker が `icacls … /inheritance:r /grant:r … /T /C` を実行すると、root 自体は処理できるが、その時点で broker 自身のアクセス権がなくなり、`runner\*` への再帰がアクセス拒否で失敗した。それでも icacls は **exit 0** を返したため、`$LASTEXITCODE` のチェックでは検出できなかった(fail-open)。
+  2. 資格情報の確認が、承認の消費と ACL の変更の後にしか行われなかった。そのため、ac-runner のパスワードを打ち間違えると、承認が失われ、ACL も書き換わったまま残る。
+- さらに、Phase 4 の ACL には broker が含まれていなかった。Phase 4 apply は probe の出力を読み戻し、Phase 5 は runner の出力ファイルを作って読むが、どちらも昇格していない broker が runner ツリーの中で行う。つまり、パスワードが正しくても後続の処理で必ず失敗する設計だった。CI の Windows ランナーは昇格した管理者で動くので、Administrators のフルコントロールに隠れて表面化しなかった。
+
+### Changed
+
+- ACL の準備で、broker 自身の SID に Modify(継承あり)を付与するようにした。SID は `whoami.exe /user` から取得し、名前が binding の broker identity と一致することを確かめる。ACL は SYSTEM と Administrators がフルコントロール、broker と target が Modify になる。
+- ACL の付け方を変えた。`/grant:r … (OI)(CI) … /T` で全要素に同じ許可を付けるのをやめ、root だけを保護して 4 者を継承付きで許可し、配下は `icacls <root>\* /reset /T` で「root から継承するだけ」に戻す。CI で確かめたところ、従来の再帰付与は、継承フラグを付けられないファイルを「処理成功」と報告しながら、エントリのない保護 DACL(`D:PAI`)にしていた。
+- icacls の exit code を信用せず、runner ツリーの全要素について `Get-Acl` の SDDL を読み戻して検証する。root は保護され、エントリはすべて明示の `OI`+`CI` であること。配下は保護されておらず、エントリはすべて root から継承したもの(フォルダは `OI`+`CI`+`ID`、ファイルは `ID`)であること。継承専用(`IO`)のエントリはどこにあっても失敗にする(Codex P1 の指摘:`/reset` が黙って失敗したフォルダに、明示エントリと継承専用の Everyone が残っていても通ってしまっていた)。失敗時は、その要素の SDDL をメッセージに含める。root は継承が保護されていること、各要素について、許可エントリだけで上記 4 者がちょうどその権限を持ち、それ以外の主体がいないこと。列挙できない要素があれば、その時点で止まる。
+- `Get-Credential` の直後、probe のコピーと ACL の変更より前に、`whoami.exe` を target として `Start-Process -Credential -Wait` で起動し、ログオンできることを確かめる。出力ファイルは作らない。
+- 承認を発行する前にオペレーターが実行する `scripts/Test-PrivateCiTargetCredential.ps1` を追加した。承認は消費せず、ファイルも書かない。Phase 4 の証跡としては扱わない。
+- operator-step AST gate の読み取り専用コマンドの許可リストに `Get-Acl` を加えた(`Set-Acl` は従来どおり `ACL_MUTATION` として扱う)。gate はメソッド呼び出しを未知の効果として扱うため、candidate はメソッドを使わず、演算子だけで SDDL を解析する。
+
+### Validation / authority boundary
+
+- RED→GREEN:使い捨ての非管理者 broker と target のローカルアカウントを CI の中で作成・削除し、レンダリングされた ACL ブロックをその broker として実行する Windows 回帰テストを追加した。RED commit `93a8ebc` / `00ded5d` では、実機と同じ 2 つの現象が annotation に出た。broker が ACL ブロックの後に `config.cmd` を読めない(`Access … is denied`)ことと、ロックしたサブツリーがあると `Failed processing 2 files` でも exit 0 でブロックが完了してしまうこと。
+- 資格情報の確認ブロックについて、誤ったパスワードでは止まり、正しいパスワードでは通ることを確かめた。オペレーター用スクリプトについても、valid と invalid を正しく判定することを確かめた。Linux の契約テストでは、資格情報の確認が probe のコピーと ACL の変更より前にあることを確かめる。
+- 既存の Phase 4 隔離検査(target probe の 6 項目)と、効果の分類(ACL_MUTATION、FILESYSTEM_WRITE_MUTATION、PROCESS_CONTROL、PROCESS_LAUNCH)は変えていない。
+- この修正の merge は、Phase 4 の再試行を承認するものではない。次の試行は、merge 後の `main` から、まったく新しい identity freeze で始める。
+
+## 2026-09-26 — Archive quiescence trusts System (PID 4) handles only without SMB exposure（Issue #263 / PR #264）
+
+関連: Issue #263, Issue #216, Issue #261, PR #262, PR #264
+
+### Background（WOBBUFFET実機, canonical main `b261ecb1`）
+
+- #262後のread-onlyのpre-mutation probe（script SHA-256 `febbec55…6af3b2a5`）はPASSした。新しいplan `e3de750c…eb8045` を独立に検証したうえで、ownerの明示的承認（UACコマンド SHA-256 `ca683d7b…0f6ddf5`、1回のみ）でapplyした。archiveの効果はゼロ。承認は消費済みで、再利用しない。
+- #259の診断記録で、#262によってWindows Searchのボリュームハンドルは通過したことを確認した。そのうえで、`uninspectable external mutation handle: pid=4 live_pids=4` でfail-closedしていた。
+- pid 4はSystemプロセス。ページファイルやレジストリハイブなどのカーネルのファイルハンドルを、書き込み系権限付きで常に保持しており、brokerからは複製して調べられない。従来の設計では、実機のWindowsではarchiveが一度も通らない。CIの回帰テストはpid 4を意図的に除外していたため、実機で初めて表面化した。
+
+### Changed（owner決定：選択肢1）
+
+- 調べられない（uninspectable）候補を除外するのは、次の条件をすべて満たす場合だけにした。
+  - 元のPIDが4で、そのObjectを保持しているliveなPIDが `{4}` だけであること。この排他性は、アクセス権を問わずすべての保持者で判定する（読み取り専用で他プロセスが保持していても信頼しない）。
+  - その場で行う `NetShareEnum`（level 2）の結果で、エビデンスルートそのもの、またはその祖先をパスに持つ「管理用ではない」ディスク共有が1つもないことを証明できること。パスは生の形と解決後の形の両方で比べ、対象となる共有のパスが解決できない場合はfail-closedする。
+- カーネルとドライバーは、管理者と同じく信頼の基盤（TCB）に含まれる。ただし、SMBサーバーはリモートのクライアントに代わってSystemプロセス内でファイルを開く。そのため、SMB共有でエビデンスルートに届く場合は信頼しない。管理用の特殊共有（`C$`、`ADMIN$` など）は管理者しか使えないので、信頼する側に含める。
+- SMBサーバーが停止している（`NERR_ServerNotStarted`）場合は、公開なしとみなす。それ以外の列挙エラーはfail-closedする。
+- pid 4以外のuninspectable、保護プロセス、複製できないハンドル、他プロセスへ引き渡されたハンドルは、従来どおりfail-closedする。
+
+### Validation / authority boundary
+
+- RED→GREEN：自プロセスとpid 4の実際のハンドルだけを対象に、実物の静止確認を実行するWindows回帰テストを追加した。このテストは、pid 4が書き込み系のファイルハンドルを実際に持っていることを先に確かめる。RED commit `04f4c4f`（CI #1050）では、実機と同一のエラー（`pid=4 live_pids=4`）で失敗した。
+- 既存のpid 4ガードテストは、新しい契約に合わせて「SMB公開がある場合は止まる」ことを確認する形に変えた。追加したテストは次のとおり：SMB公開なしなら通る、公開の有無が不明なら止まる、pid 4のObjectが他プロセスにも渡っていれば止まる、pid 4以外は止まる、実際の共有列挙が動く。パスと共有の判定はLinuxでも走るテストで確認する。
+- 修正後の最初のCI（#1051）は、既存テスト `test_query_only_protected_process_candidate_blocks` がpid 4を「保護プロセス一般」の代表として使っていたため失敗した。このテストの意図を保つため、pidをSystem以外に変えた。CI #1052（`e186494`）でunittest・windows-junctionともsuccessになった。
+- Codexの独立review（exact head）で3件の指摘を受け、すべて対応した。
+  - P1：共有パスの解決に失敗すると、生のパスだけで判定を続けていた。対象となる共有ではfail-closedにした（修正前の実装で失敗する回帰テストを追加）。
+  - P2：Windowsのテストが、`%TEMP%` が共有されていない環境を前提にしていた。ホストの共有から期待値を導く形にし、公開されている場合は実機のpid 4テストをスキップするようにした。
+  - P1：pid 4の排他性の判定が、書き込み系権限でフィルタした保持者だけを見ていた。全保持者で判定するようにした（読み取り専用の共同保持者がいれば止まる回帰テストを追加）。
+  - 対応後の `a95339c` でCodexは「Didn't find any major issues」。
+- WOBBUFFETでのarchive plan/applyを承認するものではない。merge後は、canonical mainへの同期 → read-onlyのpre-mutation probe → 新しいplan → 独立したplanのreview → 人間による新たな明示的承認、の順。消費済みのplan `0eef230d…`、`89ca4496…`、`7f8df70b…`、`e3de750c…` は再利用しない。Ready / merge は ADR #90 により human-final。
+
+## 2026-09-26 — Archive quiescence classifies external volume-open handles by proof（Issue #261 / PR #262）
+
+関連: Issue #261, Issue #216, Issue #259, PR #260, PR #262
+
+### Background（WOBBUFFET実機, canonical main `9b13edab`）
+
+- #260後のread-onlyのpre-mutation probe（script SHA-256 `2f9f1471…557568`）はPASSした。新しいplan `7f8df70b…225b35` を独立に検証したうえで、ownerの明示的承認（UACコマンド SHA-256 `f134d2c4…70b3a19c`、1回のみ）でapplyした。archiveの効果はゼロ。承認は消費済みで、再利用しない。
+- #259の診断記録（`stage=child`、`child_exit_code=2`）により、#259のローダー修正で子プロセスが `apply-internal` まで到達したことを確認した。そのうえで、静止確認（quiescence）が次の理由でfail-closedしていた。
+  - pid 1420（`SearchIndexer.exe`、Windows Searchサービス `WSearch`）が、書き込み系権限付きのファイルハンドルを保持していた。
+  - そのハンドルへの `FileStandardInformation` 問い合わせが `STATUS_INVALID_PARAMETER`（0xc000000d）を返し、ディレクトリかどうか判定できなかった。
+
+### Changed
+
+- ボリュームそのものを開いたハンドル（volume open）は、`FileStandardInformation` を `STATUS_INVALID_PARAMETER` で拒否する。Windows Searchは変更ジャーナルのために、このハンドルを書き込み系権限付きで保持している。
+- 同一Objectと確認済みのディスク系の候補で、このステータスが返った場合に限り、複製したハンドルのオブジェクト名を `NtQueryObject` で問い合わせるようにした。問い合わせはタイムアウト付き（2秒）のdaemonスレッドで行う。
+  - 名前がパスを持たないデバイス名そのもの（例：`\Device\HarddiskVolume3`）で、問い合わせが完了した場合だけを「volume openである」という証明とみなし、その候補を除外する。volume openはエビデンスルートのディレクトリにはなりえない。
+  - タイムアウト、問い合わせの失敗、パスを含む名前の場合は、従来どおりfail-closedする。
+  - `STATUS_INVALID_PARAMETER` を無条件に「ディレクトリではない」とみなすことはしない。非ディスクハンドルの扱いと、エビデンスルートそのものへのハンドルの検出は変えていない。
+
+### Validation / authority boundary
+
+- RED→GREEN：別プロセスが書き込み系権限付きのvolume openハンドル（`\\.\<SystemDrive>`）を保持した状態で、実物の静止確認を実行するWindows回帰テストを追加した。RED commit `0b6bf85`（CI #1047）では、実機と同一のエラー（`FileStandardInformation` の `ntstatus=0xc000000d`）で失敗した。修正後の `e45426a`（CI #1048）ではunittest・windows-junctionともsuccessになった。
+- 証明が得られない場合（`_proven_volume_open` がFalse）には、同じvolume openハンドルでも従来のエラーで止まることを、Windows回帰テストで確認する。名前判定、タイムアウト、問い合わせ失敗は、Linuxでも走るテストで確認する。
+- 既存の静止確認の回帰テスト（エビデンスルートへの外部ハンドルがあると止まること、保護プロセス、PID 4、スロット再利用など）はすべてsuccessのまま。
+- 実装workerの自己確認はL0。独立reviewはまだ行っていない。
+- WOBBUFFETでのarchive plan/applyを承認するものではない。merge後は、canonical mainへの同期 → read-onlyのpre-mutation probe → 新しいplan → 独立したplanのreview → 人間による新たな明示的承認、の順。消費済みのplan `0eef230d…`、`89ca4496…`、`7f8df70b…` は再利用しない。Ready / merge は ADR #90 により human-final。
+
+## 2026-09-26 — Archive bootstrap loader quoting fix and durable elevated diagnostics（Issue #259 / PR #260）
+
+関連: Issue #259, Issue #216, Issue #243, PR #244, PR #260
+
+### Background（WOBBUFFET実機, canonical main `1c291878`）
+
+- #244後のread-onlyのpre-mutation probe（script SHA-256 `b499541e…ecf0b4`）はPASSした。本番の `Assert-TrustedPythonRuntime` ゲートは実機でも通る。
+- 新しいarchive plan `89ca4496…771479` を生成し、独立に検証した。ownerの明示的承認（UACコマンド SHA-256 `5f4ee5a1…a2b0d3`、1回のみ）でapplyしたが、archiveの効果はゼロだった（canonical 5件は残存、archiveディレクトリなし、evidence rootのACLは元のまま）。分類は `BLOCKED_OR_UNCERTAIN`。この承認は消費済みで、再利用しない。
+- read-onlyの突き合わせ（script SHA-256 `1e773d1d…2b2987`）により、失敗箇所を絞り込んだ。事前ゲートはすべて通過し、失敗したのはsnapshotのコピー、evidence rootのロック、Python子プロセスをまたぐ約0.4秒の区間。エラー本文は閉じた昇格ウィンドウにしか出ていなかった。
+
+### Changed
+
+- 原因：Windows PowerShell 5.1は、ネイティブコマンドに渡す引数に含まれる `"` をエスケープしない。昇格側のPythonローダー（`r"\scripts\…"`、`run_name="__main__"`）はクォートを失い、Pythonに `SyntaxError` として届いていた。#244以前の試行はランタイムACLゲートで止まっていたため、ここまで到達していなかった。
+- ローダーはPythonの単一引用符リテラルだけを使うように変えた。
+- 昇格側の診断を耐久化した。host/identity/昇格の確認より後の昇格実行は、必ず1件の終端記録（PASSまたはFAILED）を残す。記録の中身は、stage、例外の型とメッセージ、cleanupのエラー、Python子プロセスの終了コード、上限付きのstdout/stderr。記録先はAdministrators/SYSTEM専用のbootstrap親ディレクトリの下にある `diagnostics`。ここには期待するbroker identityだけに読み取りACEを付け、低権限SIDには何も与えない。
+  - 記録ファイルはcreate-newで作る。名前はplan SHAを接頭辞にした一意のもの。
+  - `diagnostics` がreparse point（junction等）なら拒否する。
+  - 記録の書き込みに失敗しても、失敗をPASSに変えず、元のエラーも隠さない。
+- Python子プロセスのstdout/stderrはファイルに捕捉する。PS 5.1がネイティブのstderrを終了エラー（`NativeCommandError`）に昇格させないようにし、成否は実際の終了コードだけで判定する。
+- UAC引数の大きさ：代表planで23099文字から28435文字に増えた。実際のplan（前回23655文字）では約29000文字の見込みで、安全上限30000は変えていない。
+
+### Validation / authority boundary
+
+- RED→GREEN：本物のPS 5.1でローダー行を実行する回帰テストは、RED commit `dfbc97d`（CI #1043）で失敗し、修正後の `600305a`（CI #1044）で `ok` になった。
+- Windows CIの回帰テストは、本番の子プロセスブロックをそのまま切り出して実行する（成功時のstdout捕捉、失敗時のstderr捕捉と終了コード）。ほかに、診断ディレクトリのACL（保護ありで低権限SIDなし、readerは読み取りのみ、親ディレクトリにはreaderなし）、junctionの拒否、記録のcreate-newと上限、bootstrap失敗時にFAILED記録を残したうえで失敗し続けることを確認する。
+- CI #1044の失敗3件は、テスト環境の問題だった。PowerShell 7のPSModulePathが5.1に引き継がれ、`Set-Acl` を読み込めなかった。既存の `_windows_powershell_env` の慣例に合わせてPSModulePathを除いて起動し、CI #1045（`56169c6`）でunittest・windows-junctionともsuccessになった。
+- 実装workerの自己確認はL0。独立reviewはまだ行っていない。
+- WOBBUFFETでのarchive plan/applyを承認するものではない。merge後は、canonical mainへの同期 → read-onlyのpre-mutation probe → 新しいplan → 独立したplanのreview → 人間による新たな明示的承認、の順。消費済みのplan `0eef230d…` と `89ca4496…` は再利用しない。Ready / merge は ADR #90 により human-final。
+
+## 2026-09-25 — Worker-neutral entry point and handoff（Issue #256 / PR #257）
+
+関連: Issue #256, ADR #12, ADR #90, ADR #199, Issue #194, Issue #200, Issue #120
+
+### Changed
+
+- 目的：Codex / Claude Code / Antigravity / Jules / チャット系のどのworkerからでも、GitHub上の状態だけで作業を引き継げるようにする。これまではChatGPTを必ず起点にしていたため、入口が暗黙だった。
+- `AGENTS.md` を短いbootloaderに書き換えた（8 KiB以内）。読む順序（`PROJECT_STATUS.md` → workstream Issueの最新checkpoint → `docs/governance/rules.md`）と、破ってはいけないルール（evidence authority、human-final、独立review、重複実装の禁止、live effectの個別承認、scope）を、それぞれの所有Issue/ADRへのリンク付きで置いた。`CLAUDE.md` / `GEMINI.md` を置かない理由も明記した（既定設定では、`CLAUDE.md` があるとClaude Codeは `AGENTS.md` を読まない。Antigravityは `AGENTS.md` を自分で読む）。
+- 旧 `AGENTS.md` のpost-merge closeout規則は、本文を変えずに `docs/governance/post-merge-closeout.md` へ移した。
+- `docs/governance/` を新設：`rules.md`（13規則、各規則に所有記録）、`checkpoint-template.md`（Verified と Agent-reported を分けるhandoff checkpoint）、`review-record.md`（独立性レベルL0–L3と、GitHub identityがownerアカウントに集約されている制約）、`README.md`。
+- 固定のWIP上限2件を廃止し、providerの利用量を確認してから新規作業を始めるcapacity policyに置き換えた（owner決定 2026-09-25）。
+- repo直下に `PROJECT_STATUS.md` を追加した。状態ではなく「どこに権威があるか」の索引であり、PR/CI/review/承認の状態は持たない（表に状態列を置かない）。
+- `.github/pull_request_template.md` を追加し、review record（実装worker・reviewer worker・exact head・独立性レベル）を毎PRで記入させる。
+- `docs/PUBLIC_REPOSITORY_READINESS.md` の分類を、#196 の closeout（2026-09-15）に合わせて `PUBLISHED` に更新した（過去のBLOCKED記述は履歴として残した）。
+
+### Validation / authority boundary
+
+- `tests/test_worker_entry_contract.py`（22件）を追加した：`AGENTS.md` のサイズ上限、必須見出しと必須規則文言（該当セクションのリスト項目にあること）、`PROJECT_STATUS.md` が索引である宣言と状態列の不在、各規則の `Owner:` 行が規則ごとに決めた所有記録へリンクしていること、入口文書の相対リンク（インライン形式と参照形式）の解決、`CLAUDE.md` 等が `AGENTS.md` を覆い隠さないこと（全階層を走査し、`CLAUDE.md` / `CLAUDE.local.md` はimport先が各ファイルの位置から見てrootの `AGENTS.md` を指すこと。`GEMINI.md` と `AGENTS.override.md` は禁止）。コードブロックやHTMLコメント内の文言は数えない。
+- 各チェッカーには違反を含むfixtureでのテストも付け、チェッカーが違反を見逃すようになれば失敗するようにした。
+- Codex（OpenAI、L2、agent-reported）による独立レビューの指摘3件（MAJOR）を反映した：規則5（重複実装の禁止）を #200 の範囲どおりCodexに限定し、フォールバックの条件を明記した。shadowファイル検査を全階層・位置依存のimportに対応させた。契約テストを文字列一致からMarkdown構造の検査に変えた。
+- 新しいheadでのCodex再レビュー（GPT-5.6 Sol・medium、L2、agent-reported）の指摘3件（MAJOR）も反映した：リスト項目の中の引用（`- > …`）やインデントコードに置かれた必須文言は、読まずに「未対応の書式」として失敗させる（fail closed）。一方、正しい書式である行頭からの続き行は受け入れる。各規則の所有記録を規則番号ごとに固定し、`Owner:` 行がその記録にリンクしていることを確認する。ファイルは改行コードを正規化して読むので、WindowsのCRLF checkoutでも同じ結果になる（#253で記録した落とし穴を再発させていた）。
+- 3回目のCodex再レビュー（同モデル）の指摘4件（MAJOR 2・MINOR 2）も反映した：空行のあとにインデントしたコードブロックや打ち消し線（`~~`）を含むリスト項目も、未対応の書式として失敗させる。Active workstreams表の列は、決めた4列だけを許可する（「Current status」列などを追加させない）。各規則の `Owner:` 行は、決めた所有記録をすべて含み、それ以外のIssueや文書にリンクしないことを確認する。`AGENTS.md` の Claude Code に関する記述を、公式ドキュメントに合わせて「既定では」に直した。
+- 4回目のCodex再レビュー（同モデル）の指摘（MAJOR 2・MINOR 1・NOTE 1）も反映した：リスト項目の中に入れ子にしたフェンスコードブロックも未対応の書式として失敗させ、インラインコード内の文言は数えず、`<del>` 等も失敗させ、タブを展開してからインデントを判定する。`GEMINI.md` はimportのshimとしても認めず禁止にした（Antigravityの `@filename` は内容を読み込まず、`AGENTS.md` は自分で読むため）。
+- 5回目のCodex再レビュー（同モデル）の指摘（MAJOR 1・NOTE 1）も反映した：リンクのタイトルが単一引用符や括弧の形式だと、リンク先が壊れていても検査から漏れていた。CommonMarkの3形式すべてのタイトルを読むようにし、読めない `](` は読み飛ばさず「未対応のリンク書式」として失敗させる。NOTE（構造検査だけでは指示内容の正しさまでは保証しない）は変更不要とし、Ready時の人間レビューで補う。
+- 6回目のCodex再レビュー（同モデル）の指摘（MAJOR 1・NOTE 1）も反映した：shadowファイル検査が大文字小文字の違う名前（`claude.md` など）と、公式ドキュメントで自動読み込みされるproviderごとの場所（Claude Codeの `.claude/AGENTS.md` と `.claude/rules/`、Antigravityの `.agents/AGENTS.md`・`.agents/rules/`・旧 `.agent/rules/`）を見ていなかった。名前は大文字小文字を区別せずに比べ、これらの場所の `.md` は禁止とし、`AGENTS.md` にも1文で明記した。NOTE（意味の正しさは人間レビューで補う）は変更不要とした。
+- 本番コードは変更していない。`PROJECT_STATUS.md` と checkpoint は指し示すものであって証拠ではなく、事実は引き続きGitHubとCIから再確認する。Ready / merge は ADR #90 により human-final。
+
 ## 2026-09-25 — Pilot freeze end-to-end behavior tests replace source-text assertions（Issue #254 / PR #255）
 
 関連: Issue #254, Issue #246, Issue #216, PR #255

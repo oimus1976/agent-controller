@@ -236,6 +236,18 @@ class PrivateCiAstProducerWindowsTests(unittest.TestCase):
                     report["observed_effect_families"],
                 )
 
+    def test_get_acl_is_read_only_while_set_acl_stays_an_acl_mutation(self):
+        # #265: the Phase 4 ACL read-back uses Get-Acl; reading an ACL must not
+        # be reported as an unknown effect, and writing one must stay classified.
+        report, _ = self.run_producer(
+            self.bound_candidate("$Observed = (Get-Acl -LiteralPath C:\\target).Sddl")
+        )
+        self.assertEqual(report["observed_effect_families"], [])
+        report, _ = self.run_producer(
+            self.bound_candidate("Set-Acl -LiteralPath C:\\target -AclObject $Acl")
+        )
+        self.assertIn("ACL_MUTATION", report["observed_effect_families"])
+
     def test_bounded_child_process_shape_proves_progress_exit_and_fail_fast(self):
         candidate = self.bound_candidate(
             "$BridgeStartedAt = Get-Date\n"

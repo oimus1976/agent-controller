@@ -341,6 +341,8 @@ PHASE4_TRANSCRIPT_FILENAME = "issue225-phase4-target-environment.log"
 PHASE4_SUCCESS_MARKER = "PHASE4_TARGET_ENVIRONMENT_PASS"
 PHASE4_EFFECTS = (
     "ACL_MUTATION",
+    # #270: the broker writes the target-probe output it read through pipes.
+    "EVIDENCE_OUTPUT_WRITE",
     "FILESYSTEM_WRITE_MUTATION",
     "PROCESS_CONTROL",
     "PROCESS_LAUNCH",
@@ -398,6 +400,71 @@ PHASE4_AUTHORITY_ROOT = r"C:\ProgramData\agent-controller-private-ci-authority"
 PHASE4_TARGET_TIMEOUT_SECONDS = 60
 PHASE4_HEARTBEAT_SECONDS = 5
 PHASE4_TRUSTED_GH_PATH = r"C:\Program Files\GitHub CLI\gh.exe"
+# Comment sentinels delimit candidate blocks that real Windows regressions
+# execute in isolation. Comments carry no AST effect.
+PHASE4_ACL_BLOCK_BEGIN = "# BEGIN agent-controller:phase4-acl-preparation"
+PHASE4_ACL_BLOCK_END = "# END agent-controller:phase4-acl-preparation"
+PHASE4_CREDENTIAL_BLOCK_BEGIN = (
+    "# BEGIN agent-controller:phase4-credential-validation"
+)
+PHASE4_CREDENTIAL_BLOCK_END = "# END agent-controller:phase4-credential-validation"
+PHASE4_TARGET_LAUNCH_BLOCK_BEGIN = "# BEGIN agent-controller:phase4-target-launch"
+PHASE4_TARGET_LAUNCH_BLOCK_END = "# END agent-controller:phase4-target-launch"
+# Characters that would break a double-quoted Windows command-line argument.
+_UNSAFE_QUOTED_ARGUMENT_CHARACTERS = frozenset('"\r\n\t\x00')
+
+
+def quoted_argument_value(value: str) -> str:
+    """Return ``value`` if it is safe inside a double-quoted argument.
+
+    Target children are started through ``ProcessStartInfo.Arguments``, a
+    single command line (#270). A value embedded as ``"value"`` must not carry
+    a double quote or control character, and must not end with a backslash,
+    which would escape the closing quote.
+    """
+    if type(value) is not str or not value:
+        raise ValueError("argument value must be a non-empty string")
+    if any(character in _UNSAFE_QUOTED_ARGUMENT_CHARACTERS for character in value):
+        raise ValueError("argument value contains a quote or control character")
+    if value.endswith("\\"):
+        raise ValueError("argument value must not end with a backslash")
+    return value
+
+
+def target_launch_lines(
+    variable: str,
+    *,
+    file_name: str,
+    arguments: str | None,
+    user_name: str,
+    domain: str,
+    password: str,
+    load_user_profile: bool,
+    working_directory: str,
+    redirect_output: bool,
+) -> list[str]:
+    """Render the one target-launch shape the AST gate accepts (#270).
+
+    ``$<variable> = [System.Diagnostics.Process]::Start((New-Object ...))``:
+    the ProcessStartInfo is passed inline, so no start-info variable exists
+    that a param default, -OutVariable or the Variable provider could rebind.
+    Every value is a single-quoted literal or a plain variable/member read,
+    and the gate pins each one per launch shape.
+    """
+    first = f"    FileName = {file_name}"
+    if arguments is not None:
+        first += f"; Arguments = {arguments}"
+    lines = [
+        f"${variable} = [System.Diagnostics.Process]::Start((New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{{",
+        first,
+        f"    UserName = {_ps_single_quoted(user_name)}; Domain = {_ps_single_quoted(domain)}",
+        f"    Password = {password}; LoadUserProfile = ${'true' if load_user_profile else 'false'}",
+        f"    UseShellExecute = $false; CreateNoWindow = $true; WorkingDirectory = {working_directory}",
+    ]
+    if redirect_output:
+        lines.append("    RedirectStandardOutput = $true; RedirectStandardError = $true")
+    lines.append("}))")
+    return lines
 
 
 def _ps_single_quoted(value: str) -> str:
@@ -460,6 +527,15 @@ def render_phase4_target_environment_candidate(
     work_path = str(PureWindowsPath(binding.runner_root) / binding.work_folder)
     marker_path = _phase4_registration_marker_path(handoff)
     qualified_target = f"{binding.host}\\{binding.target_identity}"
+    for argument_value in (
+        copied_probe,
+        binding.host,
+        qualified_target,
+        marker_path,
+        probe_result,
+        PHASE4_TRUSTED_GH_PATH,
+    ):
+        quoted_argument_value(argument_value)
 
     lines = [
         f"$BridgeRepository = {_ps_single_quoted(binding.repository)}",
@@ -540,41 +616,151 @@ def render_phase4_target_environment_candidate(
         "$BridgeRunnerTasks = @(Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -match 'runner|actions' -or $_.TaskPath -match 'runner|actions' })",
         "if ($BridgeRunnerTasks.Count -ne 0) { throw 'Phase 4 stale runner task detected' }",
         "",
+        "$BridgeTargetCredential = Get-Credential -UserName $BridgeQualifiedTargetIdentity -Message 'Enter the local ac-runner credential for the reviewed Phase 4 plan.'",
+        "if ($null -eq $BridgeTargetCredential) { throw 'Phase 4 target credential was not supplied' }",
+        "if ($BridgeTargetCredential.UserName -ine $BridgeQualifiedTargetIdentity) { throw 'Phase 4 target credential identity mismatch' }",
+        PHASE4_CREDENTIAL_BLOCK_BEGIN,
+        "$BridgeCredentialCheckDirectory = $env:SystemRoot + '\\System32'",
+        "$BridgeCredentialCheckPath = $BridgeCredentialCheckDirectory + '\\whoami.exe'",
+        # #270: Start-Process -Credential cannot be waited on by a non-elevated
+        # broker; Process.Start keeps the creation handle. A wrong password
+        # makes Process.Start throw before anything else runs.
+        *target_launch_lines(
+            "BridgeCredentialCheck",
+            file_name="$BridgeCredentialCheckPath",
+            arguments=None,
+            user_name=binding.target_identity,
+            domain=binding.host,
+            password="$BridgeTargetCredential.Password",
+            load_user_profile=False,
+            working_directory="$BridgeCredentialCheckDirectory",
+            redirect_output=False,
+        ),
+        "if ($null -eq $BridgeCredentialCheck) { throw 'Phase 4 target credential validation did not start' }",
+        "$BridgeCredentialCheck.WaitForExit()",
+        "if ($BridgeCredentialCheck.ExitCode -ne 0) { throw 'Phase 4 target credential validation failed' }",
+        "Write-Host 'progress phase=phase4 step=target-credential-validated'",
+        PHASE4_CREDENTIAL_BLOCK_END,
+        "",
         "$BridgeSourceProbeHash = (Get-FileHash -LiteralPath $BridgeTargetProbeSource -Algorithm SHA256).Hash",
         "if ($BridgeSourceProbeHash -ine $BridgeTargetProbeSha256) { throw 'Phase 4 target probe source hash mismatch' }",
         "Copy-Item -LiteralPath $BridgeTargetProbeSource -Destination $BridgeTargetProbePath -ErrorAction Stop",
         "$BridgeCopiedProbeHash = (Get-FileHash -LiteralPath $BridgeTargetProbePath -Algorithm SHA256).Hash",
         "if ($BridgeCopiedProbeHash -ine $BridgeTargetProbeSha256) { throw 'Phase 4 copied target probe hash mismatch' }",
         "",
-        "icacls.exe $BridgeRunnerRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' ('*' + $BridgeTargetSid + ':(OI)(CI)(M)') /T /C | Write-Host",
+        PHASE4_ACL_BLOCK_BEGIN,
+        # The non-elevated broker keeps Modify: the Phase 4 apply read-back and
+        # Phase 5 create and read files in this tree as the broker (#265).
+        # The operator-step AST gate rejects method invocation, so SIDs and ACLs
+        # are read through whoami.exe and Get-Acl .Sddl with operators only.
+        "$BridgeBrokerUserRecord = whoami.exe /user /fo csv /nh",
+        "$BridgeBrokerUserFields = @((([string]$BridgeBrokerUserRecord) -replace '\"', '') -split ',')",
+        "if ($BridgeBrokerUserFields.Count -ne 2 -or $BridgeBrokerUserFields[0] -ine $BridgeBrokerIdentity -or $BridgeBrokerUserFields[1] -notlike 'S-1-5-*') { throw 'Phase 4 broker SID readback failed' }",
+        "$BridgeBrokerSid = $BridgeBrokerUserFields[1]",
+        "if ($BridgeBrokerSid -eq $BridgeTargetSid) { throw 'Phase 4 broker and target identities must be distinct' }",
+        # Protect the root and grant the four principals as inheritable entries,
+        # then reset every descendant to inherit only from the root. A recursive
+        # /grant:r with (OI)(CI) leaves files with an empty protected DACL,
+        # because inheritance flags cannot be applied to files.
+        "icacls.exe $BridgeRunnerRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' ('*' + $BridgeBrokerSid + ':(OI)(CI)(M)') ('*' + $BridgeTargetSid + ':(OI)(CI)(M)') /C | Write-Host",
         "$BridgeAclExitCode = $LASTEXITCODE",
         "if ($BridgeAclExitCode -ne 0) { throw 'Phase 4 runner-root ACL preparation failed' }",
+        "icacls.exe ($BridgeRunnerRoot + '\\*') /reset /T /C | Write-Host",
+        "$BridgeAclResetExitCode = $LASTEXITCODE",
+        "if ($BridgeAclResetExitCode -ne 0) { throw 'Phase 4 runner-tree ACL reset failed' }",
+        # icacls /T /C can report exit 0 after per-item failures: prove the
+        # result by reading back every item instead of trusting the exit code.
+        "$BridgeAclSidAlias = @{ 'SY' = 'S-1-5-18'; 'BA' = 'S-1-5-32-544' }",
+        "$BridgeAclExpected = @{ 'S-1-5-18' = 'FA'; 'S-1-5-32-544' = 'FA' }",
+        "$BridgeAclExpected[$BridgeBrokerSid] = '0X1301BF'",
+        "$BridgeAclExpected[$BridgeTargetSid] = '0X1301BF'",
+        "$BridgeAclItems = @(Get-Item -LiteralPath $BridgeRunnerRoot -Force -ErrorAction Stop) + @(Get-ChildItem -LiteralPath $BridgeRunnerRoot -Recurse -Force -ErrorAction Stop)",
+        "$BridgeAclIsRoot = $true",
+        "foreach ($BridgeAclItem in $BridgeAclItems) {",
+        "    if (($BridgeAclItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Phase 4 runner ACL read-back reparse point blocked' }",
+        "    $BridgeAclSddl = [string](Get-Acl -LiteralPath $BridgeAclItem.FullName -ErrorAction Stop).Sddl",
+        "    $BridgeAclDacl = @($BridgeAclSddl -split 'D:', 2)",
+        "    if ($BridgeAclDacl.Count -ne 2) { throw ('Phase 4 runner ACL has no DACL: ' + $BridgeAclItem.FullName) }",
+        "    $BridgeAclItemIsRoot = $BridgeAclIsRoot",
+        "    $BridgeAclIsRoot = $false",
+        "    $BridgeAclParts = @($BridgeAclDacl[1] -split '\\(')",
+        "    $BridgeAclProtected = $BridgeAclParts[0] -clike '*P*'",
+        # The root holds explicit inheritable grants; every descendant must be
+        # unprotected and hold only entries inherited from the root, so outputs
+        # created later (Phase 5) inherit exactly the same four principals.
+        "    if ($BridgeAclItemIsRoot -and -not $BridgeAclProtected) { throw 'Phase 4 runner-root ACL inheritance is not protected' }",
+        "    if (-not $BridgeAclItemIsRoot -and $BridgeAclProtected) { throw ('Phase 4 runner ACL descendant is protected: ' + $BridgeAclItem.FullName + ' sddl=' + $BridgeAclSddl) }",
+        "    $BridgeAclSeen = @{}",
+        "    foreach ($BridgeAclPart in @($BridgeAclParts | Select-Object -Skip 1)) {",
+        "        $BridgeAclFields = @(($BridgeAclPart -replace '\\).*$', '') -split ';')",
+        "        if ($BridgeAclFields.Count -ne 6) { throw ('Phase 4 runner ACL entry malformed: ' + $BridgeAclItem.FullName + ' sddl=' + $BridgeAclSddl) }",
+        "        if ($BridgeAclFields[0] -cne 'A') { throw ('Phase 4 runner ACL non-allow entry: ' + $BridgeAclItem.FullName + ' sddl=' + $BridgeAclSddl) }",
+        "        $BridgeAclFlags = @($BridgeAclFields[1] -split '(..)' | Where-Object { $_ -ne '' })",
+        "        if ($BridgeAclItemIsRoot) { $BridgeAclFlagsOk = ($BridgeAclFlags.Count -eq 2 -and $BridgeAclFlags -ccontains 'OI' -and $BridgeAclFlags -ccontains 'CI') }",
+        "        elseif ($BridgeAclItem.PSIsContainer) { $BridgeAclFlagsOk = ($BridgeAclFlags.Count -eq 3 -and $BridgeAclFlags -ccontains 'OI' -and $BridgeAclFlags -ccontains 'CI' -and $BridgeAclFlags -ccontains 'ID') }",
+        "        else { $BridgeAclFlagsOk = ($BridgeAclFlags.Count -eq 1 -and $BridgeAclFlags -ccontains 'ID') }",
+        "        if (-not $BridgeAclFlagsOk) { throw ('Phase 4 runner ACL entry inheritance mismatch: ' + $BridgeAclItem.FullName + ' sddl=' + $BridgeAclSddl) }",
+        "        $BridgeAclSid = $BridgeAclFields[5]",
+        "        $BridgeAclMappedSid = $BridgeAclSidAlias[$BridgeAclSid]",
+        "        if ($null -ne $BridgeAclMappedSid) { $BridgeAclSid = $BridgeAclMappedSid }",
+        "        $BridgeAclWanted = $BridgeAclExpected[$BridgeAclSid]",
+        "        if ($null -eq $BridgeAclWanted) { throw ('Phase 4 runner ACL unexpected principal: ' + $BridgeAclItem.FullName + ' sddl=' + $BridgeAclSddl) }",
+        "        $BridgeAclRights = $BridgeAclFields[2]",
+        "        if ($BridgeAclRights -ieq '0x1f01ff') { $BridgeAclRights = 'FA' }",
+        "        if ($BridgeAclRights -ine $BridgeAclWanted) { throw ('Phase 4 runner ACL rights mismatch: ' + $BridgeAclItem.FullName + ' sddl=' + $BridgeAclSddl) }",
+        "        $BridgeAclSeen[$BridgeAclSid] = $true",
+        "    }",
+        "    foreach ($BridgeAclExpectedSid in @($BridgeAclExpected.Keys)) {",
+        "        if ($true -ne $BridgeAclSeen[$BridgeAclExpectedSid]) { throw ('Phase 4 runner ACL missing principal: ' + $BridgeAclItem.FullName + ' sddl=' + $BridgeAclSddl) }",
+        "    }",
+        "}",
+        "Write-Host ('progress phase=phase4 step=runner-acl-verified items=' + $BridgeAclItems.Count)",
+        PHASE4_ACL_BLOCK_END,
         "",
-        "$BridgeTargetCredential = Get-Credential -UserName $BridgeQualifiedTargetIdentity -Message 'Enter the local ac-runner credential for the reviewed Phase 4 plan.'",
-        "if ($null -eq $BridgeTargetCredential) { throw 'Phase 4 target credential was not supplied' }",
-        "if ($BridgeTargetCredential.UserName -ine $BridgeQualifiedTargetIdentity) { throw 'Phase 4 target credential identity mismatch' }",
-        "",
+        PHASE4_TARGET_LAUNCH_BLOCK_BEGIN,
+        # #270: launch the probe with Process.Start so the non-elevated broker
+        # keeps the creation handle (HasExited, ExitCode, Kill). Output is read
+        # through pipes and written by the broker once the probe has exited.
+        (
+            "$BridgeTargetProbeArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass"
+            " -File \"' + $BridgeTargetProbePath + '\"'"
+            " + ' -ExpectedHost \"' + $BridgeHost + '\"'"
+            " + ' -ExpectedIdentity \"' + $BridgeQualifiedTargetIdentity + '\"'"
+            " + ' -AuthorityMarkerPath \"' + $BridgeRegistrationMarkerPath + '\"'"
+            " + ' -ResultPath \"' + $BridgeTargetProbeResultPath + '\"'"
+            " + ' -TrustedGhPath \"' + $BridgeTrustedGhPath + '\"'"
+        ),
         "$BridgeStartedAt = Get-Date",
-        "$BridgeChild = Start-Process -FilePath 'powershell.exe' -ArgumentList @(",
-        "    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',",
-        "    '-File', $BridgeTargetProbePath,",
-        "    '-ExpectedHost', $BridgeHost,",
-        "    '-ExpectedIdentity', $BridgeQualifiedTargetIdentity,",
-        "    '-AuthorityMarkerPath', $BridgeRegistrationMarkerPath,",
-        "    '-ResultPath', $BridgeTargetProbeResultPath,",
-        "    '-TrustedGhPath', $BridgeTrustedGhPath",
-        ") -Credential $BridgeTargetCredential -LoadUserProfile -WorkingDirectory $BridgeRunnerRoot -RedirectStandardOutput $BridgeTargetProbeStdoutPath -RedirectStandardError $BridgeTargetProbeStderrPath -PassThru",
+        *target_launch_lines(
+            "BridgeChild",
+            file_name="'powershell.exe'",
+            arguments="$BridgeTargetProbeArguments",
+            user_name=binding.target_identity,
+            domain=binding.host,
+            password="$BridgeTargetCredential.Password",
+            load_user_profile=True,
+            working_directory="$BridgeRunnerRoot",
+            redirect_output=True,
+        ),
+        "$BridgeChildStdoutTask = $BridgeChild.StandardOutput.ReadToEndAsync()",
+        "$BridgeChildStderrTask = $BridgeChild.StandardError.ReadToEndAsync()",
         "while (-not $BridgeChild.HasExited) {",
         "    $BridgeElapsedSeconds = [int]((Get-Date) - $BridgeStartedAt).TotalSeconds",
         '    Write-Host ("heartbeat phase=phase4 elapsed_seconds={0}" -f $BridgeElapsedSeconds)',
         "    if ($BridgeElapsedSeconds -ge $BridgeTargetTimeoutSeconds) {",
-        "        Stop-Process -Id $BridgeChild.Id -Force -ErrorAction Stop",
+        "        $BridgeChild.Kill()",
         "        throw 'Phase 4 target probe timeout'",
         "    }",
         "    Start-Sleep -Seconds 5",
         "}",
+        "$BridgeChild.WaitForExit()",
+        "$BridgeChildStdoutText = $BridgeChildStdoutTask.Result",
+        "$BridgeChildStderrText = $BridgeChildStderrTask.Result",
+        "Set-Content -LiteralPath $BridgeTargetProbeStdoutPath -Value $BridgeChildStdoutText -Encoding UTF8",
+        "Set-Content -LiteralPath $BridgeTargetProbeStderrPath -Value $BridgeChildStderrText -Encoding UTF8",
         "$BridgeChildExitCode = $BridgeChild.ExitCode",
         "if ($BridgeChildExitCode -ne 0) { throw 'Phase 4 target probe failed' }",
+        PHASE4_TARGET_LAUNCH_BLOCK_END,
         "",
         "if (-not (Test-Path -LiteralPath $BridgeTargetProbeResultPath -PathType Leaf)) { throw 'Phase 4 target probe result missing' }",
         "$BridgeProbeResult = Get-Content -LiteralPath $BridgeTargetProbeResultPath -Raw -Encoding UTF8 | ConvertFrom-Json",

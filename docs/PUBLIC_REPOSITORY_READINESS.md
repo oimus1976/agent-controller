@@ -2,7 +2,8 @@
 
 Issue: #196
 
-Status: **BLOCKED — publication retirement change requires validation and merge**
+Status: **PUBLISHED.** Post-public closeout was recorded as complete in Issue #196 on 2026-09-15: visibility public, `main` protected, required checks `unittest` and `windows-junction`, and hosted CI proven after publication. The rest of this document is the historical pre-publication record and is retained unchanged. Updated under Issue #256.
+
 
 This document is the repository-local publication contract for changing `oimus1976/agent-controller` from private to public. It records completed audit evidence, remaining blockers, and the human-final publication sequence. It does not itself authorize a visibility change.
 
@@ -260,6 +261,10 @@ The safe sequence is:
 Ready, merge, visibility change, history rewrite, and destructive cleanup remain human-final unless separately and explicitly delegated.
 
 ## Current classification
+
+`PUBLISHED`. Post-public closeout was recorded as complete in Issue #196 on 2026-09-15. The historical pre-publication classification, retained below, was `BLOCKED_PENDING_RETIREMENT_VALIDATION_AND_MERGE`.
+
+Historical classification text:
 
 `BLOCKED_PENDING_RETIREMENT_VALIDATION_AND_MERGE`
 

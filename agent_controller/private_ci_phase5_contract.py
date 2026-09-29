@@ -17,6 +17,8 @@ from agent_controller.private_ci_phase4_contract import (
     PHASE4_TRUSTED_GH_PATH,
     PrivateCiPilotBinding,
     pilot_binding_reason_codes,
+    quoted_argument_value,
+    target_launch_lines,
 )
 
 
@@ -27,6 +29,9 @@ PHASE5_BROKER_IDENTITY = "c-admin"
 PHASE5_TRANSCRIPT_FILENAME = "issue225-phase5-exactly-one-job.log"
 PHASE5_SUCCESS_MARKER = "PHASE5_EXACTLY_ONE_JOB_ATTEMPT_COMPLETE"
 PHASE5_EFFECTS = (
+    # #270: the broker writes the security-probe output it read through pipes.
+    # A narrow family: Phase 5 still allows no general filesystem write.
+    "EVIDENCE_OUTPUT_WRITE",
     "HTTP_API_ACCESS",
     "PROCESS_CONTROL",
     "PROCESS_LAUNCH",
@@ -50,6 +55,23 @@ def _digest(value: object) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+_CMD_REDIRECTION_FORBIDDEN = frozenset('"%^&|<>!\r\n\t\x00')
+
+
+def cmd_redirection_path(value: str) -> str:
+    """Return ``value`` if cmd.exe can use it as a quoted redirection target.
+
+    The Phase 5 listener writes its own output through ``cmd.exe /d /s /c``
+    redirection (#270), so the path must carry no character cmd.exe expands or
+    treats as an operator, even inside quotes.
+    """
+    if type(value) is not str or not value:
+        raise ValueError("redirection path must be a non-empty string")
+    if any(character in _CMD_REDIRECTION_FORBIDDEN for character in value):
+        raise ValueError("redirection path contains a cmd.exe metacharacter")
+    return quoted_argument_value(value)
 
 
 def _ps_single_quoted(value: str) -> str:
@@ -163,6 +185,13 @@ def render_phase5_exactly_one_job_candidate(
         PureWindowsPath(binding.runner_root)
         / PHASE5_SECURITY_PROBE_STDERR_FILENAME
     )
+    runner_arguments = (
+        '/d /s /c "run.cmd 1>"'
+        + cmd_redirection_path(runner_stdout)
+        + '" 2>"'
+        + cmd_redirection_path(runner_stderr)
+        + '""'
+    )
     phase5_authority_marker = str(
         PureWindowsPath(PHASE4_AUTHORITY_ROOT)
         / (
@@ -171,6 +200,16 @@ def render_phase5_exactly_one_job_candidate(
             + ".consumed.json"
         )
     )
+
+    for argument_value in (
+        security_probe,
+        binding.host,
+        qualified_target,
+        phase5_authority_marker,
+        security_probe_result,
+        PHASE4_TRUSTED_GH_PATH,
+    ):
+        quoted_argument_value(argument_value)
 
     active_read_commands = {
         status: (
@@ -291,25 +330,45 @@ def render_phase5_exactly_one_job_candidate(
         "$BridgeSecurityProbePrelaunchSha = (Get-FileHash -LiteralPath $BridgeSecurityProbePath -Algorithm SHA256).Hash",
         "if ($BridgeSecurityProbePrelaunchSha -ine $BridgeSecurityProbeSha256) { throw 'Phase 5 security probe drift before launch' }",
         "",
+        # #270: Process.Start keeps the creation handle for the non-elevated
+        # broker; output is read through pipes and written after exit.
+        (
+            "$BridgeSecurityProbeArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass"
+            " -File \"' + $BridgeSecurityProbePath + '\"'"
+            " + ' -ExpectedHost \"' + $BridgeHost + '\"'"
+            " + ' -ExpectedIdentity \"' + $BridgeQualifiedTargetIdentity + '\"'"
+            " + ' -AuthorityMarkerPath \"' + $BridgePhase5AuthorityMarkerPath + '\"'"
+            " + ' -ResultPath \"' + $BridgeSecurityProbeResultPath + '\"'"
+            " + ' -TrustedGhPath \"' + $BridgeTrustedGhPath + '\"'"
+        ),
         "$BridgeSecurityProbeStartedAt = Get-Date",
-        "$BridgeSecurityProbeChild = Start-Process -FilePath 'powershell.exe' -ArgumentList @(",
-        "    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',",
-        "    '-File', $BridgeSecurityProbePath,",
-        "    '-ExpectedHost', $BridgeHost,",
-        "    '-ExpectedIdentity', $BridgeQualifiedTargetIdentity,",
-        "    '-AuthorityMarkerPath', $BridgePhase5AuthorityMarkerPath,",
-        "    '-ResultPath', $BridgeSecurityProbeResultPath,",
-        "    '-TrustedGhPath', $BridgeTrustedGhPath",
-        ") -Credential $BridgeTargetCredential -LoadUserProfile -WorkingDirectory $BridgeRunnerRoot -RedirectStandardOutput $BridgeSecurityProbeStdoutPath -RedirectStandardError $BridgeSecurityProbeStderrPath -PassThru",
+        *target_launch_lines(
+            "BridgeSecurityProbeChild",
+            file_name="'powershell.exe'",
+            arguments="$BridgeSecurityProbeArguments",
+            user_name=binding.target_identity,
+            domain=binding.host,
+            password="$BridgeTargetCredential.Password",
+            load_user_profile=True,
+            working_directory="$BridgeRunnerRoot",
+            redirect_output=True,
+        ),
+        "$BridgeSecurityProbeChildStdoutTask = $BridgeSecurityProbeChild.StandardOutput.ReadToEndAsync()",
+        "$BridgeSecurityProbeChildStderrTask = $BridgeSecurityProbeChild.StandardError.ReadToEndAsync()",
         "while (-not $BridgeSecurityProbeChild.HasExited) {",
         "    $BridgeSecurityProbeElapsedSeconds = [int]((Get-Date) - $BridgeSecurityProbeStartedAt).TotalSeconds",
         '    Write-Host ("heartbeat phase=phase5-security elapsed_seconds={0}" -f $BridgeSecurityProbeElapsedSeconds)',
         "    if ($BridgeSecurityProbeElapsedSeconds -ge $BridgeSecurityProbeTimeoutSeconds) {",
-        "        Stop-Process -Id $BridgeSecurityProbeChild.Id -Force -ErrorAction Stop",
+        "        $BridgeSecurityProbeChild.Kill()",
         "        throw 'Phase 5 security probe timeout; dispatch must not be attempted'",
         "    }",
         "    Start-Sleep -Seconds 1",
         "}",
+        "$BridgeSecurityProbeChild.WaitForExit()",
+        "$BridgeSecurityProbeChildStdoutText = $BridgeSecurityProbeChildStdoutTask.Result",
+        "$BridgeSecurityProbeChildStderrText = $BridgeSecurityProbeChildStderrTask.Result",
+        "Set-Content -LiteralPath $BridgeSecurityProbeStdoutPath -Value $BridgeSecurityProbeChildStdoutText -Encoding UTF8",
+        "Set-Content -LiteralPath $BridgeSecurityProbeStderrPath -Value $BridgeSecurityProbeChildStderrText -Encoding UTF8",
         "$BridgeSecurityProbeExitCode = $BridgeSecurityProbeChild.ExitCode",
         "if ($BridgeSecurityProbeExitCode -ne 0) { throw 'Phase 5 security probe failed; dispatch must not be attempted' }",
         "if (-not (Test-Path -LiteralPath $BridgeSecurityProbeResultPath -PathType Leaf)) { throw 'Phase 5 security probe result missing' }",
@@ -327,7 +386,20 @@ def render_phase5_exactly_one_job_candidate(
         "Write-Output 'PHASE5_SECURITY_CONTEXT_REVALIDATED'",
         "",
         "$BridgeStartedAt = Get-Date",
-        "$BridgeChild = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d','/s','/c','run.cmd') -Credential $BridgeTargetCredential -LoadUserProfile -WorkingDirectory $BridgeRunnerRoot -RedirectStandardOutput $BridgeRunnerStdoutPath -RedirectStandardError $BridgeRunnerStderrPath -PassThru",
+        # #270: the long-running listener keeps no broker pipes; cmd.exe (as
+        # the target) writes its output files. The broker holds the creation
+        # handle for HasExited, ExitCode and Kill().
+        *target_launch_lines(
+            "BridgeChild",
+            file_name="'cmd.exe'",
+            arguments=_ps_single_quoted(runner_arguments),
+            user_name=binding.target_identity,
+            domain=binding.host,
+            password="$BridgeTargetCredential.Password",
+            load_user_profile=True,
+            working_directory="$BridgeRunnerRoot",
+            redirect_output=False,
+        ),
         "Start-Sleep -Seconds 1",
         "if ($BridgeChild.HasExited) {",
         "    $BridgeChildExitCode = $BridgeChild.ExitCode",
@@ -421,7 +493,7 @@ def render_phase5_exactly_one_job_candidate(
         "    $BridgeElapsedSeconds = [int]((Get-Date) - $BridgeStartedAt).TotalSeconds",
         '    Write-Host ("heartbeat phase=phase5 elapsed_seconds={0}" -f $BridgeElapsedSeconds)',
         "    if ($BridgeElapsedSeconds -ge $BridgeRunnerTimeoutSeconds) {",
-        "        Stop-Process -Id $BridgeChild.Id -Force -ErrorAction Stop",
+        "        $BridgeChild.Kill()",
         "        throw 'Phase 5 runner listener timeout; dispatch must not be retried'",
         "    }",
         f"    Start-Sleep -Seconds {PHASE5_HEARTBEAT_SECONDS}",

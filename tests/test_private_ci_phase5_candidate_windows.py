@@ -92,6 +92,7 @@ class PrivateCiPhase5CandidateWindowsTests(unittest.TestCase):
         self.assertEqual(
             set(report["observed_effect_families"]),
             {
+                "EVIDENCE_OUTPUT_WRITE",
                 "HTTP_API_ACCESS",
                 "PROCESS_CONTROL",
                 "PROCESS_LAUNCH",

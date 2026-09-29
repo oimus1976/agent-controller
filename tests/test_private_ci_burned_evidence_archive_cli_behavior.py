@@ -403,8 +403,10 @@ class ArchiveApplyInternalBehaviorTests(_ArchiveCliHarness):
         # argument shape. Replay that exact shape through the real main().
         bootstrap = self.bootstrap_path.read_bytes().decode("utf-8")
         invocation = re.search(
-            r"& \$PythonPath -I -S -B -c \$Loader \$SnapshotRoot (.+)",
+            # Stdout/stderr redirections (Issue #259) are not CLI arguments.
+            r"& \$PythonPath -I -S -B -c \$Loader \$SnapshotRoot (.+?)(?:\s+[12]>.*)?$",
             bootstrap,
+            re.MULTILINE,
         ).group(1).split()
         argv = [
             {

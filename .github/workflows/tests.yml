@@ -31,7 +31,7 @@ jobs:
 
   windows-junction:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -51,6 +51,11 @@ jobs:
         run: python -m unittest discover -s tests -p "test_private_ci_phase4_target_probe_windows.py" -v
       - name: Run real Windows PowerShell 5.1 Phase 4 candidate regressions
         run: python -m unittest discover -s tests -p "test_private_ci_phase4_candidate_windows.py" -v
+      - name: Run real Windows Phase 4 ACL and credential-gate regressions (#265)
+        run: python -m unittest discover -s tests -p "test_private_ci_phase4_acl_windows.py" -v
+      - name: Run real Windows PowerShell 5.1 target-launch AST shape regressions (#270)
+        if: ${{ !cancelled() }}
+        run: python -m unittest discover -s tests -p "test_private_ci_process_start_shapes_windows.py" -v
       - name: Run real Windows PowerShell 5.1 Phase 5 candidate regressions
         run: python -m unittest discover -s tests -p "test_private_ci_phase5_candidate_windows.py" -v
       - name: Run real Windows PowerShell 5.1 Phase 6 candidate regressions
@@ -71,3 +76,6 @@ jobs:
         run: python -m unittest discover -s tests -p "test_private_ci_burned_evidence_archive_windows.py" -v
       - name: Run real Windows native-output decoding regressions
         run: python -m unittest discover -s tests -p "test_private_ci_native_output_windows.py" -v
+      - name: Run real Windows PowerShell 5.1 target-probe execution and native-stderr guard regressions (#273)
+        if: ${{ !cancelled() }}
+        run: python -m unittest discover -s tests -p "test_private_ci_phase4_target_probe_exec_windows.py" -v
