@@ -284,6 +284,67 @@ class TestInspector(unittest.TestCase):
         }
         self.assertEqual(classify_pr(canonical(evidence)), "REVIEW_READY")
 
+    def test_prior_head_activity_does_not_make_current_head_pending(self):
+        head_sha = "b" * 40
+        stale_sha = "a" * 40
+        evidence = {
+            "head_sha": head_sha,
+            "scope_status": "SATISFIED",
+            "draft": True,
+            "merged": False,
+            "state": "open",
+            "issue_comments": [
+                {
+                    "user": {"login": "chatgpt-codex-connector[bot]"},
+                    "body": f"Reviewed commit: {stale_sha[:10]}",
+                },
+                {
+                    "user": {"login": "owner"},
+                    "body": f"@codex review\nhead={stale_sha}",
+                    "reactions": [
+                        {
+                            "user": {"login": "chatgpt-codex-connector[bot]"},
+                            "content": "+1",
+                        }
+                    ],
+                },
+            ],
+            "reviews": [
+                {
+                    "user": {"login": "chatgpt-codex-connector[bot]"},
+                    "commit_id": stale_sha,
+                    "state": "COMMENTED",
+                }
+            ],
+        }
+        snapshot = canonical(evidence)["canonical_review_evidence"]
+        self.assertEqual("ABSENT", snapshot["verdict"])
+
+    def test_unbracketed_codex_graphql_login_is_blocking(self):
+        head_sha = "b" * 40
+        evidence = {
+            "head_sha": head_sha,
+            "scope_status": "SATISFIED",
+            "draft": True,
+            "merged": False,
+            "state": "open",
+            "review_threads_graphql": [
+                {
+                    "isResolved": False,
+                    "comments": {
+                        "nodes": [
+                            {
+                                "author": {"login": "chatgpt-codex-connector"},
+                                "originalCommit": {"oid": head_sha},
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+        snapshot = canonical(evidence)["canonical_review_evidence"]
+        self.assertEqual("BLOCKING", snapshot["verdict"])
+
     def test_partial_raw_review_evidence_cannot_be_authoritative(self):
         evidence = {
             "repo": "owner/repo",
@@ -376,6 +437,67 @@ class TestInspector(unittest.TestCase):
         self.assertEqual(result['head_sha'], head_sha)
         self.assertEqual(result['actions_ci_status'], "PASS")
         self.assertFalse(result['check_runs_error'])
+
+    @patch('agent_controller.inspector.get_issue_comment_reactions')
+    @patch('agent_controller.inspector.get_pr_files')
+    @patch('agent_controller.inspector.get_actions_runs')
+    @patch('agent_controller.inspector.get_pr_review_threads_graphql')
+    @patch('agent_controller.inspector.get_pr_issue_comments')
+    @patch('agent_controller.inspector.get_pr_review_comments')
+    @patch('agent_controller.inspector.get_pr_reviews')
+    @patch('agent_controller.inspector.get_pr_details')
+    def test_reactions_are_read_only_for_current_head_review_requests(
+        self,
+        mock_details,
+        mock_reviews,
+        mock_review_comments,
+        mock_issue_comments,
+        mock_graphql,
+        mock_actions_runs,
+        mock_files,
+        mock_reactions,
+    ):
+        head_sha = 'b201119ec5b82aef81630ec375d208d2c113f033'
+        stale_sha = 'a' * 40
+        mock_details.return_value = {
+            'head': {'sha': head_sha},
+            'base': {'ref': 'main'},
+            'draft': True,
+            'merged': False,
+            'state': 'open',
+            'changed_files': 1,
+        }
+        mock_reviews.return_value = []
+        mock_review_comments.return_value = []
+        mock_issue_comments.return_value = [
+            {'id': 1, 'user': {'login': 'user'}, 'body': 'ordinary comment'},
+            {
+                'id': 2,
+                'user': {'login': 'user'},
+                'body': f'@codex review\nhead={stale_sha}',
+            },
+            {
+                'id': 3,
+                'user': {'login': 'user'},
+                'body': f'@codex review\nhead={head_sha}',
+            },
+        ]
+        mock_graphql.return_value = []
+        mock_files.return_value = [{'filename': 'test.py', 'changes': 1}]
+        mock_actions_runs.return_value = {
+            'total_count': 1,
+            'workflow_runs': [{
+                'head_sha': head_sha,
+                'event': 'pull_request',
+                'status': 'completed',
+                'conclusion': 'success',
+            }],
+        }
+        mock_reactions.return_value = []
+
+        inspect_pr('owner', 'repo', 1, scope_policy={'allowed_paths': ['*']})
+
+        mock_reactions.assert_called_once_with('owner', 'repo', 3)
 
     @patch('agent_controller.inspector.get_pr_files')
     @patch('agent_controller.inspector.get_actions_runs')

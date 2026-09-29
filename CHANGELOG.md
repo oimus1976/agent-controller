@@ -24,6 +24,8 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - GitHub formal reviews、top-level comments、inline threads、reactions の取得完了状態を、exact PR head と結び付けた immutable canonical review snapshot にした。各surfaceの unreadable / malformed / truncated 相当と収集中のhead driftは、空の結果ではなく `UNCERTAIN` として保持する。
 - `classify_pr` はcanonical snapshotなしに `REVIEW_READY` またはreview-absence由来の `IMPLEMENTATION_READY` を返さない。review-request planner、published-Draft composition、attention queueもcanonical evidenceを検証し、任意のclassification文字列や部分的なraw API readからReady/mergeのhuman actionを作らない。
 - Jules review evidenceは、Controller-boundなfresh review operation、completeなsession/activity read、exact expected head、structured clean/finding result、実装operationとの独立性を別々に検証する。owner名義で転載したJules文面だけはadvisoryのまま。
+- Codex review activityの `PENDING` / `BLOCKING` 判定もcurrent headだけに束縛し、GraphQLのbot login表現を正規化した。旧headのcomment/review/reaction、dismiss済みreview、人間起点threadへのbot replyはcurrent-head findingにならない。
+- remediation plannerとmutation直前gateは同じcanonical snapshotを必須にし、raw review/threadの部分読みからremediationを認可しない。reaction取得はcurrent-head marker付き `@codex review` commentだけに限定し、無関係なcomment数によるAPI call増幅を除いた。
 
 ### Authority boundary
 

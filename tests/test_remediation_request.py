@@ -7,6 +7,11 @@ from agent_controller.remediation_request import (
     plan_codex_remediation_request,
 )
 from agent_controller.remediation_request_mutator import codex_remediation_request_marker
+from agent_controller.inspector import build_canonical_review_evidence
+from agent_controller.review_evidence import (
+    REQUIRED_GITHUB_SURFACES,
+    ReviewSurfaceStatus,
+)
 
 
 HEAD = "a" * 40
@@ -89,6 +94,20 @@ def inspection(**overrides):
         "review_threads_graphql": [finding_thread()],
     }
     value.update(overrides)
+    if "canonical_review_evidence" not in overrides:
+        surfaces = tuple(
+            ReviewSurfaceStatus(name, "COMPLETE", True)
+            for name in REQUIRED_GITHUB_SURFACES
+        )
+        value["canonical_review_evidence"] = build_canonical_review_evidence(
+            repo=REPO,
+            pr_number=111,
+            head_sha=value["head_sha"],
+            reviews=value["reviews"],
+            issue_comments=value["issue_comments"],
+            review_threads_graphql=value["review_threads_graphql"] or [],
+            surfaces=surfaces,
+        ).to_dict()
     return value
 
 
@@ -124,6 +143,19 @@ class RemediationRequestPlanTests(unittest.TestCase):
         self.assertEqual("EXECUTABLE", plan["decision"])
         self.assertEqual(HEAD, plan["source_head_sha"])
         self.assertEqual("READY_TO_REQUEST_CODEX_REMEDIATION", plan["reason"])
+
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    def test_partial_raw_finding_cannot_authorize_remediation(self, _load):
+        plan = plan_codex_remediation_request(
+            owner="oimus1976",
+            repo="agent-controller",
+            pr_number=111,
+            policy_path="policy.json",
+            scope_policy=SCOPE,
+            inspection=inspection(canonical_review_evidence=None),
+        )
+        self.assertEqual("BLOCKED", plan["decision"])
+        self.assertEqual("REVIEW_EVIDENCE_UNAVAILABLE", plan["reason"])
 
     @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
     def test_resolved_or_old_head_finding_does_not_authorize(self, _load):
@@ -396,21 +428,11 @@ class RemediationRequestPlanTests(unittest.TestCase):
 
 class RemediationRequestExecutionTests(unittest.TestCase):
     def setUp(self):
-        reviews = patch("agent_controller.remediation_request.get_pr_reviews")
-        threads = patch(
-            "agent_controller.remediation_request.get_pr_review_threads_graphql"
+        canonical_inspection = patch(
+            "agent_controller.remediation_request._inspect_remediation_request"
         )
-        self.get_reviews = reviews.start()
-        self.get_threads = threads.start()
-        self.get_reviews.return_value = [
-            {
-                "id": 101,
-                "user": {"login": "chatgpt-codex-connector[bot]"},
-                "commit_id": HEAD,
-                "state": "COMMENTED",
-            }
-        ]
-        self.get_threads.return_value = [finding_thread()]
+        self.canonical_inspection = canonical_inspection.start()
+        self.canonical_inspection.return_value = inspection()
         actions = patch("agent_controller.remediation_request.get_actions_runs")
         self.get_actions = actions.start()
         self.get_actions.return_value = {
@@ -425,8 +447,7 @@ class RemediationRequestExecutionTests(unittest.TestCase):
                 }
             ],
         }
-        self.addCleanup(reviews.stop)
-        self.addCleanup(threads.stop)
+        self.addCleanup(canonical_inspection.stop)
         self.addCleanup(actions.stop)
 
     def executable_plan(self):
@@ -489,7 +510,9 @@ class RemediationRequestExecutionTests(unittest.TestCase):
     ):
         fresh_plan.return_value = self.executable_plan()
         get_pr.return_value = safe_pr()
-        self.get_threads.return_value = [finding_thread(resolved=True)]
+        self.canonical_inspection.return_value = inspection(
+            review_threads_graphql=[finding_thread(resolved=True)], reviews=[]
+        )
         with patch(
             "agent_controller.remediation_request.post_codex_remediation_request"
         ) as post:

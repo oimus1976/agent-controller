@@ -16,6 +16,22 @@ from .review_evidence import (
 
 
 DEFAULT_GITHUB_REQUEST_TIMEOUT_SECONDS = 30.0
+_CODEX_BOT_LOGINS = {
+    "chatgpt-codex-connector[bot]",
+    "chatgpt-codex-connector",
+}
+
+
+def _is_codex_login(value):
+    return isinstance(value, str) and value in _CODEX_BOT_LOGINS
+
+
+def _mentions_head(body, head_sha):
+    return bool(
+        head_sha
+        and isinstance(body, str)
+        and (head_sha in body or head_sha[:10] in body)
+    )
 
 
 def _validated_request_timeout(timeout=DEFAULT_GITHUB_REQUEST_TIMEOUT_SECONDS):
@@ -322,17 +338,17 @@ def _codex_review_flags(head_sha, reviews, issue_comments, review_threads_graphq
     clean = False
     blocking = False
     seen = False
+    active_review_ids = set()
+    changes_requested_ids = set()
 
     for comment in issue_comments:
         if not isinstance(comment, dict):
             return False, False, False, "ISSUE_COMMENT_MALFORMED"
         body = comment.get("body", "")
         user = comment.get("user") or {}
-        if user.get("login") == "chatgpt-codex-connector[bot]":
-            seen = True
-            if head_sha and isinstance(body, str) and (
-                head_sha in body or head_sha[:10] in body
-            ):
+        if _is_codex_login(user.get("login")):
+            if _mentions_head(body, head_sha):
+                seen = True
                 if "Didn't find any major issues" in body:
                     clean = True
         elif isinstance(body, str) and "@codex review" in body.lower():
@@ -341,7 +357,9 @@ def _codex_review_flags(head_sha, reviews, issue_comments, review_threads_graphq
                 return False, False, False, "REACTION_EVIDENCE_MALFORMED"
             for reaction in reactions:
                 reaction_user = reaction.get("user") or {}
-                if reaction_user.get("login") == "chatgpt-codex-connector[bot]":
+                if _is_codex_login(reaction_user.get("login")) and _mentions_head(
+                    body, head_sha
+                ):
                     seen = True
 
     for review in reviews:
@@ -349,39 +367,62 @@ def _codex_review_flags(head_sha, reviews, issue_comments, review_threads_graphq
             return False, False, False, "FORMAL_REVIEW_MALFORMED"
         user = review.get("user") or {}
         body = review.get("body", "")
-        if user.get("login") != "chatgpt-codex-connector[bot]":
+        if not _is_codex_login(user.get("login")):
             continue
-        seen = True
         on_head = review.get("commit_id") == head_sha or (
-            head_sha
-            and isinstance(body, str)
-            and (head_sha in body or head_sha[:10] in body)
+            _mentions_head(body, head_sha)
         )
+        state = review.get("state")
+        if isinstance(state, str):
+            state = state.upper()
+        if state == "DISMISSED":
+            continue
+        if on_head:
+            seen = True
+            review_id = review.get("id")
+            if isinstance(review_id, int) and not isinstance(review_id, bool):
+                active_review_ids.add(review_id)
         if on_head and (
-            review.get("state") == "APPROVED"
+            state == "APPROVED"
             or "Didn't find any major issues" in body
         ):
             clean = True
-        elif on_head and review.get("state") == "CHANGES_REQUESTED":
-            blocking = True
+        elif on_head and state in {"CHANGES_REQUESTED", "REQUEST_CHANGES"}:
+            review_id = review.get("id")
+            if isinstance(review_id, int) and not isinstance(review_id, bool):
+                changes_requested_ids.add(review_id)
+            else:
+                blocking = True
 
+    associated_thread_review_ids = set()
     for thread in review_threads_graphql:
         if not isinstance(thread, dict):
             return False, False, False, "INLINE_THREAD_MALFORMED"
-        if thread.get("isResolved"):
-            continue
         comments = (thread.get("comments") or {}).get("nodes", [])
-        if not isinstance(comments, list):
+        if not isinstance(comments, list) or not comments:
             return False, False, False, "INLINE_THREAD_COMMENTS_MALFORMED"
-        for comment in comments:
-            author = comment.get("author") or {}
-            original_commit = comment.get("originalCommit") or {}
-            if (
-                author.get("login") == "chatgpt-codex-connector[bot]"
-                and original_commit.get("oid") == head_sha
-            ):
-                seen = True
-                blocking = True
+        root_comment = comments[0]
+        if not isinstance(root_comment, dict):
+            return False, False, False, "INLINE_THREAD_COMMENT_MALFORMED"
+        author = root_comment.get("author") or {}
+        original_commit = root_comment.get("originalCommit") or {}
+        if not (
+            _is_codex_login(author.get("login"))
+            and original_commit.get("oid") == head_sha
+        ):
+            continue
+        review = root_comment.get("pullRequestReview") or {}
+        review_id = review.get("databaseId") if isinstance(review, dict) else None
+        if isinstance(review_id, int) and not isinstance(review_id, bool):
+            associated_thread_review_ids.add(review_id)
+            if review_id not in active_review_ids:
+                continue
+        seen = True
+        if not thread.get("isResolved"):
+            blocking = True
+
+    if changes_requested_ids - associated_thread_review_ids:
+        blocking = True
     return clean, blocking, seen, None
 
 
@@ -495,6 +536,13 @@ def inspect_pr(owner, repo, pr_number, scope_policy=None, provider_review_eviden
     for comment in issue_comments:
         if not isinstance(comment, dict):
             surface_errors["issue_comments"] = TypeError("issue comment entry is not an object")
+            continue
+        body = comment.get("body")
+        if not (
+            isinstance(body, str)
+            and "@codex review" in body.lower()
+            and _mentions_head(body, head_sha)
+        ):
             continue
         comment_id = comment.get("id")
         if comment_id:
