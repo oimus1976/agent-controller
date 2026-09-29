@@ -24,6 +24,7 @@ Each rule links to the record that owns it.
 - **No duplicate implementation.** While a completed Codex task still offers its `View Task → Update branch` handoff, do not reimplement it. Fall back only after that apply is shown to be absent or failed ([#200](https://github.com/oimus1976/agent-controller/issues/200)).
 - **Live and owner-machine effects** need a separate explicit human authorization for the exact plan. Consumed authority is never reused ([#216](https://github.com/oimus1976/agent-controller/issues/216), [#195](https://github.com/oimus1976/agent-controller/issues/195)).
 - **Scope.** New work gets its own Issue or workstream. Do not widen an active PR. Repository proximity is not task authority ([#120](https://github.com/oimus1976/agent-controller/issues/120)).
+- **Personal-development economics.** Unless the owner explicitly says otherwise, treat this as personal, single-owner development. Cost-effectiveness and time to a usable release are the primary decision criteria: prefer the smallest reliable control or concise human step that addresses a concrete, likely, material failure mode. New ceremony or control code must justify the recurring burden or realistic loss it removes and its ongoing maintenance cost. This priority does not weaken human-final authority, credential/secret protection, destructive-action boundaries, or evidence integrity ([#279](https://github.com/oimus1976/agent-controller/issues/279), [ADR #90](https://github.com/oimus1976/agent-controller/issues/90)).
 
 ## Handoff
 

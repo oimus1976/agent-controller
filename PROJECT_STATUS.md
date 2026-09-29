@@ -30,6 +30,7 @@ This table lists pointers only. Status comes from each authority Issue's latest 
 
 ## Standing decisions
 
+- Personal-development priority: unless the owner explicitly changes the context, optimize for a single-owner project, with cost-effectiveness and time to a usable release as the primary decision criteria. Prefer minimum sufficient controls and concise human steps over speculative automation or organization-scale governance ([#279](https://github.com/oimus1976/agent-controller/issues/279), [ADR #90](https://github.com/oimus1976/agent-controller/issues/90), [rules](docs/governance/rules.md)).
 - ADRs: [#12](https://github.com/oimus1976/agent-controller/issues/12) provider-neutral / reuse-first; [#90](https://github.com/oimus1976/agent-controller/issues/90) human-final; [#179](https://github.com/oimus1976/agent-controller/issues/179) specification-driven; [#199](https://github.com/oimus1976/agent-controller/issues/199) independent review.
 - Capacity policy: there is no fixed WIP cap; check provider capacity before starting new work ([rules §7](docs/governance/rules.md)).
 - House baseline: [`oimus1976/ai-dev-starter`](https://github.com/oimus1976/ai-dev-starter) `BASELINE.md`.

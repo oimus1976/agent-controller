@@ -78,6 +78,7 @@ RULE_OWNERS = {
     11: ("doc:PUBLIC_REPOSITORY_READINESS.md",),
     12: ("issue:256", "doc:post-merge-cleanup-candidates.md"),
     13: ("issue:256",),
+    14: ("issue:279", "issue:90"),
 }
 
 # Files that make a provider read something other than AGENTS.md. By default

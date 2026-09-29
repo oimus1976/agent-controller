@@ -15,6 +15,23 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-29 — Personal-development cost-effectiveness and release speed become standing decision priorities (Issue #279)
+
+Related: Issue #279, ADR #90
+
+### Changed
+
+- `AGENTS.md` now tells every worker to assume a personal, single-owner development context unless the owner says otherwise, and to treat cost-effectiveness and time to a usable release as the primary decision criteria.
+- `docs/governance/rules.md` prefers minimum sufficient controls, existing supported paths, and concise human steps over speculative automation or organization-scale governance. New ceremony or control code must justify the recurring burden, realistic loss, or release blocker it removes against implementation and maintenance cost.
+- `PROJECT_STATUS.md` records the policy as a standing decision.
+
+### Preserved boundaries
+
+- The priority does not relax human-final Ready/merge/release/deploy authority, credential and secret protection, destructive-action boundaries, consumed live-effect authority, or evidence integrity.
+- This documentation-only change adds no provider dispatch, orchestration, automation, or approval mechanism.
+
+---
+
 ## 2026-09-28 — The Phase 4 target probe checks gh without native stderr redirection, and is now executed under PS 5.1 in CI（Issue #273 / PR #274）
 
 関連: Issue #273, Issue #216, Issue #265, Issue #270
