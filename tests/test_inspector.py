@@ -301,12 +301,7 @@ class TestInspector(unittest.TestCase):
                 {
                     "user": {"login": "owner"},
                     "body": f"@codex review\nhead={stale_sha}",
-                    "reactions": [
-                        {
-                            "user": {"login": "chatgpt-codex-connector[bot]"},
-                            "content": "+1",
-                        }
-                    ],
+                    "reactions": {"total_count": 1},
                 },
             ],
             "reviews": [

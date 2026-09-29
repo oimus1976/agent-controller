@@ -352,14 +352,14 @@ def _codex_review_flags(head_sha, reviews, issue_comments, review_threads_graphq
                 if "Didn't find any major issues" in body:
                     clean = True
         elif isinstance(body, str) and "@codex review" in body.lower():
+            if not _mentions_head(body, head_sha):
+                continue
             reactions = comment.get("reactions", [])
             if not isinstance(reactions, list):
                 return False, False, False, "REACTION_EVIDENCE_MALFORMED"
             for reaction in reactions:
                 reaction_user = reaction.get("user") or {}
-                if _is_codex_login(reaction_user.get("login")) and _mentions_head(
-                    body, head_sha
-                ):
+                if _is_codex_login(reaction_user.get("login")):
                     seen = True
 
     for review in reviews:
