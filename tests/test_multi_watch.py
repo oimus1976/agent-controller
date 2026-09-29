@@ -157,7 +157,7 @@ def _observation(
     merged=False,
     state="open",
 ):
-    return {
+    value = {
         "repo": repo,
         "pr": pr,
         "current_head_sha": f"sha-{pr}",
@@ -172,6 +172,22 @@ def _observation(
         "transition": True,
         "transition_reasons": ["CLASSIFICATION_CHANGED"],
     }
+    if classification == "REVIEW_READY":
+        value["canonical_review_evidence"] = {
+            "schema": "agent-controller/review-evidence/v1",
+            "repo": repo,
+            "pr": pr,
+            "observed_head_sha": f"sha-{pr}",
+            "collection_complete": True,
+            "verdict": "CLEAN",
+            "surfaces": [
+                {"surface": name, "status": "COMPLETE", "pagination_exhausted": True, "error": None}
+                for name in ("formal_reviews", "issue_comments", "inline_threads", "reactions")
+            ],
+            "provider_reviews": [],
+            "errors": [],
+        }
+    return value
 
 
 if __name__ == "__main__":

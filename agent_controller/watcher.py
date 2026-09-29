@@ -51,6 +51,7 @@ def watch_pr_once(owner, repo, pr_number, state_file, scope_policy=None):
     current_actions_ci_status = current_evidence.get('actions_ci_status', 'UNAVAILABLE')
     current_check_runs_error = current_evidence.get('check_runs_error', current_actions_ci_status == 'UNAVAILABLE')
     current_scope_status = current_evidence.get('scope_status', 'UNKNOWN')
+    current_canonical_review_evidence = current_evidence.get('canonical_review_evidence')
 
     transition_reasons = set()
 
@@ -89,7 +90,8 @@ def watch_pr_once(owner, repo, pr_number, state_file, scope_policy=None):
         'graphql_error': current_graphql_error,
         'actions_ci_status': current_actions_ci_status,
         'check_runs_error': current_check_runs_error,
-        'scope_status': current_scope_status
+        'scope_status': current_scope_status,
+        'canonical_review_evidence': current_canonical_review_evidence,
     }
 
     observation = {
@@ -106,6 +108,7 @@ def watch_pr_once(owner, repo, pr_number, state_file, scope_policy=None):
         "graphql_error": current_graphql_error,
         "actions_ci_status": current_actions_ci_status,
         "check_runs_error": current_check_runs_error,
+        "canonical_review_evidence": current_canonical_review_evidence,
         "runtime_status": runtime_status,
         "transition": bool(transition_reasons),
         "transition_reasons": sorted(list(transition_reasons)),

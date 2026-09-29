@@ -1,6 +1,37 @@
 import unittest
 from unittest.mock import patch
-from agent_controller.inspector import classify_pr, inspect_pr
+from agent_controller.inspector import (
+    build_canonical_review_evidence,
+    classify_pr,
+    inspect_pr,
+)
+from agent_controller.review_evidence import (
+    REQUIRED_GITHUB_SURFACES,
+    ReviewSurfaceStatus,
+)
+
+
+def canonical(evidence):
+    evidence = dict(evidence)
+    evidence.setdefault("repo", "owner/repo")
+    evidence.setdefault("pr", 1)
+    evidence.setdefault("reviews", [])
+    evidence.setdefault("issue_comments", [])
+    evidence.setdefault("review_threads_graphql", [])
+    surfaces = tuple(
+        ReviewSurfaceStatus(name, "COMPLETE", True)
+        for name in REQUIRED_GITHUB_SURFACES
+    )
+    evidence["canonical_review_evidence"] = build_canonical_review_evidence(
+        repo=evidence["repo"],
+        pr_number=evidence["pr"],
+        head_sha=evidence["head_sha"],
+        reviews=evidence["reviews"],
+        issue_comments=evidence["issue_comments"],
+        review_threads_graphql=evidence["review_threads_graphql"],
+        surfaces=surfaces,
+    ).to_dict()
+    return evidence
 
 class TestInspector(unittest.TestCase):
 
@@ -50,7 +81,7 @@ class TestInspector(unittest.TestCase):
             'issue_comments': [],
             'review_comments': []
         }
-        self.assertEqual(classify_pr(evidence), "IMPLEMENTATION_READY")
+        self.assertEqual(classify_pr(canonical(evidence)), "IMPLEMENTATION_READY")
 
     def test_classify_pr_unresolved_comments_needs_review(self):
         evidence = {
@@ -100,7 +131,7 @@ class TestInspector(unittest.TestCase):
             ],
             'reviews': []
         }
-        self.assertEqual(classify_pr(evidence), "IMPLEMENTATION_READY")
+        self.assertEqual(classify_pr(canonical(evidence)), "IMPLEMENTATION_READY")
 
     def test_classify_pr_resolved_vs_unresolved_inline_codex_thread(self):
         head_sha = "12345"
@@ -251,7 +282,56 @@ class TestInspector(unittest.TestCase):
                 }
             ]
         }
-        self.assertEqual(classify_pr(evidence), "REVIEW_READY")
+        self.assertEqual(classify_pr(canonical(evidence)), "REVIEW_READY")
+
+    def test_partial_raw_review_evidence_cannot_be_authoritative(self):
+        evidence = {
+            "repo": "owner/repo",
+            "pr": 1,
+            "head_sha": "1" * 40,
+            "scope_status": "SATISFIED",
+            "state": "open",
+            "merged": False,
+            "actions_ci_status": "PASS",
+            "issue_comments": [
+                {
+                    "user": {"login": "chatgpt-codex-connector[bot]"},
+                    "body": f"Didn't find any major issues. Reviewed commit: {'1' * 40}",
+                }
+            ],
+        }
+        self.assertEqual("NEEDS_REVIEW", classify_pr(evidence))
+
+    @patch('agent_controller.inspector.get_pr_files')
+    @patch('agent_controller.inspector.get_actions_runs')
+    @patch('agent_controller.inspector.get_pr_review_threads_graphql')
+    @patch('agent_controller.inspector.get_pr_issue_comments')
+    @patch('agent_controller.inspector.get_pr_review_comments')
+    @patch('agent_controller.inspector.get_pr_reviews')
+    @patch('agent_controller.inspector.get_pr_details')
+    def test_malformed_issue_comment_fails_closed(self, mock_details, mock_reviews, mock_review_comments, mock_issue_comments, mock_graphql, mock_actions_runs, mock_files):
+        head_sha = 'b201119ec5b82aef81630ec375d208d2c113f033'
+        mock_details.return_value = {
+            'head': {'sha': head_sha}, 'base': {'ref': 'main'}, 'draft': True,
+            'merged': False, 'state': 'open', 'changed_files': 1,
+        }
+        mock_files.return_value = [{'filename': 'test.py', 'changes': 5}]
+        mock_reviews.return_value = []
+        mock_review_comments.return_value = []
+        mock_issue_comments.return_value = ['not-an-object']
+        mock_graphql.return_value = []
+        mock_actions_runs.return_value = {
+            'workflow_runs': [{'head_sha': head_sha, 'event': 'pull_request', 'status': 'completed', 'conclusion': 'success'}]
+        }
+
+        result = inspect_pr('owner', 'repo', 1, scope_policy={'allowed_paths': ['*']})
+        self.assertEqual('NEEDS_REVIEW', result['classification'])
+        self.assertEqual('UNCERTAIN', result['canonical_review_evidence']['verdict'])
+        issue_surface = next(
+            item for item in result['canonical_review_evidence']['surfaces']
+            if item['surface'] == 'issue_comments'
+        )
+        self.assertEqual('UNAVAILABLE', issue_surface['status'])
 
     @patch('agent_controller.inspector.get_pr_files')
     @patch('agent_controller.inspector.get_actions_runs')
@@ -279,7 +359,7 @@ class TestInspector(unittest.TestCase):
                 'body': "Codex Review: Didn't find any major issues.\n**Reviewed commit:** `b201119ec5`"
             }
         ]
-        mock_graphql.return_value = None
+        mock_graphql.return_value = []
         mock_actions_runs.return_value = {
             'total_count': 1,
             'workflow_runs': [{

@@ -15,6 +15,23 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-29 — Canonical review evidence becomes a code-level authority boundary（Issue #194, Draft / unmerged）
+
+関連: Issue #194, Issue #199, PR #255
+
+### Changed
+
+- GitHub formal reviews、top-level comments、inline threads、reactions の取得完了状態を、exact PR head と結び付けた immutable canonical review snapshot にした。各surfaceの unreadable / malformed / truncated 相当と収集中のhead driftは、空の結果ではなく `UNCERTAIN` として保持する。
+- `classify_pr` はcanonical snapshotなしに `REVIEW_READY` またはreview-absence由来の `IMPLEMENTATION_READY` を返さない。review-request planner、published-Draft composition、attention queueもcanonical evidenceを検証し、任意のclassification文字列や部分的なraw API readからReady/mergeのhuman actionを作らない。
+- Jules review evidenceは、Controller-boundなfresh review operation、completeなsession/activity read、exact expected head、structured clean/finding result、実装operationとの独立性を別々に検証する。owner名義で転載したJules文面だけはadvisoryのまま。
+
+### Authority boundary
+
+- Jules APIがbranch指定後の実checkout SHAを返さない制約を `CONTROLLER_PRE_DISPATCH_EXACT_HEAD` として明示し、provider-observed exact SHAと混同しない。欠落・stale・self-review・不完全paginationはfail closed。
+- Ready / merge、Jules sessionの新規dispatch、provider publication、live/owner-machine effectは追加していない。
+
+---
+
 ## 2026-09-28 — The Phase 4 target probe checks gh without native stderr redirection, and is now executed under PS 5.1 in CI（Issue #273 / PR #274）
 
 関連: Issue #273, Issue #216, Issue #265, Issue #270

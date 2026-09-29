@@ -32,8 +32,9 @@ Implementation and review must remain independent.
 
 ## 4. Canonical review evidence
 
-- A review state (clean, finding, pending, absent) may be claimed only from the complete multi-surface evidence of the canonical inspector path, `inspect-pr`. That evidence covers formal reviews, top-level PR comments, inline threads, and reactions, all bound to the current head.
+- A review state (clean, finding, pending, absent) may be claimed only from the complete evidence of the canonical inspector path, `inspect-pr`. GitHub evidence covers formal reviews, top-level PR comments, inline threads, and reactions. Provider review evidence, including Jules, must come from a Controller-bound review operation and preserve completeness, exact-head binding, provenance, and independence separately from the verdict.
 - A read of one raw GitHub surface is advisory. Absence on one surface is not absence of a review.
+- Owner-relayed provider prose is advisory and does not become authoritative merely because it is posted to GitHub. A missing, unreadable, malformed, truncated, or head-drifted required surface fails closed as uncertain.
 - Owner: [#194](https://github.com/oimus1976/agent-controller/issues/194).
 
 ## 5. Codex task results pending human application

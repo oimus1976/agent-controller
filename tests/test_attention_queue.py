@@ -23,7 +23,7 @@ def observation(
     merged=False,
     state="open",
 ):
-    return {
+    value = {
         "repo": repo,
         "pr": pr,
         "current_head_sha": head_sha,
@@ -38,6 +38,23 @@ def observation(
         "transition": transition,
         "transition_reasons": list(reasons),
     }
+    if classification == "REVIEW_READY" and head_sha is not None:
+        value["canonical_review_evidence"] = {
+            "schema": "agent-controller/review-evidence/v1",
+            "repo": repo,
+            "pr": pr,
+            "observed_head_sha": head_sha,
+            "collection_complete": True,
+            "verdict": "CLEAN",
+            "surfaces": [
+                {"surface": name, "status": "COMPLETE", "pagination_exhausted": True, "error": None}
+                for name in ("formal_reviews", "issue_comments", "inline_threads", "reactions")
+            ],
+            "provider_reviews": [],
+            "errors": [],
+        }
+    return value
+
 
 
 class AttentionQueueTests(unittest.TestCase):
@@ -64,6 +81,13 @@ class AttentionQueueTests(unittest.TestCase):
         self.assertEqual(AttentionCategory.NEEDS_ATTENTION, item.category)
         self.assertEqual("CONTRADICTORY_REVIEW_READY_EVIDENCE", item.reason)
         self.assertIsNone(item.human_action)
+
+    def test_review_ready_without_canonical_snapshot_fails_closed(self):
+        value = observation(classification="REVIEW_READY")
+        value.pop("canonical_review_evidence")
+        item = classify_attention(value)
+        self.assertEqual(AttentionCategory.NEEDS_ATTENTION, item.category)
+        self.assertEqual("CONTRADICTORY_REVIEW_READY_EVIDENCE", item.reason)
 
     def test_review_ready_without_head_fails_closed(self):
         item = classify_attention(

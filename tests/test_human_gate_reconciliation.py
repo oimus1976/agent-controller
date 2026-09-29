@@ -23,6 +23,20 @@ class HumanGateReconciliationTests(unittest.TestCase):
             "runtime_status": "OK",
             "transition": True,
             "transition_reasons": ["PR_STATE_CHANGED"],
+            "canonical_review_evidence": {
+                "schema": "agent-controller/review-evidence/v1",
+                "repo": "owner/repo",
+                "pr": 7,
+                "observed_head_sha": "head-1",
+                "collection_complete": True,
+                "verdict": "CLEAN",
+                "surfaces": [
+                    {"surface": name, "status": "COMPLETE", "pagination_exhausted": True, "error": None}
+                    for name in ("formal_reviews", "issue_comments", "inline_threads", "reactions")
+                ],
+                "provider_reviews": [],
+                "errors": [],
+            },
         }
         observation.update(overrides)
         return classify_attention(observation)
