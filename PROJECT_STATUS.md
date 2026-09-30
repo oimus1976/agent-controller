@@ -2,7 +2,7 @@
 
 > **This file is an index, not an authority.** Do not infer PR, head, CI, review, or authorization state from it. Before acting, re-read those facts from GitHub and CI. For each workstream, the authority is its Issue: read the latest checkpoint comment there.
 
-- **as_of:** 2026-09-25, reconciled against `main` at `e6494caa14dac09ba9f87d9d2a9dfe6ee04e6969`. This is an advisory freshness hint only.
+- **as_of:** 2026-09-29, reconciled against `main` at `16b9c0f1bbb286aa3cffb554f1feda8cc7b7378d`. This is an advisory freshness hint only.
 - **Entry point for workers:** [`AGENTS.md`](AGENTS.md). **Rules:** [`docs/governance/rules.md`](docs/governance/rules.md).
 
 ## Goal
@@ -26,6 +26,7 @@ This table lists pointers only. Status comes from each authority Issue's latest 
 |---|---|---|---|
 | Private-CI live pilot (main line) | [#216](https://github.com/oimus1976/agent-controller/issues/216) | [#229](https://github.com/oimus1976/agent-controller/issues/229), [#243](https://github.com/oimus1976/agent-controller/issues/243) | comments on #216 |
 | Test-suite audit follow-up | [#246](https://github.com/oimus1976/agent-controller/issues/246) | [#254](https://github.com/oimus1976/agent-controller/issues/254) / PR [#255](https://github.com/oimus1976/agent-controller/pull/255) | comments on #246 |
+| Canonical review evidence enforcement | [#194](https://github.com/oimus1976/agent-controller/issues/194) | PR pending | comments on #194 |
 | Worker entry point and handoff | [#256](https://github.com/oimus1976/agent-controller/issues/256) | PR [#257](https://github.com/oimus1976/agent-controller/pull/257) | comments on #256 |
 
 ## Standing decisions
@@ -39,7 +40,7 @@ This table lists pointers only. Status comes from each authority Issue's latest 
 
 These Issues are open but not being worked on. Their order is an owner decision. The last recorded queue is in a [#55 comment](https://github.com/oimus1976/agent-controller/issues/55) dated 2026-09-04 and may be stale. Before selecting one, confirm it with the owner.
 
-- Enforcement: [#194](https://github.com/oimus1976/agent-controller/issues/194) canonical review evidence, [#200](https://github.com/oimus1976/agent-controller/issues/200) Codex task apply states.
+- Enforcement: [#200](https://github.com/oimus1976/agent-controller/issues/200) Codex task apply states.
 - Orchestration: [#215](https://github.com/oimus1976/agent-controller/issues/215) review-remediation loop, [#173](https://github.com/oimus1976/agent-controller/issues/173) verified-head / single-writer, [#178](https://github.com/oimus1976/agent-controller/issues/178) canonical TaskSpec.
 - Efficiency / capacity: [#55](https://github.com/oimus1976/agent-controller/issues/55) (umbrella), [#174](https://github.com/oimus1976/agent-controller/issues/174), [#176](https://github.com/oimus1976/agent-controller/issues/176), [#177](https://github.com/oimus1976/agent-controller/issues/177), [#182](https://github.com/oimus1976/agent-controller/issues/182).
 - Providers: [#159](https://github.com/oimus1976/agent-controller/issues/159), [#170](https://github.com/oimus1976/agent-controller/issues/170) Jules; [#183](https://github.com/oimus1976/agent-controller/issues/183) Antigravity review-only adapter.

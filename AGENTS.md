@@ -18,7 +18,7 @@ Then re-read every mutable fact you will rely on from GitHub or CI: PR state, ex
 
 Each rule links to the record that owns it.
 
-- **Evidence authority.** Agent, provider, and chat statements are claims until verified. GitHub refs, exact SHAs, diffs, CI, and canonical review evidence are authoritative ([#1](https://github.com/oimus1976/agent-controller/issues/1), [ADR #12](https://github.com/oimus1976/agent-controller/issues/12)).
+- **Evidence authority.** Agent, provider, and chat statements are claims until verified. Raw review-surface reads are advisory; only canonical `inspect-pr` owns review state ([#1](https://github.com/oimus1976/agent-controller/issues/1), [#194](https://github.com/oimus1976/agent-controller/issues/194)).
 - **Human-final.** Ready, merge, and every LEVEL 3 effect are human actions. Prepare and verify them; never perform or infer them ([ADR #90](https://github.com/oimus1976/agent-controller/issues/90)).
 - **Independent review.** The implementing worker is not the sole reviewer of its own work. Self-review is L0 and never counts as independent review. Review binds to an exact head, and every remediation needs a fresh-head rereview ([ADR #199](https://github.com/oimus1976/agent-controller/issues/199)).
 - **No duplicate implementation.** While a completed Codex task still offers its `View Task → Update branch` handoff, do not reimplement it. Fall back only after that apply is shown to be absent or failed ([#200](https://github.com/oimus1976/agent-controller/issues/200)).

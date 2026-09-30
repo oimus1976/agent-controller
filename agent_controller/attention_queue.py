@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Sequence
 
+from .review_evidence import canonical_review_from_mapping
+
 
 class AttentionCategory(str, Enum):
     HUMAN_ACTION = "HUMAN_ACTION"
@@ -62,6 +64,12 @@ def classify_attention(observation: Mapping[str, object]) -> AttentionItem:
     current_merged = observation.get("current_merged")
     current_state_enum = observation.get("current_state_enum")
     raw_workstream_id = observation.get("workstream_id")
+    canonical_review = canonical_review_from_mapping(
+        observation.get("canonical_review_evidence"),
+        repo=repo,
+        pr=pr,
+        head_sha=head_sha,
+    ) if repo is not None and isinstance(pr, int) and head_sha is not None else None
 
     if raw_workstream_id is None:
         workstream_id = None
@@ -124,6 +132,9 @@ def classify_attention(observation: Mapping[str, object]) -> AttentionItem:
             or actions_ci_status != "PASS"
             or scope_status != "SATISFIED"
             or graphql_error is not False
+            or canonical_review is None
+            or not canonical_review.collection_complete
+            or canonical_review.verdict != "CLEAN"
         ):
             category = AttentionCategory.NEEDS_ATTENTION
             reason = "CONTRADICTORY_REVIEW_READY_EVIDENCE"
@@ -139,7 +150,14 @@ def classify_attention(observation: Mapping[str, object]) -> AttentionItem:
         category = AttentionCategory.NEEDS_ATTENTION
         reason = "REVIEW_OR_REMEDIATION_REQUIRED"
     elif classification == "IMPLEMENTATION_READY":
-        if transition:
+        if (
+            canonical_review is None
+            or not canonical_review.collection_complete
+            or canonical_review.verdict != "ABSENT"
+        ):
+            category = AttentionCategory.NEEDS_ATTENTION
+            reason = "CONTRADICTORY_IMPLEMENTATION_READY_EVIDENCE"
+        elif transition:
             category = AttentionCategory.IN_PROGRESS
             reason = "IMPLEMENTATION_READY_FOR_NEXT_AUTOMATED_STEP"
         else:

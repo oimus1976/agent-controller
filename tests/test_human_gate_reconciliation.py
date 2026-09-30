@@ -9,10 +9,11 @@ from agent_controller.watcher import watch_pr_once
 
 class HumanGateReconciliationTests(unittest.TestCase):
     def _attention(self, **overrides):
+        head_sha = "a" * 40
         observation = {
             "repo": "owner/repo",
             "pr": 7,
-            "current_head_sha": "head-1",
+            "current_head_sha": head_sha,
             "current_classification": "REVIEW_READY",
             "current_draft": True,
             "current_merged": False,
@@ -23,6 +24,20 @@ class HumanGateReconciliationTests(unittest.TestCase):
             "runtime_status": "OK",
             "transition": True,
             "transition_reasons": ["PR_STATE_CHANGED"],
+            "canonical_review_evidence": {
+                "schema": "agent-controller/review-evidence/v1",
+                "repo": "owner/repo",
+                "pr": 7,
+                "observed_head_sha": head_sha,
+                "collection_complete": True,
+                "verdict": "CLEAN",
+                "surfaces": [
+                    {"surface": name, "status": "COMPLETE", "pagination_exhausted": True, "error": None}
+                    for name in ("formal_reviews", "issue_comments", "inline_threads", "reactions")
+                ],
+                "provider_reviews": [],
+                "errors": [],
+            },
         }
         observation.update(overrides)
         return classify_attention(observation)

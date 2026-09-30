@@ -15,7 +15,7 @@ def observation(
     runtime_status="OK",
     transition=True,
     reasons=("CLASSIFICATION_CHANGED",),
-    head_sha="abc123",
+    head_sha="a" * 40,
     actions_ci_status="PASS",
     scope_status="SATISFIED",
     graphql_error=False,
@@ -23,7 +23,7 @@ def observation(
     merged=False,
     state="open",
 ):
-    return {
+    value = {
         "repo": repo,
         "pr": pr,
         "current_head_sha": head_sha,
@@ -38,6 +38,23 @@ def observation(
         "transition": transition,
         "transition_reasons": list(reasons),
     }
+    if classification in {"REVIEW_READY", "IMPLEMENTATION_READY"} and head_sha is not None:
+        value["canonical_review_evidence"] = {
+            "schema": "agent-controller/review-evidence/v1",
+            "repo": repo,
+            "pr": pr,
+            "observed_head_sha": head_sha,
+            "collection_complete": True,
+            "verdict": "CLEAN" if classification == "REVIEW_READY" else "ABSENT",
+            "surfaces": [
+                {"surface": name, "status": "COMPLETE", "pagination_exhausted": True, "error": None}
+                for name in ("formal_reviews", "issue_comments", "inline_threads", "reactions")
+            ],
+            "provider_reviews": [],
+            "errors": [],
+        }
+    return value
+
 
 
 class AttentionQueueTests(unittest.TestCase):
@@ -65,9 +82,24 @@ class AttentionQueueTests(unittest.TestCase):
         self.assertEqual("CONTRADICTORY_REVIEW_READY_EVIDENCE", item.reason)
         self.assertIsNone(item.human_action)
 
+    def test_review_ready_without_canonical_snapshot_fails_closed(self):
+        value = observation(classification="REVIEW_READY")
+        value.pop("canonical_review_evidence")
+        item = classify_attention(value)
+        self.assertEqual(AttentionCategory.NEEDS_ATTENTION, item.category)
+        self.assertEqual("CONTRADICTORY_REVIEW_READY_EVIDENCE", item.reason)
+
     def test_review_ready_without_head_fails_closed(self):
         item = classify_attention(
             observation(classification="REVIEW_READY", head_sha=None)
+        )
+        self.assertEqual(AttentionCategory.NEEDS_ATTENTION, item.category)
+        self.assertEqual("CONTRADICTORY_REVIEW_READY_EVIDENCE", item.reason)
+        self.assertIsNone(item.human_action)
+
+    def test_review_ready_with_matching_malformed_head_fails_closed(self):
+        item = classify_attention(
+            observation(classification="REVIEW_READY", head_sha="not-a-git-sha")
         )
         self.assertEqual(AttentionCategory.NEEDS_ATTENTION, item.category)
         self.assertEqual("CONTRADICTORY_REVIEW_READY_EVIDENCE", item.reason)
@@ -177,6 +209,38 @@ class AttentionQueueTests(unittest.TestCase):
             observation(classification="IMPLEMENTATION_READY", transition=False, reasons=())
         )
         self.assertEqual(AttentionCategory.NO_CHANGE, item.category)
+
+    def test_implementation_ready_requires_complete_current_absence_evidence(self):
+        cases = {}
+
+        missing = observation(classification="IMPLEMENTATION_READY")
+        missing.pop("canonical_review_evidence")
+        cases["missing"] = missing
+
+        malformed = observation(classification="IMPLEMENTATION_READY")
+        malformed["canonical_review_evidence"] = {}
+        cases["malformed"] = malformed
+
+        incomplete = observation(classification="IMPLEMENTATION_READY")
+        incomplete["canonical_review_evidence"]["collection_complete"] = False
+        cases["incomplete"] = incomplete
+
+        stale = observation(classification="IMPLEMENTATION_READY")
+        stale["canonical_review_evidence"]["observed_head_sha"] = "stale-head"
+        cases["stale"] = stale
+
+        wrong_verdict = observation(classification="IMPLEMENTATION_READY")
+        wrong_verdict["canonical_review_evidence"]["verdict"] = "CLEAN"
+        cases["wrong_verdict"] = wrong_verdict
+
+        for name, value in cases.items():
+            with self.subTest(name=name):
+                item = classify_attention(value)
+                self.assertEqual(AttentionCategory.NEEDS_ATTENTION, item.category)
+                self.assertEqual(
+                    "CONTRADICTORY_IMPLEMENTATION_READY_EVIDENCE", item.reason
+                )
+                self.assertIsNone(item.human_action)
 
     def test_needs_review_requires_attention_even_when_stable(self):
         item = classify_attention(

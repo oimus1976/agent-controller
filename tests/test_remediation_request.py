@@ -7,6 +7,12 @@ from agent_controller.remediation_request import (
     plan_codex_remediation_request,
 )
 from agent_controller.remediation_request_mutator import codex_remediation_request_marker
+from agent_controller.inspector import build_canonical_review_evidence
+from agent_controller.review_evidence import (
+    ProviderReviewEvidence,
+    REQUIRED_GITHUB_SURFACES,
+    ReviewSurfaceStatus,
+)
 
 
 HEAD = "a" * 40
@@ -89,6 +95,49 @@ def inspection(**overrides):
         "review_threads_graphql": [finding_thread()],
     }
     value.update(overrides)
+    if "canonical_review_evidence" not in overrides:
+        surfaces = tuple(
+            ReviewSurfaceStatus(name, "COMPLETE", True)
+            for name in REQUIRED_GITHUB_SURFACES
+        )
+        value["canonical_review_evidence"] = build_canonical_review_evidence(
+            repo=REPO,
+            pr_number=111,
+            head_sha=value["head_sha"],
+            reviews=value["reviews"],
+            issue_comments=value["issue_comments"],
+            review_threads_graphql=value["review_threads_graphql"] or [],
+            surfaces=surfaces,
+        ).to_dict()
+    return value
+
+
+def provider_only_blocking_inspection():
+    value = inspection(reviews=[], review_threads_graphql=[])
+    provider = ProviderReviewEvidence(
+        provider="jules",
+        provider_operation_id="session-review-111",
+        repo=REPO,
+        pr=111,
+        reviewed_head_sha=HEAD,
+        verdict="BLOCKING",
+        complete=True,
+        independence="VERIFIED_DIFFERENT_OPERATION",
+        binding_strength="CONTROLLER_PRE_DISPATCH_EXACT_HEAD",
+    )
+    value["canonical_review_evidence"] = build_canonical_review_evidence(
+        repo=REPO,
+        pr_number=111,
+        head_sha=HEAD,
+        reviews=[],
+        issue_comments=[],
+        review_threads_graphql=[],
+        surfaces=tuple(
+            ReviewSurfaceStatus(name, "COMPLETE", True)
+            for name in REQUIRED_GITHUB_SURFACES
+        ),
+        provider_review_evidence=(provider,),
+    ).to_dict()
     return value
 
 
@@ -126,6 +175,43 @@ class RemediationRequestPlanTests(unittest.TestCase):
         self.assertEqual("READY_TO_REQUEST_CODEX_REMEDIATION", plan["reason"])
 
     @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    def test_partial_raw_finding_cannot_authorize_remediation(self, _load):
+        plan = plan_codex_remediation_request(
+            owner="oimus1976",
+            repo="agent-controller",
+            pr_number=111,
+            policy_path="policy.json",
+            scope_policy=SCOPE,
+            inspection=inspection(canonical_review_evidence=None),
+        )
+        self.assertEqual("BLOCKED", plan["decision"])
+        self.assertEqual("REVIEW_EVIDENCE_UNAVAILABLE", plan["reason"])
+
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    def test_provider_only_blocker_does_not_authorize_codex_remediation(self, _load):
+        evidence = provider_only_blocking_inspection()
+        self.assertEqual(
+            "BLOCKING", evidence["canonical_review_evidence"]["verdict"]
+        )
+        self.assertFalse(
+            evidence["canonical_review_evidence"]["codex_blocking"]
+        )
+
+        plan = plan_codex_remediation_request(
+            owner="oimus1976",
+            repo="agent-controller",
+            pr_number=111,
+            policy_path="policy.json",
+            scope_policy=SCOPE,
+            inspection=evidence,
+        )
+
+        self.assertEqual("NOOP", plan["decision"])
+        self.assertEqual(
+            "NO_UNRESOLVED_CURRENT_HEAD_CODEX_FINDING", plan["reason"]
+        )
+
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
     def test_resolved_or_old_head_finding_does_not_authorize(self, _load):
         for threads in (
             [finding_thread(resolved=True)],
@@ -137,7 +223,7 @@ class RemediationRequestPlanTests(unittest.TestCase):
                 pr_number=111,
                 policy_path="policy.json",
                 scope_policy=SCOPE,
-                inspection=inspection(review_threads_graphql=threads, reviews=[]),
+                inspection=inspection(review_threads_graphql=threads),
             )
             self.assertEqual("NOOP", plan["decision"])
             self.assertEqual(
@@ -396,21 +482,11 @@ class RemediationRequestPlanTests(unittest.TestCase):
 
 class RemediationRequestExecutionTests(unittest.TestCase):
     def setUp(self):
-        reviews = patch("agent_controller.remediation_request.get_pr_reviews")
-        threads = patch(
-            "agent_controller.remediation_request.get_pr_review_threads_graphql"
+        canonical_inspection = patch(
+            "agent_controller.remediation_request._inspect_remediation_request"
         )
-        self.get_reviews = reviews.start()
-        self.get_threads = threads.start()
-        self.get_reviews.return_value = [
-            {
-                "id": 101,
-                "user": {"login": "chatgpt-codex-connector[bot]"},
-                "commit_id": HEAD,
-                "state": "COMMENTED",
-            }
-        ]
-        self.get_threads.return_value = [finding_thread()]
+        self.canonical_inspection = canonical_inspection.start()
+        self.canonical_inspection.return_value = inspection()
         actions = patch("agent_controller.remediation_request.get_actions_runs")
         self.get_actions = actions.start()
         self.get_actions.return_value = {
@@ -425,8 +501,7 @@ class RemediationRequestExecutionTests(unittest.TestCase):
                 }
             ],
         }
-        self.addCleanup(reviews.stop)
-        self.addCleanup(threads.stop)
+        self.addCleanup(canonical_inspection.stop)
         self.addCleanup(actions.stop)
 
     def executable_plan(self):
@@ -489,7 +564,37 @@ class RemediationRequestExecutionTests(unittest.TestCase):
     ):
         fresh_plan.return_value = self.executable_plan()
         get_pr.return_value = safe_pr()
-        self.get_threads.return_value = [finding_thread(resolved=True)]
+        self.canonical_inspection.return_value = inspection(
+            review_threads_graphql=[finding_thread(resolved=True)]
+        )
+        with patch(
+            "agent_controller.remediation_request.post_codex_remediation_request"
+        ) as post:
+            result = execute_codex_remediation_request(
+                plan=self.executable_plan(),
+                owner="oimus1976",
+                repo="agent-controller",
+                pr_number=111,
+                policy_path="policy.json",
+                apply=True,
+            )
+
+        post.assert_not_called()
+        self.assertEqual("NOOP", result["final_outcome"])
+        self.assertEqual(
+            "NO_UNRESOLVED_CURRENT_HEAD_CODEX_FINDING", result["failure_reason"]
+        )
+
+    @patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="oimus1976")
+    @patch("agent_controller.remediation_request.get_pr_details")
+    @patch("agent_controller.remediation_request.load_policy", return_value=POLICY)
+    @patch("agent_controller.remediation_request.plan_codex_remediation_request")
+    def test_provider_only_blocker_at_final_gate_blocks_before_post(
+        self, fresh_plan, _load, get_pr, _identity
+    ):
+        fresh_plan.return_value = self.executable_plan()
+        get_pr.return_value = safe_pr()
+        self.canonical_inspection.return_value = provider_only_blocking_inspection()
         with patch(
             "agent_controller.remediation_request.post_codex_remediation_request"
         ) as post:

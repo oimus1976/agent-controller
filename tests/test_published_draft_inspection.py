@@ -180,10 +180,33 @@ class PublishedDraftInspectionTests(unittest.TestCase):
             h = Harness()
             h.evidence["classification"] = classification
             h.evidence["actions_ci_status"] = ci
+            if classification == "REVIEW_READY":
+                h.evidence["canonical_review_evidence"] = {
+                    "schema": "agent-controller/review-evidence/v1",
+                    "repo": REPO,
+                    "pr": 77,
+                    "observed_head_sha": HEAD,
+                    "collection_complete": True,
+                    "verdict": "CLEAN",
+                    "surfaces": [
+                        {"surface": name, "status": "COMPLETE", "pagination_exhausted": True, "error": None}
+                        for name in ("formal_reviews", "issue_comments", "inline_threads", "reactions")
+                    ],
+                    "provider_reviews": [],
+                    "errors": [],
+                }
             result, _ = run(harness=h)
             self.assertEqual(result.status, "PASS")
             self.assertEqual(result.classification, classification)
             self.assertEqual(result.actions_ci_status, ci)
+
+    def test_review_ready_without_canonical_evidence_is_uncertain(self):
+        h = Harness()
+        h.evidence["classification"] = "REVIEW_READY"
+        h.evidence["actions_ci_status"] = "PASS"
+        result, _ = run(harness=h)
+        self.assertEqual("UNCERTAIN", result.status)
+        self.assertEqual("CANONICAL_REVIEW_EVIDENCE_REQUIRED", result.reason)
 
     def test_malformed_inspector_evidence_fails_closed(self):
         h = Harness()

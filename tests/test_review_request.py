@@ -32,6 +32,35 @@ def _inspection(**overrides):
         "review_threads_graphql": [],
     }
     values.update(overrides)
+    complete = not values.get("graphql_error")
+    verdict = "ABSENT"
+    if any(
+        isinstance(item, dict)
+        and (item.get("user") or {}).get("login") == "chatgpt-codex-connector[bot]"
+        for item in values.get("issue_comments", []) + values.get("reviews", [])
+    ) or values.get("review_threads_graphql"):
+        verdict = "CLEAN"
+    values["repo"] = "oimus1976/agent-controller"
+    values["pr"] = 109
+    values["canonical_review_evidence"] = {
+        "schema": "agent-controller/review-evidence/v1",
+        "repo": "oimus1976/agent-controller",
+        "pr": 109,
+        "observed_head_sha": values["head_sha"],
+        "collection_complete": complete,
+        "verdict": verdict if complete else "UNCERTAIN",
+        "surfaces": [
+            {
+                "surface": name,
+                "status": "COMPLETE" if complete else "UNAVAILABLE",
+                "pagination_exhausted": complete,
+                "error": None if complete else "unavailable",
+            }
+            for name in ("formal_reviews", "issue_comments", "inline_threads", "reactions")
+        ],
+        "provider_reviews": [],
+        "errors": [] if complete else ["unavailable"],
+    }
     return values
 
 
@@ -269,35 +298,9 @@ class CodexReviewRequestTests(unittest.TestCase):
                 self.assertEqual("NOOP", plan["decision"])
                 self.assertEqual("CODEX_REVIEW_ALREADY_PRESENT_ON_HEAD", plan["reason"])
 
-    @patch("agent_controller.inspector.get_issue_comment_reactions")
-    @patch("agent_controller.review_request.get_actions_runs")
-    @patch("agent_controller.review_request.get_pr_review_threads_graphql")
-    @patch("agent_controller.review_request.get_pr_files")
-    @patch("agent_controller.review_request.get_pr_issue_comments")
-    @patch("agent_controller.review_request.get_pr_reviews")
-    @patch("agent_controller.review_request.get_pr_details")
-    def test_purpose_specific_planner_does_not_fetch_comment_reactions(
-        self,
-        get_pr,
-        get_reviews,
-        get_comments,
-        get_files,
-        get_threads,
-        get_actions,
-        reaction_read,
-    ):
-        get_pr.return_value = {**_pr_snapshot(), "changed_files": 1}
-        get_reviews.return_value = []
-        get_comments.return_value = [
-            {"id": index, "body": "noise", "user": {"login": f"user-{index}"}}
-            for index in range(50)
-        ]
-        get_files.return_value = [
-            {"filename": "agent_controller/example.py", "changes": 1}
-        ]
-        get_threads.return_value = []
-        get_actions.return_value = _actions_pass()
-
+    @patch("agent_controller.review_request.inspect_pr")
+    def test_planner_uses_canonical_inspector(self, inspect):
+        inspect.return_value = _inspection()
         plan = plan_codex_review_request(
             owner="oimus1976",
             repo="agent-controller",
@@ -306,8 +309,12 @@ class CodexReviewRequestTests(unittest.TestCase):
             scope_policy=self.scope,
         )
         self.assertEqual("EXECUTABLE", plan["decision"])
-        reaction_read.assert_not_called()
-        get_comments.assert_called_once()
+        inspect.assert_called_once_with(
+            "oimus1976",
+            "agent-controller",
+            109,
+            scope_policy=self.scope,
+        )
 
     @patch("agent_controller.review_request.post_codex_review_request")
     @patch("agent_controller.review_request.get_authenticated_github_login")

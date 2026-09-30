@@ -5,6 +5,7 @@ from typing import Any, Callable, Mapping, Optional
 
 from agent_controller.jules_draft_publication import DraftPublicationResult
 from agent_controller.provider_contract import TaskBinding
+from agent_controller.review_evidence import canonical_review_from_mapping
 from agent_controller.workstream import WorkstreamBinding, validate_branch_workstream, validate_task_workstream
 
 
@@ -146,6 +147,25 @@ def inspect_published_draft_pr(
         scope_status = evidence.get("scope_status")
         if not all(isinstance(value, str) and value for value in (classification, actions_ci_status, scope_status)):
             return PublishedDraftInspectionResult("UNCERTAIN", "INSPECTION_CLASSIFICATION_MALFORMED", pr_number=pr_number, head_sha=head_sha)
+        if classification in {"REVIEW_READY", "IMPLEMENTATION_READY"}:
+            canonical_review = canonical_review_from_mapping(
+                evidence.get("canonical_review_evidence"),
+                repo=task.repo,
+                pr=pr_number,
+                head_sha=head_sha,
+            )
+            expected_verdict = "CLEAN" if classification == "REVIEW_READY" else "ABSENT"
+            if (
+                canonical_review is None
+                or not canonical_review.collection_complete
+                or canonical_review.verdict != expected_verdict
+            ):
+                return PublishedDraftInspectionResult(
+                    "UNCERTAIN",
+                    "CANONICAL_REVIEW_EVIDENCE_REQUIRED",
+                    pr_number=pr_number,
+                    head_sha=head_sha,
+                )
 
         after = read_pr(task.repo, pr_number)
         reason = _validate_pr_snapshot(

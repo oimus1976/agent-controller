@@ -4,15 +4,12 @@ from typing import Any, Mapping
 
 from .executor import load_policy
 from .inspector import (
-    evaluate_actions_ci,
     evaluate_scope,
-    get_actions_runs,
     get_pr_details,
-    get_pr_files,
     get_pr_issue_comments,
-    get_pr_reviews,
-    get_pr_review_threads_graphql,
+    inspect_pr,
 )
+from .review_evidence import canonical_review_from_mapping
 from .review_request_mutator import (
     codex_review_request_marker,
     get_authenticated_github_login,
@@ -172,52 +169,15 @@ def _validate_exact_pr_snapshot(
     return None
 
 
-def _inspect_review_request(owner: str, repo: str, pr_number: int) -> dict[str, Any]:
-    """Collect only the GitHub facts required for review-request eligibility.
+def _inspect_review_request(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    scope_policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Use the authority-bearing inspector for review-request eligibility."""
 
-    This deliberately avoids the general inspector's per-comment reaction reads.
-    Review-request eligibility does not consume reactions, and comment-count fan-out
-    would make an untrusted comment flood a GitHub API quota amplifier.
-    """
-
-    pr_data = get_pr_details(owner, repo, pr_number)
-    if not isinstance(pr_data, Mapping):
-        raise ValueError("PR details malformed")
-
-    head = pr_data.get("head")
-    head_sha = head.get("sha") if isinstance(head, Mapping) else None
-
-    reviews = get_pr_reviews(owner, repo, pr_number)
-    issue_comments = get_pr_issue_comments(owner, repo, pr_number)
-    files = get_pr_files(owner, repo, pr_number)
-
-    graphql_error = False
-    try:
-        review_threads_graphql = get_pr_review_threads_graphql(owner, repo, pr_number)
-    except Exception:
-        review_threads_graphql = None
-        graphql_error = True
-
-    actions_ci_status = "UNAVAILABLE"
-    try:
-        actions_response = get_actions_runs(owner, repo, head_sha)
-        actions_ci_status = evaluate_actions_ci(actions_response, head_sha)
-    except Exception:
-        actions_ci_status = "UNAVAILABLE"
-
-    return {
-        "head_sha": head_sha,
-        "draft": pr_data.get("draft"),
-        "merged": pr_data.get("merged"),
-        "state": pr_data.get("state"),
-        "changed_files": pr_data.get("changed_files"),
-        "files": files,
-        "actions_ci_status": actions_ci_status,
-        "graphql_error": graphql_error,
-        "issue_comments": issue_comments,
-        "reviews": reviews,
-        "review_threads_graphql": review_threads_graphql,
-    }
+    return inspect_pr(owner, repo, pr_number, scope_policy=dict(scope_policy))
 
 
 def plan_codex_review_request(
@@ -263,7 +223,7 @@ def plan_codex_review_request(
 
     if inspection is None:
         try:
-            inspection = _inspect_review_request(owner, repo, pr_number)
+            inspection = _inspect_review_request(owner, repo, pr_number, scope_policy)
         except Exception:
             plan["reason"] = "EVIDENCE_FETCH_FAILED"
             return plan
@@ -302,6 +262,16 @@ def plan_codex_review_request(
         plan["reason"] = "HEAD_SHA_MALFORMED"
         return plan
 
+    canonical_review = canonical_review_from_mapping(
+        inspection.get("canonical_review_evidence"),
+        repo=f"{owner}/{repo}",
+        pr=pr_number,
+        head_sha=head_sha,
+    )
+    if canonical_review is None or not canonical_review.collection_complete:
+        plan["reason"] = "REVIEW_EVIDENCE_UNAVAILABLE"
+        return plan
+
     if merged or state == "closed":
         plan["reason"] = "PR_CLOSED_OR_MERGED"
         return plan
@@ -310,11 +280,14 @@ def plan_codex_review_request(
         return plan
 
     try:
+        # Validate raw shapes for diagnostics, but never derive authority from
+        # this partial view. The canonical snapshot owns the verdict.
+        _has_codex_review_on_head(inspection, head_sha)
         if _has_same_head_request(issue_comments, head_sha, trusted_authors):
             plan["decision"] = "NOOP"
             plan["reason"] = "REVIEW_ALREADY_REQUESTED_FOR_HEAD"
             return plan
-        if _has_codex_review_on_head(inspection, head_sha):
+        if canonical_review.verdict != "ABSENT":
             plan["decision"] = "NOOP"
             plan["reason"] = "CODEX_REVIEW_ALREADY_PRESENT_ON_HEAD"
             return plan

@@ -5,8 +5,33 @@ import os
 import urllib.error
 import urllib.request
 
+from .review_evidence import (
+    CANONICAL_REVIEW_SCHEMA,
+    CanonicalReviewEvidence,
+    ProviderReviewEvidence,
+    REQUIRED_GITHUB_SURFACES,
+    ReviewSurfaceStatus,
+    canonical_review_from_mapping,
+)
+
 
 DEFAULT_GITHUB_REQUEST_TIMEOUT_SECONDS = 30.0
+_CODEX_BOT_LOGINS = {
+    "chatgpt-codex-connector[bot]",
+    "chatgpt-codex-connector",
+}
+
+
+def _is_codex_login(value):
+    return isinstance(value, str) and value in _CODEX_BOT_LOGINS
+
+
+def _mentions_head(body, head_sha):
+    return bool(
+        head_sha
+        and isinstance(body, str)
+        and (head_sha in body or head_sha[:10] in body)
+    )
 
 
 def _validated_request_timeout(timeout=DEFAULT_GITHUB_REQUEST_TIMEOUT_SECONDS):
@@ -84,6 +109,14 @@ def _github_graphql_request(
         raise Exception(f"GitHub GraphQL API Error: {e.code} {e.reason}")
 
 
+def _require_complete_graphql_response(response):
+    if not isinstance(response, dict):
+        raise Exception("GraphQL response structure unexpected: response is not an object")
+    if response.get("errors"):
+        raise Exception("GraphQL response contains top-level errors")
+    return response
+
+
 def get_pr_review_threads_graphql(owner, repo, pr_number):
     query = """
     query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
@@ -139,7 +172,9 @@ def get_pr_review_threads_graphql(owner, repo, pr_number):
             "pr": pr_number,
             "cursor": thread_cursor,
         }
-        response = _github_graphql_request(query, variables)
+        response = _require_complete_graphql_response(
+            _github_graphql_request(query, variables)
+        )
 
         try:
             threads_data = response["data"]["repository"]["pullRequest"]["reviewThreads"]
@@ -150,7 +185,9 @@ def get_pr_review_threads_graphql(owner, repo, pr_number):
 
                 while has_next_comment:
                     c_vars = {"threadId": thread["id"], "cursor": comment_cursor}
-                    c_resp = _github_graphql_request(comment_query, c_vars)
+                    c_resp = _require_complete_graphql_response(
+                        _github_graphql_request(comment_query, c_vars)
+                    )
                     c_data = c_resp["data"]["node"]["comments"]
                     thread["comments"]["nodes"].extend(c_data["nodes"])
                     has_next_comment = c_data["pageInfo"]["hasNextPage"]
@@ -300,7 +337,189 @@ def evaluate_scope(files, policy):
     return "SATISFIED"
 
 
-def inspect_pr(owner, repo, pr_number, scope_policy=None):
+def _surface_status(surface, error=None):
+    return ReviewSurfaceStatus(
+        surface=surface,
+        status="UNAVAILABLE" if error else "COMPLETE",
+        pagination_exhausted=error is None,
+        error=str(error) if error else None,
+    )
+
+
+def _codex_review_flags(head_sha, reviews, issue_comments, review_threads_graphql):
+    clean = False
+    blocking = False
+    seen = False
+    formal_review_ids = set()
+    active_review_ids = set()
+    changes_requested_ids = set()
+
+    for comment in issue_comments:
+        if not isinstance(comment, dict):
+            return False, False, False, "ISSUE_COMMENT_MALFORMED"
+        body = comment.get("body", "")
+        user = comment.get("user") or {}
+        if _is_codex_login(user.get("login")):
+            if _mentions_head(body, head_sha):
+                seen = True
+                if "Didn't find any major issues" in body:
+                    clean = True
+        elif isinstance(body, str) and "@codex review" in body.lower():
+            if not _mentions_head(body, head_sha):
+                continue
+            reactions = comment.get("reactions", [])
+            if not isinstance(reactions, list):
+                return False, False, False, "REACTION_EVIDENCE_MALFORMED"
+            for reaction in reactions:
+                reaction_user = reaction.get("user") or {}
+                if _is_codex_login(reaction_user.get("login")):
+                    seen = True
+
+    for review in reviews:
+        if not isinstance(review, dict):
+            return False, False, False, "FORMAL_REVIEW_MALFORMED"
+        review_id = review.get("id")
+        if isinstance(review_id, int) and not isinstance(review_id, bool):
+            formal_review_ids.add(review_id)
+        user = review.get("user") or {}
+        body = review.get("body", "")
+        if not _is_codex_login(user.get("login")):
+            continue
+        on_head = review.get("commit_id") == head_sha or (
+            _mentions_head(body, head_sha)
+        )
+        state = review.get("state")
+        if isinstance(state, str):
+            state = state.upper()
+        if state == "DISMISSED":
+            continue
+        if on_head:
+            seen = True
+            review_id = review.get("id")
+            if isinstance(review_id, int) and not isinstance(review_id, bool):
+                active_review_ids.add(review_id)
+        if on_head and (
+            state == "APPROVED"
+            or "Didn't find any major issues" in body
+        ):
+            clean = True
+        elif on_head and state in {"CHANGES_REQUESTED", "REQUEST_CHANGES"}:
+            review_id = review.get("id")
+            if isinstance(review_id, int) and not isinstance(review_id, bool):
+                changes_requested_ids.add(review_id)
+            else:
+                blocking = True
+
+    associated_thread_review_ids = set()
+    for thread in review_threads_graphql:
+        if not isinstance(thread, dict):
+            return False, False, False, "INLINE_THREAD_MALFORMED"
+        comments = (thread.get("comments") or {}).get("nodes", [])
+        if not isinstance(comments, list) or not comments:
+            return False, False, False, "INLINE_THREAD_COMMENTS_MALFORMED"
+        root_comment = comments[0]
+        if not isinstance(root_comment, dict):
+            return False, False, False, "INLINE_THREAD_COMMENT_MALFORMED"
+        author = root_comment.get("author") or {}
+        original_commit = root_comment.get("originalCommit") or {}
+        if not (
+            _is_codex_login(author.get("login"))
+            and original_commit.get("oid") == head_sha
+        ):
+            continue
+        review = root_comment.get("pullRequestReview") or {}
+        review_id = review.get("databaseId") if isinstance(review, dict) else None
+        if isinstance(review_id, int) and not isinstance(review_id, bool):
+            associated_thread_review_ids.add(review_id)
+            if review_id not in formal_review_ids:
+                return False, False, False, "INLINE_THREAD_REVIEW_NOT_IN_FORMAL_REVIEWS"
+            if review_id not in active_review_ids:
+                continue
+        seen = True
+        resolved = thread.get("isResolved")
+        if not isinstance(resolved, bool):
+            return False, False, False, "INLINE_THREAD_RESOLUTION_MALFORMED"
+        if not resolved:
+            blocking = True
+
+    if changes_requested_ids - associated_thread_review_ids:
+        blocking = True
+    return clean, blocking, seen, None
+
+
+def build_canonical_review_evidence(
+    *,
+    repo,
+    pr_number,
+    head_sha,
+    reviews,
+    issue_comments,
+    review_threads_graphql,
+    surfaces,
+    provider_review_evidence=(),
+    head_changed=False,
+):
+    errors = [item.error for item in surfaces if item.error]
+    complete = (
+        not head_changed
+        and {item.surface for item in surfaces} == set(REQUIRED_GITHUB_SURFACES)
+        and all(item.complete for item in surfaces)
+    )
+    clean, blocking, seen, parse_error = _codex_review_flags(
+        head_sha, reviews, issue_comments, review_threads_graphql
+    )
+    codex_blocking = blocking
+    if parse_error:
+        errors.append(parse_error)
+        complete = False
+    if head_changed:
+        errors.append("HEAD_CHANGED_DURING_COLLECTION")
+
+    providers = []
+    for item in provider_review_evidence:
+        if not isinstance(item, ProviderReviewEvidence):
+            errors.append("PROVIDER_REVIEW_EVIDENCE_NOT_CANONICAL")
+            complete = False
+            continue
+        providers.append(item)
+        if item.repo != repo or item.pr != pr_number or item.reviewed_head_sha != head_sha:
+            errors.append("PROVIDER_REVIEW_IDENTITY_MISMATCH")
+            complete = False
+        elif not item.complete:
+            errors.extend(item.errors or ("PROVIDER_REVIEW_INCOMPLETE",))
+            complete = False
+        elif item.verdict == "BLOCKING":
+            blocking = True
+            seen = True
+        elif item.verdict == "CLEAN":
+            clean = True
+            seen = True
+
+    if not complete:
+        verdict = "UNCERTAIN"
+    elif blocking:
+        verdict = "BLOCKING"
+    elif clean:
+        verdict = "CLEAN"
+    elif seen:
+        verdict = "PENDING"
+    else:
+        verdict = "ABSENT"
+    return CanonicalReviewEvidence(
+        schema=CANONICAL_REVIEW_SCHEMA,
+        repo=repo,
+        pr=pr_number,
+        observed_head_sha=head_sha,
+        collection_complete=complete,
+        verdict=verdict,
+        surfaces=tuple(surfaces),
+        provider_reviews=tuple(providers),
+        codex_blocking=codex_blocking,
+        errors=tuple(dict.fromkeys(errors)),
+    )
+
+
+def inspect_pr(owner, repo, pr_number, scope_policy=None, provider_review_evidence=()):
     """Inspects a GitHub PR for objective evidence and classifies its state."""
     if scope_policy is None:
         scope_policy = {}
@@ -314,18 +533,56 @@ def inspect_pr(owner, repo, pr_number, scope_policy=None):
     state = pr_data.get("state")
     changed_files = pr_data.get("changed_files", 0)
 
-    reviews = get_pr_reviews(owner, repo, pr_number)
-    review_comments = get_pr_review_comments(owner, repo, pr_number)
-    issue_comments = get_pr_issue_comments(owner, repo, pr_number)
+    surface_errors = {}
+    try:
+        reviews = get_pr_reviews(owner, repo, pr_number)
+        if not isinstance(reviews, list):
+            raise TypeError("formal review evidence is not a list")
+    except Exception as exc:
+        reviews = []
+        surface_errors["formal_reviews"] = exc
+    try:
+        review_comments = get_pr_review_comments(owner, repo, pr_number)
+        if not isinstance(review_comments, list):
+            raise TypeError("inline review comment evidence is not a list")
+    except Exception as exc:
+        review_comments = []
+        surface_errors["inline_threads"] = exc
+    try:
+        issue_comments = get_pr_issue_comments(owner, repo, pr_number)
+        if not isinstance(issue_comments, list):
+            raise TypeError("issue comment evidence is not a list")
+    except Exception as exc:
+        issue_comments = []
+        surface_errors["issue_comments"] = exc
 
     for comment in issue_comments:
+        if not isinstance(comment, dict):
+            surface_errors["issue_comments"] = TypeError("issue comment entry is not an object")
+            continue
+        body = comment.get("body")
+        if not (
+            isinstance(body, str)
+            and "@codex review" in body.lower()
+            and _mentions_head(body, head_sha)
+        ):
+            continue
         comment_id = comment.get("id")
-        if comment_id:
-            try:
-                reactions = get_issue_comment_reactions(owner, repo, comment_id)
-                comment["reactions"] = reactions
-            except Exception:
-                comment["reactions"] = []
+        if (
+            not isinstance(comment_id, int)
+            or isinstance(comment_id, bool)
+            or comment_id <= 0
+        ):
+            surface_errors["reactions"] = TypeError("REVIEW_REQUEST_COMMENT_ID_MALFORMED")
+            continue
+        try:
+            reactions = get_issue_comment_reactions(owner, repo, comment_id)
+            if not isinstance(reactions, list):
+                raise TypeError("reaction evidence is not a list")
+            comment["reactions"] = reactions
+        except Exception as exc:
+            comment["reactions"] = []
+            surface_errors["reactions"] = exc
 
     files = get_pr_files(owner, repo, pr_number)
 
@@ -350,9 +607,12 @@ def inspect_pr(owner, repo, pr_number, scope_policy=None):
     graphql_error = False
     try:
         review_threads_graphql = get_pr_review_threads_graphql(owner, repo, pr_number)
-    except Exception:
+        if not isinstance(review_threads_graphql, list):
+            raise TypeError("review thread evidence is not a list")
+    except Exception as exc:
         review_threads_graphql = None
         graphql_error = True
+        surface_errors["inline_threads"] = exc
 
     actions_ci_status = "UNAVAILABLE"
     actions_runs = None
@@ -363,7 +623,27 @@ def inspect_pr(owner, repo, pr_number, scope_policy=None):
         actions_runs = None
         actions_ci_status = "UNAVAILABLE"
 
+    after_pr_data = get_pr_details(owner, repo, pr_number)
+    after_head_sha = after_pr_data.get("head", {}).get("sha")
+    surfaces = tuple(
+        _surface_status(surface, surface_errors.get(surface))
+        for surface in REQUIRED_GITHUB_SURFACES
+    )
+    canonical_review = build_canonical_review_evidence(
+        repo=f"{owner}/{repo}",
+        pr_number=pr_number,
+        head_sha=head_sha,
+        reviews=reviews,
+        issue_comments=issue_comments,
+        review_threads_graphql=review_threads_graphql or [],
+        surfaces=surfaces,
+        provider_review_evidence=provider_review_evidence,
+        head_changed=after_head_sha != head_sha,
+    )
+
     evidence = {
+        "repo": f"{owner}/{repo}",
+        "pr": pr_number,
         "head_sha": head_sha,
         "base_branch": base_branch,
         "draft": is_draft,
@@ -382,6 +662,7 @@ def inspect_pr(owner, repo, pr_number, scope_policy=None):
         "actions_ci_status": actions_ci_status,
         "check_runs_error": actions_ci_status == "UNAVAILABLE",
         "check_runs": None,
+        "canonical_review_evidence": canonical_review.to_dict(),
     }
 
     evidence["classification"] = classify_pr(evidence)
@@ -389,83 +670,10 @@ def inspect_pr(owner, repo, pr_number, scope_policy=None):
 
 
 def classify_pr(evidence):
-    head_sha = evidence.get("head_sha")
-
-    has_clean_codex_review_on_head = False
-    has_unresolved_codex_findings_on_head = False
-    has_changes_requested_on_head = False
-
-    issue_comments = evidence.get("issue_comments", [])
-    has_any_review = False
-
-    for comment in issue_comments:
-        body = comment.get("body", "")
-        user = comment.get("user", {}).get("login", "")
-        reactions = comment.get("reactions", [])
-
-        if user == "chatgpt-codex-connector[bot]":
-            has_any_review = True
-            if head_sha and (head_sha in body or head_sha[:10] in body):
-                if "Didn't find any major issues" in body:
-                    has_clean_codex_review_on_head = True
-        elif "@codex review" in body.lower():
-            for reaction in reactions:
-                reaction_user = reaction.get("user", {}).get("login")
-                if reaction_user == "chatgpt-codex-connector[bot]" and reaction.get(
-                    "content"
-                ) in ["+1", "thumbsup", "👍"]:
-                    has_any_review = True
-
-    reviews = evidence.get("reviews", [])
-    for review in reviews:
-        user = review.get("user", {}).get("login", "")
-        commit_id = review.get("commit_id")
-        state = review.get("state")
-        body = review.get("body", "")
-
-        if user == "chatgpt-codex-connector[bot]":
-            has_any_review = True
-            if commit_id == head_sha or (
-                head_sha and (head_sha in body or head_sha[:10] in body)
-            ):
-                if state == "APPROVED" or "Didn't find any major issues" in body:
-                    has_clean_codex_review_on_head = True
-                elif state == "CHANGES_REQUESTED":
-                    has_changes_requested_on_head = True
-
-    if not evidence.get("graphql_error"):
-        review_threads_graphql = evidence.get("review_threads_graphql")
-        if review_threads_graphql is not None:
-            for thread in review_threads_graphql:
-                if not thread.get("isResolved"):
-                    comments = thread.get("comments", {}).get("nodes", [])
-                    for comment in comments:
-                        author = comment.get("author") or {}
-                        login = author.get("login")
-                        if login == "chatgpt-codex-connector[bot]":
-                            original_commit_oid = comment.get("originalCommit", {}).get("oid")
-                            if original_commit_oid == head_sha:
-                                has_unresolved_codex_findings_on_head = True
-                                break
-        else:
-            review_comments = evidence.get("review_comments", [])
-            for comment in review_comments:
-                user = comment.get("user", {}).get("login", "")
-                commit_id = comment.get("commit_id")
-
-                if user == "chatgpt-codex-connector[bot]" and commit_id == head_sha:
-                    has_unresolved_codex_findings_on_head = True
-
     if evidence.get("merged") or evidence.get("state") == "closed":
         return "CLOSED"
 
     if evidence.get("scope_status") != "SATISFIED":
-        return "NEEDS_REVIEW"
-
-    if has_unresolved_codex_findings_on_head or has_changes_requested_on_head:
-        return "NEEDS_REVIEW"
-
-    if evidence.get("graphql_error"):
         return "NEEDS_REVIEW"
 
     ci_status = evidence.get("actions_ci_status")
@@ -475,11 +683,17 @@ def classify_pr(evidence):
     if ci_status != "PASS":
         return "NEEDS_REVIEW"
 
-    if has_clean_codex_review_on_head:
+    canonical = canonical_review_from_mapping(
+        evidence.get("canonical_review_evidence"),
+        repo=evidence.get("repo"),
+        pr=evidence.get("pr"),
+        head_sha=evidence.get("head_sha"),
+    )
+    if canonical is None or not canonical.collection_complete:
+        return "NEEDS_REVIEW"
+    if canonical.verdict == "CLEAN":
         return "REVIEW_READY"
-
-    if evidence.get("state") == "open" and not evidence.get("merged"):
-        if not has_any_review:
-            return "IMPLEMENTATION_READY"
+    if canonical.verdict == "ABSENT" and evidence.get("state") == "open" and not evidence.get("merged"):
+        return "IMPLEMENTATION_READY"
 
     return "NEEDS_REVIEW"
