@@ -46,9 +46,10 @@ def operation():
     )
 
 
-def activities(*, reviewed_head_sha=HEAD, verdict="CLEAN", findings=None):
+def activities(*, reviewed_pr=255, reviewed_head_sha=HEAD, verdict="CLEAN", findings=None):
     result = {
         "schema": "agent-controller/jules-review/v1",
+        "reviewed_pr": reviewed_pr,
         "reviewed_head_sha": reviewed_head_sha,
         "verdict": verdict,
         "findings": [] if findings is None else findings,
@@ -251,6 +252,89 @@ class ReviewEvidenceTests(unittest.TestCase):
             )
         )
 
+
+    def test_jules_review_cannot_be_retargeted_to_same_head_other_pr(self):
+        source = jules()
+        self.assertTrue(source.complete)
+        self.assertEqual("CLEAN", source.verdict)
+        retargeted = jules(pr=256)
+        self.assertFalse(retargeted.complete)
+        self.assertEqual("UNCERTAIN", retargeted.verdict)
+        self.assertIn("REVIEWED_PR_MISMATCH", retargeted.errors)
+        canonical = build_canonical_review_evidence(
+            repo=REPO, pr_number=256, head_sha=HEAD,
+            reviews=[], issue_comments=[], review_threads_graphql=[],
+            surfaces=surfaces(), provider_review_evidence=(retargeted,),
+        )
+        self.assertFalse(canonical.collection_complete)
+        self.assertEqual("UNCERTAIN", canonical.verdict)
+        self.assertIn("REVIEWED_PR_MISMATCH", canonical.errors)
+        self.assertEqual("NEEDS_REVIEW", classify_pr({
+            "repo": REPO, "pr": 256, "head_sha": HEAD,
+            "state": "open", "merged": False, "scope_status": "SATISFIED",
+            "actions_ci_status": "PASS", "canonical_review_evidence": canonical.to_dict(),
+        }))
+
+    def test_jules_missing_or_malformed_reviewed_pr_fails_closed(self):
+        identities = ({}, *({"reviewed_pr": value} for value in (
+            None, 0, -1, False, True, "255", [], {}, [255], 255.0,
+        )))
+        for identity in identities:
+            with self.subTest(identity=identity):
+                records = activities()
+                result = json.loads(records[0]["agentMessaged"]["agentMessage"])
+                result.pop("reviewed_pr")
+                result.update(identity)
+                records[0]["agentMessaged"]["agentMessage"] = json.dumps(result)
+                provider = jules(activities=records)
+                self.assertFalse(provider.complete)
+                self.assertEqual("UNCERTAIN", provider.verdict)
+                self.assertIn("REVIEWED_PR_MALFORMED", provider.errors)
+
+    def test_jules_pr_binding_preserves_repo_and_head_validation(self):
+        cases = (
+            ({"repo": "owner/another-repo"}, "REPOSITORY_MISMATCH"),
+            ({"current_head_sha": "b" * 40}, "EXPECTED_HEAD_MISMATCH"),
+            ({"activities": activities(reviewed_head_sha="b" * 40)}, "REVIEWED_HEAD_MISMATCH"),
+            ({"current_head_sha": "not-a-git-sha"}, "CURRENT_HEAD_MALFORMED"),
+            ({"activities": activities(reviewed_head_sha="not-a-git-sha")}, "REVIEWED_HEAD_MISMATCH"),
+        )
+        for overrides, error in cases:
+            with self.subTest(error=error):
+                provider = jules(**overrides)
+                self.assertFalse(provider.complete)
+                self.assertEqual("UNCERTAIN", provider.verdict)
+                self.assertIn(error, provider.errors)
+
+    def test_jules_canonical_provider_identity_cannot_cross_pr(self):
+        provider = jules()
+        snapshot = build_canonical_review_evidence(
+            repo=REPO, pr_number=255, head_sha=HEAD,
+            reviews=[], issue_comments=[], review_threads_graphql=[],
+            surfaces=surfaces(), provider_review_evidence=(provider,),
+        ).to_dict()
+        entry = snapshot["provider_reviews"][0]
+        self.assertEqual((REPO, 255, HEAD),
+                         (entry["repo"], entry["pr"], entry["reviewed_head_sha"]))
+        self.assertIsNotNone(canonical_review_from_mapping(
+            snapshot, repo=REPO, pr=255, head_sha=HEAD,
+        ))
+        self.assertIsNone(canonical_review_from_mapping(
+            snapshot, repo=REPO, pr=256, head_sha=HEAD,
+        ))
+        snapshot["pr"] = 256
+        self.assertIsNone(canonical_review_from_mapping(
+            snapshot, repo=REPO, pr=256, head_sha=HEAD,
+        ))
+        other = build_canonical_review_evidence(
+            repo=REPO, pr_number=256, head_sha=HEAD,
+            reviews=[], issue_comments=[], review_threads_graphql=[],
+            surfaces=surfaces(), provider_review_evidence=(provider,),
+        )
+        self.assertFalse(other.collection_complete)
+        self.assertEqual("UNCERTAIN", other.verdict)
+        self.assertIn("PROVIDER_REVIEW_IDENTITY_MISMATCH", other.errors)
+
     def test_owner_relayed_jules_prose_is_not_provider_evidence(self):
         canonical = build_canonical_review_evidence(
             repo=REPO,
@@ -277,6 +361,8 @@ class ReviewEvidenceTests(unittest.TestCase):
             jules(activities=[]),
             jules(activities=activities(findings=["P1"])),
             jules(activities=activities(verdict="BLOCKING", findings=[])),
+            jules(activities=activities(verdict="UNKNOWN")),
+            jules(activities=activities(findings="not-a-list")),
         )
         for provider in cases:
             with self.subTest(errors=provider.errors):

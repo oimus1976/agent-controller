@@ -103,7 +103,8 @@ def build_jules_review_evidence(
 
     The caller must obtain ``session`` and every activity through the official
     read APIs. Pagination completeness is explicit because an empty final page
-    and a truncated read are materially different evidence.
+    and a truncated read are materially different evidence. The structured
+    result must carry a positive integer reviewed_pr matching the target PR.
     """
 
     errors: list[str] = []
@@ -181,6 +182,11 @@ def build_jules_review_evidence(
         result: Mapping[str, Any] = {}
     else:
         result = results[0]
+    reviewed_pr = result.get("reviewed_pr")
+    if not isinstance(reviewed_pr, int) or isinstance(reviewed_pr, bool) or reviewed_pr <= 0:
+        errors.append("REVIEWED_PR_MALFORMED")
+    elif reviewed_pr != pr:
+        errors.append("REVIEWED_PR_MISMATCH")
     reviewed_sha = result.get("reviewed_head_sha")
     verdict = result.get("verdict")
     findings = result.get("findings")

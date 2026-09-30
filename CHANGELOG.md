@@ -34,6 +34,8 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 - Issue #284: current-head review-request candidates require a positive integer comment ID (excluding booleans) before reaction lookup; missing/malformed IDs mark the reactions surface unavailable through the existing fail-closed path, while irrelevant comments remain excluded.
 
+- Issue #285: the structured Jules review result requires a positive integer `reviewed_pr` matching the target PR; missing/malformed/mismatched PR identity fails closed through existing provider errors. Repository/head checks and canonical provider identity remain intact; generic `TaskBinding` is unchanged.
+
 ### Authority boundary
 
 - Jules APIがbranch指定後の実checkout SHAを返さない制約を `CONTROLLER_PRE_DISPATCH_EXACT_HEAD` として明示し、provider-observed exact SHAと混同しない。欠落・stale・self-review・不完全paginationはfail closed。
