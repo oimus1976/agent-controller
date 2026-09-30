@@ -157,10 +157,11 @@ def _observation(
     merged=False,
     state="open",
 ):
+    head_sha = f"{pr:040x}"
     value = {
         "repo": repo,
         "pr": pr,
-        "current_head_sha": f"sha-{pr}",
+        "current_head_sha": head_sha,
         "current_classification": classification,
         "current_draft": draft,
         "current_merged": merged,
@@ -177,7 +178,7 @@ def _observation(
             "schema": "agent-controller/review-evidence/v1",
             "repo": repo,
             "pr": pr,
-            "observed_head_sha": f"sha-{pr}",
+            "observed_head_sha": head_sha,
             "collection_complete": True,
             "verdict": "CLEAN" if classification == "REVIEW_READY" else "ABSENT",
             "surfaces": [
