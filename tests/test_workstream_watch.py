@@ -37,6 +37,30 @@ class WorkstreamWatchTests(unittest.TestCase):
             "runtime_status": "OK",
             "transition": True,
             "transition_reasons": ["CLASSIFICATION_CHANGED"],
+            "canonical_review_evidence": {
+                "schema": "agent-controller/review-evidence/v1",
+                "repo": f"{owner}/{repo}",
+                "pr": pr,
+                "observed_head_sha": f"sha-{pr}",
+                "collection_complete": True,
+                "verdict": "ABSENT",
+                "surfaces": [
+                    {
+                        "surface": name,
+                        "status": "COMPLETE",
+                        "pagination_exhausted": True,
+                        "error": None,
+                    }
+                    for name in (
+                        "formal_reviews",
+                        "issue_comments",
+                        "inline_threads",
+                        "reactions",
+                    )
+                ],
+                "provider_reviews": [],
+                "errors": [],
+            },
         }
 
     def test_117_and_119_can_be_observed_concurrently_without_mixing(self):

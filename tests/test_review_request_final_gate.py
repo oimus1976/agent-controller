@@ -18,6 +18,8 @@ TRUSTED_AUTHOR = "oimus1976"
 
 def _inspection():
     return {
+        "repo": "oimus1976/agent-controller",
+        "pr": 109,
         "head_sha": HEAD,
         "draft": True,
         "merged": False,
@@ -29,6 +31,20 @@ def _inspection():
         "issue_comments": [],
         "reviews": [],
         "review_threads_graphql": [],
+        "canonical_review_evidence": {
+            "schema": "agent-controller/review-evidence/v1",
+            "repo": "oimus1976/agent-controller",
+            "pr": 109,
+            "observed_head_sha": HEAD,
+            "collection_complete": True,
+            "verdict": "ABSENT",
+            "surfaces": [
+                {"surface": name, "status": "COMPLETE", "pagination_exhausted": True, "error": None}
+                for name in ("formal_reviews", "issue_comments", "inline_threads", "reactions")
+            ],
+            "provider_reviews": [],
+            "errors": [],
+        },
     }
 
 

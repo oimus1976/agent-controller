@@ -3,6 +3,11 @@ from unittest.mock import patch
 
 from agent_controller.remediation_request import ACTION, execute_codex_remediation_request
 from agent_controller.remediation_request_mutator import codex_remediation_request_marker
+from agent_controller.inspector import build_canonical_review_evidence
+from agent_controller.review_evidence import (
+    REQUIRED_GITHUB_SURFACES,
+    ReviewSurfaceStatus,
+)
 
 
 HEAD = "a" * 40
@@ -69,6 +74,38 @@ def published_comment():
     }
 
 
+def canonical_inspection():
+    review_id = 101
+    canonical = build_canonical_review_evidence(
+        repo=REPO,
+        pr_number=111,
+        head_sha=HEAD,
+        reviews=[{
+            "id": review_id,
+            "user": {"login": "chatgpt-codex-connector[bot]"},
+            "commit_id": HEAD,
+            "state": "COMMENTED",
+        }],
+        issue_comments=[],
+        review_threads_graphql=[{
+            "isResolved": False,
+            "comments": {"nodes": [{
+                "author": {"login": "chatgpt-codex-connector[bot]"},
+                "originalCommit": {"oid": HEAD},
+                "pullRequestReview": {"databaseId": review_id},
+            }]},
+        }],
+        surfaces=tuple(
+            ReviewSurfaceStatus(name, "COMPLETE", True)
+            for name in REQUIRED_GITHUB_SURFACES
+        ),
+    )
+    return {
+        "head_sha": HEAD,
+        "canonical_review_evidence": canonical.to_dict(),
+    }
+
+
 class RemediationConcurrencyBoundaryTests(unittest.TestCase):
     """Document the intentional no-distributed-exactly-once boundary.
 
@@ -94,22 +131,9 @@ class RemediationConcurrencyBoundaryTests(unittest.TestCase):
         },
     )
     @patch(
-        "agent_controller.remediation_request.get_pr_review_threads_graphql",
-        return_value=[{
-            "isResolved": False,
-            "comments": {"nodes": [{
-                "author": {"login": "chatgpt-codex-connector[bot]"},
-                "originalCommit": {"oid": HEAD},
-                "pullRequestReview": {"databaseId": 101},
-            }]},
-        }],
+        "agent_controller.remediation_request._inspect_remediation_request",
+        return_value=canonical_inspection(),
     )
-    @patch("agent_controller.remediation_request.get_pr_reviews", return_value=[{
-        "id": 101,
-        "user": {"login": "chatgpt-codex-connector[bot]"},
-        "commit_id": HEAD,
-        "state": "COMMENTED",
-    }])
     @patch("agent_controller.remediation_request.get_pr_issue_comments")
     @patch("agent_controller.remediation_request.post_codex_remediation_request")
     @patch(
@@ -127,8 +151,7 @@ class RemediationConcurrencyBoundaryTests(unittest.TestCase):
         _identity,
         post,
         comments,
-        _reviews,
-        _threads,
+        _inspection,
         _actions,
     ):
         fresh_plan.return_value = executable_plan()
@@ -158,22 +181,9 @@ class RemediationConcurrencyBoundaryTests(unittest.TestCase):
 
 class RemediationPolicyDriftTests(unittest.TestCase):
     @patch(
-        "agent_controller.remediation_request.get_pr_review_threads_graphql",
-        return_value=[{
-            "isResolved": False,
-            "comments": {"nodes": [{
-                "author": {"login": "chatgpt-codex-connector[bot]"},
-                "originalCommit": {"oid": HEAD},
-                "pullRequestReview": {"databaseId": 101},
-            }]},
-        }],
+        "agent_controller.remediation_request._inspect_remediation_request",
+        return_value=canonical_inspection(),
     )
-    @patch("agent_controller.remediation_request.get_pr_reviews", return_value=[{
-        "id": 101,
-        "user": {"login": "chatgpt-codex-connector[bot]"},
-        "commit_id": HEAD,
-        "state": "COMMENTED",
-    }])
     @patch(
         "agent_controller.remediation_request.get_authenticated_github_login",
         return_value="oimus1976",
@@ -182,7 +192,7 @@ class RemediationPolicyDriftTests(unittest.TestCase):
     @patch("agent_controller.remediation_request.load_policy")
     @patch("agent_controller.remediation_request.plan_codex_remediation_request")
     def test_policy_revocation_after_identity_lookup_blocks_before_post(
-        self, fresh_plan, load_policy, _get_pr, _identity, _reviews, _threads
+        self, fresh_plan, load_policy, _get_pr, _identity, _inspection
     ):
         fresh_plan.return_value = executable_plan()
         load_policy.side_effect = [POLICY, REVOKED_POLICY]

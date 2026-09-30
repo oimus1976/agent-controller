@@ -8,11 +8,12 @@ from agent_controller.attention_queue import (
 
 
 def _observation(workstream_id, pr, classification, *, draft=False, merged=False, state="open"):
-    return {
+    head_sha = f"{pr:040x}"
+    value = {
         "repo": "oimus1976/agent-controller",
         "pr": pr,
         "workstream_id": workstream_id,
-        "current_head_sha": f"sha-{pr}",
+        "current_head_sha": head_sha,
         "current_classification": classification,
         "current_draft": draft,
         "current_merged": merged,
@@ -24,6 +25,22 @@ def _observation(workstream_id, pr, classification, *, draft=False, merged=False
         "transition": True,
         "transition_reasons": ["CLASSIFICATION_CHANGED"],
     }
+    if classification == "REVIEW_READY":
+        value["canonical_review_evidence"] = {
+            "schema": "agent-controller/review-evidence/v1",
+            "repo": "oimus1976/agent-controller",
+            "pr": pr,
+            "observed_head_sha": head_sha,
+            "collection_complete": True,
+            "verdict": "CLEAN",
+            "surfaces": [
+                {"surface": name, "status": "COMPLETE", "pagination_exhausted": True, "error": None}
+                for name in ("formal_reviews", "issue_comments", "inline_threads", "reactions")
+            ],
+            "provider_reviews": [],
+            "errors": [],
+        }
+    return value
 
 
 class AttentionQueueWorkstreamTests(unittest.TestCase):

@@ -4,7 +4,7 @@ from unittest.mock import patch
 from agent_controller.inspector import evaluate_actions_ci, get_actions_runs, inspect_pr
 
 
-HEAD = "abc123"
+HEAD = "a" * 40
 
 
 def response(*runs):

@@ -157,10 +157,11 @@ def _observation(
     merged=False,
     state="open",
 ):
-    return {
+    head_sha = f"{pr:040x}"
+    value = {
         "repo": repo,
         "pr": pr,
-        "current_head_sha": f"sha-{pr}",
+        "current_head_sha": head_sha,
         "current_classification": classification,
         "current_draft": draft,
         "current_merged": merged,
@@ -172,6 +173,22 @@ def _observation(
         "transition": True,
         "transition_reasons": ["CLASSIFICATION_CHANGED"],
     }
+    if classification in {"REVIEW_READY", "IMPLEMENTATION_READY"}:
+        value["canonical_review_evidence"] = {
+            "schema": "agent-controller/review-evidence/v1",
+            "repo": repo,
+            "pr": pr,
+            "observed_head_sha": head_sha,
+            "collection_complete": True,
+            "verdict": "CLEAN" if classification == "REVIEW_READY" else "ABSENT",
+            "surfaces": [
+                {"surface": name, "status": "COMPLETE", "pagination_exhausted": True, "error": None}
+                for name in ("formal_reviews", "issue_comments", "inline_threads", "reactions")
+            ],
+            "provider_reviews": [],
+            "errors": [],
+        }
+    return value
 
 
 if __name__ == "__main__":

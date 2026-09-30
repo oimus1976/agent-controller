@@ -15,6 +15,51 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-09-29 — Canonical review evidence becomes a code-level authority boundary（Issue #194, Draft / unmerged）
+
+関連: Issue #194, Issue #199, PR #255
+
+### Changed
+
+- GitHub formal reviews、top-level comments、inline threads、reactions の取得完了状態を、exact PR head と結び付けた immutable canonical review snapshot にした。各surfaceの unreadable / malformed / truncated 相当と収集中のhead driftは、空の結果ではなく `UNCERTAIN` として保持する。
+- `classify_pr` はcanonical snapshotなしに `REVIEW_READY` またはreview-absence由来の `IMPLEMENTATION_READY` を返さない。review-request planner、published-Draft composition、attention queueもcanonical evidenceを検証し、snapshotのhead bindingには40文字のGit SHAを必須にする。attention queueの `IMPLEMENTATION_READY` はcompleteかつcurrent-headの `ABSENT` を必須にして、任意のclassification文字列や部分的なraw API readから安全な次状態やReady/mergeのhuman actionを作らない。
+- Jules review evidenceは、Controller-boundなfresh review operation、boolean `True` で確認したcompleteなsession/activity read、exact expected head、structured clean/finding result、実装operationとの独立性を別々に検証する。owner名義で転載したJules文面だけはadvisoryのまま。
+- Codex review activityの `PENDING` / `BLOCKING` 判定もcurrent headだけに束縛し、GraphQLのbot login表現を正規化した。旧headのcomment/review/reaction、dismiss済みreview、人間起点threadへのbot replyはcurrent-head findingにならない。
+- remediation plannerとmutation直前gateは同じcanonical snapshotを必須にし、raw review/threadの部分読みからremediationを認可しない。snapshotはCodex-origin blockerをprovider blockerと分けて保持し、`@codex address that feedback` はactionableなCodex blockerがある場合だけ許可する。reaction取得はcurrent-head marker付き `@codex review` commentだけに限定し、無関係なcomment数によるAPI call増幅を除いた。
+- GraphQLがusableな `data` とtop-level `errors` を同時に返す部分応答は、thread/commentのどのpageでも取得完了とせずfail closedにした。serialized provider snapshotも、検証済みの別operation、既存のexact-head binding、conclusiveな `CLEAN` / `BLOCKING` verdictをcomplete evidenceとして示し、top-level verdictがproviderのclean/blocking verdictと矛盾しない場合だけconsumer boundaryを通る。
+
+- Issue #282: a current-head Codex-rooted thread with a valid review ID missing from the same snapshot's formal reviews now preserves `INLINE_THREAD_REVIEW_NOT_IN_FORMAL_REVIEWS` and yields incomplete / `UNCERTAIN` evidence through the existing fail-closed builder, without extra API reads or retries.
+
+- Issue #283: relevant current-head Codex thread resolution now requires a boolean `isResolved`; missing or non-boolean values preserve `INLINE_THREAD_RESOLUTION_MALFORMED` through the existing incomplete / `UNCERTAIN` path. Existing origin/head filtering and boolean resolution semantics remain unchanged.
+
+- Issue #284: current-head review-request candidates require a positive integer comment ID (excluding booleans) before reaction lookup; missing/malformed IDs mark the reactions surface unavailable through the existing fail-closed path, while irrelevant comments remain excluded.
+
+- Issue #285: the structured Jules review result requires a positive integer `reviewed_pr` matching the target PR; missing/malformed/mismatched PR identity fails closed through existing provider errors. Repository/head checks and canonical provider identity remain intact; generic `TaskBinding` is unchanged.
+
+### Authority boundary
+
+- Jules APIがbranch指定後の実checkout SHAを返さない制約を `CONTROLLER_PRE_DISPATCH_EXACT_HEAD` として明示し、provider-observed exact SHAと混同しない。欠落・stale・self-review・不完全paginationはfail closed。
+- Ready / merge、Jules sessionの新規dispatch、provider publication、live/owner-machine effectは追加していない。
+
+---
+
+## 2026-09-29 — Personal-development cost-effectiveness and release speed become standing decision priorities (Issue #279)
+
+Related: Issue #279, ADR #90
+
+### Changed
+
+- `AGENTS.md` now tells every worker to assume a personal, single-owner development context unless the owner says otherwise, and to treat cost-effectiveness and time to a usable release as the primary decision criteria.
+- `docs/governance/rules.md` prefers minimum sufficient controls, existing supported paths, and concise human steps over speculative automation or organization-scale governance. New ceremony or control code must justify the recurring burden, realistic loss, or release blocker it removes against implementation and maintenance cost.
+- `PROJECT_STATUS.md` records the policy as a standing decision.
+
+### Preserved boundaries
+
+- The priority does not relax human-final Ready/merge/release/deploy authority, credential and secret protection, destructive-action boundaries, consumed live-effect authority, or evidence integrity.
+- This documentation-only change adds no provider dispatch, orchestration, automation, or approval mechanism.
+
+---
+
 ## 2026-09-28 — The Phase 4 target probe checks gh without native stderr redirection, and is now executed under PS 5.1 in CI（Issue #273 / PR #274）
 
 関連: Issue #273, Issue #216, Issue #265, Issue #270

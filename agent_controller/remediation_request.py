@@ -7,10 +7,8 @@ from .inspector import (
     evaluate_actions_ci,
     get_actions_runs,
     get_pr_details,
-    get_pr_files,
     get_pr_issue_comments,
-    get_pr_reviews,
-    get_pr_review_threads_graphql,
+    inspect_pr,
 )
 from .remediation_request_mutator import (
     codex_remediation_request_marker,
@@ -18,17 +16,10 @@ from .remediation_request_mutator import (
 )
 from .review_request import _safe_scope_status, _trusted_request_authors
 from .review_request_mutator import get_authenticated_github_login
+from .review_evidence import canonical_review_from_mapping
 
 
 ACTION = "REQUEST_CODEX_REMEDIATION"
-_CODEX_BOT_LOGINS = {
-    "chatgpt-codex-connector[bot]",
-    "chatgpt-codex-connector",
-}
-
-
-def _is_codex_login(login: Any) -> bool:
-    return isinstance(login, str) and login in _CODEX_BOT_LOGINS
 
 
 def _repo_full_name(repo_data: Any) -> str | None:
@@ -65,133 +56,6 @@ def _has_same_source_head_request(
             and "@codex address that feedback" in body.lower()
             and marker in body
         ):
-            return True
-    return False
-
-
-def _thread_has_current_head_codex_finding(
-    thread: Mapping[str, Any], head_sha: str, active_review_ids: set[int]
-) -> bool:
-    resolved = thread.get("isResolved")
-    if resolved is None:
-        resolved = thread.get("is_resolved")
-    if not isinstance(resolved, bool):
-        raise ValueError("review thread resolved state is malformed")
-    if resolved:
-        return False
-
-    comments_container = thread.get("comments")
-    if not isinstance(comments_container, Mapping):
-        raise ValueError("review thread comments are malformed")
-    comments = comments_container.get("nodes")
-    if not isinstance(comments, list) or not comments:
-        raise ValueError("review thread comments are malformed")
-
-    root_comment = comments[0]
-    if not isinstance(root_comment, Mapping):
-        raise ValueError("review thread comment is malformed")
-    author = root_comment.get("author")
-    if not isinstance(author, Mapping) or not _is_codex_login(author.get("login")):
-        return False
-    original_commit = root_comment.get("originalCommit") or {}
-    review = root_comment.get("pullRequestReview")
-    review_id = review.get("databaseId") if isinstance(review, Mapping) else None
-    return (
-        isinstance(original_commit, Mapping)
-        and original_commit.get("oid") == head_sha
-        and isinstance(review_id, int)
-        and not isinstance(review_id, bool)
-        and review_id in active_review_ids
-    )
-
-
-def _current_head_codex_thread_review_id(
-    thread: Mapping[str, Any], head_sha: str
-) -> int | None:
-    comments_container = thread.get("comments")
-    if not isinstance(comments_container, Mapping):
-        raise ValueError("review thread comments are malformed")
-    comments = comments_container.get("nodes")
-    if not isinstance(comments, list) or not comments:
-        raise ValueError("review thread comments are malformed")
-    root_comment = comments[0]
-    if not isinstance(root_comment, Mapping):
-        raise ValueError("review thread comment is malformed")
-    author = root_comment.get("author")
-    original_commit = root_comment.get("originalCommit") or {}
-    if not (
-        isinstance(author, Mapping)
-        and _is_codex_login(author.get("login"))
-        and isinstance(original_commit, Mapping)
-        and original_commit.get("oid") == head_sha
-    ):
-        return None
-    review = root_comment.get("pullRequestReview")
-    if not isinstance(review, Mapping):
-        return None
-    review_id = review.get("databaseId")
-    return review_id if isinstance(review_id, int) and not isinstance(review_id, bool) else None
-
-
-def _review_is_current_head_codex_finding(
-    review: Mapping[str, Any], head_sha: str
-) -> bool:
-    user = review.get("user")
-    if not isinstance(user, Mapping) or not _is_codex_login(user.get("login")):
-        return False
-    if review.get("commit_id") != head_sha:
-        return False
-    state = review.get("state")
-    return isinstance(state, str) and state.upper() in {
-        "CHANGES_REQUESTED",
-        "REQUEST_CHANGES",
-    }
-
-
-def _has_current_head_codex_finding(
-    inspection: Mapping[str, Any], head_sha: str
-) -> bool:
-    reviews = inspection.get("reviews")
-    threads = inspection.get("review_threads_graphql")
-    if not isinstance(reviews, list) or not isinstance(threads, list):
-        raise ValueError("review evidence is malformed")
-
-    active_review_ids = {
-        review.get("id")
-        for review in reviews
-        if isinstance(review, Mapping)
-        and isinstance(review.get("id"), int)
-        and not isinstance(review.get("id"), bool)
-        and isinstance(review.get("user"), Mapping)
-        and _is_codex_login(review["user"].get("login"))
-        and review.get("commit_id") == head_sha
-        and isinstance(review.get("state"), str)
-        and review["state"].upper() != "DISMISSED"
-    }
-
-    for thread in threads:
-        if not isinstance(thread, Mapping):
-            raise ValueError("review thread evidence is malformed")
-        if _thread_has_current_head_codex_finding(
-            thread, head_sha, active_review_ids
-        ):
-            return True
-
-    for review in reviews:
-        if not isinstance(review, Mapping):
-            raise ValueError("review evidence is malformed")
-        if _review_is_current_head_codex_finding(review, head_sha):
-            review_id = review.get("id")
-            # GitHub retains CHANGES_REQUESTED after conversations are resolved.
-            # Suppress this fallback only when a Codex-originated thread can be
-            # associated with this exact review; threads from another review on
-            # the same head are not evidence that this review was resolved.
-            if isinstance(review_id, int) and not isinstance(review_id, bool):
-                if any(
-                    _current_head_codex_thread_review_id(thread, head_sha) == review_id
-                    for thread in threads
-                ):
-                    continue
             return True
     return False
 
@@ -267,8 +131,20 @@ def _validate_planned_base_snapshot(
 
 
 def _inspect_remediation_request(
-    owner: str, repo: str, pr_number: int
+    owner: str,
+    repo: str,
+    pr_number: int,
+    scope_policy: Mapping[str, Any],
 ) -> dict[str, Any]:
+    inspection = inspect_pr(
+        owner,
+        repo,
+        pr_number,
+        scope_policy=dict(scope_policy),
+    )
+    if not isinstance(inspection, Mapping):
+        raise ValueError("canonical PR inspection malformed")
+
     pr_data = get_pr_details(owner, repo, pr_number)
     if not isinstance(pr_data, Mapping):
         raise ValueError("PR details malformed")
@@ -278,41 +154,19 @@ def _inspect_remediation_request(
     base_repo_data = base.get("repo") if isinstance(base, Mapping) else None
     head_sha = head.get("sha") if isinstance(head, Mapping) else None
 
-    reviews = get_pr_reviews(owner, repo, pr_number)
-    issue_comments = get_pr_issue_comments(owner, repo, pr_number)
-    files = get_pr_files(owner, repo, pr_number)
-    try:
-        threads = get_pr_review_threads_graphql(owner, repo, pr_number)
-        graphql_error = False
-    except Exception:
-        threads = None
-        graphql_error = True
+    if inspection.get("head_sha") != head_sha:
+        raise ValueError("PR head changed after canonical inspection")
 
-    try:
-        actions_response = get_actions_runs(owner, repo, head_sha)
-        actions_ci_status = evaluate_actions_ci(actions_response, head_sha)
-    except Exception:
-        actions_ci_status = "UNAVAILABLE"
-
-    return {
-        "head_sha": head_sha,
+    result = dict(inspection)
+    result.update({
         "head_ref": head.get("ref") if isinstance(head, Mapping) else None,
         "head_repo": _repo_full_name(head_repo_data),
         "base_ref": base.get("ref") if isinstance(base, Mapping) else None,
         "base_sha": base.get("sha") if isinstance(base, Mapping) else None,
         "base_repo": _repo_full_name(base_repo_data),
         "default_branch": _default_branch(base_repo_data),
-        "draft": pr_data.get("draft"),
-        "merged": pr_data.get("merged"),
-        "state": pr_data.get("state"),
-        "changed_files": pr_data.get("changed_files"),
-        "files": files,
-        "actions_ci_status": actions_ci_status,
-        "graphql_error": graphql_error,
-        "issue_comments": issue_comments,
-        "reviews": reviews,
-        "review_threads_graphql": threads,
-    }
+    })
+    return result
 
 
 def plan_codex_remediation_request(
@@ -365,7 +219,9 @@ def plan_codex_remediation_request(
 
     if inspection is None:
         try:
-            inspection = _inspect_remediation_request(owner, repo, pr_number)
+            inspection = _inspect_remediation_request(
+                owner, repo, pr_number, scope_policy
+            )
         except Exception:
             plan["reason"] = "EVIDENCE_FETCH_FAILED"
             return plan
@@ -446,12 +302,25 @@ def plan_codex_remediation_request(
         plan["reason"] = "REVIEW_EVIDENCE_UNAVAILABLE"
         return plan
 
+    canonical_review = canonical_review_from_mapping(
+        inspection.get("canonical_review_evidence"),
+        repo=expected_repo,
+        pr=pr_number,
+        head_sha=head_sha,
+    )
+    if canonical_review is None or not canonical_review.collection_complete:
+        plan["reason"] = "REVIEW_EVIDENCE_UNAVAILABLE"
+        return plan
+
     try:
         if _has_same_source_head_request(issue_comments, head_sha, trusted_authors):
             plan["decision"] = "NOOP"
             plan["reason"] = "REMEDIATION_ALREADY_REQUESTED_FOR_SOURCE_HEAD"
             return plan
-        if not _has_current_head_codex_finding(inspection, head_sha):
+        if (
+            canonical_review.verdict != "BLOCKING"
+            or not canonical_review.codex_blocking
+        ):
             plan["decision"] = "NOOP"
             plan["reason"] = "NO_UNRESOLVED_CURRENT_HEAD_CODEX_FINDING"
             return plan
@@ -594,18 +463,29 @@ def execute_codex_remediation_request(
         result["failure_reason"] = "GITHUB_POSTING_IDENTITY_NOT_TRUSTED"
         return result
 
-    # Review-thread resolution is mutable independently of the PR head. Refresh
-    # it after identity lookup so a finding resolved since the evidence sweep no
-    # longer authorizes the write-triggering request.
+    # Review state is mutable independently of the PR head. Refresh the complete
+    # canonical evidence snapshot after identity lookup so partial raw surfaces
+    # can never authorize the write-triggering request.
     try:
-        final_reviews = get_pr_reviews(owner, repo, pr_number)
-        final_threads = get_pr_review_threads_graphql(owner, repo, pr_number)
-        final_review_inspection = {
-            "reviews": final_reviews,
-            "review_threads_graphql": final_threads,
-        }
-        if not _has_current_head_codex_finding(
-            final_review_inspection, source_head
+        final_review_inspection = _inspect_remediation_request(
+            owner, repo, pr_number, scope_policy
+        )
+        final_review_head = final_review_inspection.get("head_sha")
+        if final_review_head != source_head:
+            result["failure_reason"] = "STALE_HEAD_SHA"
+            return result
+        final_canonical = canonical_review_from_mapping(
+            final_review_inspection.get("canonical_review_evidence"),
+            repo=expected_repo,
+            pr=pr_number,
+            head_sha=source_head,
+        )
+        if final_canonical is None or not final_canonical.collection_complete:
+            result["failure_reason"] = "REVIEW_EVIDENCE_UNAVAILABLE"
+            return result
+        if (
+            final_canonical.verdict != "BLOCKING"
+            or not final_canonical.codex_blocking
         ):
             result["final_outcome"] = "NOOP"
             result["failure_reason"] = "NO_UNRESOLVED_CURRENT_HEAD_CODEX_FINDING"
