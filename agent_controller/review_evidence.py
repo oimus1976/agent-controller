@@ -239,7 +239,7 @@ def canonical_review_from_mapping(
         return None
     if value.get("repo") != repo or value.get("pr") != pr:
         return None
-    if value.get("observed_head_sha") != head_sha:
+    if not _valid_sha(head_sha) or value.get("observed_head_sha") != head_sha:
         return None
     verdict = value.get("verdict")
     complete = value.get("collection_complete")

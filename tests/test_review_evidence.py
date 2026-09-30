@@ -94,6 +94,27 @@ def surfaces():
 
 
 class ReviewEvidenceTests(unittest.TestCase):
+    def test_serialized_evidence_rejects_matching_malformed_head_sha(self):
+        snapshot = build_canonical_review_evidence(
+            repo=REPO,
+            pr_number=255,
+            head_sha=HEAD,
+            reviews=[],
+            issue_comments=[],
+            review_threads_graphql=[],
+            surfaces=surfaces(),
+        ).to_dict()
+        snapshot["observed_head_sha"] = "not-a-git-sha"
+
+        self.assertIsNone(
+            canonical_review_from_mapping(
+                snapshot,
+                repo=REPO,
+                pr=255,
+                head_sha="not-a-git-sha",
+            )
+        )
+
     def test_bound_complete_jules_clean_can_feed_canonical_inspector(self):
         provider = jules()
         self.assertTrue(provider.complete)

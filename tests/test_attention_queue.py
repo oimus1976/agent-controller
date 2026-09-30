@@ -15,7 +15,7 @@ def observation(
     runtime_status="OK",
     transition=True,
     reasons=("CLASSIFICATION_CHANGED",),
-    head_sha="abc123",
+    head_sha="a" * 40,
     actions_ci_status="PASS",
     scope_status="SATISFIED",
     graphql_error=False,
@@ -92,6 +92,14 @@ class AttentionQueueTests(unittest.TestCase):
     def test_review_ready_without_head_fails_closed(self):
         item = classify_attention(
             observation(classification="REVIEW_READY", head_sha=None)
+        )
+        self.assertEqual(AttentionCategory.NEEDS_ATTENTION, item.category)
+        self.assertEqual("CONTRADICTORY_REVIEW_READY_EVIDENCE", item.reason)
+        self.assertIsNone(item.human_action)
+
+    def test_review_ready_with_matching_malformed_head_fails_closed(self):
+        item = classify_attention(
+            observation(classification="REVIEW_READY", head_sha="not-a-git-sha")
         )
         self.assertEqual(AttentionCategory.NEEDS_ATTENTION, item.category)
         self.assertEqual("CONTRADICTORY_REVIEW_READY_EVIDENCE", item.reason)
