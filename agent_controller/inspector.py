@@ -568,15 +568,21 @@ def inspect_pr(owner, repo, pr_number, scope_policy=None, provider_review_eviden
         ):
             continue
         comment_id = comment.get("id")
-        if comment_id:
-            try:
-                reactions = get_issue_comment_reactions(owner, repo, comment_id)
-                if not isinstance(reactions, list):
-                    raise TypeError("reaction evidence is not a list")
-                comment["reactions"] = reactions
-            except Exception as exc:
-                comment["reactions"] = []
-                surface_errors["reactions"] = exc
+        if (
+            not isinstance(comment_id, int)
+            or isinstance(comment_id, bool)
+            or comment_id <= 0
+        ):
+            surface_errors["reactions"] = TypeError("REVIEW_REQUEST_COMMENT_ID_MALFORMED")
+            continue
+        try:
+            reactions = get_issue_comment_reactions(owner, repo, comment_id)
+            if not isinstance(reactions, list):
+                raise TypeError("reaction evidence is not a list")
+            comment["reactions"] = reactions
+        except Exception as exc:
+            comment["reactions"] = []
+            surface_errors["reactions"] = exc
 
     files = get_pr_files(owner, repo, pr_number)
 

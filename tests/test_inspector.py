@@ -566,6 +566,77 @@ class TestInspector(unittest.TestCase):
                     self.assertEqual("ABSENT", snapshot["verdict"])
                     self.assertEqual([], snapshot["errors"])
 
+
+    def test_review_request_comment_id_and_reaction_surface(self):
+        head_sha = "b" * 40
+        candidate_body = f"@codex review\nhead={head_sha}"
+        malformed_ids = ({}, *({"id": value} for value in (
+            None, 0, -1, False, True, "123", [], {}, [123], 1.0,
+        )))
+        scenarios = [
+            ("malformed_candidate", fields, candidate_body, [], "UNCERTAIN", False)
+            for fields in malformed_ids
+        ]
+        scenarios += [
+            ("valid_empty", {"id": 123}, candidate_body, [], "ABSENT", True),
+            ("valid_acknowledged", {"id": 123}, candidate_body,
+             [{"user": {"login": "chatgpt-codex-connector[bot]"}}], "PENDING", True),
+            ("fetch_error", {"id": 123}, candidate_body, RuntimeError("reaction read failed"),
+             "UNCERTAIN", True),
+            ("malformed_response", {"id": 123}, candidate_body, {}, "UNCERTAIN", True),
+        ]
+        for fields in malformed_ids:
+            for body in ("ordinary comment", f"@codex review\nhead={'a' * 40}", None):
+                scenarios.append(("irrelevant", fields, body, [], "ABSENT", False))
+        for name, fields, body, response, verdict, lookup in scenarios:
+            with self.subTest(name=name, fields=fields, body=body):
+                from unittest.mock import DEFAULT
+                with patch.multiple(
+                    "agent_controller.inspector",
+                    get_pr_details=DEFAULT, get_pr_reviews=DEFAULT,
+                    get_pr_review_comments=DEFAULT, get_pr_issue_comments=DEFAULT,
+                    get_pr_review_threads_graphql=DEFAULT, get_pr_files=DEFAULT,
+                    get_actions_runs=DEFAULT, get_issue_comment_reactions=DEFAULT,
+                ) as mocks:
+                    mocks["get_pr_details"].return_value = {
+                        "head": {"sha": head_sha}, "base": {"ref": "main"},
+                        "draft": True, "merged": False, "state": "open", "changed_files": 1,
+                    }
+                    mocks["get_pr_reviews"].return_value = []
+                    mocks["get_pr_review_comments"].return_value = []
+                    mocks["get_pr_issue_comments"].return_value = [{
+                        **fields, "user": {"login": "owner"}, "body": body,
+                    }]
+                    mocks["get_pr_review_threads_graphql"].return_value = []
+                    mocks["get_pr_files"].return_value = [{"filename": "test.py", "changes": 1}]
+                    mocks["get_actions_runs"].return_value = {"workflow_runs": [{
+                        "head_sha": head_sha, "event": "pull_request",
+                        "status": "completed", "conclusion": "success",
+                    }]}
+                    reaction_mock = mocks["get_issue_comment_reactions"]
+                    if isinstance(response, Exception):
+                        reaction_mock.side_effect = response
+                    else:
+                        reaction_mock.return_value = response
+                    result = inspect_pr("owner", "repo", 1, scope_policy={"allowed_paths": ["*"]})
+                    if lookup:
+                        reaction_mock.assert_called_once_with("owner", "repo", 123)
+                    else:
+                        reaction_mock.assert_not_called()
+                    snapshot = result["canonical_review_evidence"]
+                    surface = next(s for s in snapshot["surfaces"] if s["surface"] == "reactions")
+                    complete = verdict != "UNCERTAIN"
+                    self.assertEqual(complete, snapshot["collection_complete"])
+                    self.assertEqual(verdict, snapshot["verdict"])
+                    self.assertEqual("COMPLETE" if complete else "UNAVAILABLE", surface["status"])
+                    self.assertEqual(complete, surface["pagination_exhausted"])
+                    if not complete:
+                        self.assertEqual("NEEDS_REVIEW", result["classification"])
+                        self.assertTrue(surface["error"])
+                        self.assertIn(surface["error"], snapshot["errors"])
+                    if name == "malformed_candidate":
+                        self.assertEqual("REVIEW_REQUEST_COMMENT_ID_MALFORMED", surface["error"])
+
     def test_partial_raw_review_evidence_cannot_be_authoritative(self):
         evidence = {
             "repo": "owner/repo",
