@@ -510,6 +510,62 @@ class TestInspector(unittest.TestCase):
                 self.assertEqual("BLOCKING", snapshot["verdict"])
                 self.assertEqual([], snapshot["errors"])
 
+
+    def test_malformed_current_head_thread_resolution_fails_closed(self):
+        head_sha = "b" * 40
+        bot = "chatgpt-codex-connector[bot]"
+        resolutions = ({}, *({"isResolved": value} for value in (
+            None, 0, "", [], 1, "false", "true", [1], {},
+        )))
+        for review_id in (None, 2):
+            for resolution in resolutions:
+                with self.subTest(review_id=review_id, resolution=resolution):
+                    evidence = canonical({
+                        "head_sha": head_sha, "scope_status": "SATISFIED",
+                        "draft": True, "merged": False, "state": "open",
+                        "reviews": [{
+                            "id": 2, "user": {"login": bot},
+                            "commit_id": head_sha, "state": "APPROVED",
+                        }],
+                        "review_threads_graphql": [{
+                            **resolution,
+                            "comments": {"nodes": [{
+                                "author": {"login": bot},
+                                "originalCommit": {"oid": head_sha},
+                                "pullRequestReview": {"databaseId": review_id},
+                            }]},
+                        }],
+                    })
+                    snapshot = evidence["canonical_review_evidence"]
+                    self.assertFalse(snapshot["collection_complete"])
+                    self.assertEqual("UNCERTAIN", snapshot["verdict"])
+                    self.assertIn("INLINE_THREAD_RESOLUTION_MALFORMED", snapshot["errors"])
+                    self.assertEqual("NEEDS_REVIEW", classify_pr(evidence))
+
+    def test_irrelevant_thread_malformed_resolution_remains_excluded(self):
+        head_sha = "b" * 40
+        bot = "chatgpt-codex-connector[bot]"
+        for author, thread_head in ((bot, "a" * 40), ("human", head_sha)):
+            for resolution in ({}, {"isResolved": None}, {"isResolved": "false"}):
+                with self.subTest(author=author, thread_head=thread_head, resolution=resolution):
+                    snapshot = canonical({
+                        "head_sha": head_sha,
+                        "review_threads_graphql": [{
+                            **resolution,
+                            "comments": {"nodes": [{
+                                "author": {"login": author},
+                                "originalCommit": {"oid": thread_head},
+                                "pullRequestReview": {"databaseId": 2},
+                            }, {
+                                "author": {"login": bot},
+                                "originalCommit": {"oid": head_sha},
+                            }]},
+                        }],
+                    })["canonical_review_evidence"]
+                    self.assertTrue(snapshot["collection_complete"])
+                    self.assertEqual("ABSENT", snapshot["verdict"])
+                    self.assertEqual([], snapshot["errors"])
+
     def test_partial_raw_review_evidence_cannot_be_authoritative(self):
         evidence = {
             "repo": "owner/repo",

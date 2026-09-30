@@ -436,7 +436,10 @@ def _codex_review_flags(head_sha, reviews, issue_comments, review_threads_graphq
             if review_id not in active_review_ids:
                 continue
         seen = True
-        if not thread.get("isResolved"):
+        resolved = thread.get("isResolved")
+        if not isinstance(resolved, bool):
+            return False, False, False, "INLINE_THREAD_RESOLUTION_MALFORMED"
+        if not resolved:
             blocking = True
 
     if changes_requested_ids - associated_thread_review_ids:

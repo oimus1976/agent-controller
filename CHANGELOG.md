@@ -30,6 +30,8 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 - Issue #282: a current-head Codex-rooted thread with a valid review ID missing from the same snapshot's formal reviews now preserves `INLINE_THREAD_REVIEW_NOT_IN_FORMAL_REVIEWS` and yields incomplete / `UNCERTAIN` evidence through the existing fail-closed builder, without extra API reads or retries.
 
+- Issue #283: relevant current-head Codex thread resolution now requires a boolean `isResolved`; missing or non-boolean values preserve `INLINE_THREAD_RESOLUTION_MALFORMED` through the existing incomplete / `UNCERTAIN` path. Existing origin/head filtering and boolean resolution semantics remain unchanged.
+
 ### Authority boundary
 
 - Jules APIがbranch指定後の実checkout SHAを返さない制約を `CONTROLLER_PRE_DISPATCH_EXACT_HEAD` として明示し、provider-observed exact SHAと混同しない。欠落・stale・self-review・不完全paginationはfail closed。
