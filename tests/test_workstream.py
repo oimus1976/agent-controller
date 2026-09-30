@@ -148,10 +148,11 @@ class WorkstreamContractTests(unittest.TestCase):
 class WorkstreamIncidentRegressionTests(unittest.TestCase):
     @staticmethod
     def _observation(repo, pr, *, classification, draft=False, merged=False, state="open"):
+        head_sha = f"{pr:040x}"
         value = {
             "repo": repo,
             "pr": pr,
-            "current_head_sha": f"sha-{pr}",
+            "current_head_sha": head_sha,
             "current_classification": classification,
             "current_draft": draft,
             "current_merged": merged,
@@ -168,7 +169,7 @@ class WorkstreamIncidentRegressionTests(unittest.TestCase):
                 "schema": "agent-controller/review-evidence/v1",
                 "repo": repo,
                 "pr": pr,
-                "observed_head_sha": f"sha-{pr}",
+                "observed_head_sha": head_sha,
                 "collection_complete": True,
                 "verdict": "CLEAN",
                 "surfaces": [
