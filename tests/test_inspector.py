@@ -384,6 +384,132 @@ class TestInspector(unittest.TestCase):
         snapshot = canonical(evidence)["canonical_review_evidence"]
         self.assertEqual("BLOCKING", snapshot["verdict"])
 
+
+    def test_unknown_current_head_thread_review_id_fails_closed(self):
+        head_sha = "b" * 40
+        bot = "chatgpt-codex-connector[bot]"
+        for formal_input in ("empty", "stale", "pending", "clean"):
+            for resolved in (False, True):
+                with self.subTest(formal_input=formal_input, resolved=resolved):
+                    reviews = [] if formal_input == "empty" else [{
+                        "id": 1,
+                        "user": {"login": bot},
+                        "commit_id": "a" * 40 if formal_input == "stale" else head_sha,
+                        "state": "APPROVED" if formal_input == "clean" else "COMMENTED",
+                    }]
+                    evidence = canonical({
+                        "head_sha": head_sha, "scope_status": "SATISFIED",
+                        "draft": True, "merged": False, "state": "open",
+                        "reviews": reviews,
+                        "review_threads_graphql": [{
+                            "isResolved": resolved,
+                            "comments": {"nodes": [{
+                                "author": {"login": bot},
+                                "originalCommit": {"oid": head_sha},
+                                "pullRequestReview": {"databaseId": 2},
+                                "body": "P1: unresolved current-head finding",
+                            }]},
+                        }],
+                    })
+                    snapshot = evidence["canonical_review_evidence"]
+                    self.assertFalse(snapshot["collection_complete"])
+                    self.assertEqual("UNCERTAIN", snapshot["verdict"])
+                    self.assertIn("INLINE_THREAD_REVIEW_NOT_IN_FORMAL_REVIEWS", snapshot["errors"])
+                    self.assertEqual("NEEDS_REVIEW", classify_pr(evidence))
+
+    def test_associated_current_head_thread_review_id_preserves_behavior(self):
+        head_sha = "b" * 40
+        bot = "chatgpt-codex-connector[bot]"
+        for resolved in (False, True):
+            with self.subTest(resolved=resolved):
+                evidence = canonical({
+                    "head_sha": head_sha,
+                    "reviews": [{
+                        "id": 2, "user": {"login": bot},
+                        "commit_id": head_sha, "state": "CHANGES_REQUESTED",
+                    }],
+                    "review_threads_graphql": [{
+                        "isResolved": resolved,
+                        "comments": {"nodes": [{
+                            "author": {"login": bot},
+                            "originalCommit": {"oid": head_sha},
+                            "pullRequestReview": {"databaseId": 2},
+                        }]},
+                    }],
+                })
+                snapshot = evidence["canonical_review_evidence"]
+                self.assertTrue(snapshot["collection_complete"])
+                self.assertEqual("PENDING" if resolved else "BLOCKING", snapshot["verdict"])
+                self.assertEqual([], snapshot["errors"])
+
+    def test_irrelevant_thread_review_ids_do_not_create_mismatch(self):
+        head_sha = "b" * 40
+        bot = "chatgpt-codex-connector[bot]"
+        for author, thread_head in ((bot, "a" * 40), ("human", head_sha)):
+            with self.subTest(author=author, thread_head=thread_head):
+                evidence = canonical({
+                    "head_sha": head_sha,
+                    "review_threads_graphql": [{
+                        "isResolved": False,
+                        "comments": {"nodes": [{
+                            "author": {"login": author},
+                            "originalCommit": {"oid": thread_head},
+                            "pullRequestReview": {"databaseId": 2},
+                        }, {
+                            "author": {"login": bot},
+                            "originalCommit": {"oid": head_sha},
+                            "pullRequestReview": {"databaseId": 2},
+                        }]},
+                    }],
+                })
+                snapshot = evidence["canonical_review_evidence"]
+                self.assertTrue(snapshot["collection_complete"])
+                self.assertEqual("ABSENT", snapshot["verdict"])
+                self.assertEqual([], snapshot["errors"])
+
+
+    def test_collected_inactive_formal_review_thread_remains_excluded(self):
+        head_sha = "b" * 40
+        bot = "chatgpt-codex-connector[bot]"
+        for state, review_head in (("DISMISSED", head_sha), ("COMMENTED", "a" * 40)):
+            with self.subTest(state=state, review_head=review_head):
+                snapshot = canonical({
+                    "head_sha": head_sha,
+                    "reviews": [{
+                        "id": 2, "user": {"login": bot},
+                        "commit_id": review_head, "state": state,
+                    }],
+                    "review_threads_graphql": [{
+                        "isResolved": False,
+                        "comments": {"nodes": [{
+                            "author": {"login": bot},
+                            "originalCommit": {"oid": head_sha},
+                            "pullRequestReview": {"databaseId": 2},
+                        }]},
+                    }],
+                })["canonical_review_evidence"]
+                self.assertTrue(snapshot["collection_complete"])
+                self.assertEqual("ABSENT", snapshot["verdict"])
+                self.assertEqual([], snapshot["errors"])
+
+    def test_unusable_thread_review_id_remains_blocking(self):
+        for review_id in (None, "2", True):
+            with self.subTest(review_id=review_id):
+                snapshot = canonical({
+                    "head_sha": "b" * 40,
+                    "review_threads_graphql": [{
+                        "isResolved": False,
+                        "comments": {"nodes": [{
+                            "author": {"login": "chatgpt-codex-connector[bot]"},
+                            "originalCommit": {"oid": "b" * 40},
+                            "pullRequestReview": {"databaseId": review_id},
+                        }]},
+                    }],
+                })["canonical_review_evidence"]
+                self.assertTrue(snapshot["collection_complete"])
+                self.assertEqual("BLOCKING", snapshot["verdict"])
+                self.assertEqual([], snapshot["errors"])
+
     def test_partial_raw_review_evidence_cannot_be_authoritative(self):
         evidence = {
             "repo": "owner/repo",

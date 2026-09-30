@@ -350,6 +350,7 @@ def _codex_review_flags(head_sha, reviews, issue_comments, review_threads_graphq
     clean = False
     blocking = False
     seen = False
+    formal_review_ids = set()
     active_review_ids = set()
     changes_requested_ids = set()
 
@@ -377,6 +378,9 @@ def _codex_review_flags(head_sha, reviews, issue_comments, review_threads_graphq
     for review in reviews:
         if not isinstance(review, dict):
             return False, False, False, "FORMAL_REVIEW_MALFORMED"
+        review_id = review.get("id")
+        if isinstance(review_id, int) and not isinstance(review_id, bool):
+            formal_review_ids.add(review_id)
         user = review.get("user") or {}
         body = review.get("body", "")
         if not _is_codex_login(user.get("login")):
@@ -427,6 +431,8 @@ def _codex_review_flags(head_sha, reviews, issue_comments, review_threads_graphq
         review_id = review.get("databaseId") if isinstance(review, dict) else None
         if isinstance(review_id, int) and not isinstance(review_id, bool):
             associated_thread_review_ids.add(review_id)
+            if review_id not in formal_review_ids:
+                return False, False, False, "INLINE_THREAD_REVIEW_NOT_IN_FORMAL_REVIEWS"
             if review_id not in active_review_ids:
                 continue
         seen = True

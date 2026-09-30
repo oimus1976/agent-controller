@@ -28,6 +28,8 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - remediation plannerとmutation直前gateは同じcanonical snapshotを必須にし、raw review/threadの部分読みからremediationを認可しない。snapshotはCodex-origin blockerをprovider blockerと分けて保持し、`@codex address that feedback` はactionableなCodex blockerがある場合だけ許可する。reaction取得はcurrent-head marker付き `@codex review` commentだけに限定し、無関係なcomment数によるAPI call増幅を除いた。
 - GraphQLがusableな `data` とtop-level `errors` を同時に返す部分応答は、thread/commentのどのpageでも取得完了とせずfail closedにした。serialized provider snapshotも、検証済みの別operation、既存のexact-head binding、conclusiveな `CLEAN` / `BLOCKING` verdictをcomplete evidenceとして示し、top-level verdictがproviderのclean/blocking verdictと矛盾しない場合だけconsumer boundaryを通る。
 
+- Issue #282: a current-head Codex-rooted thread with a valid review ID missing from the same snapshot's formal reviews now preserves `INLINE_THREAD_REVIEW_NOT_IN_FORMAL_REVIEWS` and yields incomplete / `UNCERTAIN` evidence through the existing fail-closed builder, without extra API reads or retries.
+
 ### Authority boundary
 
 - Jules APIがbranch指定後の実checkout SHAを返さない制約を `CONTROLLER_PRE_DISPATCH_EXACT_HEAD` として明示し、provider-observed exact SHAと混同しない。欠落・stale・self-review・不完全paginationはfail closed。

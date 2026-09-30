@@ -223,7 +223,7 @@ class RemediationRequestPlanTests(unittest.TestCase):
                 pr_number=111,
                 policy_path="policy.json",
                 scope_policy=SCOPE,
-                inspection=inspection(review_threads_graphql=threads, reviews=[]),
+                inspection=inspection(review_threads_graphql=threads),
             )
             self.assertEqual("NOOP", plan["decision"])
             self.assertEqual(
@@ -565,7 +565,7 @@ class RemediationRequestExecutionTests(unittest.TestCase):
         fresh_plan.return_value = self.executable_plan()
         get_pr.return_value = safe_pr()
         self.canonical_inspection.return_value = inspection(
-            review_threads_graphql=[finding_thread(resolved=True)], reviews=[]
+            review_threads_graphql=[finding_thread(resolved=True)]
         )
         with patch(
             "agent_controller.remediation_request.post_codex_remediation_request"
