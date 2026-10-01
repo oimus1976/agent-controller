@@ -306,7 +306,7 @@ foreach ($ForEachAst in $ForEachAsts) {
 # prove payload or identity integrity: the exact canonical candidate
 # comparison in the Python contracts/runtimes owns that (Start-Process with an
 # arbitrary FilePath is also only PROCESS_LAUNCH here).
-$ProcessLaunchNames = @('BridgeChild', 'BridgeSecurityProbeChild', 'BridgeCredentialCheck')
+$ProcessLaunchNames = @('BridgeChild', 'BridgeSecurityProbeChild', 'BridgeCredentialCheck', 'BridgeRunnerReadChild')
 $ProcessStartInfoKeys = @(
     'FileName', 'Arguments', 'UserName', 'Domain', 'Password', 'LoadUserProfile',
     'UseShellExecute', 'CreateNoWindow', 'WorkingDirectory',
@@ -366,8 +366,19 @@ function Get-DirectRootAssignment {
     if ($Current.Operator -ne [System.Management.Automation.Language.TokenKind]::Equals) {
         return $null
     }
+    if ($RootStatements -contains $Current -and (Get-PlainVariableName -Node $Current.Left) -ieq 'BridgeRunnerReadChild') { return $null }
     if ($RootStatements -notcontains $Current) {
-        return $null
+        # #277 exception: the one read launch is directly in the readiness
+        # while body, directly in a root try body. No function/if wrapper.
+        if ((Get-PlainVariableName -Node $Current.Left) -ine 'BridgeRunnerReadChild') { return $null }
+        $Block = $Current.Parent
+        if ($Block -isnot [System.Management.Automation.Language.StatementBlockAst]) { return $null }
+        $Loop = $Block.Parent
+        if ($Loop -isnot [System.Management.Automation.Language.WhileStatementAst] -or $Loop.Condition.Extent.Text -cne '$true') { return $null }
+        $OuterBlock = $Loop.Parent
+        if ($OuterBlock -isnot [System.Management.Automation.Language.StatementBlockAst]) { return $null }
+        $Try = $OuterBlock.Parent
+        if ($Try -isnot [System.Management.Automation.Language.TryStatementAst] -or -not [object]::ReferenceEquals($Try.Body, $OuterBlock) -or $RootStatements -notcontains $Try) { return $null }
     }
     return $Current
 }
@@ -536,7 +547,36 @@ function Test-ProcessStartInfoShape {
     }
 
     # Per launch name and shape: exact key set and exact launch values.
-    if ($LaunchName -ieq 'BridgeCredentialCheck') {
+    if ($LaunchName -ieq 'BridgeRunnerReadChild') {
+        if (-not (Test-KeySet -Values $Values -ExpectedKeys @('filename', 'arguments', 'useshellexecute', 'createnowindow', 'redirectstandardoutput', 'redirectstandarderror'))) { return $false }
+        # Executable binding must be one unscoped root literal, with no nearby
+        # rebinding. Canonical candidate comparison owns complete payload flow.
+        $GhBindings = @($AssignmentAsts | Where-Object {
+            @($_.Left.FindAll({ param($N) $N -is [System.Management.Automation.Language.VariableExpressionAst] }, $true) | Where-Object {
+                (Get-NormalizedVariableUserPath -UserPath $_.VariablePath.UserPath) -ieq 'BridgeTrustedGhPath'
+            }).Count -gt 0
+        })
+        if ($GhBindings.Count -ne 1 -or (Get-PlainVariableName -Node $GhBindings[0].Left) -ine 'BridgeTrustedGhPath' -or $RootStatements -notcontains $GhBindings[0]) { return $false }
+        foreach ($ForEach in $ForEachAsts) {
+            if ((Get-NormalizedVariableUserPath -UserPath $ForEach.Variable.VariablePath.UserPath) -ieq 'BridgeTrustedGhPath') { return $false }
+        }
+        foreach ($Parameter in $ParameterAsts) {
+            if ((Get-NormalizedVariableUserPath -UserPath $Parameter.Name.VariablePath.UserPath) -ieq 'BridgeTrustedGhPath') { return $false }
+        }
+        $GhValue = Get-ProcessStartInfoValueExpression -Statement $GhBindings[0].Right
+        if (-not (Test-StringValue -Expression $GhValue -Value 'C:\Program Files\GitHub CLI\gh.exe')) { return $false }
+        $ExpectedArguments = 'api --method GET -H "X-GitHub-Api-Version: 2026-03-10" "repos/' + $Bindings['BridgeRepository'] + '/actions/runners?per_page=100"'
+        return (
+            (Test-VariableValue -Expression $Values['filename'] -Name 'BridgeTrustedGhPath') -and
+            $Values['arguments'] -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+            $Values['arguments'].Value -ceq $ExpectedArguments -and
+            (Test-BooleanLiteral -Expression $Values['useshellexecute'] -Expected $false) -and
+            (Test-BooleanLiteral -Expression $Values['createnowindow'] -Expected $true) -and
+            (Test-BooleanLiteral -Expression $Values['redirectstandardoutput'] -Expected $true) -and
+            (Test-BooleanLiteral -Expression $Values['redirectstandarderror'] -Expected $true)
+        )
+    }
+    elseif ($LaunchName -ieq 'BridgeCredentialCheck') {
         if (-not (Test-KeySet -Values $Values -ExpectedKeys $StartInfoCredentialKeys)) {
             return $false
         }

@@ -190,7 +190,13 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
             target_probe_sha256=evidence.target_probe_sha256,
         )
         root = evidence.binding.runner_root
-        self.assertEqual(candidate.count("[System.Diagnostics.Process]::Start("), 2)
+        self.assertEqual(candidate.count("[System.Diagnostics.Process]::Start("), 3)
+        self.assertEqual(candidate.count("Password = $BridgeTargetCredential.Password"), 2)
+        read_block = candidate[candidate.index("$BridgeRunnerReadChild = [System.Diagnostics.Process]::Start("):]
+        read_block = read_block[:read_block.index("}))")]
+        self.assertIn("FileName = $BridgeTrustedGhPath", read_block)
+        self.assertNotIn("UserName", read_block)
+        self.assertNotIn("Password", read_block)
         self.assertIn(
             "$BridgeSecurityProbeChild = [System.Diagnostics.Process]::Start((New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{",
             candidate,

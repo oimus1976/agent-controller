@@ -6,6 +6,8 @@ import tempfile
 import unittest
 import copy
 import re
+import time
+import signal
 from pathlib import Path
 
 from agent_controller.operator_step_gate import operator_step_spec_sha256
@@ -114,7 +116,8 @@ class PrivateCiPhase5CandidateWindowsTests(unittest.TestCase):
         self.assertEqual(candidate.count("gh.exe api --method POST"), 1)
 
     def run_predispatch(self, reads, *, read_error=False, local_failure="", exit_after=None,
-                        queue_failure=False, dispatch_failure=False, kill_failure=False):
+                        queue_failure=False, dispatch_failure=False, kill_failure=False,
+                        stalled_executable=None, read_delays=(0,), read_kill_failure=False):
         """Execute the rendered post-creation/pre-dispatch region with no live effects.
 
         Keep all guards/control flow; replace only external reads, dispatch,
@@ -125,16 +128,25 @@ class PrivateCiPhase5CandidateWindowsTests(unittest.TestCase):
         start = candidate.index("\n}))", candidate.index("$BridgeChild =")) + len("\n}))")
         end = candidate.index("\nwhile (-not $BridgeChild.HasExited)", start)
         region = candidate[start:end]
-        region = re.sub(r"(?m)^(\s*)\$BridgeRunnerReadJson = .*", r"\1$BridgeRunnerReadJson = Read-Runner", region)
+        if stalled_executable is None:
+            region = re.sub(r"(?m)^(\s*)\$BridgeRunnerReadJson = gh.exe .*", r"\1$BridgeRunnerReadJson = Read-Runner", region)
+            region = re.sub(r"\$BridgeRunnerReadChild = \[System.Diagnostics.Process\]::Start\(\(New-Object.*?\n\}\)\)",
+                            "$BridgeRunnerReadChild = New-RunnerRead", region, flags=re.S)
+        else:
+            # On the RED head, route the synchronous read through the real stub.
+            fixture_arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + str(stalled_executable) + '"'
+            region = re.sub(r"(?m)^\$BridgeRunnerReadJson = gh.exe .*", lambda _: "$BridgeRunnerReadJson = & $BridgeTrustedGhPath " + fixture_arguments, region)
+            region = re.sub(r"(?m)^(\s*)Arguments = 'api --method GET .*", lambda m: m[1] + "Arguments = '" + fixture_arguments.replace("'", "''") + "'", region)
         region = re.sub(r"(?m)^(\s*\$Bridge\w+BeforeDispatchJson) = .*", r"\1 = Read-Queue", region)
         region = re.sub(r"(?m)^(\s*)\$BridgeDispatchJson = .*", r"\1$BridgeDispatchJson = Dispatch-Stub", region)
         config = json.dumps(dict(reads=reads, read_error=read_error, local_failure=local_failure,
                                  exit_after=exit_after, queue_failure=queue_failure,
-                                 dispatch_failure=dispatch_failure, kill_failure=kill_failure))
+                                 dispatch_failure=dispatch_failure, kill_failure=kill_failure,
+                                 read_delays=read_delays, read_kill_failure=read_kill_failure))
         harness = r'''
 $ErrorActionPreference = 'Stop'
 $Config = '__CONFIG__' | ConvertFrom-Json
-$script:Ticks = 0; $script:Reads = 0; $script:Dispatches = 0; $script:Kills = 0
+$script:Ticks = 0; $script:Reads = 0; $script:Dispatches = 0; $script:Kills = 0; $script:ReadKills = 0
 $BridgeRunnerId = 23; $BridgeRunnerName = 'ac-ci-0123456789abcdef'
 $BridgeRunnerLabel = 'private-ci-windows-pilot'; $BridgeRunnerRoot = 'fixture-root'
 $BridgeQualifiedTargetIdentity = 'fixture-host\fixture-user'
@@ -144,9 +156,28 @@ $BridgeChild | Add-Member ScriptMethod Kill {
     $script:Kills++; if ($Config.kill_failure) { throw 'kill failed' }; $this.HasExited = $true
 }
 function Get-Date { [datetime]'2026-01-01' + [timespan]::FromSeconds($script:Ticks) }
-function Start-Sleep { param($Seconds)
-    $script:Ticks += $Seconds
+function Start-Sleep { param($Seconds, $Milliseconds)
+    $script:Ticks += $Seconds + ($Milliseconds / 1000.0)
     if ($null -ne $Config.exit_after -and $script:Ticks -ge $Config.exit_after) { $BridgeChild.HasExited = $true }
+}
+function New-RunnerRead {
+    $delay = $Config.read_delays[[Math]::Min($script:Reads, $Config.read_delays.Count - 1)]
+    $json = Read-Runner
+    $at = $script:Ticks + $delay
+    $child = [pscustomobject]@{ Killed=$false; CompleteAt=$at; ExitCode=$global:LASTEXITCODE;
+        StandardOutput=[pscustomobject]@{Text=$json; CompleteAt=$at}; StandardError=[pscustomobject]@{Text=''; CompleteAt=$at} }
+    $child | Add-Member ScriptProperty HasExited { $this.Killed -or $script:Ticks -ge $this.CompleteAt }
+    foreach ($stream in @($child.StandardOutput, $child.StandardError)) {
+        $stream | Add-Member ScriptMethod ReadToEndAsync {
+            $task = [pscustomobject]@{Result=$this.Text; CompleteAt=$this.CompleteAt}
+            $task | Add-Member ScriptProperty IsCompleted { $script:Ticks -ge $this.CompleteAt }
+            return $task
+        }
+    }
+    $child | Add-Member ScriptMethod Kill {
+        $script:ReadKills++; if ($Config.read_kill_failure) { throw 'read kill failed' }; $this.Killed=$true
+    }
+    return $child
 }
 function Get-CimInstance {
     if ($Config.local_failure -eq 'cim') { throw 'cim failed' }
@@ -180,15 +211,64 @@ try {
 __REGION__
 } catch { $Failure = $_.Exception.Message }
 @{ failure=$Failure; reads=$script:Reads; dispatches=$script:Dispatches;
-   kills=$script:Kills; ticks=$script:Ticks } | ConvertTo-Json -Compress
+   kills=$script:Kills; read_kills=$script:ReadKills; ticks=$script:Ticks; read_exited=($null -ne $BridgeRunnerReadChild -and $BridgeRunnerReadChild.HasExited) } | ConvertTo-Json -Compress
 '''.replace("__CONFIG__", config.replace("'", "''")).replace("__REGION__", region)
+        if stalled_executable is not None:
+            harness = re.sub(r"function Get-Date \{.*?\nfunction Get-CimInstance", "function Get-CimInstance", harness, flags=re.S)
+            harness = "$BridgeTrustedGhPath = '" + str(Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe') + "'\n" + harness
+            harness = harness.replace("$Failure = ''", "$BridgeStartedAt = Get-Date\n$Failure = ''")
+            harness = harness.replace("@{ failure=$Failure", "if ($null -ne $BridgeRunnerReadChild) { $BridgeRunnerReadChild.WaitForExit(5000) | Out-Null }\n@{ failure=$Failure")
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "regression.ps1"
             path.write_text(harness, encoding="utf-8-sig")
             result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(path)],
-                                    capture_output=True, text=True, timeout=20)
+                                    capture_output=True, text=True, timeout=38 if stalled_executable else 20)
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout.strip().splitlines()[-1])
+
+    def test_stalled_native_read_is_bounded_and_both_held_children_stop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "runner-read-stub.ps1"
+            pid_path = root / "read.pid"
+            executable.write_text("Set-Content -LiteralPath '" + str(pid_path).replace("'", "''") + "' -Value $PID\nStart-Sleep -Seconds 45\nWrite-Output '{}'", encoding="utf-8-sig")
+            started = time.monotonic()
+            try:
+                result = self.run_predispatch([self.runner_read()], stalled_executable=executable)
+            except subprocess.TimeoutExpired:
+                self.fail("rendered candidate remained blocked beyond the 30s runner-online budget + 8s slack")
+            finally:
+                # RED cleanup: only the PID published by this exact test fixture.
+                if pid_path.exists():
+                    try:
+                        os.kill(int(pid_path.read_text()), signal.SIGTERM)
+                    except OSError:
+                        pass
+            self.assert_stopped(result)
+            self.assertTrue(pid_path.exists(), "the real runner-read fixture must have started")
+            self.assertIn("timeout", result["failure"])
+            self.assertTrue(result["read_exited"], result)
+            self.assertLess(time.monotonic() - started, 37)
+
+    def test_second_read_uses_remaining_readiness_budget(self):
+        result = self.run_predispatch([self.runner_read('offline'), self.runner_read()], read_delays=(20, 45))
+        self.assert_stopped(result)
+        self.assertEqual(result['reads'], 2, result)
+        self.assertEqual(result['read_kills'], 1, result)
+        self.assertTrue(result['read_exited'], result)
+        self.assertLessEqual(result['ticks'], 31.2, result)
+
+    def test_listener_exit_during_read_stops_exact_read_child(self):
+        result = self.run_predispatch([self.runner_read()], read_delays=(45,), exit_after=2)
+        self.assert_stopped(result, kills=0)
+        self.assertEqual(result['read_kills'], 1, result)
+        self.assertIn('exited', result['failure'])
+
+    def test_read_cleanup_error_cannot_skip_listener_cleanup(self):
+        result = self.run_predispatch([self.runner_read()], read_delays=(45,), read_kill_failure=True)
+        self.assert_stopped(result)
+        self.assertEqual(result['read_kills'], 1, result)
+        self.assertIn('timeout', result['failure'])
 
     def runner_read(self, status="online"):
         return {"total_count": 1, "runners": [{"id": 23, "name": "ac-ci-0123456789abcdef",
