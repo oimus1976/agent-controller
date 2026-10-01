@@ -1,6 +1,6 @@
 # Agent Controller North Star
 
-Agent Controller is a **provider-neutral control plane that turns a human task into bounded AI work, routes that work to suitable providers/models using capability plus capacity/cost evidence, coordinates implementation/review/remediation across heterogeneous agents, verifies results from authoritative evidence, and returns only consequential decisions to the human.**
+The intended North Star for Agent Controller is a **provider-neutral control plane that turns a human task into bounded AI work, routes that work to suitable providers/models using capability plus capacity/cost evidence, coordinates implementation/review/remediation across heterogeneous agents, verifies results from authoritative evidence, and returns only consequential decisions to the human.**
 
 This document restates the existing product direction. It does not replace the owning Issues/ADRs and does not grant new authority.
 
@@ -67,6 +67,7 @@ These are current building blocks, not yet one unattended product flow.
 | Codex task observation and exact GitHub target verification | Available as bounded primitives | current CLI `observe-codex`, `verify-codex-target` |
 | Codex independent review/remediation request primitives | Available as bounded primitives | current CLI `request-codex-review`, `request-codex-remediation` |
 | Jules dispatch/observation adapter | Available as bounded provider adapter | current CLI `dispatch-jules`, `observe-jules` |
+| Antigravity bounded review-only evidence adapter | Available as bounded review/evidence adapter; not a general implementation adapter | #183 / PR #184 |
 | Provider-capacity observation and recommendation | Available as recommendation, not automatic fallback | #168, parent #55 |
 | Resource/token/context efficiency and reasoning-tier direction | Standing optimization direction | #55 |
 | Windows private one-job CI execution substrate | Live pilot in progress | #216 |
@@ -79,7 +80,6 @@ These are current building blocks, not yet one unattended product flow.
 | Canonical provider-neutral TaskSpec / operation binding | Design exists; implementation not complete | #178 |
 | Draft PR review -> remediation -> rereview loop | Bounded state-machine design exists; not yet fully composed | #215 |
 | Codex completed-task vs branch-apply state enforcement | Specified; not yet fully enforced | #200 |
-| Antigravity bounded review-only adapter | Specified follow-up; not a general implementation adapter | #183 |
 | Broader provider-capacity-aware dispatch composition | Recommendation exists; automatic dispatch/fallback remains deferred | #168 / #55 |
 
 ## Not current capabilities
@@ -90,8 +90,9 @@ The following are part of the intended product experience or plausible future co
 - automatic selection of the best model/reasoning level directly from an arbitrary user prompt;
 - automatic second-choice / third-choice provider fallback when allowance is depleted;
 - automatic paid-provider escalation;
-- fully unattended end-to-end orchestration from user request through implementation, CI, review, remediation, and Draft PR;
-- automatic Ready, merge, release, deployment, destructive cleanup, or other human-final effects.
+- fully unattended end-to-end orchestration from user request through implementation, CI, review, remediation, and Draft PR.
+
+Automatic Ready, merge, release, deployment, destructive cleanup, and other human-final effects are **not future automation targets** under ADR #90; they remain human-final unless that governing authority is explicitly changed by the owner.
 
 Future routing should prefer explicit eligibility and reason codes over opaque "best model" scoring. Capacity, cost, role separation, expected completion chain, and provider fitness are separate inputs.
 
