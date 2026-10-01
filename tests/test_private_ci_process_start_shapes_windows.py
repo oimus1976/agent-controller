@@ -189,7 +189,7 @@ class PrivateCiProcessStartShapeWindowsTests(_AnnotatedTestCase):
             "$BridgeRunnerReadChild.Kill()\n"
             "break\n} } catch { throw }\n"
         )
-        self.assertEqual(self.effects(shape), {"PROCESS_LAUNCH", "PROCESS_CONTROL"})
+        self.assertEqual(self.effects(shape), {"PROCESS_LAUNCH", "PROCESS_CONTROL", "HTTP_API_ACCESS"})
         variants = [
             shape.replace("FileName = $BridgeTrustedGhPath", "FileName = 'gh.exe'"),
             shape.replace("C:\\Program Files\\GitHub CLI\\gh.exe", "C:\\untrusted\\gh.exe"),

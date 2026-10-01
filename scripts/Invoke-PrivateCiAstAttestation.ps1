@@ -1035,6 +1035,9 @@ foreach ($InvokeMemberAst in $InvokeMemberAsts) {
     }
     if ($InvokeMemberAst.Static) {
         $UsedLaunchName = Get-PlainVariableName -Node (Get-DirectRootAssignment -Node $InvokeMemberAst).Left
+        if ($UsedLaunchName -ieq 'BridgeRunnerReadChild' -and -not $ObservedEffects.Contains('HTTP_API_ACCESS')) {
+            $ObservedEffects.Add('HTTP_API_ACCESS')
+        }
     }
     elseif ($InvokeMemberAst.Member.Value -ieq 'ReadToEndAsync') {
         $UsedLaunchName = Get-PlainVariableName -Node $InvokeMemberAst.Expression.Expression
