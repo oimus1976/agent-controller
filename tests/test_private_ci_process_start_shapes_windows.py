@@ -173,6 +173,48 @@ class PrivateCiProcessStartShapeWindowsTests(_AnnotatedTestCase):
 
     # --- allowed shapes -------------------------------------------------
 
+    def test_runner_read_launch_is_bound_to_exact_broker_get_only(self):
+        arguments = 'api --method GET -H "X-GitHub-Api-Version: 2026-03-10" "repos/owner/private-repo/actions/runners?per_page=100"'
+        shape = (
+            "$BridgeTrustedGhPath = 'C:\\Program Files\\GitHub CLI\\gh.exe'\n"
+            "try { while ($true) {\n"
+            "$BridgeRunnerReadChild = [System.Diagnostics.Process]::Start((New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{\n"
+            "    FileName = $BridgeTrustedGhPath\n"
+            f"    Arguments = '{arguments}'\n"
+            "    UseShellExecute = $false; CreateNoWindow = $true\n"
+            "    RedirectStandardOutput = $true; RedirectStandardError = $true\n"
+            "}))\n"
+            "$BridgeRunnerReadChild.StandardOutput.ReadToEndAsync()\n"
+            "$BridgeRunnerReadChild.StandardError.ReadToEndAsync()\n"
+            "$BridgeRunnerReadChild.Kill()\n"
+            "break\n} } catch { throw }\n"
+        )
+        self.assertEqual(self.effects(shape), {"PROCESS_LAUNCH", "PROCESS_CONTROL", "HTTP_API_ACCESS"})
+        variants = [
+            shape.replace("FileName = $BridgeTrustedGhPath", "FileName = 'gh.exe'"),
+            shape.replace("C:\\Program Files\\GitHub CLI\\gh.exe", "C:\\untrusted\\gh.exe"),
+            shape.replace("--method GET", "--method POST"),
+            shape.replace("repos/owner/private-repo/", "repos/other/repository/"),
+            shape.replace("actions/runners?per_page=100", "actions/runs?per_page=100"),
+            shape.replace("2026-03-10", "2022-11-28"),
+            shape.replace("per_page=100", "per_page=100 --paginate"),
+            shape.replace(f"Arguments = '{arguments}'", "Arguments = $ArbitraryArguments"),
+            shape.replace("CreateNoWindow = $true", "CreateNoWindow = $true; UserName = 'other'"),
+            shape.replace("UseShellExecute = $false", "UseShellExecute = $true"),
+            shape.replace("RedirectStandardOutput = $true", "RedirectStandardOutput = $false"),
+            shape.replace("BridgeRunnerReadChild", "OtherReadChild"),
+            shape.replace("try { while ($true) {", "function Run-Read { while ($true) {"),
+            shape + "$BridgeRunnerReadChild = $OtherProcess\n",
+            shape + "$BridgeTrustedGhPath = 'C:\\untrusted\\gh.exe'\n",
+            shape + "foreach ($BridgeTrustedGhPath in @('C:\\untrusted\\gh.exe')) {}\n",
+            "param($BridgeTrustedGhPath)\n" + shape,
+            shape.replace("try { while ($true) {\n", "").replace("break\n} } catch { throw }\n", ""),
+            shape + "$UnrelatedChild.Kill()\n",
+        ]
+        for variant in variants:
+            with self.subTest(variant=variant):
+                self.assertIn(DYNAMIC, self.effects(variant))
+
     def test_each_rendered_launch_shape_is_a_process_launch(self):
         for shape in SHAPES:
             with self.subTest(shape=shape):

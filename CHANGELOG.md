@@ -15,6 +15,18 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-10-01 — Phase 5 waits for frozen runner readiness and cleans up pre-dispatch failures (Issue #277, Draft / unmerged)
+
+Related: Issue #277, parent #216
+
+- The rendered Windows candidate polls the exact frozen runner for online + idle readiness, with a 30-second deadline and at most 30 reads. Offline is the only retryable state; malformed/incomplete readback, binding/cardinality drift, busy state, listener exit, and timeout fail closed before dispatch.
+- Once the listener child handle exists, pre-dispatch and unconfirmed-dispatch failures best-effort call that held child's `Kill()` and preserve the original error. No name-based process killing or new authority/effect family is introduced; dispatch is never retried.
+- The newly authorized runner-read child uses only the trusted broker gh executable and the frozen read-only runners endpoint. It drains both pipes asynchronously within the remaining readiness budget; timeout or listener exit stops that exact read child before listener cleanup. AST guards admit only this launch/control shape and reject executable/endpoint/argument/identity changes and unrelated targets. Other gh calls and dispatch transport are unchanged.
+- Windows PowerShell 5.1 execution regressions cover delayed readiness, timeout/cleanup, readback and local-owner failures, listener exit, immediate readiness, and cleanup failure. Existing AST/effect guards still apply.
+- Ready/merge and live pilot continuation remain human-final. The consumed #216 identity cannot be reused.
+
+---
+
 ## 2026-09-29 — Canonical review evidence becomes a code-level authority boundary（Issue #194, Draft / unmerged）
 
 関連: Issue #194, Issue #199, PR #255

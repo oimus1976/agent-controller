@@ -44,6 +44,7 @@ PHASE5_SECURITY_PROBE_STDOUT_FILENAME = "issue225-phase5-security-probe-stdout.l
 PHASE5_SECURITY_PROBE_STDERR_FILENAME = "issue225-phase5-security-probe-stderr.log"
 PHASE5_HEARTBEAT_SECONDS = 5
 PHASE5_RUNNER_TIMEOUT_SECONDS = 660
+PHASE5_RUNNER_ONLINE_TIMEOUT_SECONDS = 30
 PHASE4_RESULT_PRODUCER_OPERATION_ID = "issue225-phase4-target-environment"
 PHASE4_RESULT_PRODUCER_STEP_ID = "prepare-target-environment"
 GITHUB_API_VERSION = "2026-03-10"
@@ -219,10 +220,9 @@ def render_phase5_exactly_one_job_candidate(
         )
         for status in active_statuses
     }
-    runner_read_command = (
-        "gh.exe api "
-        f"-H {_ps_single_quoted('X-GitHub-Api-Version: ' + GITHUB_API_VERSION)} "
-        f"{_ps_single_quoted(runners_endpoint)}"
+    runner_read_arguments = (
+        f'api --method GET -H "X-GitHub-Api-Version: {GITHUB_API_VERSION}" '
+        f'"{runners_endpoint}"'
     )
 
     dispatch_command = (
@@ -279,6 +279,7 @@ def render_phase5_exactly_one_job_candidate(
         f"$BridgeActivePendingEndpoint = {_ps_single_quoted(active_endpoints['pending'])}",
         f"$BridgeRunnersEndpoint = {_ps_single_quoted(runners_endpoint)}",
         f"$BridgeRunnerTimeoutSeconds = {PHASE5_RUNNER_TIMEOUT_SECONDS}",
+        f"$BridgeRunnerOnlineTimeoutSeconds = {PHASE5_RUNNER_ONLINE_TIMEOUT_SECONDS}",
         "$ErrorActionPreference = 'Stop'",
         "",
         "if (-not (Test-Path -LiteralPath $BridgeRunnerCommand -PathType Leaf)) { throw 'Phase 5 run.cmd missing' }",
@@ -400,6 +401,7 @@ def render_phase5_exactly_one_job_candidate(
             working_directory="$BridgeRunnerRoot",
             redirect_output=False,
         ),
+        "try {",
         "Start-Sleep -Seconds 1",
         "if ($BridgeChild.HasExited) {",
         "    $BridgeChildExitCode = $BridgeChild.ExitCode",
@@ -431,14 +433,41 @@ def render_phase5_exactly_one_job_candidate(
         "Write-Output (\"PHASE5_RUNNER_PROCESS_ID={0}\" -f $BridgeListenerProcess.ProcessId)",
         "Write-Output (\"PHASE5_RUNNER_PROCESS_OWNER={0}\" -f $BridgeListenerQualifiedOwner)",
         "",
-        f"$BridgeRunnerReadJson = {runner_read_command}",
-        "$BridgeRunnerReadExitCode = $LASTEXITCODE",
+        "$BridgeRunnerOnlineStartedAt = Get-Date",
+        "$BridgeRunnerOnlineAttempts = 0",
+        "while ($true) {",
+        "if ($BridgeChild.HasExited) { throw 'Phase 5 runner listener exited while waiting for online readiness' }",
+        "$BridgeRunnerOnlineElapsedSeconds = ((Get-Date) - $BridgeRunnerOnlineStartedAt).TotalSeconds",
+        "if ($BridgeRunnerOnlineElapsedSeconds -ge $BridgeRunnerOnlineTimeoutSeconds -or $BridgeRunnerOnlineAttempts -ge $BridgeRunnerOnlineTimeoutSeconds) { throw 'Phase 5 pre-dispatch runner online timeout' }",
+        "$BridgeRunnerOnlineAttempts += 1",
+        # #277: only this frozen read runs as a separately held broker child.
+        # Pipes are drained asynchronously so full output cannot block exit.
+        "$BridgeRunnerReadChild = [System.Diagnostics.Process]::Start((New-Object -TypeName System.Diagnostics.ProcessStartInfo -Property @{",
+        "    FileName = $BridgeTrustedGhPath",
+        f"    Arguments = {_ps_single_quoted(runner_read_arguments)}",
+        "    UseShellExecute = $false; CreateNoWindow = $true",
+        "    RedirectStandardOutput = $true; RedirectStandardError = $true",
+        "}))",
+        "$BridgeRunnerReadStdoutTask = $BridgeRunnerReadChild.StandardOutput.ReadToEndAsync()",
+        "$BridgeRunnerReadStderrTask = $BridgeRunnerReadChild.StandardError.ReadToEndAsync()",
+        "$BridgeRunnerReadWaitAttempts = 0",
+        "$BridgeRunnerReadBudgetTicks = ($BridgeRunnerOnlineTimeoutSeconds - $BridgeRunnerOnlineElapsedSeconds) * 10",
+        "while (-not $BridgeRunnerReadChild.HasExited -or -not $BridgeRunnerReadStdoutTask.IsCompleted -or -not $BridgeRunnerReadStderrTask.IsCompleted) {",
+        "    if ($BridgeChild.HasExited) { throw 'Phase 5 runner listener exited during runner readback' }",
+        "    $BridgeRunnerOnlineElapsedSeconds = ((Get-Date) - $BridgeRunnerOnlineStartedAt).TotalSeconds",
+        "    if ($BridgeRunnerOnlineElapsedSeconds -ge $BridgeRunnerOnlineTimeoutSeconds -or $BridgeRunnerReadWaitAttempts -ge $BridgeRunnerReadBudgetTicks) { throw 'Phase 5 pre-dispatch runner readback timeout' }",
+        "    $BridgeRunnerReadWaitAttempts += 1",
+        "    Start-Sleep -Milliseconds 100",
+        "}",
+        "$BridgeRunnerReadExitCode = $BridgeRunnerReadChild.ExitCode",
+        "$BridgeRunnerReadJson = $BridgeRunnerReadStdoutTask.Result",
         "if ($BridgeRunnerReadExitCode -ne 0) { throw 'Phase 5 pre-dispatch runner readback failed; dispatch must not be attempted' }",
         "if (-not $BridgeRunnerReadJson) { throw 'Phase 5 pre-dispatch runner readback was empty; dispatch must not be attempted' }",
         "$BridgeRunnerRead = $BridgeRunnerReadJson | ConvertFrom-Json",
         "if ($null -eq $BridgeRunnerRead.total_count -or $null -eq $BridgeRunnerRead.runners) { throw 'Phase 5 pre-dispatch runner readback shape invalid; dispatch must not be attempted' }",
+        "if ($BridgeRunnerRead.runners -isnot [array]) { throw 'Phase 5 pre-dispatch runner list shape invalid' }",
         "$BridgeRunnerItems = @($BridgeRunnerRead.runners)",
-        "if ([int]$BridgeRunnerRead.total_count -gt $BridgeRunnerItems.Count) { throw 'Phase 5 pre-dispatch runner readback incomplete; dispatch must not be attempted' }",
+        "if ($BridgeRunnerRead.total_count -isnot [int] -or $BridgeRunnerRead.total_count -ne $BridgeRunnerItems.Count) { throw 'Phase 5 pre-dispatch runner readback incomplete; dispatch must not be attempted' }",
         "$BridgeEligibleRunners = @($BridgeRunnerItems | Where-Object {",
         "    $BridgeObservedLabels = @($_.labels.name)",
         "    $_.id -eq $BridgeRunnerId -or",
@@ -448,11 +477,20 @@ def render_phase5_exactly_one_job_candidate(
         "if ($BridgeEligibleRunners.Count -ne 1) { throw 'Phase 5 pre-dispatch eligible runner cardinality invalid' }",
         "$BridgeRemoteRunner = $BridgeEligibleRunners[0]",
         "$BridgeRemoteLabels = @($BridgeRemoteRunner.labels.name)",
+        "if (($BridgeRemoteRunner.id -isnot [int] -and $BridgeRemoteRunner.id -isnot [long]) -or $BridgeRemoteRunner.name -isnot [string] -or $BridgeRemoteRunner.labels -isnot [array]) { throw 'Phase 5 pre-dispatch runner binding shape invalid' }",
         "if ([long]$BridgeRemoteRunner.id -ne $BridgeRunnerId) { throw 'Phase 5 pre-dispatch runner id mismatch' }",
         "if ($BridgeRemoteRunner.name -cne $BridgeRunnerName) { throw 'Phase 5 pre-dispatch runner name mismatch' }",
-        "if ($BridgeRemoteLabels -notcontains $BridgeRunnerLabel) { throw 'Phase 5 pre-dispatch runner label mismatch' }",
-        "if ($BridgeRemoteRunner.status -cne 'online') { throw 'Phase 5 pre-dispatch runner is not online' }",
-        "if ([bool]$BridgeRemoteRunner.busy) { throw 'Phase 5 pre-dispatch runner is busy' }",
+        "if ($BridgeRemoteLabels -cnotcontains $BridgeRunnerLabel) { throw 'Phase 5 pre-dispatch runner label mismatch' }",
+        "if ($BridgeRemoteRunner.busy -isnot [bool]) { throw 'Phase 5 pre-dispatch runner busy shape invalid' }",
+        "if ($BridgeRemoteRunner.busy) { throw 'Phase 5 pre-dispatch runner is busy' }",
+        "if ($BridgeRemoteRunner.status -cne 'online' -and $BridgeRemoteRunner.status -cne 'offline') { throw 'Phase 5 pre-dispatch runner status invalid' }",
+        "if ($BridgeChild.HasExited) { throw 'Phase 5 runner listener exited while waiting for online readiness' }",
+        "$BridgeRunnerOnlineElapsedSeconds = ((Get-Date) - $BridgeRunnerOnlineStartedAt).TotalSeconds",
+        "if ($BridgeRunnerOnlineElapsedSeconds -ge $BridgeRunnerOnlineTimeoutSeconds) { throw 'Phase 5 pre-dispatch runner online timeout' }",
+        "if ($BridgeRemoteRunner.status -ceq 'online') { break }",
+        'Write-Host ("heartbeat phase=phase5-runner-online elapsed_seconds={0}" -f $BridgeRunnerOnlineElapsedSeconds)',
+        "Start-Sleep -Seconds 1",
+        "}",
         "",
         f"$BridgeQueuedBeforeDispatchJson = {active_read_commands['queued']}",
         "$BridgeQueuedBeforeDispatchExitCode = $LASTEXITCODE",
@@ -480,6 +518,7 @@ def render_phase5_exactly_one_job_candidate(
         "$BridgePendingBeforeDispatch = $BridgePendingBeforeDispatchJson | ConvertFrom-Json",
         "if ($null -eq $BridgePendingBeforeDispatch.total_count -or [int]$BridgePendingBeforeDispatch.total_count -ne 0) { throw 'Phase 5 pending trusted workflow exists before dispatch' }",
         "",
+        "if ($BridgeChild.HasExited) { throw 'Phase 5 runner listener exited before dispatch' }",
         f"$BridgeDispatchJson = {dispatch_command}",
         "$BridgeDispatchExitCode = $LASTEXITCODE",
         "if ($BridgeDispatchExitCode -ne 0) { throw 'Phase 5 dispatch request failed; do not retry' }",
@@ -488,6 +527,19 @@ def render_phase5_exactly_one_job_candidate(
         "if ($null -eq $BridgeDispatch.workflow_run_id -or [long]$BridgeDispatch.workflow_run_id -le 0) { throw 'Phase 5 dispatch response workflow_run_id invalid; do not retry' }",
         "$BridgeWorkflowRunId = [long]$BridgeDispatch.workflow_run_id",
         'Write-Output ("PHASE5_WORKFLOW_RUN_ID={0}" -f $BridgeWorkflowRunId)',
+        "} catch {",
+        "    try {",
+        "        if ($null -ne $BridgeRunnerReadChild -and -not $BridgeRunnerReadChild.HasExited) { $BridgeRunnerReadChild.Kill() }",
+        "    } catch {",
+        "        # Read cleanup failure must not prevent exact-listener cleanup.",
+        "    }",
+        "    try {",
+        "        if (-not $BridgeChild.HasExited) { $BridgeChild.Kill() }",
+        "    } catch {",
+        "        # Best effort only: preserve the original failure; never retry dispatch.",
+        "    }",
+        "    throw",
+        "}",
         "",
         "while (-not $BridgeChild.HasExited) {",
         "    $BridgeElapsedSeconds = [int]((Get-Date) - $BridgeStartedAt).TotalSeconds",
