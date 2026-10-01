@@ -15,6 +15,18 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-10-01 — Agent Controller North Star is restated as an end-to-end provider-neutral product path (Issue #292, Draft / unmerged)
+
+Related: Issue #292; ADR #12; ADR #90; #55; #168; #178; #183; #200; #215; #216; #279
+
+- Added `docs/NORTH_STAR.md` as a concise product compass connecting human intent, canonical task specification, task/risk/reasoning classification, provider/model eligibility, capacity/cost-aware routing, heterogeneous-agent execution, GitHub-authoritative evidence, CI, independent review, bounded remediation, and the final human gate.
+- The document distinguishes current building blocks from designed-but-not-yet-composed capabilities and from future/not-yet-specified user experience. Natural-language intake, automatic provider/model fallback, and unattended end-to-end orchestration are explicitly not described as current behavior.
+- Multi-agent intent remains specialization across heterogeneous providers under one control plane rather than provider-native state becoming Controller truth.
+- Issue #216 is explicitly positioned as an execution-substrate milestone for one private/local CI channel, not as the Agent Controller product end-state.
+- The personal/single-owner cost-effectiveness priority from #279 remains the decision filter. No production code, provider dispatch, routing implementation, TaskSpec implementation, authority expansion, or #216 behavior is changed by this documentation-only workstream.
+
+---
+
 ## 2026-10-01 — Phase 5 waits for frozen runner readiness and cleans up pre-dispatch failures (Issue #277, Draft / unmerged)
 
 Related: Issue #277, parent #216
