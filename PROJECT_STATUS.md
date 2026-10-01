@@ -9,7 +9,9 @@
 
 Agent Controller is a provider-neutral control plane. It lets heterogeneous, untrusted AI workers (Codex, Claude, Antigravity, Jules, …) do bounded work, and it verifies that work objectively from GitHub evidence. It keeps the work moving and brings the human only the decisions that need human authority.
 
-Shorthand: *automate the work, not the final authority* ([ADR #12](https://github.com/oimus1976/agent-controller/issues/12), [ADR #90](https://github.com/oimus1976/agent-controller/issues/90)).\n\nProduct compass: [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md) restates the end-to-end product direction and distinguishes current building blocks from designed/future composition.
+Shorthand: *automate the work, not the final authority* ([ADR #12](https://github.com/oimus1976/agent-controller/issues/12), [ADR #90](https://github.com/oimus1976/agent-controller/issues/90)).
+
+Product compass: [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md) restates the end-to-end product direction and distinguishes current building blocks from designed/future composition.
 
 ## Main line
 
@@ -25,7 +27,6 @@ This table lists pointers only. Status comes from each authority Issue's latest 
 | Workstream | Authority Issue | Related Issues / PRs | Checkpoints |
 |---|---|---|---|
 | Private-CI live pilot (main line) | [#216](https://github.com/oimus1976/agent-controller/issues/216) | [#229](https://github.com/oimus1976/agent-controller/issues/229), [#243](https://github.com/oimus1976/agent-controller/issues/243) | comments on #216 |
-| Burned-evidence UAC transport headroom | [#290](https://github.com/oimus1976/agent-controller/issues/290) | parent [#216](https://github.com/oimus1976/agent-controller/issues/216), predecessor [#237](https://github.com/oimus1976/agent-controller/issues/237) | comments on #290 |
 | Phase 5 readiness and pre-dispatch cleanup | [#277](https://github.com/oimus1976/agent-controller/issues/277) | parent [#216](https://github.com/oimus1976/agent-controller/issues/216) | comments on #277 |
 | Test-suite audit follow-up | [#246](https://github.com/oimus1976/agent-controller/issues/246) | [#254](https://github.com/oimus1976/agent-controller/issues/254) / PR [#255](https://github.com/oimus1976/agent-controller/pull/255) | comments on #246 |
 | Canonical review evidence enforcement | [#194](https://github.com/oimus1976/agent-controller/issues/194) | PR pending | comments on #194 |
@@ -50,6 +51,7 @@ These Issues are open but not being worked on. Their order is an owner decision.
 
 ## Where to look
 
-- Product direction: [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md).\n- Semantic history: [`CHANGELOG.md`](CHANGELOG.md).
+- Product direction: [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md).
+- Semantic history: [`CHANGELOG.md`](CHANGELOG.md).
 - Design and runbooks: [`docs/`](docs/), including [`verification-policy.md`](docs/verification-policy.md), [`threat-model.md`](docs/threat-model.md), and [`workstream-isolation.md`](docs/workstream-isolation.md).
 - Validation: `python -m unittest discover -s tests` (Python 3.12). CI runs `.github/workflows/tests.yml` on pull requests.
