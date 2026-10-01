@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from unittest import mock
 from pathlib import Path
 
+from archive_transport_fixture import rendered_production_bootstrap
+
 
 @unittest.skipUnless(os.name == "nt", "Windows-only PowerShell 5.1 regression")
 class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
@@ -113,8 +115,8 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
                 "-NonInteractive",
                 "-ExecutionPolicy",
                 "Bypass",
-                "-EncodedCommand",
-                transport["encoded_command"],
+                "-Command",
+                transport["command"],
             ],
             cwd=self.repo_root,
             check=False,
@@ -146,16 +148,10 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
         marker = "CORRUPT_PAYLOAD_MUST_NOT_EXECUTE"
         transport = build_transport(f"Write-Output '{marker}'")
 
-        stub = base64.b64decode(
-            transport["encoded_command"],
-            validate=True,
-        ).decode("utf-16-le")
+        stub = transport["command"]
         payload = transport["compressed_payload_base64"]
         replacement = ("A" if payload[0] != "A" else "B") + payload[1:]
         corrupt_stub = stub.replace(payload, replacement, 1)
-        corrupt_encoded = base64.b64encode(
-            corrupt_stub.encode("utf-16-le")
-        ).decode("ascii")
 
         completed = subprocess.run(
             [
@@ -164,8 +160,8 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
                 "-NonInteractive",
                 "-ExecutionPolicy",
                 "Bypass",
-                "-EncodedCommand",
-                corrupt_encoded,
+                "-Command",
+                corrupt_stub,
             ],
             cwd=self.repo_root,
             check=False,
@@ -189,18 +185,12 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
         marker = "DIGEST_MISMATCH_MUST_NOT_EXECUTE"
         transport = build_transport(f"Write-Output '{marker}'")
 
-        stub = base64.b64decode(
-            transport["encoded_command"],
-            validate=True,
-        ).decode("utf-16-le")
+        stub = transport["command"]
         stub = stub.replace(
             transport["bootstrap_sha256"],
             "0" * 64,
             1,
         )
-        mismatched_encoded = base64.b64encode(
-            stub.encode("utf-16-le")
-        ).decode("ascii")
 
         completed = subprocess.run(
             [
@@ -209,8 +199,8 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
                 "-NonInteractive",
                 "-ExecutionPolicy",
                 "Bypass",
-                "-EncodedCommand",
-                mismatched_encoded,
+                "-Command",
+                stub,
             ],
             cwd=self.repo_root,
             check=False,
@@ -226,6 +216,57 @@ class PrivateCiBurnedEvidenceArchiveWindowsTests(unittest.TestCase):
             "Reviewed archive bootstrap SHA-256 mismatch.",
             combined,
         )
+
+    def test_production_transport_reconstructs_exact_bytes_through_start_process(self):
+        namespace = runpy.run_path(str(self.repo_root / "scripts" / "archive_private_ci_burned_evidence.py"))
+        rendered = rendered_production_bootstrap()
+        transport = namespace["_build_uac_bootstrap_transport"](rendered)
+        self.assertLess(transport["uac_argument_chars"], 15000)
+        # Intercept only the final execution point; never run the archive.
+        argument = transport["uac_argument"].replace(
+            "& ([ScriptBlock]::Create($t))", "[Convert]::ToBase64String($r)"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "child.txt"
+            errors = Path(tmp) / "error.txt"
+            quote = lambda value: "'" + str(value).replace("'", "''") + "'"
+            parent = (
+                f"$p=Start-Process {quote(self.powershell)} -Wait -PassThru "
+                f"-ArgumentList {quote(argument)} -RedirectStandardOutput {quote(output)} "
+                f"-RedirectStandardError {quote(errors)};exit $p.ExitCode"
+            )
+            completed = subprocess.run(
+                [self.powershell, "-NoProfile", "-NonInteractive", "-Command", "-"],
+                input=parent + "\n", capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr + errors.read_text())
+            self.assertEqual(base64.b64decode(output.read_text().strip()), rendered.encode("utf-8"))
+        self.assertNotIn("-File", transport["uac_argument"])
+
+    def test_production_transport_tampering_fails_before_execution(self):
+        namespace = runpy.run_path(str(self.repo_root / "scripts" / "archive_private_ci_burned_evidence.py"))
+        transport = namespace["_build_uac_bootstrap_transport"](rendered_production_bootstrap())
+        payload = transport["compressed_payload_base64"]
+        raw = base64.b64decode(payload)
+        marker = "PRODUCTION_BOOTSTRAP_MUST_NOT_EXECUTE"
+        stub = transport["command"].replace(
+            "& ([ScriptBlock]::Create($t))", f"Write-Output '{marker}'"
+        )
+        variants = {
+            "corrupt-header": stub.replace(payload, base64.b64encode(b"X" + raw[1:]).decode()),
+            "corrupt-trailer": stub.replace(payload, base64.b64encode(raw[:-1] + bytes([raw[-1] ^ 1])).decode()),
+            "truncated": stub.replace(payload, base64.b64encode(raw[:-8]).decode()),
+            "digest-mismatch": stub.replace(transport["bootstrap_sha256"], "0" * 64),
+        }
+        for name, command in variants.items():
+            with self.subTest(name=name):
+                completed = subprocess.run(
+                    [self.powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+                    capture_output=True, text=True, timeout=30,
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertNotIn(marker, completed.stdout)
+                self.assertIn("SHA-256 mismatch", completed.stdout + completed.stderr)
 
     def _run_embedded_plan_probe(
         self,

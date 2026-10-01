@@ -27,6 +27,16 @@ Related: Issue #277, parent #216
 
 ---
 
+## 2026-10-01 — Archive UAC transport growth headroom (#290 / #216, Draft / unmerged)
+
+- WOBBUFFET planning at canonical main `923f8ca5cd1ab9759db400da32132c08da3ae666` was reported blocked at 31,719 argument characters. A RED regression using that bootstrap and a valid full supported inventory reproduced the ceiling failure at 32,147 characters (`safe_limit=30000`). Its deterministic placeholder plan is representative, not a copy of private host evidence.
+- Transport the fixed ASCII decompression stub and gzip Base64 through a quoted `-Command`, avoiding the second UTF-16LE/Base64 expansion. Verify the compressed payload digest and then the exact reconstructed bootstrap SHA-256 before ScriptBlock creation/execution. Both representations stay in memory; mutable-checkout `-File` execution remains forbidden.
+- Measured Windows production-shaped regression after the fix: 12,384 argument characters, leaving 17,616 below the unchanged 30,000 ceiling. A stricter regression budget of 15,000 makes future growth visible; the runtime still blocks oversized commands.
+- Windows PowerShell 5.1 regressions cover exact byte reconstruction through `Start-Process` argument quoting, corrupted header/trailer, truncation, and reconstructed-source digest mismatch. Planning stays read-only with `NO_MUTATION_PERFORMED`; source/plan bindings, UAC elevation, trusted paths/runtime isolation, diagnostics, ACL/quiescence, archive and approval/consumption semantics remain unchanged.
+- No archive apply, runner registration, workflow dispatch, or other live pilot action is authorized. Independent exact-head review precedes human Ready/merge; any later live retry needs fresh explicit authority.
+
+---
+
 ## 2026-09-29 — Canonical review evidence becomes a code-level authority boundary（Issue #194, Draft / unmerged）
 
 関連: Issue #194, Issue #199, PR #255

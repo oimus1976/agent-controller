@@ -3,9 +3,13 @@ import base64
 import gzip
 import hashlib
 import runpy
+import random
+import string
 import tempfile
 import unittest
 from pathlib import Path
+
+from archive_transport_fixture import rendered_production_bootstrap
 
 
 class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
@@ -150,6 +154,25 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
             transport["safe_argument_limit"],
             32767,
         )
+
+    def test_production_bootstrap_transport_has_growth_headroom(self):
+        namespace = runpy.run_path(str(self.cli_path))
+        rendered = rendered_production_bootstrap()
+        transport = namespace["_build_uac_bootstrap_transport"](rendered)
+        self.assertEqual(namespace["UAC_ARGUMENT_SAFE_LIMIT"], 30000)
+        self.assertLess(transport["uac_argument_chars"], 15000)
+        self.assertEqual(
+            gzip.decompress(base64.b64decode(transport["compressed_payload_base64"])),
+            rendered.encode("utf-8"),
+        )
+        self.assertNotIn("-File", transport["uac_argument"])
+
+    def test_transport_still_blocks_oversized_incompressible_bootstrap(self):
+        namespace = runpy.run_path(str(self.cli_path))
+        rng = random.Random(290)
+        rendered = "".join(rng.choices(string.ascii_letters + string.digits, k=40000))
+        with self.assertRaisesRegex(RuntimeError, "exceeds safe command-line limit"):
+            namespace["_build_uac_bootstrap_transport"](rendered)
 
     def test_planner_has_no_controller_import_before_source_verification(self):
         source = self.cli_path.read_text(encoding="utf-8")
