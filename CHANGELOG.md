@@ -263,6 +263,33 @@ Related: Issue #279, ADR #90
 - 6回目のCodex再レビュー（同モデル）の指摘（MAJOR 1・NOTE 1）も反映した：shadowファイル検査が大文字小文字の違う名前（`claude.md` など）と、公式ドキュメントで自動読み込みされるproviderごとの場所（Claude Codeの `.claude/AGENTS.md` と `.claude/rules/`、Antigravityの `.agents/AGENTS.md`・`.agents/rules/`・旧 `.agent/rules/`）を見ていなかった。名前は大文字小文字を区別せずに比べ、これらの場所の `.md` は禁止とし、`AGENTS.md` にも1文で明記した。NOTE（意味の正しさは人間レビューで補う）は変更不要とした。
 - 本番コードは変更していない。`PROJECT_STATUS.md` と checkpoint は指し示すものであって証拠ではなく、事実は引き続きGitHubとCIから再確認する。Ready / merge は ADR #90 により human-final。
 
+## 2026-09-25 — Pilot freeze end-to-end behavior tests replace source-text assertions（Issue #254 / PR #255）
+
+関連: Issue #254, Issue #246, Issue #216, PR #255
+
+### Changed
+
+- `scripts/create_private_ci_pilot_freeze.py` は #216 の pilot identity freeze を作るスクリプト。Linux上の行カバレッジは0%で、保証の根拠はソース中の部分文字列テストだけだった。
+- `tests/test_private_ci_pilot_freeze_behavior.py`（12件）を追加し、実物の `main()` を最後まで実行する。
+  - fakeにするのは、プロセス境界（`_completed` 経由の `gh.exe` / `git.exe` / `powershell.exe`）、authoritativeな出力先、controller treeの場所、Windowsのrunner root probe だけに絞った。
+  - スクリプト自身のreadback検証、workflow runner exclusivity の検証、2回のsweepによるrunner readback、freezeの生成とシリアライズは実物がそのまま動く。
+- 確認する内容：
+  - readbackの順序（controller main → ローカルのzero-residual → 対象PR → workflowの一覧と排他性 → ローカルgenerationの確認 → リモートrunner → freezeの書き込み1回）。
+  - target / workflow SHA がfreshなreadbackから取られること。引数で渡すことはできないこと。
+  - 実行のたびに新しいidentityが作られること。
+  - 既存のfreezeを上書きしないこと（その場合は何も読みに行かない）。
+  - 失敗条件のどれに当たっても書き込みが行われないこと。対象は、controllerのdirty/stale、ホストや実行者の不一致・残留プロセス、public repo・draftでないPR・fork head、競合する/動的な/汎用self-hostedのrunner指定、古いローカルgeneration、残っているリモートrunner。
+- 上記に置き換わった部分文字列テスト3件を削除した。静的な境界チェック（live操作の呼び出し口がないこと）は残した。
+- スクリプトのLinux上の行カバレッジは0%から76%になった。
+
+### Validation / authority boundary
+
+- リポジトリ全体をコピーし、regressionを1件ずつ注入して全スイートを実行した。本物のregression 11件のうち、新スイートはすべて検出し、main上のスイートが検出したのは1件だけだった。main側が見逃したのは、残留カウントの無視、adminかどうか不明な状態の受理、dirtyなtreeの受理、draft要件の削除、fork headの受理、排他性違反の握りつぶし、古いrunnerのラベル無視、上書き前チェックの削除、古いgenerationの無視、nonceの固定。
+- 無害なローカル変数の改名2件では、新スイートは失敗しなかった（mainのスイートは1件で失敗した）。どちらのスイートも、注入しない状態ではpassすることを確認済み。
+- 自己レビューで、順序確認に使っていたprefix一致が、信頼済みworkflowファイルの読み取りをworkflow一覧の読み取りと取り違え、順序チェックを弱めうることに気づいた。exact一致に直し、排他性チェックの順序を入れ替えるregressionを検出できることを確認した。
+- ローカル（Python 3.12.3）では1341件がpassした（Windows専用の104件はskip）。本番コードは変更していない。
+- live pilot freezeの作成、runnerの登録、workflowのdispatchを承認するものではない。Ready / merge は ADR #90 により human-final。
+
 ## 2026-09-25 — Archive CLI behavior tests replace source-text assertions（Issue #252 / PR #253）
 
 関連: Issue #252, Issue #246, Issue #216, PR #253
