@@ -2,14 +2,14 @@
 
 > **This file is an index, not an authority.** Do not infer PR, head, CI, review, or authorization state from it. Before acting, re-read those facts from GitHub and CI. For each workstream, the authority is its Issue: read the latest checkpoint comment there.
 
-- **as_of:** 2026-09-29, reconciled against `main` at `16b9c0f1bbb286aa3cffb554f1feda8cc7b7378d`. This is an advisory freshness hint only.
+- **as_of:** 2026-10-01, reconciled against post-#291 `main` at `e12b002dfb1e2f8ce31003c9558d44d9962d46a6`. This is an advisory freshness hint only.
 - **Entry point for workers:** [`AGENTS.md`](AGENTS.md). **Rules:** [`docs/governance/rules.md`](docs/governance/rules.md).
 
 ## Goal
 
 Agent Controller is a provider-neutral control plane. It lets heterogeneous, untrusted AI workers (Codex, Claude, Antigravity, Jules, …) do bounded work, and it verifies that work objectively from GitHub evidence. It keeps the work moving and brings the human only the decisions that need human authority.
 
-Shorthand: *automate the work, not the final authority* ([ADR #12](https://github.com/oimus1976/agent-controller/issues/12), [ADR #90](https://github.com/oimus1976/agent-controller/issues/90)).
+Shorthand: *automate the work, not the final authority* ([ADR #12](https://github.com/oimus1976/agent-controller/issues/12), [ADR #90](https://github.com/oimus1976/agent-controller/issues/90)).\n\nProduct compass: [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md) restates the end-to-end product direction and distinguishes current building blocks from designed/future composition.
 
 ## Main line
 
@@ -50,6 +50,6 @@ These Issues are open but not being worked on. Their order is an owner decision.
 
 ## Where to look
 
-- Semantic history: [`CHANGELOG.md`](CHANGELOG.md).
+- Product direction: [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md).\n- Semantic history: [`CHANGELOG.md`](CHANGELOG.md).
 - Design and runbooks: [`docs/`](docs/), including [`verification-policy.md`](docs/verification-policy.md), [`threat-model.md`](docs/threat-model.md), and [`workstream-isolation.md`](docs/workstream-isolation.md).
 - Validation: `python -m unittest discover -s tests` (Python 3.12). CI runs `.github/workflows/tests.yml` on pull requests.
