@@ -256,6 +256,26 @@ class PilotFreezeBehaviorTests(unittest.TestCase):
         self.assertEqual(self.output.read_bytes(), b"previous\n")
         self.assertEqual(self.events, [])
 
+    def test_late_competing_freeze_is_never_overwritten(self):
+        competing_bytes = b'{"competing": "late freeze"}\n'
+        real_serialize = FREEZE.pilot_identity_freeze_bytes
+
+        def serialize_with_competing_freeze(freeze):
+            raw = real_serialize(freeze)
+            self.assertFalse(self.output.exists())
+            self.output.write_bytes(competing_bytes)
+            return raw
+
+        self.assertFalse(self.output.exists())
+        with mock.patch.object(
+            FREEZE, "pilot_identity_freeze_bytes", serialize_with_competing_freeze
+        ):
+            code, stdout, stderr = self._main()
+        self.assertEqual(code, 2, stderr)
+        self.assertIn("BLOCKED:", stderr)
+        self.assertEqual(self.output.read_bytes(), competing_bytes)
+        self.assertNotIn("PILOT_IDENTITY_FREEZE_CREATED", stdout)
+
     def _assert_blocked(self, message):
         code, stdout, stderr = self._main()
         self.assertEqual(code, 2, stdout)
