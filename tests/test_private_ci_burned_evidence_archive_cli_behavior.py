@@ -89,8 +89,8 @@ def _decode_uac_bootstrap(stdout):
     line = next(
         line for line in stdout.splitlines() if line.startswith("uac_apply_command=")
     )
-    encoded = re.search(r"-EncodedCommand ([A-Za-z0-9+/=]+)", line).group(1)
-    stub = base64.b64decode(encoded, validate=True).decode("utf-16-le")
+    argument = line.split("-ArgumentList '", 1)[1][:-1].replace("''", "'")
+    stub = argument.split('-Command "', 1)[1][:-1]
     payload = re.search(r"FromBase64String\('([A-Za-z0-9+/=]+)'\)", stub).group(1)
     expected_sha = re.search(r"if\(\$s -cne '([0-9a-f]{64})'\)", stub).group(1)
     rendered_raw = gzip.decompress(base64.b64decode(payload, validate=True))

@@ -3,6 +3,8 @@ import base64
 import gzip
 import hashlib
 import runpy
+import random
+import string
 import tempfile
 import unittest
 from pathlib import Path
@@ -164,6 +166,13 @@ class PrivateCiBurnedEvidenceArchiveCliTests(unittest.TestCase):
             rendered.encode("utf-8"),
         )
         self.assertNotIn("-File", transport["uac_argument"])
+
+    def test_transport_still_blocks_oversized_incompressible_bootstrap(self):
+        namespace = runpy.run_path(str(self.cli_path))
+        rng = random.Random(290)
+        rendered = "".join(rng.choices(string.ascii_letters + string.digits, k=40000))
+        with self.assertRaisesRegex(RuntimeError, "exceeds safe command-line limit"):
+            namespace["_build_uac_bootstrap_transport"](rendered)
 
     def test_planner_has_no_controller_import_before_source_verification(self):
         source = self.cli_path.read_text(encoding="utf-8")

@@ -142,6 +142,12 @@ def _build_uac_bootstrap_transport(
         "$p=[Convert]::FromBase64String('"
         + compressed_payload_base64
         + "');"
+        "$v=[Security.Cryptography.SHA256]::Create();"
+        "try{$c=([BitConverter]::ToString($v.ComputeHash($p))).Replace('-','').ToLowerInvariant()}"
+        "finally{$v.Dispose()};"
+        "if($c -cne '"
+        + hashlib.sha256(compressed).hexdigest()
+        + "'){throw 'Reviewed archive compressed payload SHA-256 mismatch.'};"
         "$i=New-Object IO.MemoryStream(,$p);"
         "$g=New-Object IO.Compression.GzipStream("
         "$i,[IO.Compression.CompressionMode]::Decompress);"
@@ -158,14 +164,16 @@ def _build_uac_bootstrap_transport(
         "$t=[Text.Encoding]::UTF8.GetString($r);"
         "& ([ScriptBlock]::Create($t))"
     )
-    encoded_command = base64.b64encode(
-        stub.encode("utf-16-le")
-    ).decode("ascii")
+    # Only fixed ASCII syntax, Base64, and a hex digest enter this command.
+    # Quoting it directly avoids expanding the payload again as UTF-16LE
+    # Base64. The reviewed bootstrap itself is still reconstructed in memory.
+    if not stub.isascii() or '"' in stub:
+        raise RuntimeError("archive UAC transport stub is not quote-safe ASCII")
     uac_argument = (
         "-NoProfile -NonInteractive -ExecutionPolicy Bypass "
-        f"-EncodedCommand {encoded_command}"
+        f'-Command "{stub}"'
     )
-    if len(uac_argument) > UAC_ARGUMENT_SAFE_LIMIT:
+    if len(uac_argument) >= UAC_ARGUMENT_SAFE_LIMIT:
         raise RuntimeError(
             "archive UAC bootstrap exceeds safe command-line limit: "
             f"chars={len(uac_argument)} "
@@ -175,7 +183,7 @@ def _build_uac_bootstrap_transport(
     return {
         "bootstrap_sha256": bootstrap_sha256,
         "compressed_payload_base64": compressed_payload_base64,
-        "encoded_command": encoded_command,
+        "command": stub,
         "uac_argument": uac_argument,
         "uac_argument_chars": len(uac_argument),
         "safe_argument_limit": UAC_ARGUMENT_SAFE_LIMIT,
@@ -763,8 +771,8 @@ def command_plan() -> int:
         .replace(plan_token, plan_base64)
     )
     transport = _build_uac_bootstrap_transport(rendered_bootstrap)
-    encoded_bootstrap = str(transport["encoded_command"])
     uac_argument = str(transport["uac_argument"])
+    quoted_uac_argument = uac_argument.replace("'", "''")
     powershell_path = _trusted_windows_powershell_path()
     quoted_powershell = str(powershell_path).replace("'", "''")
     full_command_chars = len(str(powershell_path)) + 1 + len(uac_argument)
@@ -791,7 +799,7 @@ def command_plan() -> int:
         "uac_apply_command="
         f"Start-Process '{quoted_powershell}' -Verb RunAs -Wait "
         "-ArgumentList "
-        f"\"{uac_argument}\""
+        f"'{quoted_uac_argument}'"
     )
     print("NO_MUTATION_PERFORMED")
     return 0
