@@ -270,7 +270,7 @@ Related: Issue #279, ADR #90
 ### Changed
 
 - `scripts/create_private_ci_pilot_freeze.py` は #216 の pilot identity freeze を作るスクリプト。Linux上の行カバレッジは0%で、保証の根拠はソース中の部分文字列テストだけだった。
-- `tests/test_private_ci_pilot_freeze_behavior.py`（11件）を追加し、実物の `main()` を最後まで実行する。
+- `tests/test_private_ci_pilot_freeze_behavior.py`（12件）を追加し、実物の `main()` を最後まで実行する。
   - fakeにするのは、プロセス境界（`_completed` 経由の `gh.exe` / `git.exe` / `powershell.exe`）、authoritativeな出力先、controller treeの場所、Windowsのrunner root probe だけに絞った。
   - スクリプト自身のreadback検証、workflow runner exclusivity の検証、2回のsweepによるrunner readback、freezeの生成とシリアライズは実物がそのまま動く。
 - 確認する内容：
