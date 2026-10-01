@@ -142,7 +142,7 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
             "in-progress trusted workflow exists before dispatch",
             "actions/runners?per_page=100",
             "Phase 5 pre-dispatch eligible runner cardinality invalid",
-            "Phase 5 pre-dispatch runner is not online",
+            "Phase 5 pre-dispatch runner online timeout",
             "Phase 5 pre-dispatch runner is busy",
             "gh.exe api --method POST",
             "inputs[pr_number]=4",
