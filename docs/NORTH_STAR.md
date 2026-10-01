@@ -89,8 +89,9 @@ The following are part of the intended product experience or plausible future co
 - conversational Japanese/natural-language intake that converts a user request into a canonical TaskSpec;
 - automatic selection of the best model/reasoning level directly from an arbitrary user prompt;
 - automatic second-choice / third-choice provider fallback when allowance is depleted;
-- automatic paid-provider escalation;
 - fully unattended end-to-end orchestration from user request through implementation, CI, review, remediation, and Draft PR.
+
+Starting paid-provider usage without explicit human authorization is **not a future automation target** under the standing capacity policy; routing may only use paid capacity after the human has authorized that paid usage.
 
 Automatic Ready, merge, release, deployment, destructive cleanup, and other human-final effects are **not future automation targets** under ADR #90; they remain human-final unless that governing authority is explicitly changed by the owner.
 
