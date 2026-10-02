@@ -290,8 +290,10 @@ def render_phase5_exactly_one_job_candidate(
         "foreach ($BridgeFreshPath in @($BridgeRunnerStdoutPath, $BridgeRunnerStderrPath, $BridgeSecurityProbeResultPath, $BridgeSecurityProbeStdoutPath, $BridgeSecurityProbeStderrPath)) {",
         "    if (Test-Path -LiteralPath $BridgeFreshPath) { throw 'Phase 5 runner output path already exists' }",
         "}",
+        # #298: broker gh authentication is permitted; the target security
+        # probe still rejects GitHub tokens before listener start.
         "$BridgeForbiddenBrokerEnvironment = @(Get-ChildItem Env: | Where-Object {",
-        "    $_.Name -match '^(GH_TOKEN|GITHUB_TOKEN|ACTIONS_RUNNER_INPUT_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY)$' -or",
+        "    $_.Name -match '^(ACTIONS_RUNNER_INPUT_TOKEN|OPENAI_API_KEY|ANTHROPIC_API_KEY|GEMINI_API_KEY)$' -or",
         "    $_.Name -match '^(AGENT_CONTROLLER|PRIVATE_CI).*(HMAC|KEY|SECRET|TOKEN|AUTH)'",
         "})",
         "if ($BridgeForbiddenBrokerEnvironment.Count -ne 0) { throw 'Phase 5 broker environment contains forbidden inheritable authority material' }",
