@@ -115,6 +115,90 @@ class PrivateCiPhase5CandidateWindowsTests(unittest.TestCase):
         self.assertTrue(report["fail_fast_proven"])
         self.assertEqual(candidate.count("gh.exe api --method POST"), 1)
 
+    def run_environment_gate(self, source, start_marker, end_marker, cases):
+        """Run only the rendered name filter/throw with name-only fixtures.
+
+        Never enumerate the real environment or create/read token values.
+        No listener, target launch, or GitHub command is executed.
+        """
+        start = source.index(start_marker)
+        gate = source[start:source.index(end_marker, start)]
+        config = json.dumps(cases).replace("'", "''")
+        harness = r'''
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$Cases = '__CASES__' | ConvertFrom-Json
+function Get-ChildItem {
+    param($Path)
+    if ($Path -ne 'Env:') { throw 'unexpected fixture enumeration' }
+    foreach ($Name in $script:Names) { [pscustomobject]@{ Name = $Name } }
+}
+$Results = @(foreach ($Case in $Cases) {
+    $script:Names = @($Case.names)
+    $Rejected = $false
+    try {
+__GATE__
+    } catch { $Rejected = $true }
+    [pscustomobject]@{ rejected = $Rejected }
+})
+ConvertTo-Json -InputObject $Results -Compress
+'''.replace('__CASES__', config).replace('__GATE__', gate)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'environment-gate.ps1'
+            path.write_text(harness, encoding='utf-8-sig')
+            result = subprocess.run(
+                ['powershell.exe', '-NoProfile', '-NonInteractive',
+                 '-ExecutionPolicy', 'Bypass', '-File', str(path)],
+                capture_output=True, text=True, timeout=20,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outcomes = json.loads(result.stdout)
+        self.assertEqual(len(outcomes), len(cases))
+        for case, outcome in zip(cases, outcomes):
+            with self.subTest(names=case['names']):
+                self.assertIs(outcome['rejected'], case['rejected'])
+
+    def authority_environment_names(self):
+        return (
+            'ACTIONS_RUNNER_INPUT_TOKEN', 'OPENAI_API_KEY',
+            'ANTHROPIC_API_KEY', 'GEMINI_API_KEY',
+            'AGENT_CONTROLLER_HMAC', 'AGENT_CONTROLLER_KEY',
+            'AGENT_CONTROLLER_SECRET', 'AGENT_CONTROLLER_TOKEN',
+            'AGENT_CONTROLLER_AUTH', 'PRIVATE_CI_HMAC', 'PRIVATE_CI_KEY',
+            'PRIVATE_CI_SECRET', 'PRIVATE_CI_TOKEN', 'PRIVATE_CI_AUTH',
+        )
+
+    def test_broker_allows_github_auth_names_but_rejects_other_authority(self):
+        candidate = render_phase5_exactly_one_job_candidate(
+            self.binding(), phase4_result_sha256='b' * 64,
+            target_probe_sha256='c' * 64,
+        )
+        cases = [dict(names=names, rejected=False) for names in (
+            [], ['PATH'], ['GH_TOKEN'], ['GITHUB_TOKEN'],
+            ['GH_TOKEN', 'GITHUB_TOKEN'], ['gh_token', 'github_token'],
+        )]
+        for name in self.authority_environment_names():
+            cases.append(dict(names=[name], rejected=True))
+            cases.append(dict(names=['GH_TOKEN', 'GITHUB_TOKEN', name.lower()],
+                              rejected=True))
+        self.run_environment_gate(
+            candidate, '$BridgeForbiddenBrokerEnvironment = @(',
+            '$BridgeExistingRunnerProcesses =', cases,
+        )
+
+    def test_target_environment_gate_still_rejects_all_authority_names(self):
+        probe = (self.repo_root / 'scripts' /
+                 'Invoke-PrivateCiPhase4TargetProbe.ps1').read_text(encoding='utf-8')
+        cases = [dict(names=[], rejected=False),
+                 dict(names=['PATH'], rejected=False)]
+        for name in ('GH_TOKEN', 'GITHUB_TOKEN', *self.authority_environment_names()):
+            cases.append(dict(names=[name], rejected=True))
+            cases.append(dict(names=[name.lower()], rejected=True))
+        cases.append(dict(names=['GH_TOKEN', 'GITHUB_TOKEN'], rejected=True))
+        self.run_environment_gate(
+            probe, '$ForbiddenEnvironment = @(', '$BrokerCredentialRoots =', cases,
+        )
+
     def run_predispatch(self, reads, *, read_error=False, local_failure="", exit_after=None,
                         queue_failure=False, dispatch_failure=False, kill_failure=False,
                         stalled_executable=None, read_delays=(0,), read_kill_failure=False):

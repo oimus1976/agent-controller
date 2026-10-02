@@ -260,6 +260,7 @@ class PrivateCiPhase5ContractRedTests(unittest.TestCase):
             candidate,
         )
         self.assertIn("Phase 5 target gh authentication isolation failed", candidate)
+        self.assertIn("$BridgeProbeResult.gh_authenticated -ne $false", candidate)
         self.assertIn("Phase 5 broker credential isolation failed", candidate)
         self.assertIn("Phase 5 security probe admin status unsafe", candidate)
         self.assertIn("Phase 5 durable authority isolation failed", candidate)

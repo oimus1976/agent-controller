@@ -15,6 +15,14 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-10-02 — Phase 5 permits broker GitHub auth environment names (Issue #298, Draft / unmerged)
+
+- The rendered Phase 5 broker gate permits `GH_TOKEN` and `GITHUB_TOKEN` for the broker's own authenticated GitHub CLI operations. Other forbidden broker authority names still fail closed.
+- Target environment rejection, `gh_authenticated=false`, credential isolation, queue/readiness checks, exactly-one-dispatch and no-retry behavior are unchanged. This fix grants no live retry authority; #216 needs a fresh pilot identity/authority sequence after human merge.
+- Focused PowerShell regressions execute the broker and target name gates with name-only fixtures; no token values are read or created.
+
+---
+
 ## 2026-10-01 — Agent Controller North Star is restated as an end-to-end provider-neutral product path (Issue #292, Draft / unmerged)
 
 Related: Issue #292; ADR #12; ADR #90; #55; #168; #178; #183; #200; #215; #216; #279
