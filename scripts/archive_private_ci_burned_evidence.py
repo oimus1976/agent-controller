@@ -534,6 +534,8 @@ def _controller_git_metadata(
             raise RuntimeError("controller Git metadata outside trusted profile") from error
         current = trusted_profile
         for part in ("", *relative.parts):
+            if part and ":" in part:
+                raise RuntimeError("controller Git metadata path is ambiguous")
             current = current / part
             # Relative commondir paths normally contain ../..; do not let
             # them escape the profile, even temporarily.
@@ -546,8 +548,6 @@ def _controller_git_metadata(
                 getattr(observed, "st_file_attributes", 0) & 0x400
             ):
                 raise RuntimeError("controller Git metadata contains symlink/reparse")
-            if part and ":" in part:
-                raise RuntimeError("controller Git metadata path is ambiguous")
             if current != path and not stat.S_ISDIR(observed.st_mode):
                 raise RuntimeError("controller Git metadata ancestor is not directory")
             bindings.append((current, observed.st_dev, observed.st_ino, None))
@@ -567,7 +567,8 @@ def _controller_git_metadata(
             opened = os.fstat(handle.fileno())
             raw = handle.read(65537)
         after = path.lstat()
-        identity = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_size)
+        def identity(value: os.stat_result) -> tuple[int, int, int, int]:
+            return value.st_dev, value.st_ino, value.st_mode, value.st_size
         if identity(observed) != identity(opened) or identity(observed) != identity(after):
             raise RuntimeError("controller Git metadata pointer changed during read")
         if len(raw) != observed.st_size:

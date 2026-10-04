@@ -4,7 +4,6 @@ import contextlib
 import importlib.util
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -252,12 +251,14 @@ class SourceVerificationGitTests(unittest.TestCase):
         self.linked()
         path = self.root / ".git"
         raw = path.read_bytes()
-        # Git for Windows marks linked-worktree gitfiles read-only.
-        path.chmod(stat.S_IREAD | stat.S_IWRITE)
         # Same target, different pointer bytes: even benign drift invalidates
         # the metadata snapshot used for the verification.
         def mutate():
-            path.write_bytes(raw.rstrip(b"\r\n") + b"\r\n")
+            # Git for Windows hides gitfiles. Open the existing file rather
+            # than using CREATE_ALWAYS, which rejects hidden files there.
+            with path.open("r+b") as handle:
+                handle.write(raw.rstrip(b"\r\n") + b"\r\n")
+                handle.truncate()
         with self.assertRaisesRegex(RuntimeError, "metadata drift"):
             self.verify(mutate=mutate)
 
