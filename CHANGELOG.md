@@ -15,6 +15,13 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-10-04 — Archive planner accepts canonical linked worktrees (Issue #300, Draft / unmerged)
+
+- Source verification resolves ordinary `.git` directories and linked-worktree gitfiles within the trusted profile, rejecting malformed pointers, symlink/reparse paths, invalid common-directory topology, mismatched backlinks, and metadata drift during verification.
+- Trusted Git/environment, clean-tree and fresh remote-main equality, canonical source-blob authentication, and strict CRLF materialization checks remain in place. This change grants no archive Apply or live pilot authority.
+
+---
+
 ## 2026-10-02 — Phase 5 permits broker GitHub auth environment names (Issue #298, Draft / unmerged)
 
 - The rendered Phase 5 broker gate permits `GH_TOKEN` and `GITHUB_TOKEN` for the broker's own authenticated GitHub CLI operations. Other forbidden broker authority names still fail closed.

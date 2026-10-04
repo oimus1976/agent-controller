@@ -514,6 +514,102 @@ def _require_digest(value: str) -> str:
     return value
 
 
+def _controller_git_metadata(
+    root: Path,
+    trusted_profile: Path,
+) -> tuple[Path, tuple[tuple[Path, int, int, bytes | None], ...]]:
+    """Resolve only plain, profile-contained checkout/worktree metadata.
+
+    Check lexical components *before* resolve() can hide a reparse point.
+    A linked worktree must have reciprocal gitfile/admin-dir bindings and
+    the standard common-dir/worktrees/<id> topology. Snapshot these bindings
+    so source verification can reject metadata substitution during its reads.
+    """
+    bindings: list[tuple[Path, int, int, bytes | None]] = []
+
+    def plain(path: Path) -> tuple[Path, os.stat_result]:
+        try:
+            relative = path.relative_to(trusted_profile)
+        except ValueError as error:
+            raise RuntimeError("controller Git metadata outside trusted profile") from error
+        current = trusted_profile
+        for part in ("", *relative.parts):
+            current = current / part
+            # Relative commondir paths normally contain ../..; do not let
+            # them escape the profile, even temporarily.
+            try:
+                Path(os.path.abspath(current)).relative_to(trusted_profile)
+            except ValueError as error:
+                raise RuntimeError("controller Git metadata outside trusted profile") from error
+            observed = current.lstat()
+            if current.is_symlink() or (
+                getattr(observed, "st_file_attributes", 0) & 0x400
+            ):
+                raise RuntimeError("controller Git metadata contains symlink/reparse")
+            if part and ":" in part:
+                raise RuntimeError("controller Git metadata path is ambiguous")
+            if current != path and not stat.S_ISDIR(observed.st_mode):
+                raise RuntimeError("controller Git metadata ancestor is not directory")
+            bindings.append((current, observed.st_dev, observed.st_ino, None))
+        return path.resolve(strict=True), observed
+
+    def directory(path: Path) -> Path:
+        resolved, observed = plain(path)
+        if not stat.S_ISDIR(observed.st_mode):
+            raise RuntimeError("controller Git metadata directory missing")
+        return resolved
+
+    def pointer(path: Path, prefix: str = "") -> Path:
+        resolved, observed = plain(path)
+        if not stat.S_ISREG(observed.st_mode) or observed.st_size > 65536:
+            raise RuntimeError("controller Git metadata pointer is not a bounded regular file")
+        with resolved.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            raw = handle.read(65537)
+        after = path.lstat()
+        identity = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_size)
+        if identity(observed) != identity(opened) or identity(observed) != identity(after):
+            raise RuntimeError("controller Git metadata pointer changed during read")
+        if len(raw) != observed.st_size:
+            raise RuntimeError("controller Git metadata pointer size drift")
+        bindings.append((path, observed.st_dev, observed.st_ino, raw))
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise RuntimeError("controller Git metadata pointer is not UTF-8") from error
+        if text.endswith("\r\n"):
+            text = text[:-2]
+        elif text.endswith("\n"):
+            text = text[:-1]
+        if not text.startswith(prefix):
+            raise RuntimeError("controller Git metadata pointer malformed")
+        target = text[len(prefix):]
+        if (
+            not target or target != target.strip()
+            or any(ord(character) < 32 or ord(character) == 127 for character in target)
+        ):
+            raise RuntimeError("controller Git metadata pointer malformed")
+        candidate = Path(target)
+        if candidate.drive and not candidate.is_absolute():
+            raise RuntimeError("controller Git metadata path is ambiguous")
+        return candidate if candidate.is_absolute() else path.parent / candidate
+
+    checkout_git = root / ".git"
+    resolved, observed = plain(checkout_git)
+    if stat.S_ISDIR(observed.st_mode):
+        if (resolved / "commondir").exists() or (resolved / "commondir").is_symlink():
+            raise RuntimeError("controller ordinary Git directory has indirect commondir")
+        return resolved, tuple(bindings)
+    git_dir = directory(pointer(checkout_git, "gitdir: "))
+    common_dir = directory(pointer(git_dir / "commondir"))
+    if git_dir.parent.name != "worktrees" or git_dir.parent.parent != common_dir:
+        raise RuntimeError("controller linked Git metadata topology invalid")
+    backlink, backlink_stat = plain(pointer(git_dir / "gitdir"))
+    if backlink != resolved or not stat.S_ISREG(backlink_stat.st_mode):
+        raise RuntimeError("controller linked Git metadata backlink mismatch")
+    return git_dir, tuple(bindings)
+
+
 def _require_controller_source_exact(
 ) -> tuple[str, Path, dict[str, str]]:
     root = _controller_repo_root()
@@ -526,9 +622,7 @@ def _require_controller_source_exact(
 
     git = _trusted_git_path()
     git_env = _trusted_git_environment()
-    git_dir = root / ".git"
-    if not git_dir.is_dir():
-        raise RuntimeError("controller .git directory missing")
+    git_dir, metadata_binding = _controller_git_metadata(root, trusted_profile)
 
     trusted_cwd = _trusted_system_directory()
     local_head = _require_success(
@@ -639,6 +733,8 @@ def _require_controller_source_exact(
                     f"{relative_path}"
                 )
 
+    if _controller_git_metadata(root, trusted_profile) != (git_dir, metadata_binding):
+        raise RuntimeError("controller Git metadata drift during source verification")
     return local_head, root, canonical_blob_ids
 
 def _windows_boundary_state() -> dict[str, object]:

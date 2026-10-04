@@ -27,6 +27,7 @@ This table lists pointers only. Status comes from each authority Issue's latest 
 | Workstream | Authority Issue | Related Issues / PRs | Checkpoints |
 |---|---|---|---|
 | Private-CI live pilot (main line) | [#216](https://github.com/oimus1976/agent-controller/issues/216) | [#229](https://github.com/oimus1976/agent-controller/issues/229), [#243](https://github.com/oimus1976/agent-controller/issues/243) | comments on #216 |
+| Archive planner canonical linked-worktree support | [#300](https://github.com/oimus1976/agent-controller/issues/300) | parent [#216](https://github.com/oimus1976/agent-controller/issues/216), scope [#297](https://github.com/oimus1976/agent-controller/issues/297) | comments on #300 |
 | Phase 5 broker GitHub auth blocker | [#298](https://github.com/oimus1976/agent-controller/issues/298) | parent [#216](https://github.com/oimus1976/agent-controller/issues/216), scope [#297](https://github.com/oimus1976/agent-controller/issues/297) | comments on #298 |
 | Phase 5 readiness and pre-dispatch cleanup | [#277](https://github.com/oimus1976/agent-controller/issues/277) | parent [#216](https://github.com/oimus1976/agent-controller/issues/216) | comments on #277 |
 | Test-suite audit follow-up | [#246](https://github.com/oimus1976/agent-controller/issues/246) | [#254](https://github.com/oimus1976/agent-controller/issues/254) / PR [#255](https://github.com/oimus1976/agent-controller/pull/255) | comments on #246 |
