@@ -92,6 +92,11 @@ def phase0_bytes():
         runner_task_count=0,
         powershell_version="5.1.26100.9444",
         python_version="3.12.10",
+        machine_policy="Undefined",
+        target_user_policy="Undefined",
+        execution_policy_target_identity=PRIVATE_CI_TARGET_IDENTITY,
+        execution_policy_target_sid="S-1-5-21-111-222-333-1007",
+        effective_policy_with_process_bypass="Bypass",
     )
     return phase0_canonical_bytes(evidence)
 

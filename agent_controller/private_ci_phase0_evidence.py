@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath, PureWindowsPath
 
@@ -14,7 +15,7 @@ from agent_controller.private_ci_pilot_identity import (
 )
 
 
-PHASE0_EVIDENCE_SCHEMA = "agent-controller.private-ci-phase0-evidence.v2"
+PHASE0_EVIDENCE_SCHEMA = "agent-controller.private-ci-phase0-evidence.v3"
 
 # Historical values retained only for regression fixtures / archival inspection.
 # They are not authority defaults for a future fresh pilot.
@@ -62,6 +63,11 @@ class Phase0Evidence:
     runner_task_count: int
     powershell_version: str
     python_version: str
+    machine_policy: str
+    target_user_policy: str
+    execution_policy_target_identity: str
+    execution_policy_target_sid: str
+    effective_policy_with_process_bypass: str
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -91,6 +97,9 @@ def parse_phase0_evidence(raw: bytes) -> Phase0Evidence:
         raise ValueError("phase0 evidence JSON invalid") from error
     if type(payload) is not dict:
         raise ValueError("phase0 evidence must be object")
+    # Historical shapes are never upgraded into fresh policy authority.
+    if payload.get("schema") != PHASE0_EVIDENCE_SCHEMA:
+        raise ValueError("phase0 evidence schema unsupported; fresh v3 collection required")
     expected_keys = set(Phase0Evidence.__dataclass_fields__)
     if set(payload) != expected_keys:
         raise ValueError("phase0 evidence fields invalid")
@@ -268,6 +277,28 @@ def phase0_reason_codes(evidence: object) -> tuple[str, ...]:
         and evidence.python_version.startswith("3.12.")
     ):
         reasons.append("PHASE0_PYTHON_VERSION_INVALID")
+
+    if evidence.execution_policy_target_identity != evidence.target_identity:
+        reasons.append("PHASE0_EXECUTION_POLICY_TARGET_IDENTITY_MISMATCH")
+    if (
+        type(evidence.execution_policy_target_sid) is not str
+        or re.fullmatch(r"S-1-5-21-\d+-\d+-\d+-\d+", evidence.execution_policy_target_sid) is None
+    ):
+        reasons.append("PHASE0_EXECUTION_POLICY_TARGET_SID_INVALID")
+    policies = ("Undefined", "Restricted", "AllSigned", "RemoteSigned", "Unrestricted", "Bypass")
+    if type(evidence.machine_policy) is not str or evidence.machine_policy not in policies:
+        reasons.append("PHASE0_MACHINE_POLICY_UNKNOWN")
+    if type(evidence.target_user_policy) is not str or evidence.target_user_policy not in policies:
+        reasons.append("PHASE0_TARGET_USER_POLICY_UNKNOWN")
+    effective = (
+        evidence.machine_policy if evidence.machine_policy != "Undefined"
+        else evidence.target_user_policy if evidence.target_user_policy != "Undefined"
+        else "Bypass"
+    )
+    if evidence.effective_policy_with_process_bypass != effective:
+        reasons.append("PHASE0_EFFECTIVE_POLICY_WITH_PROCESS_BYPASS_MISMATCH")
+    if effective != "Bypass":
+        reasons.append("PHASE0_PROCESS_BYPASS_BLOCKED_BY_GROUP_POLICY")
     return tuple(reasons)
 
 

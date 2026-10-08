@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -24,6 +25,46 @@ PYTHON_EXECUTABLE = r"C:\Program Files\Python312\python.exe"
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 PathExists = Callable[[Path], bool]
 Now = Callable[[], datetime]
+
+# Windows PowerShell 5.1 UserPolicy registry semantics, read from the resolved
+# target SID's *already loaded* hive. Never read broker HKCU, load NTUSER.DAT,
+# log on the target, or write policy/profile/account state to obtain evidence.
+_TARGET_USER_POLICY_PROBE = r"""
+function Read-Phase0TargetUserPolicy {
+    param($Users, [string]$TargetSid)
+    $Hive = $null
+    $Policy = $null
+    try {
+        $Hive = $Users.OpenSubKey($TargetSid, $false)
+        if ($null -eq $Hive) {
+            throw 'target UserPolicy unreadable: target SID hive is not loaded; no hive/profile mutation permitted'
+        }
+        $Policy = $Hive.OpenSubKey('Software\Policies\Microsoft\Windows\PowerShell', $false)
+        if ($null -eq $Policy) { return 'Undefined' }
+        if (@($Policy.GetValueNames()) -notcontains 'EnableScripts') { return 'Undefined' }
+        if ($Policy.GetValueKind('EnableScripts') -ne [Microsoft.Win32.RegistryValueKind]::DWord) {
+            throw 'target UserPolicy unknown: EnableScripts is not DWORD'
+        }
+        $Enabled = $Policy.GetValue('EnableScripts')
+        if ($Enabled -eq 0) { return 'Restricted' }
+        if ($Enabled -ne 1) { throw 'target UserPolicy unknown: EnableScripts is not 0 or 1' }
+        if (@($Policy.GetValueNames()) -notcontains 'ExecutionPolicy' -or
+            $Policy.GetValueKind('ExecutionPolicy') -ne [Microsoft.Win32.RegistryValueKind]::String) {
+            throw 'target UserPolicy unknown: enabled policy has no readable string ExecutionPolicy'
+        }
+        $Value = $Policy.GetValue('ExecutionPolicy')
+        foreach ($Known in @('Restricted', 'AllSigned', 'RemoteSigned', 'Unrestricted', 'Bypass')) {
+            if ($Value -ieq $Known) { return $Known }
+        }
+        throw 'target UserPolicy unknown: unrecognized ExecutionPolicy'
+    } catch {
+        throw ('target UserPolicy unreadable/unknown: ' + $_.Exception.Message)
+    } finally {
+        if ($null -ne $Policy) { $Policy.Dispose() }
+        if ($null -ne $Hive) { $Hive.Dispose() }
+    }
+}
+""".strip()
 
 
 def _default_command_runner(*command: str, cwd=None) -> subprocess.CompletedProcess[str]:
@@ -64,8 +105,12 @@ def _local_probe(
     target_identity: str,
 ) -> dict[str, object]:
     quoted_target = target_identity.replace("'", "''")
-    script = r"""
+    script = _TARGET_USER_POLICY_PROBE + "\n" + r"""
 $ErrorActionPreference = 'Stop'
+if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1 -or
+    -not [Environment]::Is64BitProcess) {
+    throw 'execution policy probe requires 64-bit Windows PowerShell 5.1'
+}
 $TargetName = '__TARGET_IDENTITY__'
 $Target = Get-LocalUser -Name $TargetName -ErrorAction SilentlyContinue
 $TargetEnabled = $false
@@ -80,6 +125,13 @@ if ($null -ne $Target) {
         $_.Name -ieq $Qualified -or $_.Name -ieq $TargetName
     })
 }
+if ($null -eq $Target) { throw 'target UserPolicy unreadable: target account not found' }
+$TargetSid = $Target.SID.Value
+$MachinePolicy = (Get-ExecutionPolicy -Scope MachinePolicy -ErrorAction Stop).ToString()
+$TargetUserPolicy = Read-Phase0TargetUserPolicy -Users ([Microsoft.Win32.Registry]::Users) -TargetSid $TargetSid
+$EffectivePolicy = 'Bypass'
+if ($MachinePolicy -ne 'Undefined') { $EffectivePolicy = $MachinePolicy }
+elseif ($TargetUserPolicy -ne 'Undefined') { $EffectivePolicy = $TargetUserPolicy }
 $RunnerProcesses = @(
     Get-CimInstance Win32_Process -ErrorAction Stop |
         Where-Object { $_.Name -match 'Runner|actions' }
@@ -107,16 +159,26 @@ $RunnerTasks = @(
     runner_service_count = $RunnerServices.Count
     runner_task_count = $RunnerTasks.Count
     powershell_version = $PSVersionTable.PSVersion.ToString()
+    machine_policy = $MachinePolicy
+    target_user_policy = $TargetUserPolicy
+    execution_policy_target_identity = $Target.Name
+    execution_policy_target_sid = $TargetSid
+    effective_policy_with_process_bypass = $EffectivePolicy
 } | ConvertTo-Json -Compress
 """.strip().replace("__TARGET_IDENTITY__", quoted_target)
     completed = command_runner(
         "powershell.exe",
         "-NoProfile",
+        "-NonInteractive",
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
         script,
     )
+    if completed.returncode != 0:
+        if "target SID hive is not loaded" in completed.stderr:
+            raise ValueError("phase0 blocked: target UserPolicy unreadable: target SID hive is not loaded; no hive/profile mutation permitted")
+        raise ValueError("phase0 blocked: local identity/execution-policy probe failed; target MachinePolicy/UserPolicy not proven readable")
     payload = _json_output(completed, "local-probe")
     if type(payload) is not dict:
         raise ValueError("phase0 collection invalid local probe shape")
@@ -248,7 +310,7 @@ def collect_phase0_evidence(
 
     runners = _runner_items(command_runner, pilot_freeze.repository)
 
-    return Phase0Evidence(
+    evidence = Phase0Evidence(
         schema=PHASE0_EVIDENCE_SCHEMA,
         collected_at=now().isoformat(),
         status="PHASE0_PASS",
@@ -288,7 +350,16 @@ def collect_phase0_evidence(
         runner_task_count=int(local.get("runner_task_count", -1)),
         powershell_version=str(local.get("powershell_version", "")),
         python_version=python_version,
+        machine_policy=local.get("machine_policy", "Unknown"),
+        target_user_policy=local.get("target_user_policy", "Unknown"),
+        execution_policy_target_identity=local.get("execution_policy_target_identity", ""),
+        execution_policy_target_sid=local.get("execution_policy_target_sid", ""),
+        effective_policy_with_process_bypass=local.get("effective_policy_with_process_bypass", "Unknown"),
     )
+    # Even the unvalidated collector must not label a policy failure PASS.
+    if phase0_reason_codes(evidence):
+        evidence = replace(evidence, status="PHASE0_BLOCKED")
+    return evidence
 
 
 def collect_validated_phase0_evidence(
