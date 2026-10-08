@@ -18,7 +18,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 ## 2026-10-08 — Phase 0 binds target Windows PowerShell Group Policy (Issue #303, Draft / unmerged)
 
 - Canonical Phase 0 evidence v3 records MachinePolicy, the resolved target identity/SID's UserPolicy, and the effective policy with process-scoped Bypass. Unknown/unreadable policy, a substituted broker subject, or a Group Policy that prevents effective Bypass blocks Phase 0. Historical v2 evidence is not upgraded into fresh authority.
-- The Windows PowerShell 5.1 read-only collector opens only the target's already-loaded SID hive. An unloaded/inaccessible hive is a precise blocker; no hive loading, logon, registry write, or account/profile mutation is added. Existing fresh-freeze bindings and exclusive canonical output remain enforced.
+- The Windows PowerShell 5.1 collector strictly reads MachinePolicy from HKLM and UserPolicy only from the target's already-loaded SID hive; malformed registry values cannot be normalized to Undefined. An unloaded/inaccessible hive is a precise blocker; no hive loading, logon, registry write, or account/profile mutation is added. Existing fresh-freeze bindings and exclusive canonical output remain enforced.
 - Fixture regressions execute the policy probe under Windows PowerShell 5.1 without real policy writes or target execution, and cover canonical bytes, historical shapes, freeze digest binding, and no-overwrite behavior. No fresh pilot freeze, registration, credential acquisition, dispatch, old-generation/profile/account cleanup, or #302 archive/authority change was performed. Independent review and human Ready/merge remain required.
 
 ---

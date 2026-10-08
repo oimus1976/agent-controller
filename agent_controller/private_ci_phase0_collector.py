@@ -26,41 +26,51 @@ CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 PathExists = Callable[[Path], bool]
 Now = Callable[[], datetime]
 
-# Windows PowerShell 5.1 UserPolicy registry semantics, read from the resolved
-# target SID's *already loaded* hive. Never read broker HKCU, load NTUSER.DAT,
-# log on the target, or write policy/profile/account state to obtain evidence.
-_TARGET_USER_POLICY_PROBE = r"""
-function Read-Phase0TargetUserPolicy {
-    param($Users, [string]$TargetSid)
-    $Hive = $null
+# Read the two Windows PowerShell 5.1 GP scopes strictly: Get-ExecutionPolicy
+# can normalize malformed MachinePolicy data to Undefined. Target UserPolicy
+# comes only from its resolved, already-loaded SID hive, never broker HKCU.
+# No hive loading, target logon, or policy/profile/account writes are permitted.
+_EXECUTION_POLICY_PROBE = r"""
+function Read-Phase0GroupPolicy {
+    param($Hive, [string]$Scope)
     $Policy = $null
     try {
-        $Hive = $Users.OpenSubKey($TargetSid, $false)
-        if ($null -eq $Hive) {
-            throw 'target UserPolicy unreadable: target SID hive is not loaded; no hive/profile mutation permitted'
-        }
         $Policy = $Hive.OpenSubKey('Software\Policies\Microsoft\Windows\PowerShell', $false)
         if ($null -eq $Policy) { return 'Undefined' }
         if (@($Policy.GetValueNames()) -notcontains 'EnableScripts') { return 'Undefined' }
         if ($Policy.GetValueKind('EnableScripts') -ne [Microsoft.Win32.RegistryValueKind]::DWord) {
-            throw 'target UserPolicy unknown: EnableScripts is not DWORD'
+            throw "${Scope} unknown: EnableScripts is not DWORD"
         }
         $Enabled = $Policy.GetValue('EnableScripts')
         if ($Enabled -eq 0) { return 'Restricted' }
-        if ($Enabled -ne 1) { throw 'target UserPolicy unknown: EnableScripts is not 0 or 1' }
+        if ($Enabled -ne 1) { throw "${Scope} unknown: EnableScripts is not 0 or 1" }
         if (@($Policy.GetValueNames()) -notcontains 'ExecutionPolicy' -or
             $Policy.GetValueKind('ExecutionPolicy') -ne [Microsoft.Win32.RegistryValueKind]::String) {
-            throw 'target UserPolicy unknown: enabled policy has no readable string ExecutionPolicy'
+            throw "${Scope} unknown: enabled policy has no readable string ExecutionPolicy"
         }
         $Value = $Policy.GetValue('ExecutionPolicy')
         foreach ($Known in @('Restricted', 'AllSigned', 'RemoteSigned', 'Unrestricted', 'Bypass')) {
             if ($Value -ieq $Known) { return $Known }
         }
-        throw 'target UserPolicy unknown: unrecognized ExecutionPolicy'
+        throw "${Scope} unknown: unrecognized ExecutionPolicy"
+    } catch {
+        throw ("${Scope} unreadable/unknown: " + $_.Exception.Message)
+    } finally {
+        if ($null -ne $Policy) { $Policy.Dispose() }
+    }
+}
+function Read-Phase0TargetUserPolicy {
+    param($Users, [string]$TargetSid)
+    $Hive = $null
+    try {
+        $Hive = $Users.OpenSubKey($TargetSid, $false)
+        if ($null -eq $Hive) {
+            throw 'target UserPolicy unreadable: target SID hive is not loaded; no hive/profile mutation permitted'
+        }
+        return Read-Phase0GroupPolicy -Hive $Hive -Scope 'target UserPolicy'
     } catch {
         throw ('target UserPolicy unreadable/unknown: ' + $_.Exception.Message)
     } finally {
-        if ($null -ne $Policy) { $Policy.Dispose() }
         if ($null -ne $Hive) { $Hive.Dispose() }
     }
 }
@@ -105,7 +115,7 @@ def _local_probe(
     target_identity: str,
 ) -> dict[str, object]:
     quoted_target = target_identity.replace("'", "''")
-    script = _TARGET_USER_POLICY_PROBE + "\n" + r"""
+    script = _EXECUTION_POLICY_PROBE + "\n" + r"""
 $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1 -or
     -not [Environment]::Is64BitProcess) {
@@ -127,7 +137,7 @@ if ($null -ne $Target) {
 }
 if ($null -eq $Target) { throw 'target UserPolicy unreadable: target account not found' }
 $TargetSid = $Target.SID.Value
-$MachinePolicy = (Get-ExecutionPolicy -Scope MachinePolicy -ErrorAction Stop).ToString()
+$MachinePolicy = Read-Phase0GroupPolicy -Hive ([Microsoft.Win32.Registry]::LocalMachine) -Scope 'MachinePolicy'
 $TargetUserPolicy = Read-Phase0TargetUserPolicy -Users ([Microsoft.Win32.Registry]::Users) -TargetSid $TargetSid
 $EffectivePolicy = 'Bypass'
 if ($MachinePolicy -ne 'Undefined') { $EffectivePolicy = $MachinePolicy }
@@ -178,6 +188,10 @@ $RunnerTasks = @(
     if completed.returncode != 0:
         if "target SID hive is not loaded" in completed.stderr:
             raise ValueError("phase0 blocked: target UserPolicy unreadable: target SID hive is not loaded; no hive/profile mutation permitted")
+        if "MachinePolicy unreadable/unknown" in completed.stderr:
+            raise ValueError("phase0 blocked: MachinePolicy registry state unreadable or malformed")
+        if "target UserPolicy unreadable/unknown" in completed.stderr:
+            raise ValueError("phase0 blocked: target UserPolicy SID hive/policy unreadable or malformed; no hive/profile mutation permitted")
         raise ValueError("phase0 blocked: local identity/execution-policy probe failed; target MachinePolicy/UserPolicy not proven readable")
     payload = _json_output(completed, "local-probe")
     if type(payload) is not dict:

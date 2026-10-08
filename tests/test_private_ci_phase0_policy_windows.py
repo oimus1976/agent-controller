@@ -43,6 +43,10 @@ $Fixture = $env:PHASE0_POLICY_FIXTURE | ConvertFrom-Json
 $Users = [FixtureKey]::new()
 $TargetHive = [FixtureKey]::new()
 $PolicyKey = [FixtureKey]::new()
+$MachineHive = [FixtureKey]::new()
+$MachinePolicyKey = [FixtureKey]::new()
+$MachineHive.Denied = $Fixture.machine_hive_denied
+$MachinePolicyKey.Denied = $Fixture.machine_value_denied
 $Users.Denied = $Fixture.users_denied
 $TargetHive.Denied = $Fixture.hive_denied
 $PolicyKey.Denied = $Fixture.value_denied
@@ -54,6 +58,13 @@ if ($Fixture.loaded) { $Users.Children['S-1-5-21-111-222-333-1007'] = $TargetHiv
 if ($Fixture.policy_present) {
     $TargetHive.Children['Software\Policies\Microsoft\Windows\PowerShell'] = $PolicyKey
 }
+foreach ($Property in $Fixture.machine_values.PSObject.Properties) {
+    $MachinePolicyKey.Values[$Property.Name] = $Property.Value
+    $MachinePolicyKey.Kinds[$Property.Name] = $Fixture.machine_kinds.($Property.Name)
+}
+if ($Fixture.machine_policy_present) {
+    $MachineHive.Children['Software\Policies\Microsoft\Windows\PowerShell'] = $MachinePolicyKey
+}
 # Broker has a readable hive without UserPolicy. It must never be selected.
 $Users.Children['S-1-5-21-111-222-333-1001'] = [FixtureKey]::new()
 function Get-LocalUser {
@@ -64,11 +75,6 @@ function Get-LocalGroup { param($SID) [pscustomobject]@{ Name = 'FixtureAdminist
 function Get-LocalGroupMember { param($Group, $ErrorAction) }
 function Get-CimInstance { param($ClassName, $ErrorAction) }
 function Get-ScheduledTask { param($ErrorAction) }
-function Get-ExecutionPolicy {
-    param($Scope, $ErrorAction)
-    if ($Scope -ne 'MachinePolicy') { throw 'broker UserPolicy must not be read' }
-    return $Fixture.machine_policy
-}
 """
 
 
@@ -85,14 +91,25 @@ class Phase0PolicyWindowsTests(unittest.TestCase):
         _local_probe(capture, "ac-runner")
         # Execute the exact collector script; substitute only its OS registry
         # root. Cmdlet doubles above provide all other OS observations.
-        cls.script = commands[0][-1].replace("([Microsoft.Win32.Registry]::Users)", "$Users")
+        cls.script = commands[0][-1].replace(
+            "([Microsoft.Win32.Registry]::Users)", "$Users",
+        ).replace("([Microsoft.Win32.Registry]::LocalMachine)", "$MachineHive")
 
     def probe(self, **changes):
         fixture = {
-            "loaded": True, "policy_present": True, "machine_policy": "Undefined",
+            "loaded": True, "policy_present": True,
             "values": {}, "kinds": {}, "users_denied": False,
             "hive_denied": False, "value_denied": False,
+            "machine_values": {}, "machine_kinds": {}, "machine_policy_present": True,
+            "machine_hive_denied": False, "machine_value_denied": False,
         }
+        machine_policy = changes.pop("machine_policy", "Undefined")
+        if machine_policy != "Undefined":
+            fixture["machine_values"] = {"EnableScripts": 0 if machine_policy == "Restricted" else 1}
+            fixture["machine_kinds"] = {"EnableScripts": "DWord"}
+            if machine_policy != "Restricted":
+                fixture["machine_values"]["ExecutionPolicy"] = machine_policy
+                fixture["machine_kinds"]["ExecutionPolicy"] = "String"
         fixture.update(changes)
         environment = {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
         environment["PHASE0_POLICY_FIXTURE"] = json.dumps(fixture)
@@ -102,6 +119,7 @@ class Phase0PolicyWindowsTests(unittest.TestCase):
 if ($Users.OpenedName -ne 'S-1-5-21-111-222-333-1007') { throw 'wrong policy SID' }
 if (-not $TargetHive.Disposed) { throw 'hive handle leaked' }
 if ($Fixture.policy_present -and -not $PolicyKey.Disposed) { throw 'policy handle leaked' }
+if ($Fixture.machine_policy_present -and -not $MachinePolicyKey.Disposed) { throw 'machine policy handle leaked' }
 """
         return subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -111,7 +129,7 @@ if ($Fixture.policy_present -and -not $PolicyKey.Disposed) { throw 'policy handl
         )
 
     def test_loaded_target_hive_without_policy_allows_process_bypass(self):
-        for changes in ({}, {"policy_present": False}):
+        for changes in ({}, {"policy_present": False}, {"machine_policy_present": False}):
             with self.subTest(changes=changes):
                 completed = self.probe(**changes)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -167,6 +185,22 @@ if ($Fixture.policy_present -and -not $PolicyKey.Disposed) { throw 'policy handl
                 completed = self.probe(values=values, kinds=kinds)
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertIn("target UserPolicy unknown", completed.stderr)
+                self.assertEqual(completed.stdout.strip(), "")
+
+    def test_malformed_or_unreadable_machine_policy_cannot_become_undefined(self):
+        cases = (
+            {"machine_values": {"EnableScripts": 1}, "machine_kinds": {"EnableScripts": "DWord"}},
+            {"machine_values": {"EnableScripts": 2}, "machine_kinds": {"EnableScripts": "DWord"}},
+            {"machine_values": {"EnableScripts": "1"}, "machine_kinds": {"EnableScripts": "String"}},
+            {"machine_values": {"EnableScripts": 1, "ExecutionPolicy": "Unknown"}, "machine_kinds": {"EnableScripts": "DWord", "ExecutionPolicy": "String"}},
+            {"machine_hive_denied": True},
+            {"machine_value_denied": True, "machine_values": {"EnableScripts": 0}, "machine_kinds": {"EnableScripts": "DWord"}},
+        )
+        for changes in cases:
+            with self.subTest(changes=changes):
+                completed = self.probe(**changes)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("MachinePolicy unreadable/unknown", completed.stderr)
                 self.assertEqual(completed.stdout.strip(), "")
 
 

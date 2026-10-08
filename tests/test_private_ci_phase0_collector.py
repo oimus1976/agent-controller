@@ -193,6 +193,23 @@ class Phase0CollectorTests(unittest.TestCase):
                 command_runner=runner, path_exists=lambda path: False,
             )
 
+    def test_malformed_machine_policy_probe_error_blocks_before_github_target_reads(self):
+        calls = []
+
+        def runner(*command, cwd=None):
+            calls.append(command)
+            if command[0] == "powershell.exe":
+                return subprocess.CompletedProcess(command, 1, "", "MachinePolicy unreadable/unknown: EnableScripts is not 0 or 1")
+            return FakeRunner()(*command, cwd=cwd)
+
+        freeze = valid_freeze()
+        with self.assertRaisesRegex(ValueError, "MachinePolicy registry state unreadable or malformed"):
+            collect_validated_phase0_evidence(
+                Path(freeze.controller_tree), pilot_freeze=freeze,
+                command_runner=runner, path_exists=lambda path: False,
+            )
+        self.assertFalse(any(command[0] == "gh.exe" for command in calls))
+
     def test_collects_canonical_fresh_phase0_state(self):
         freeze = valid_freeze()
         evidence = collect_validated_phase0_evidence(
