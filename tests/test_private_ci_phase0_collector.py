@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_controller.private_ci_phase0_collector import (
+    collect_phase0_evidence,
     collect_validated_phase0_evidence,
     phase0_state_matches,
 )
@@ -60,10 +61,12 @@ class FakeRunner:
         target_admin=False,
         runner_process_count=0,
         workflow_path_valid=True,
+        policy_changes=None,
     ):
         self.target_admin = target_admin
         self.runner_process_count = runner_process_count
         self.workflow_path_valid = workflow_path_valid
+        self.policy_changes = policy_changes or {}
 
     def __call__(self, *command, cwd=None):
         freeze = valid_freeze()
@@ -77,7 +80,13 @@ class FakeRunner:
                 "runner_service_count": 0,
                 "runner_task_count": 0,
                 "powershell_version": "5.1.26100.9444",
+                "machine_policy": "Undefined",
+                "target_user_policy": "Undefined",
+                "execution_policy_target_identity": freeze.target_identity,
+                "execution_policy_target_sid": "S-1-5-21-111-222-333-1007",
+                "effective_policy_with_process_bypass": "Bypass",
             }
+            payload.update(self.policy_changes)
             return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
         if command[:4] == ("git.exe", "-C", freeze.controller_tree, "rev-parse"):
             return subprocess.CompletedProcess(command, 0, freeze.controller_main_sha + "\n", "")
@@ -150,6 +159,57 @@ class FakeRunner:
 
 
 class Phase0CollectorTests(unittest.TestCase):
+    def test_policy_failure_never_reports_pass_even_from_unvalidated_collector(self):
+        cases = (
+            {"machine_policy": "Restricted", "effective_policy_with_process_bypass": "Restricted"},
+            {"target_user_policy": "AllSigned", "effective_policy_with_process_bypass": "AllSigned"},
+            {"target_user_policy": None},
+            {"execution_policy_target_identity": PRIVATE_CI_BROKER_IDENTITY},
+        )
+        freeze = valid_freeze()
+        for changes in cases:
+            with self.subTest(changes=changes):
+                evidence = collect_phase0_evidence(
+                    Path(freeze.controller_tree), pilot_freeze=freeze,
+                    command_runner=FakeRunner(policy_changes=changes), path_exists=lambda path: False,
+                )
+                self.assertEqual(evidence.status, "PHASE0_BLOCKED")
+                with self.assertRaisesRegex(ValueError, "phase0 evidence blocked"):
+                    collect_validated_phase0_evidence(
+                        Path(freeze.controller_tree), pilot_freeze=freeze,
+                        command_runner=FakeRunner(policy_changes=changes), path_exists=lambda path: False,
+                    )
+
+    def test_policy_probe_error_is_blocked_with_unloaded_hive_diagnostic(self):
+        def runner(*command, cwd=None):
+            if command[0] == "powershell.exe":
+                return subprocess.CompletedProcess(command, 1, "", "target SID hive is not loaded")
+            return FakeRunner()(*command, cwd=cwd)
+
+        freeze = valid_freeze()
+        with self.assertRaisesRegex(ValueError, "target SID hive is not loaded"):
+            collect_validated_phase0_evidence(
+                Path(freeze.controller_tree), pilot_freeze=freeze,
+                command_runner=runner, path_exists=lambda path: False,
+            )
+
+    def test_malformed_machine_policy_probe_error_blocks_before_github_target_reads(self):
+        calls = []
+
+        def runner(*command, cwd=None):
+            calls.append(command)
+            if command[0] == "powershell.exe":
+                return subprocess.CompletedProcess(command, 1, "", "MachinePolicy unreadable/unknown: EnableScripts is not 0 or 1")
+            return FakeRunner()(*command, cwd=cwd)
+
+        freeze = valid_freeze()
+        with self.assertRaisesRegex(ValueError, "MachinePolicy registry state unreadable or malformed"):
+            collect_validated_phase0_evidence(
+                Path(freeze.controller_tree), pilot_freeze=freeze,
+                command_runner=runner, path_exists=lambda path: False,
+            )
+        self.assertFalse(any(command[0] == "gh.exe" for command in calls))
+
     def test_collects_canonical_fresh_phase0_state(self):
         freeze = valid_freeze()
         evidence = collect_validated_phase0_evidence(
@@ -175,6 +235,10 @@ class Phase0CollectorTests(unittest.TestCase):
         self.assertEqual(evidence.matching_pilot_runner_count, 0)
         self.assertEqual(evidence.runner_process_count, 0)
         self.assertFalse(evidence.target_identity_admin)
+        self.assertEqual(evidence.machine_policy, "Undefined")
+        self.assertEqual(evidence.target_user_policy, "Undefined")
+        self.assertEqual(evidence.execution_policy_target_identity, freeze.target_identity)
+        self.assertEqual(evidence.effective_policy_with_process_bypass, "Bypass")
 
     def test_target_admin_drift_is_rejected_by_fresh_collection(self):
         freeze = valid_freeze()
@@ -233,6 +297,14 @@ class Phase0CollectorTests(unittest.TestCase):
                 replace(later, target_identity_admin=True),
             )
         )
+        for field, value in (
+            ("machine_policy", "Restricted"), ("target_user_policy", "Restricted"),
+            ("execution_policy_target_identity", PRIVATE_CI_BROKER_IDENTITY),
+            ("execution_policy_target_sid", "S-1-5-21-111-222-333-1008"),
+            ("effective_policy_with_process_bypass", "Restricted"),
+        ):
+            with self.subTest(field=field):
+                self.assertFalse(phase0_state_matches(first, replace(later, **{field: value})))
 
 
 if __name__ == "__main__":
