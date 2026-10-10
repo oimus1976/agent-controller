@@ -1,0 +1,70 @@
+{
+  "schema": "issue305.target-context-design.v1",
+  "authority": "DESIGN_FIXTURE_REVIEW_ONLY",
+  "directive_comment": 6098097114,
+  "candidate_lf": {
+    "sha256": "f13078dc24c21dc7a94caabd101907fd3f2c108def3734035858c91f3890f77d",
+    "size": 31239
+  },
+  "candidate_crlf": {
+    "sha256": "ca7db3e0813268a9bd0ab7e9109467b3f4a82783d80fb13839b451a8640568a2",
+    "size": 31509
+  },
+  "target_command": {
+    "sha256": "0cd1eb0cffc994cf08fca6e52792c477e918c41a8654c8a6a0177a581a050e5e",
+    "size": 463
+  },
+  "broker_command": {
+    "sha256": "81caea89d9bc3e603794cbccaad9792c1401b150a0b2b660f14caacff650adfb",
+    "size": 4570
+  },
+  "deadlines_seconds": {
+    "startup": 10,
+    "broker_probe": 12,
+    "worker_total": 35,
+    "owned_exit": 5,
+    "independent_readback": 8,
+    "child_self_lease": 60
+  },
+  "live_binding": null,
+  "decision_a": false,
+  "decision_b": false,
+  "live_plan_schema": {
+    "schema": "issue305.target-context-live.v1",
+    "required": [
+      "host",
+      "broker_identity",
+      "target_sid",
+      "profile_path",
+      "executable",
+      "executable_sha256",
+      "working_directory",
+      "candidate_sha256",
+      "candidate_size",
+      "decision_a",
+      "decision_b",
+      "not_before_utc",
+      "expires_utc"
+    ],
+    "target_account": "ac-runner",
+    "working_directory": "exact executable directory (trusted Windows System32)",
+    "window_max_seconds": 600
+  },
+  "allowed_effects": [
+    "one target credential/profile-loading fixed child",
+    "one short broker launcher retaining the target creation handle",
+    "unchanged broker Phase 0 local policy command",
+    "stdin release or kill only retained owned processes",
+    "independent bounded poststate observation"
+  ],
+  "forbidden_effects": [
+    "canonical Phase 0/freeze",
+    "runner/dispatch/target repository code",
+    "direct registry load/unload",
+    "elevation",
+    "policy/account/group/ACL/service/task modification",
+    "credential logging",
+    "#302 or consumed authority reuse"
+  ],
+  "partial_start_rule": "Supervisor timeout/unknown creation always STOP_PARTIAL_PROFILE_STATE, even if one immediate postread is empty; a delayed OS logon is not disproved by that read."
+}

@@ -15,6 +15,13 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-10-11 — One-off target-context profile-load probe (Issue #305, Draft / unmerged)
+
+- Added a review-only PowerShell 5.1 diagnostic using the supported credential/profile-loading target creation shape and unchanged strict broker Phase 0 policy reader. Fixed channels, lease/release, retained process handles, deadlines and independent poststate observation prevent a diagnostic result from becoming canonical Phase 0 evidence. Unknown startup/cleanup remains `STOP_PARTIAL_PROFILE_STATE`.
+- Frozen LF/CRLF candidate hashes and a design plan have no live binding or decisions. Non-live fixtures mock target process/profile boundaries; no target credentials, real ac-runner process/profile load, freeze, canonical collection, runner registration or dispatch is performed. #195's general gate and #302 consumed authority are unchanged; the historical STOP branch is preserved. Human Ready/merge and separate exact-scope Decisions A/B remain required.
+
+---
+
 ## 2026-10-08 — Phase 0 binds target Windows PowerShell Group Policy (Issue #303, Draft / unmerged)
 
 - Canonical Phase 0 evidence v3 records MachinePolicy, the resolved target identity/SID's UserPolicy, and the effective policy with process-scoped Bypass. Unknown/unreadable policy, a substituted broker subject, or a Group Policy that prevents effective Bypass blocks Phase 0. Historical v2 evidence is not upgraded into fresh authority.
