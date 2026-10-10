@@ -125,7 +125,7 @@ try {
         $Result.unload_status = [Issue305FixtureNative]::RegUnLoadKeyW($Hku, $Mount)
     }
     # Independent process, exact fixture key only. Unknown stays false.
-    $Check = "`$Key = [Microsoft.Win32.Registry]::Users.OpenSubKey('$Mount', `$false); if (`$null -ne `$Key) { `$Key.Dispose(); exit 3 }; 'ABSENT'"
+    $Check = "`$ErrorActionPreference = 'Stop'; try { `$Key = [Microsoft.Win32.Registry]::Users.OpenSubKey('$Mount', `$false); if (`$null -ne `$Key) { `$Key.Dispose(); exit 3 }; 'ABSENT' } catch { exit 4 }"
     $Encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Check))
     $Readback = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -EncodedCommand $Encoded
     $Result.independent_absence = $LASTEXITCODE -eq 0 -and $Readback -eq 'ABSENT'

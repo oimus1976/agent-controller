@@ -24,7 +24,8 @@ fixture deletion; source/sentinel readback is captured before that deletion.
 Its fixed bytes and effect inventory are in `fixture-plan.json`. The plan is a
 fixture plan, not a populated live approval plan. There is no live mode.
 
-Executed outcome (`fixture-result.json`, transcribed from tool stdout):
+Executed outcome (`fixture-result.json`, captured from native process stdout
+after the absence-child fix described below):
 
 - Windows PowerShell `5.1.26100.9444`; non-elevated token.
 - Private synthetic app-hive creation succeeded.
@@ -33,8 +34,8 @@ Executed outcome (`fixture-result.json`, transcribed from tool stdout):
   mount was acquired. Independent readback found the synthetic key absent.
 - Synthetic source SHA-256 before/after was identical; excluded sentinel was
   unchanged; disposable directory was removed.
-- The shell reported nonzero status. The fixture script always requests exit 2
-  and never grants operator authority, even on a hypothetical same-token success.
+- The native process exit code was **2** (captured directly by subprocess).
+  The fixture never grants operator authority, even on same-token success.
 
 Read-only `whoami /priv` independently showed only SeChangeNotifyPrivilege and
 SeIncreaseWorkingSetPrivilege in the available broker token. SeBackupPrivilege
@@ -67,12 +68,31 @@ real hive, a host-policy PASS, or a new generalized hardening workstream.
   covering target SID selection, missing/unreadable/malformed policy, handle
   closure and MachinePolicy precedence using in-memory fixtures.
 - Existing `test_private_ci_phase0_collector.py`: **9 tests PASS**.
+- New `test_issue305_fixture_readback_windows.py`: **4 tests PASS**. It executes
+  the exact absence-child expression with in-memory root doubles: denied/error
+  reads return exit 4 without ABSENT, present key returns 3, successful null
+  read returns 0 and ABSENT. No native hive or host mutation occurs in these tests.
 - New native synthetic boundary fixture: **BLOCKED (1314)**, with negative-path
   cleanup/readback as above. Positive mounted cross-integrity access, load-success
   error/unload-failure paths, live binding drift, ten-minute timeout and live
   exclusion readbacks are **NOT TESTED**, not assumed passed.
 - Independent exact-commit review is requested separately. Self-checks are L0;
   no canonical `inspect-pr` clean-review verdict is claimed in this packet.
+
+Initial independent L2 agent review of `8133e6633dad240666577e76875581068669b4ed`
+found one P2 defect: the absence child could continue after a registry error and
+emit ABSENT. The child now has terminating error preference and explicit catch
+exit 4. The four isolated regressions above and a fresh native negative-path
+run verify the changed bytes. This is one concrete remediation; no alternate
+loader, elevated fixture or speculative framework was attempted. The new head
+requires a fresh reviewer context; the initial review is not carried forward.
+
+The native rerun wrapper removes inherited `PSModulePath`, as the existing
+Windows policy tests do. An earlier Python-launched attempt imported the host's
+PowerShell 7 utility module into the 5.1 process and produced no JSON; that
+attempt is not evidence. A separate diagnostic found no fixture mount/directory
+residue. With the module path isolated, the native process emitted complete
+JSON, no stderr, exit 2, and the same 1314/negative-cleanup disposition.
 
 ## Later human scope, if a safe fixture path is separately established
 

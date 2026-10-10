@@ -9,10 +9,11 @@
   "unload_attempted": false,
   "unload_status": null,
   "independent_absence": true,
-  "source_before_sha256": "521429a0b7347dc2b52c924c4dd5b78bf06cb9e73841772e5e6793a7523f678d",
-  "source_after_sha256": "521429a0b7347dc2b52c924c4dd5b78bf06cb9e73841772e5e6793a7523f678d",
+  "source_before_sha256": "4f40f0dba7bc148938fceb97cdbf28bb1ac876dad5b6f59a38d334033eeffb3e",
+  "source_after_sha256": "4f40f0dba7bc148938fceb97cdbf28bb1ac876dad5b6f59a38d334033eeffb3e",
   "excluded_unchanged": true,
   "fixture_removed": true,
   "error": "Synthetic HKU load failed: 1314",
-  "verdict": "NO_SAFE_OPERATOR_ORCHESTRATION"
+  "verdict": "NO_SAFE_OPERATOR_ORCHESTRATION",
+  "candidate_process_exit_code": 2
 }

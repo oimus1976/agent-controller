@@ -6,8 +6,8 @@
   "controller_baseline_sha": "15459e4395e7ab228e1c140b04256e569643f9b9",
   "candidate": {
     "path": "scripts/Test-Issue305HiveBoundary.ps1",
-    "sha256": "e632d147acde8f6c30c5cad2eb92e051c1948ccd5fad9289bb9a6f1a741dff95",
-    "size": 8074,
+    "sha256": "8ad28c431a9a5977f56cb0e2ffecf1917394c59c4b7956b261c990a1ff76ceff",
+    "size": 8133,
     "runtime": "Windows PowerShell 5.1 x64",
     "kind": "synthetic feasibility candidate; no live mode"
   },
