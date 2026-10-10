@@ -1,0 +1,43 @@
+{
+  "schema": "issue305-stopped-fixture-plan-v1",
+  "authority": "PLAN_FIXTURE_REVIEW_ONLY",
+  "scope_issue": 305,
+  "directive_comment": 6095683027,
+  "controller_baseline_sha": "15459e4395e7ab228e1c140b04256e569643f9b9",
+  "candidate": {
+    "path": "scripts/Test-Issue305HiveBoundary.ps1",
+    "sha256": "e632d147acde8f6c30c5cad2eb92e051c1948ccd5fad9289bb9a6f1a741dff95",
+    "size": 8074,
+    "runtime": "Windows PowerShell 5.1 x64",
+    "kind": "synthetic feasibility candidate; no live mode"
+  },
+  "allowed_fixture_effects": [
+    "create one absent GUID directory beneath resolved temporary root",
+    "create excluded sentinel with FileMode.CreateNew",
+    "create private synthetic application hive and write synthetic policy values",
+    "attempt one RegLoadKeyW of only that synthetic hive at AC305_FIXTURE_<fresh GUID>",
+    "if owned mount exists, read it in a separate same-token PowerShell process",
+    "finally attempt RegUnLoadKeyW once for only the successfully created fixture mount",
+    "independent child readback of exact fixture mount absence",
+    "read source and excluded sentinel SHA-256 before cleanup",
+    "delete only the created synthetic directory after independent absence and reparse check"
+  ],
+  "excluded_effects": [
+    "real account, SID hive, profile or NTUSER.DAT access",
+    "privilege adjustment or UAC/elevation launch",
+    "account, group, ACL, service, task or real policy modification",
+    "pilot freeze or canonical Phase 0 output",
+    "registration credential, runner, dispatch or target code",
+    "#195 gate expansion or a PASS_TO_OPERATOR claim",
+    "#302 code, approval, plan or consumed authority reuse"
+  ],
+  "single_attempt": true,
+  "native_fixture_disposition": "STOP_NO_SAFE_OPERATOR_ORCHESTRATION",
+  "live_candidate": null,
+  "live_plan": null,
+  "live_binding": null,
+  "human_execution_authority": "NONE",
+  "proposed_live_window_seconds": 600,
+  "proposed_live_window_status": "not implemented or tested; no claim of deadline enforcement",
+  "note": "A fixture-plan hash cannot authorize an actual host operation. No real-bound plan is fabricated after the failed native boundary probe."
+}

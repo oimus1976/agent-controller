@@ -1,0 +1,18 @@
+{
+  "kind": "SYNTHETIC_FIXTURE_ONLY",
+  "powershell": "5.1.26100.9444",
+  "elevated": false,
+  "app_hive_created": true,
+  "load_status": 1314,
+  "broker_child_status": null,
+  "broker_child_policy": null,
+  "unload_attempted": false,
+  "unload_status": null,
+  "independent_absence": true,
+  "source_before_sha256": "521429a0b7347dc2b52c924c4dd5b78bf06cb9e73841772e5e6793a7523f678d",
+  "source_after_sha256": "521429a0b7347dc2b52c924c4dd5b78bf06cb9e73841772e5e6793a7523f678d",
+  "excluded_unchanged": true,
+  "fixture_removed": true,
+  "error": "Synthetic HKU load failed: 1314",
+  "verdict": "NO_SAFE_OPERATOR_ORCHESTRATION"
+}
