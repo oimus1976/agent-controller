@@ -3,12 +3,12 @@
   "authority": "DESIGN_FIXTURE_REVIEW_ONLY",
   "directive_comment": 6098097114,
   "candidate_lf": {
-    "sha256": "f13078dc24c21dc7a94caabd101907fd3f2c108def3734035858c91f3890f77d",
-    "size": 31239
+    "sha256": "6cd129e4bc3417694ffc1fd2791e73a585e95722619bc76f1da4656e9a4bc74a",
+    "size": 32136
   },
   "candidate_crlf": {
-    "sha256": "ca7db3e0813268a9bd0ab7e9109467b3f4a82783d80fb13839b451a8640568a2",
-    "size": 31509
+    "sha256": "c135d9357f0ed82cf07fd41a6a68b3a71eeebea51899a0f51c852a543b2ec571",
+    "size": 32421
   },
   "target_command": {
     "sha256": "0cd1eb0cffc994cf08fca6e52792c477e918c41a8654c8a6a0177a581a050e5e",
@@ -21,7 +21,8 @@
   "deadlines_seconds": {
     "startup": 10,
     "broker_probe": 12,
-    "worker_total": 35,
+    "worker_release_signal": 25,
+    "worker_report": 15,
     "owned_exit": 5,
     "independent_readback": 8,
     "child_self_lease": 60

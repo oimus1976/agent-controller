@@ -64,14 +64,18 @@ function Assert-Issue305Idle($State) {
         $State.mounted -or $State.loaded -or $State.sessions -ne 0 -or -not $State.enabled -or $State.admin) { throw 'TARGET_NOT_IDLE' }
 }
 
+function Start-Issue305Broker($Plan, [string]$Encoded) {
+    return [Diagnostics.Process]::Start((New-Object Diagnostics.ProcessStartInfo -Property @{
+        FileName=$Plan.executable; Arguments="-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $Encoded"
+        UseShellExecute=$false; CreateNoWindow=$true; WorkingDirectory=$Plan.working_directory
+        RedirectStandardOutput=$true; RedirectStandardError=$true
+    }))
+}
+
 function Invoke-Issue305BrokerCommand($Plan, [string]$Encoded, [int]$TimeoutMs) {
     $Probe = $null
     try {
-        $Probe = [Diagnostics.Process]::Start((New-Object Diagnostics.ProcessStartInfo -Property @{
-            FileName=$Plan.executable; Arguments="-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $Encoded"
-            UseShellExecute=$false; CreateNoWindow=$true; WorkingDirectory=$Plan.working_directory
-            RedirectStandardOutput=$true; RedirectStandardError=$true
-        }))
+        $Probe = Start-Issue305Broker $Plan $Encoded
         $Out = $Probe.StandardOutput.ReadToEndAsync()
         $Err = $Probe.StandardError.ReadToEndAsync()
         $Text = Wait-Issue305Task $Out $TimeoutMs 'broker-read'
@@ -79,8 +83,9 @@ function Invoke-Issue305BrokerCommand($Plan, [string]$Encoded, [int]$TimeoutMs) 
         if (-not $Probe.WaitForExit(1000) -or $Probe.ExitCode -ne 0 -or $Errors.Length -ne 0 -or $Text.Length -gt 16384) { throw 'BROKER_PROBE_FAILED' }
         return ($Text | ConvertFrom-Json)
     } finally {
-        if (-not (Stop-Issue305Owned $Probe)) { throw 'OWNED_PROBE_EXIT_UNKNOWN' }
+        $Stopped=Stop-Issue305Owned $Probe
         if ($null -ne $Probe) { $Probe.Dispose() }
+        if (-not $Stopped) { throw 'OWNED_PROBE_EXIT_UNKNOWN' }
     }
 }
 
@@ -128,13 +133,12 @@ function Start-Issue305Target($Plan, [Security.SecureString]$Password) {
     return $Target
 }
 
-function Invoke-Issue305Worker($Plan, [Security.SecureString]$Password) {
+function Invoke-Issue305Worker($Plan, [Security.SecureString]$Password, $ReleaseReader) {
     $Target = $null
     $Clean = $false
     $Exit = $null
     $Observed = $false
     $TargetError = $null
-    $PublicPolicy = $null
     $TargetPid = $null
     $Reason = 'TARGET_CONTEXT_PROBE_BLOCKED'
     try {
@@ -154,13 +158,12 @@ function Invoke-Issue305Worker($Plan, [Security.SecureString]$Password) {
         $Owner = Invoke-CimMethod -InputObject $Native -MethodName GetOwnerSid -OperationTimeoutSec 2
         if ($Owner.ReturnValue -ne 0 -or $Owner.Sid -cne $Plan.target_sid -or $Native.ExecutablePath -cne $Plan.executable) { throw 'TARGET_OWNER_UNKNOWN' }
         [Console]::Out.WriteLine('TARGET_READY')
-        $Policy = Invoke-Issue305BrokerCommand $Plan '__BROKER_COMMAND_B64__' 12000
-        Assert-Issue305Policy $Policy $Plan
-        $PublicPolicy=[ordered]@{machine_policy=$Policy.machine_policy; target_user_policy=$Policy.target_user_policy
-            effective_policy_with_process_bypass=$Policy.effective_policy_with_process_bypass
-            subject_sid=$Policy.execution_policy_target_sid; observed_at_utc=[DateTime]::UtcNow.ToString('o')}
+        # The supervisor owns the collector process handle. This launcher only
+        # holds the target until that caller signals release, EOF or deadline.
+        $Release=Wait-Issue305Task ($ReleaseReader.ReadLineAsync()) 25000 'release-signal'
+        if ($Release -cne 'RELEASE') { throw 'RELEASE_UNCONFIRMED' }
         $Observed = $true
-        $Reason = 'DIAGNOSTIC_POLICY_OBSERVED'
+        $Reason = 'TARGET_CONTEXT_RELEASED'
     } catch { $Reason = 'TARGET_CONTEXT_PROBE_BLOCKED' }
     finally {
         if ($null -ne $Target) {
@@ -178,7 +181,7 @@ function Invoke-Issue305Worker($Plan, [Security.SecureString]$Password) {
     }
     if (-not $Clean) { $Reason='STOP_PARTIAL_PROFILE_STATE' }
     elseif ($Exit -ne 0 -or -not $Observed) { $Reason='TARGET_CONTEXT_PROBE_BLOCKED' }
-    return [ordered]@{status=$Reason; owned_exit_confirmed=$Clean; target_exit_code=$Exit; policy_observed=$Observed; target_pid=$TargetPid; policy=$PublicPolicy}
+    return [ordered]@{status=$Reason; owned_exit_confirmed=$Clean; target_exit_code=$Exit; release_confirmed=$Observed; target_pid=$TargetPid}
 }
 
 function Start-Issue305Launcher($Plan, [string]$CandidatePath) {
@@ -194,28 +197,40 @@ function Invoke-Issue305Supervisor($Plan, $Credential, [string]$CandidatePath) {
     $Launcher = $null
     $Before = Invoke-Issue305BrokerCommand $Plan (Get-Issue305StateCommand $Plan) 8000
     Assert-Issue305Idle $Before
-    $Result = [ordered]@{status='STOP_PARTIAL_PROFILE_STATE'; startup_confirmed=$false; independent_poststate=$false; independent_process_exit=$false; worker=$null}
+    $Result = [ordered]@{status='STOP_PARTIAL_PROFILE_STATE'; startup_confirmed=$false; independent_poststate=$false; independent_process_exit=$false; broker_exit_confirmed=$true; policy_observed=$false; policy=$null; worker=$null}
     try {
         $Launcher = Start-Issue305Launcher $Plan $CandidatePath
         $Cipher = ConvertFrom-SecureString $Credential.Password
         if ($Cipher.Length -gt 3000) { throw 'CREDENTIAL_ENVELOPE_TOO_LARGE' }
         $Launcher.StandardInput.WriteLine($Cipher)
-        $Launcher.StandardInput.Close()
         $Cipher = $null
         $LauncherErrors = $Launcher.StandardError.ReadToEndAsync()
         $First = Wait-Issue305Task ($Launcher.StandardOutput.ReadLineAsync()) 10000 'target-startup'
         if ($First -cne 'TARGET_READY') { throw 'STARTUP_UNCONFIRMED' }
         $Result.startup_confirmed=$true
-        $Report = Wait-Issue305Task ($Launcher.StandardOutput.ReadToEndAsync()) 25000 'policy-and-exit'
+        try {
+            $Policy=Invoke-Issue305BrokerCommand $Plan '__BROKER_COMMAND_B64__' 12000
+            Assert-Issue305Policy $Policy $Plan
+            $Result.policy=[ordered]@{machine_policy=$Policy.machine_policy; target_user_policy=$Policy.target_user_policy
+                effective_policy_with_process_bypass=$Policy.effective_policy_with_process_bypass
+                subject_sid=$Policy.execution_policy_target_sid; observed_at_utc=[DateTime]::UtcNow.ToString('o')}
+            $Result.policy_observed=$true
+        } catch {
+            if ($_.Exception.Message -ceq 'OWNED_PROBE_EXIT_UNKNOWN') { $Result.broker_exit_confirmed=$false }
+        } finally {
+            $Launcher.StandardInput.WriteLine('RELEASE'); $Launcher.StandardInput.Close()
+        }
+        $Report = Wait-Issue305Task ($Launcher.StandardOutput.ReadToEndAsync()) 15000 'target-exit'
         if (-not $Launcher.WaitForExit(1000) -or $Launcher.ExitCode -ne 0 -or $Report.Length -gt 4096 -or
-            (Wait-Issue305Task $LauncherErrors 1000 'launcher-stderr') -cnotmatch '\A(?:ISSUE305_HEARTBEAT:(?:target-ready|broker-read|broker-stderr|credential-envelope|target-stderr|target-tail):[0-9]+\r?\n)*\z') { throw 'LAUNCHER_FAILED' }
+            (Wait-Issue305Task $LauncherErrors 1000 'launcher-stderr') -cnotmatch '\A(?:ISSUE305_HEARTBEAT:(?:target-ready|release-signal|credential-envelope|target-stderr|target-tail):[0-9]+\r?\n)*\z') { throw 'LAUNCHER_FAILED' }
         $Parsed=$Report | ConvertFrom-Json
-        if ($Parsed.owned_exit_confirmed -isnot [bool] -or $Parsed.policy_observed -isnot [bool] -or
+        if ($Parsed.owned_exit_confirmed -isnot [bool] -or $Parsed.release_confirmed -isnot [bool] -or
             ($Parsed.target_pid -isnot [int] -and $Parsed.target_pid -isnot [long]) -or $Parsed.target_pid -le 0 -or
-            @('DIAGNOSTIC_POLICY_OBSERVED','TARGET_CONTEXT_PROBE_BLOCKED','STOP_PARTIAL_PROFILE_STATE') -cnotcontains $Parsed.status) { throw 'WORKER_REPORT_INVALID' }
+            @('TARGET_CONTEXT_RELEASED','TARGET_CONTEXT_PROBE_BLOCKED','STOP_PARTIAL_PROFILE_STATE') -cnotcontains $Parsed.status) { throw 'WORKER_REPORT_INVALID' }
         $Result.worker=$Parsed
     } catch { $Result.status='STOP_PARTIAL_PROFILE_STATE' }
     finally {
+        if ($null -ne $Launcher) { try { $Launcher.StandardInput.Close() } catch {} }
         if (-not (Stop-Issue305Owned $Launcher)) { $Result.worker=$null }
         if ($null -ne $Launcher) { $Launcher.Dispose() }
         try {
@@ -230,8 +245,8 @@ function Invoke-Issue305Supervisor($Plan, $Credential, [string]$CandidatePath) {
     }
     # Timeout can race native logon completion. An empty immediate readback
     # NEVER turns an unconfirmed launcher/target exit into a restored state.
-    if ($Result.independent_poststate -and $Result.independent_process_exit -and $null -ne $Result.worker -and $Result.worker.owned_exit_confirmed) {
-        if ($Result.worker.status -ceq 'DIAGNOSTIC_POLICY_OBSERVED' -and $Result.worker.target_exit_code -eq 0 -and $Result.worker.policy_observed) {
+    if ($Result.broker_exit_confirmed -and $Result.independent_poststate -and $Result.independent_process_exit -and $null -ne $Result.worker -and $Result.worker.owned_exit_confirmed) {
+        if ($Result.worker.status -ceq 'TARGET_CONTEXT_RELEASED' -and $Result.worker.target_exit_code -eq 0 -and $Result.worker.release_confirmed -and $Result.policy_observed) {
             $Result.status='DIAGNOSTIC_POLICY_OBSERVED'
         } else { $Result.status='TARGET_CONTEXT_PROBE_BLOCKED' }
     }
@@ -256,7 +271,7 @@ if ($Worker) {
     $InputReader=[IO.StreamReader]::new([Console]::OpenStandardInput())
     $Envelope=$InputReader.ReadLineAsync(); $Cipher=Wait-Issue305Task $Envelope 3000 'credential-envelope'
     $Password=ConvertTo-SecureString $Cipher; $Cipher=$null
-    Invoke-Issue305Worker $Plan $Password | ConvertTo-Json -Compress
+    Invoke-Issue305Worker $Plan $Password $InputReader | ConvertTo-Json -Compress
     exit 0
 }
 if ($null -eq $Credential -or $Credential.UserName -cne "$($Plan.host)\ac-runner") { throw 'TARGET_CREDENTIAL_BINDING' }

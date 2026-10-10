@@ -68,7 +68,7 @@ function Start-Issue305Target { param($Plan,$Password) return $Process }
 function Read-Issue305State { param($Plan) return [pscustomobject]@{mounted=$false;loaded=$false;sessions=0;enabled=$true;admin=$false} }
 function Get-CimInstance { param($ClassName,$Filter,$OperationTimeoutSec) return [pscustomobject]@{ExecutablePath=$Plan.executable} }
 function Invoke-CimMethod { param($InputObject,$MethodName,$OperationTimeoutSec) return [pscustomobject]@{ReturnValue=0;Sid=$Plan.target_sid} }
-function Invoke-Issue305BrokerCommand { param($Plan,$Encoded,$TimeoutMs) return $Policy }
+$ReleaseReader=[FixtureReader]::new();$ReleaseReader.Line='RELEASE'
 """
 
 
@@ -89,7 +89,7 @@ class Issue305WindowsTests(unittest.TestCase):
     def worker(self, changes=""):
         return self.execute(changes + r"""
 $Password=ConvertTo-SecureString 'SYNTHETIC_ONLY' -AsPlainText -Force
-$Result=Invoke-Issue305Worker $Plan $Password
+$Result=Invoke-Issue305Worker $Plan $Password $ReleaseReader
 @{report=$Result;release_count=$Process.StandardInput.Writes;disposed=$Process.Disposed;killed=$Process.Killed}|ConvertTo-Json -Depth 6 -Compress
 """)
 
@@ -100,28 +100,25 @@ $Result=Invoke-Issue305Worker $Plan $Password
 
     def test_mock_positive_is_diagnostic_only_and_releases_owned_child(self):
         result = self.worker()
-        self.assertEqual(result["report"]["status"], "DIAGNOSTIC_POLICY_OBSERVED")
+        self.assertEqual(result["report"]["status"], "TARGET_CONTEXT_RELEASED")
         self.assertEqual(result["report"]["target_exit_code"], 0)
         self.assertEqual(result["release_count"], 1)
         self.assertTrue(result["disposed"])
         self.assertNotIn("SYNTHETIC_ONLY", json.dumps(result))
 
-    def test_wrong_sid_and_broker_access_denied_release_child(self):
+    def test_wrong_sid_and_unconfirmed_release_cleanup_child(self):
         for change in (
             "$Process.StandardOutput.Line=$Process.StandardOutput.Line.Replace('1007','9999')",
-            "function Invoke-Issue305BrokerCommand { throw 'HKU access denied' }",
-            "$Policy.execution_policy_target_sid='S-1-5-21-111-222-333-9999'",
+            "$ReleaseReader.Line='UNKNOWN'",
+            "$ReleaseReader.Line=$null",
         ):
             with self.subTest(change=change):
                 result = self.worker(change + "\n")
                 self.assertEqual(result["report"]["status"], "TARGET_CONTEXT_PROBE_BLOCKED")
                 self.assertEqual(result["release_count"], 1)
 
-    def test_policy_unknown_precedence_and_nonzero_child_are_blocked(self):
+    def test_nonzero_child_and_extra_output_are_blocked(self):
         for change in (
-            "$Policy.target_user_policy='Unknown'",
-            "$Policy.target_user_policy='Restricted';$Policy.effective_policy_with_process_bypass='Restricted'",
-            "$Policy.machine_policy='AllSigned';$Policy.target_user_policy='Bypass'",
             "$Process.ExitCode=9",
             "$Process.StandardOutput.Tail='UNEXPECTED_OUTPUT'",
         ):
@@ -133,7 +130,7 @@ $Result=Invoke-Issue305Worker $Plan $Password
     def test_start_failure_timeout_and_unconfirmed_exit(self):
         failed = self.worker("function Start-Issue305Target { throw 'startup failure' }\n")
         self.assertEqual(failed["report"]["status"], "STOP_PARTIAL_PROFILE_STATE")
-        timeout = self.worker("function Invoke-Issue305BrokerCommand { throw 'DEADLINE' }\n")
+        timeout = self.worker("function Wait-Issue305Task { param($Task,$Milliseconds,$Phase) if($Phase -eq 'release-signal'){throw 'DEADLINE'};return $Task.Result }\n")
         self.assertEqual(timeout["report"]["status"], "TARGET_CONTEXT_PROBE_BLOCKED")
         self.assertEqual(timeout["release_count"], 1)
         partial = self.worker("$Process.WaitDenied=$true;$Process.KillDenied=$true\n")
@@ -181,21 +178,23 @@ $Before=[pscustomobject][ordered]@{mounted=$false;loaded=$false;sessions=0;enabl
 $After=$Before|ConvertTo-Json|ConvertFrom-Json
 $After.owned_pid_absent=$true
 $Reads=0
-function Invoke-Issue305BrokerCommand { param($Plan,$Encoded,$TimeoutMs) $script:Reads++;if($Reads -eq 1){return $Before};return $After }
+function Invoke-Issue305BrokerCommand { param($Plan,$Encoded,$TimeoutMs) $script:Reads++;if($Reads -eq 1){return $Before};if($Reads -eq 2){if($script:PolicyFailure){throw $script:PolicyFailure};return $Policy};return $After }
 function Start-Issue305Launcher { param($Plan,$CandidatePath) return $Process }
 function ConvertFrom-SecureString { param($SecureString) return 'SYNTHETIC_CIPHER' }
 $Process.StandardOutput.Line='TARGET_READY'
-$Process.StandardOutput.Tail=(@{status='DIAGNOSTIC_POLICY_OBSERVED';owned_exit_confirmed=$true;target_exit_code=0;policy_observed=$true;target_pid=12345}|ConvertTo-Json -Compress)
+$Process.StandardOutput.Tail=(@{status='TARGET_CONTEXT_RELEASED';owned_exit_confirmed=$true;target_exit_code=0;release_confirmed=$true;target_pid=12345}|ConvertTo-Json -Compress)
 $Credential=[Management.Automation.PSCredential]::new('FIXTURE\ac-runner',(ConvertTo-SecureString 'SYNTHETIC_ONLY' -AsPlainText -Force))
 """ + changes + r"""
 $Result=Invoke-Issue305Supervisor $Plan $Credential 'C:\FIXTURE\candidate.ps1'
-@{report=$Result;disposed=$Process.Disposed;killed=$Process.Killed;reads=$Reads}|ConvertTo-Json -Depth 7 -Compress
+@{report=$Result;disposed=$Process.Disposed;killed=$Process.Killed;reads=$Reads;input_writes=$Process.StandardInput.Writes;input_closed=$Process.StandardInput.Closed}|ConvertTo-Json -Depth 7 -Compress
 """)
 
     def test_supervisor_requires_independent_restoration_and_confirmed_exit(self):
         good = self.supervisor()
         self.assertEqual(good["report"]["status"], "DIAGNOSTIC_POLICY_OBSERVED")
-        self.assertEqual(good["reads"], 2)
+        self.assertEqual(good["reads"], 3)
+        self.assertEqual(good["input_writes"], 2)
+        self.assertTrue(good["input_closed"])
         self.assertTrue(good["disposed"])
         for changes in ("$After.loaded=$true", "$After.mounted=$true", "$After.profile_acl='CHANGED'", "$After.owned_pid_absent=$false", "$Process.StandardOutput.Line='UNCONFIRMED_START'", "$Process.StandardOutput.Tail=$Process.StandardOutput.Tail.Replace('true','\"true\"')"):
             with self.subTest(changes=changes):
@@ -203,10 +202,34 @@ $Result=Invoke-Issue305Supervisor $Plan $Credential 'C:\FIXTURE\candidate.ps1'
                 self.assertEqual(bad["report"]["status"], "STOP_PARTIAL_PROFILE_STATE")
 
     def test_supervisor_timeout_never_accepts_immediate_absence(self):
-        bad = self.supervisor("function Wait-Issue305Task { throw 'DEADLINE' }\n")
+        bad = self.supervisor("function Wait-Issue305Task { throw 'DEADLINE' };function Invoke-Issue305BrokerCommand { param($Plan,$Encoded,$TimeoutMs) $script:Reads++;if($Reads -eq 1){return $Before};return $After }\n")
         self.assertEqual(bad["report"]["status"], "STOP_PARTIAL_PROFILE_STATE")
         self.assertTrue(bad["report"]["independent_poststate"])
         self.assertTrue(bad["killed"])
+
+    def test_supervisor_policy_failure_releases_and_unknown_collector_exit_stays_partial(self):
+        for change in ("$Policy.target_user_policy='Unknown'", "$Policy.target_user_policy='Restricted';$Policy.effective_policy_with_process_bypass='Restricted'", "$Policy.machine_policy='AllSigned';$Policy.target_user_policy='Bypass'", "$Policy.execution_policy_target_sid='WRONG'", "$script:PolicyFailure='HKU access denied'", "$script:PolicyFailure='DEADLINE'"):
+            bad=self.supervisor(change+'\n')
+            self.assertEqual(bad['report']['status'],'TARGET_CONTEXT_PROBE_BLOCKED')
+            self.assertEqual(bad['input_writes'],2)
+        partial=self.supervisor("$script:PolicyFailure='OWNED_PROBE_EXIT_UNKNOWN'\n")
+        self.assertEqual(partial['report']['status'],'STOP_PARTIAL_PROFILE_STATE')
+        self.assertFalse(partial['report']['broker_exit_confirmed'])
+        self.assertTrue(partial['report']['independent_poststate'])
+
+    def test_broker_timeout_tears_down_retained_process_and_disposes_on_unknown_exit(self):
+        for denied in (False,True):
+            body=r"""
+function Start-Issue305Broker { param($Plan,$Encoded) return $Process }
+function Wait-Issue305Task { throw 'DEADLINE' }
+"""+("$Process.KillDenied=$true;$Process.WaitDenied=$true\n" if denied else "")+r"""
+$Message='';try { Invoke-Issue305BrokerCommand $Plan 'FIXTURE_ONLY' 30 } catch { $Message=$_.Exception.Message }
+@{message=$Message;killed=$Process.Killed;disposed=$Process.Disposed;exited=$Process.HasExited}|ConvertTo-Json -Compress
+"""
+            result=self.execute(body)
+            self.assertEqual(result['message'],'OWNED_PROBE_EXIT_UNKNOWN' if denied else 'DEADLINE')
+            self.assertTrue(result['disposed'])
+            self.assertEqual(result['exited'],not denied)
 
     def test_loaded_unknown_or_busy_target_is_never_started(self):
         for field in ("loaded=$true", "mounted=$true", "loaded='false'", "sessions=1"):

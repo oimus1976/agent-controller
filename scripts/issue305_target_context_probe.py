@@ -70,7 +70,7 @@ def design_plan() -> dict:
         "candidate_crlf": {"sha256": digest(windows), "size": len(windows)},
         "target_command": {"sha256": digest(CHILD.encode()), "size": len(CHILD.encode())},
         "broker_command": {"sha256": digest(broker_command().encode()), "size": len(broker_command().encode())},
-        "deadlines_seconds": {"startup": 10, "broker_probe": 12, "worker_total": 35, "owned_exit": 5, "independent_readback": 8, "child_self_lease": 60},
+        "deadlines_seconds": {"startup": 10, "broker_probe": 12, "worker_release_signal": 25, "worker_report": 15, "owned_exit": 5, "independent_readback": 8, "child_self_lease": 60},
         "live_binding": None,
         "decision_a": False,
         "decision_b": False,
