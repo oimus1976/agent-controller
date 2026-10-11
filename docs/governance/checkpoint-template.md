@@ -8,6 +8,8 @@ Post this as a comment on the workstream Issue:
 
 A checkpoint helps the next worker find its way. It is never authority: the next worker re-reads every mutable fact it depends on from GitHub or CI.
 
+Continuation rule: **reverify facts, reuse unchanged prior decisions, never reuse consumed effect authority; ask only for the delta**. Retain a prior decision only after the trusted authority path verifies its exact workflow/operation, accepted scope, provenance, expiry and revocation conditions. Read-only refresh or elapsed time alone does not expire a non-expiring scope-only decision. A retained decision is planning context; every new LEVEL 3 attempt still needs fresh human-final authority. This rule does not widen any past approval. See the [advisory resume API](../bound-operation-follow.md#verified-checkpoint-resume-307).
+
 Label every statement by where its authority comes from. Keep the two first groups apart:
 
 - **Verified:** confirmed from an authoritative source and linked, for example a merge commit, a CI run, or a canonical review.
