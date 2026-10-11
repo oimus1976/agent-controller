@@ -211,8 +211,9 @@ class WorkflowResumeTests(unittest.TestCase):
             source = SyntheticVerifiedSource()
             source.approvals["decision-1"] = value
             p = source.plan().steps[0]
-            self.assertNotEqual(p.action, A.SKIP_VERIFIED)
+            self.assertEqual(p.action, A.STOP_UNCERTAIN)
             self.assertIsNone(p.retained_approval_id)
+            self.assertEqual(p.reason_codes, ("APPROVAL_NOT_FOUND" if value is None else "APPROVAL_SOURCE_PAYLOAD_INVALID",))
 
     def test_wrong_ingress_issuer_or_exact_binding_cannot_be_reused(self):
         changes = dict(ingress_source="issue-comment", issuer_kind="AGENT", repo="other/repo",
@@ -223,7 +224,7 @@ class WorkflowResumeTests(unittest.TestCase):
                 source = SyntheticVerifiedSource()
                 source.approvals["decision-1"] = replace(source.approvals["decision-1"], **{key: value})
                 p = source.plan().steps[0]
-                self.assertNotEqual(p.action, A.SKIP_VERIFIED)
+                self.assertEqual(p.action, A.STOP_UNCERTAIN)
                 self.assertIsNone(p.retained_approval_id)
 
     def test_adapter_decision_uncertainty_and_read_errors_stop(self):

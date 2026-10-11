@@ -246,6 +246,7 @@ def plan_workflow_resume(*, task: TaskBinding, workstream: WorkstreamBinding,
                     action, reasons = ResumeAction.STOP_UNCERTAIN, ("FRESH_FACTS_UNCERTAIN",)
                 else:
                     decision_reason = None
+                    decision_action = ResumeAction.HUMAN_ACTION_REQUIRED
                     if step.approval_id is not None:
                         state = source.evidence.decision_state(step.approval_id, step=step, task=task, workstream=workstream)
                         if state not in ("APPROVED", "WITHHELD", "REVOKED"):
@@ -261,12 +262,13 @@ def plan_workflow_resume(*, task: TaskBinding, workstream: WorkstreamBinding,
                                 expected_head_sha=step.scope.head_sha, now=now)
                             if validation.valid:
                                 retained = step.approval_id
-                            elif validation.result is ApprovalResult.UNCERTAIN:
-                                raise ValueError("unverifiable approval")
                             else:
                                 decision_reason = validation.reason or "DECISION_INVALID"
+                                if not (validation.result is ApprovalResult.BLOCKED
+                                        and validation.reason == "APPROVAL_EXPIRED"):
+                                    decision_action = ResumeAction.STOP_UNCERTAIN
                     if decision_reason is not None:
-                        action, reasons = ResumeAction.HUMAN_ACTION_REQUIRED, (decision_reason,)
+                        action, reasons = decision_action, (decision_reason,)
                     elif facts.freshness is not VerificationResult.PASS:
                         action, reasons = ResumeAction.RECHECK, ("FRESH_FACTS_RECHECK_REQUIRED",)
                     elif record.outcome is VerificationResult.PASS:
