@@ -37,6 +37,15 @@ Implementation and review must remain independent.
 - Owner-relayed provider prose is advisory and does not become authoritative merely because it is posted to GitHub. A missing, unreadable, malformed, truncated, or head-drifted required surface fails closed as uncertain.
 - Owner: [#194](https://github.com/oimus1976/agent-controller/issues/194).
 
+ 
+### Required final merge-readiness check (owner decision, 2026-10-14)
+
+- **Before telling the human that a PR can be merged**, re-read the **complete** GitHub review-thread inventory (all pages) and verify **every** thread has `is_resolved=true`. Include historical/old-head threads where `is_outdated=true`. List each unresolved thread/link and report `MERGE_BLOCKED_UNRESOLVED_THREADS` rather than recommending merge.
+- `mergeable=true`, green CI, a clean current-head review verdict, no new findings and `is_outdated=true` **do not substitute** for thread resolution. The repository's branch protection can enforce “All comments must be resolved” separately.
+- Distinguish **finding fixed in exact-head code** from **review thread marked Resolved**. Never Resolve a genuine pending finding. Thread resolution changes GitHub review state: obtain explicit, bounded human authority to resolve specific fixed threads; after any resolution, read the thread inventory again to confirm. Do not perform human-final merge.
+- Re-read the PR HEAD, exact-head checks, canonical review, full thread list and applicable branch protection just before the final merge recommendation; missing or incomplete required readback => no positive merge-readiness claim.
+- Source: [#308 actual merge blocker and closeout](https://github.com/oimus1976/agent-controller/pull/308), [#307 closeout](https://github.com/oimus1976/agent-controller/issues/307), [ADR #90 owner direction](https://github.com/oimus1976/agent-controller/issues/90#issuecomment-6170130388).
+
 ## 5. Codex task results pending human application
 
 - A GitHub Codex task can complete and commit in its task environment while the GitHub branch is still unchanged. Applying the result may need the human handoff `View Task → Update branch`, or its current equivalent.
