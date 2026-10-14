@@ -145,6 +145,41 @@ class WorkflowResumeTests(unittest.TestCase):
                 self.assertEqual(p.retained_approval_id, "decision-1")
                 self.assertEqual(p.spent_attempt_id, "spent-1")
 
+    def test_completed_blocked_stage_stops_before_follow_on_stage(self):
+        for effect_bearing in (False, True):
+            with self.subTest(effect_bearing=effect_bearing):
+                stages = (ResumeStep("1", scope(), 3 if effect_bearing else 1,
+                                     effect_bearing, "decision-1", "SCOPE"),
+                          ResumeStep("2", scope(), 2))
+                source = SyntheticVerifiedSource(stages)
+                source.update_record(0, spent_attempt_id="spent-1" if effect_bearing else None)
+                source.update_record(1, outcome=V.NOT_RUN, evidence_id=None)
+                source.facts["1"] = StepFacts(stages[0].scope, V.PASS,
+                                              ("PHASE0_READINESS=BLOCKED",))
+                plan = source.plan()
+                self.assertEqual(plan.steps[1].action, A.RERUN_NONLIVE)
+                self.assertEqual(plan.first_actionable_step, "1")
+                self.assertEqual(plan.steps[0].action, A.STOP_UNCERTAIN)
+                self.assertEqual(plan.steps[0].reason_codes,
+                                 ("COMPLETED_STEP_BLOCKED", "PHASE0_READINESS=BLOCKED"))
+                self.assertEqual(plan.steps[0].retained_approval_id, "decision-1")
+                self.assertEqual(plan.steps[0].evidence_id, "evidence-1")
+                self.assertEqual(plan.steps[0].spent_attempt_id,
+                                 "spent-1" if effect_bearing else None)
+                self.assertFalse(plan.to_dict()["execution_authorized"])
+                self.assertFalse(plan.to_dict()["spent_authority_reusable"])
+
+    def test_completed_blocked_workflow_is_not_reported_all_complete(self):
+        stages = (ResumeStep("1", scope(), 1), ResumeStep("2", scope(), 1))
+        source = SyntheticVerifiedSource(stages)
+        source.facts["1"] = StepFacts(stages[0].scope, V.PASS,
+                                      ("PHASE0_READINESS=BLOCKED",))
+        plan = source.plan()
+        self.assertEqual(plan.steps[1].action, A.SKIP_VERIFIED)
+        self.assertEqual(plan.first_actionable_step, "1")
+        self.assertEqual(plan.steps[0].action, A.STOP_UNCERTAIN)
+        self.assertIn("PHASE0_READINESS=BLOCKED", plan.steps[0].reason_codes)
+
     def test_ac2_all_changed_scope_dimensions_need_a_delta(self):
         source = SyntheticVerifiedSource()
         changes = dict(repo="other/repo", target_id="other-pr", head_sha="c" * 40,

@@ -272,7 +272,10 @@ def plan_workflow_resume(*, task: TaskBinding, workstream: WorkstreamBinding,
                     elif facts.freshness is not VerificationResult.PASS:
                         action, reasons = ResumeAction.RECHECK, ("FRESH_FACTS_RECHECK_REQUIRED",)
                     elif record.outcome is VerificationResult.PASS:
-                        action, reasons = ResumeAction.SKIP_VERIFIED, ("VERIFIED_OUTCOME_RETAINED",)
+                        if facts.blocked_conditions:
+                            action, reasons = ResumeAction.STOP_UNCERTAIN, ("COMPLETED_STEP_BLOCKED",)
+                        else:
+                            action, reasons = ResumeAction.SKIP_VERIFIED, ("VERIFIED_OUTCOME_RETAINED",)
                     elif step.effect_bearing or step.level == 3:
                         action = ResumeAction.HUMAN_ACTION_REQUIRED
                         reasons = ("FRESH_ATTEMPT_REQUIRED" if record.spent_attempt_id
