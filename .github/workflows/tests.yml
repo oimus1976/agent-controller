@@ -43,6 +43,8 @@ jobs:
           python-version: '3.12'
       - name: Install dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run advisory resume and one-shot authority regressions (#307)
+        run: python -m unittest tests.test_workflow_resume tests.test_approval_consumption tests.test_execution_handoff tests.test_operator_step_gate -v
       - name: Run real Windows junction containment regression
         run: python -m unittest discover -s tests -p "test_antigravity_windows_junction.py" -v
       - name: Run real Windows PowerShell 5.1 AST producer regressions

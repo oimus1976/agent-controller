@@ -15,6 +15,13 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-10-11 — Verified checkpoint advisory resume (Issue #307, Draft / unmerged)
+
+- Added a bounded read-only resume classifier using existing task/workstream and trusted human approval validation contracts. Externally verified completed outcomes and unchanged scope decisions remain planning context; fresh facts, scope drift, revocation, expiry and partial effects determine the first actionable stage with structured reasons.
+- The plan cannot grant execution authority or reuse a spent attempt. Effect-bearing retries require a fresh human action, and stale completed mutations only request read-only rechecking. Synthetic restart/isolation and decision fixtures plus existing one-shot regressions run in deterministic Linux/Windows CI. No live adapter, database, ledger, issuer, or executor is added; Ready/merge remain human-final.
+
+---
+
 ## 2026-10-11 — One-off target-context profile-load probe (Issue #305, Draft / unmerged)
 
 - Added a review-only PowerShell 5.1 diagnostic using the supported credential/profile-loading target creation shape and unchanged strict broker Phase 0 policy reader. Fixed channels, lease/release, retained process handles, deadlines and independent poststate observation prevent a diagnostic result from becoming canonical Phase 0 evidence. Unknown startup/cleanup remains `STOP_PARTIAL_PROFILE_STATE`.
