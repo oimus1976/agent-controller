@@ -37,7 +37,7 @@ Implementation and review must remain independent.
 - Owner-relayed provider prose is advisory and does not become authoritative merely because it is posted to GitHub. A missing, unreadable, malformed, truncated, or head-drifted required surface fails closed as uncertain.
 - Owner: [#194](https://github.com/oimus1976/agent-controller/issues/194).
 
- 
+
 ### Required final merge-readiness check (owner decision, 2026-10-14)
 
 - **Before telling the human that a PR can be merged**, re-read the **complete** GitHub review-thread inventory (all pages) and verify **every** thread has `is_resolved=true`. Include historical/old-head threads where `is_outdated=true`. List each unresolved thread/link and report `MERGE_BLOCKED_UNRESOLVED_THREADS` rather than recommending merge.
