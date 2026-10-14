@@ -195,6 +195,39 @@ class WorkflowResumeTests(unittest.TestCase):
         self.assertFalse(plan.to_dict()["execution_authorized"])
         self.assertFalse(plan.to_dict()["spent_authority_reusable"])
 
+    def test_not_run_level3_effect_without_prior_attempt_requests_human_action(self):
+        stages = (ResumeStep("1", scope(), 3, True), ResumeStep("2", scope(), 2))
+        for blockers in ((), ("PHASE0_READINESS=BLOCKED",)):
+            with self.subTest(blockers=blockers):
+                source = SyntheticVerifiedSource(stages)
+                source.update_record(0, outcome=V.NOT_RUN, evidence_id=None)
+                source.update_record(1, outcome=V.NOT_RUN, evidence_id=None)
+                source.facts["1"] = StepFacts(stages[0].scope, V.PASS, blockers)
+                plan = source.plan()
+                self.assertEqual(plan.first_actionable_step, "1")
+                self.assertEqual(plan.steps[0].action, A.HUMAN_ACTION_REQUIRED)
+                self.assertEqual(plan.steps[0].reason_codes,
+                                 ("HUMAN_EXECUTION_REQUIRED",) + blockers)
+                self.assertIsNone(plan.steps[0].retained_approval_id)
+                self.assertIsNone(plan.steps[0].spent_attempt_id)
+                self.assertFalse(plan.to_dict()["execution_authorized"])
+                self.assertFalse(plan.to_dict()["spent_authority_reusable"])
+
+    def test_prior_attempt_without_approval_binding_still_stops(self):
+        stages = (ResumeStep("1", scope(), 3, True), ResumeStep("2", scope(), 2))
+        for outcome, spent in ((V.PASS, None), (V.FAIL, None), (V.NOT_RUN, "spent-1")):
+            with self.subTest(outcome=outcome, spent=spent):
+                source = SyntheticVerifiedSource(stages)
+                evidence = None if outcome is V.NOT_RUN else "evidence-1"
+                source.update_record(0, outcome=outcome, evidence_id=evidence,
+                                     spent_attempt_id=spent)
+                plan = source.plan()
+                self.assertEqual(plan.first_actionable_step, "1")
+                self.assertEqual(plan.steps[0].action, A.STOP_UNCERTAIN)
+                self.assertEqual(plan.steps[0].reason_codes, ("EFFECT_APPROVAL_BINDING_MISSING",))
+                self.assertEqual(plan.steps[0].evidence_id, evidence)
+                self.assertEqual(plan.steps[0].spent_attempt_id, spent)
+
     def test_ac2_all_changed_scope_dimensions_need_a_delta(self):
         source = SyntheticVerifiedSource()
         changes = dict(repo="other/repo", target_id="other-pr", head_sha="c" * 40,
