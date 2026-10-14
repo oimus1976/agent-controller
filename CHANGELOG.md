@@ -15,7 +15,14 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
-## 2026-10-11 — Verified checkpoint advisory resume (Issue #307, Draft / unmerged)
+## 2026-10-14 — Required PR review-thread resolution before merge (docs-only Draft)
+
+- A real branch-protection rejection on [PR #308](https://github.com/oimus1976/agent-controller/pull/308) showed that a fixed old-head Codex P2 could remain `is_resolved=false` and block merging even after current-head CI PASS and review CLEAN. Explicit human-authorized Resolve, followed by complete thread readback, cleared the gate; PR #308 was human-merged at `ef867228f6fa36922327592e32e0565216a2fc55`.
+- Workers must re-read **all** inline review threads, including outdated threads, require each `is_resolved=true` before recommending merge, and report unresolved links instead of inferring readiness from green checks or `mergeable=true`. Human controls review-state mutations and merge. Standing rule is in `docs/governance/rules.md` §4.
+
+---
+
+## 2026-10-14 — Verified checkpoint advisory resume (#307, PR #308 merged)
 
 - Added a bounded read-only resume classifier using existing task/workstream and trusted human approval validation contracts. Externally verified completed outcomes and unchanged scope decisions remain planning context; fresh facts, scope drift, revocation, expiry and partial effects determine the first actionable stage with structured reasons.
 - The plan cannot grant execution authority or reuse a spent attempt. Effect-bearing retries require a fresh human action, and stale completed mutations only request read-only rechecking. Synthetic restart/isolation and decision fixtures plus existing one-shot regressions run in deterministic Linux/Windows CI. No live adapter, database, ledger, issuer, or executor is added; Ready/merge remain human-final.

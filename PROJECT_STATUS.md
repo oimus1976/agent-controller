@@ -20,6 +20,11 @@ Product compass: [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md) restates the end-to-
   - Its operational log, authorizations, and probe results are the comments on #216. Read the newest checkpoint or comment there.
   - Live effects need a separate human authorization for the exact plan ([rules §8](docs/governance/rules.md)).
 
+## Recent verified closeout and merge procedure (2026-10-14)
+
+- [#307](https://github.com/oimus1976/agent-controller/issues/307) closed by human-merged [PR #308](https://github.com/oimus1976/agent-controller/pull/308) at `ef867228f6fa36922327592e32e0565216a2fc55`. The read-only checkpoint-resume classifier is merged; live checkpoint ingestion, authenticated approval source, and automatic execution are **not** part of that PR.
+- Standing final merge-readiness rule: **all inline review threads, including old/outdated threads, must be explicitly Resolved**. Re-read full thread collection and confirm `is_resolved=true` for every thread; code-fixed ≠ thread-resolved; `mergeable=true`/CI PASS/review CLEAN alone are insufficient. See [rules §4](docs/governance/rules.md), [ADR #90 direction](https://github.com/oimus1976/agent-controller/issues/90#issuecomment-6170130388). Human authorizes review-state resolution and merge separately.
+
 ## Active workstreams
 
 This table lists pointers only. Status comes from each authority Issue's latest checkpoint and from GitHub.
@@ -27,7 +32,6 @@ This table lists pointers only. Status comes from each authority Issue's latest 
 | Workstream | Authority Issue | Related Issues / PRs | Checkpoints |
 |---|---|---|---|
 | Private-CI live pilot (main line) | [#216](https://github.com/oimus1976/agent-controller/issues/216) | [#229](https://github.com/oimus1976/agent-controller/issues/229), [#243](https://github.com/oimus1976/agent-controller/issues/243) | comments on #216 |
-| Verified checkpoint advisory resume (independent B:FOLLOW_UP) | [#307](https://github.com/oimus1976/agent-controller/issues/307) | [#17](https://github.com/oimus1976/agent-controller/issues/17), [#20](https://github.com/oimus1976/agent-controller/issues/20), [#195](https://github.com/oimus1976/agent-controller/issues/195); separate from the live pilot | comments on #307; read-only planning, no live execution authority |
 | One-off target-context profile-load probe (design/non-live tests/Draft review only) | [#305](https://github.com/oimus1976/agent-controller/issues/305) | parents [#216](https://github.com/oimus1976/agent-controller/issues/216), [#297](https://github.com/oimus1976/agent-controller/issues/297); general [#195](https://github.com/oimus1976/agent-controller/issues/195) unchanged | latest owner direction / checkpoints on #305; no target execution or live authority |
 | Bounded Phase 0 target execution-policy gate (implementation/tests/review only) | [#303](https://github.com/oimus1976/agent-controller/issues/303) | parents [#216](https://github.com/oimus1976/agent-controller/issues/216), [#297](https://github.com/oimus1976/agent-controller/issues/297); completed retirement [#302](https://github.com/oimus1976/agent-controller/issues/302) | comments on #303; no fresh pilot/freeze/registration/credential acquisition/dispatch performed |
 | Archive planner canonical linked-worktree support | [#300](https://github.com/oimus1976/agent-controller/issues/300) | parent [#216](https://github.com/oimus1976/agent-controller/issues/216), scope [#297](https://github.com/oimus1976/agent-controller/issues/297) | comments on #300 |
