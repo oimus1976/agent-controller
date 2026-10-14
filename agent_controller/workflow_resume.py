@@ -267,6 +267,9 @@ def plan_workflow_resume(*, task: TaskBinding, workstream: WorkstreamBinding,
                                 if not (validation.result is ApprovalResult.BLOCKED
                                         and validation.reason == "APPROVAL_EXPIRED"):
                                     decision_action = ResumeAction.STOP_UNCERTAIN
+                    elif step.level == 3 and step.effect_bearing:
+                        decision_reason = "EFFECT_APPROVAL_BINDING_MISSING"
+                        decision_action = ResumeAction.STOP_UNCERTAIN
                     if decision_reason is not None:
                         action, reasons = decision_action, (decision_reason,)
                     elif facts.freshness is not VerificationResult.PASS:
