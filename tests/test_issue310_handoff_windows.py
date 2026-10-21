@@ -139,6 +139,48 @@ Assert-Issue310Equal $Base ($Base|ConvertTo-Json|ConvertFrom-Json)
 """)
         self.assertEqual(result["blocked"], 14)
 
+    def test_unreadable_process_ownership_is_a_known_stop_not_zero(self):
+        result=self.execute(r"""
+$Blocked=0
+foreach($Owner in @([pscustomobject]@{ReturnValue=2;Sid=$null},[pscustomobject]@{ReturnValue=0;Sid='garbage'},[pscustomobject]@{ReturnValue=0;Sid='S-1-5-21-1-2-3-1007'})){
+    try{Assert-Issue310ProcessOwner $Owner 'powershell.exe' 'S-1-5-21-1-2-3-1007'}catch{$Blocked++}
+}
+Assert-Issue310ProcessOwner ([pscustomobject]@{ReturnValue=0;Sid='S-1-5-18'}) 'System' 'S-1-5-21-1-2-3-1007'
+@{blocked=$Blocked}|ConvertTo-Json -Compress
+""")
+        self.assertEqual(result['blocked'],3)
+
+    def test_independent_readback_timeout_retains_owned_cleanup_result(self):
+        result=self.execute(r"""
+class Issue310Reader { [object] ReadToEndAsync(){return [object]::new()} }
+class Issue310Process {
+    [bool]$HasExited=$false
+    [bool]$Killed=$false
+    [bool]$Disposed=$false
+    [bool]$DenyKill=$false
+    [Issue310Reader]$StandardOutput=[Issue310Reader]::new()
+    [Issue310Reader]$StandardError=[Issue310Reader]::new()
+    [void] Kill(){if($this.DenyKill){throw 'SYNTHETIC_DENIED'};$this.Killed=$true;$this.HasExited=$true}
+    [bool] WaitForExit([int]$Timeout){return $this.HasExited}
+    [void] Dispose(){$this.Disposed=$true}
+}
+function Start-Issue310Postread {param($Packet,$Plan,$Hash,$PidToObserve) return $script:Process}
+function Wait-Issue310Read {param($Task,$Milliseconds) throw 'SYNTHETIC_TIMEOUT'}
+$Out=@()
+foreach($Denied in @($false,$true)){
+    $script:Process=[Issue310Process]::new();$script:Process.DenyKill=$Denied
+    $Report=Invoke-Issue310Postread ([pscustomobject]@{}) ([pscustomobject]@{}) ('a'*64) 0
+    $Out+=@{report=$Report;killed=$Process.Killed;disposed=$Process.Disposed}
+}
+$Out|ConvertTo-Json -Depth 6 -Compress
+""")
+        for r in result:
+            self.assertFalse(r['report']['available'])
+            self.assertTrue(r['disposed'])
+            self.assertEqual(r['report']['reason'],'POSTREAD_UNAVAILABLE_OR_DEADLINE')
+        self.assertTrue(result[0]['report']['owned_exit_confirmed'])
+        self.assertFalse(result[1]['report']['owned_exit_confirmed'])
+
     def test_claim_two_processes_partial_file_and_no_replay(self):
         body = r"""
 $Path=Join-Path $env:ISSUE310_TEMP 'fixed-operation.claim'
@@ -165,20 +207,22 @@ catch{@{claimed=$false}|ConvertTo-Json -Compress}
             result = self.execute(r"""
 $Root=$env:ISSUE310_TEMP
 $Candidate=Join-Path $Root 'fake-diagnostic.ps1'
-[IO.File]::WriteAllText($Candidate,'$global:Issue310Report | ConvertTo-Json -Depth 10 -Compress')
+[IO.File]::WriteAllText($Candidate,'if($global:Issue310Mode -eq ''throw''){throw ''SYNTHETIC_START_FAILURE''};if($global:Issue310Mode -eq ''malformed''){''not-json''}else{$global:Issue310Report | ConvertTo-Json -Depth 10 -Compress}')
 $Dummy=Join-Path $Root 'dummy';[IO.File]::WriteAllText($Dummy,'SYNTHETIC')
 $script:Prompts=0;$script:Gates=0;$script:FailGate=0;$script:PostUnknown=$false
-$script:K=[pscustomobject]@{entry=[pscustomobject]@{path=$Dummy};candidate=[pscustomobject]@{path=$Candidate};plan=[pscustomobject]@{path=$Dummy;sha256=('a'*64)};proposal=[pscustomobject]@{path=$Dummy};baseline=[pscustomobject]@{path=$Dummy};packet_path=$Dummy;claim_path='';expected_facts=[pscustomobject]@{source=[pscustomobject]@{attributes=1;bytes=2;sha256='fake';last_write_utc='fake'}}}
+$script:K=[pscustomobject]@{entry=[pscustomobject]@{path=$Dummy};candidate=[pscustomobject]@{path=$Candidate};plan=[pscustomobject]@{path=$Dummy;sha256=('a'*64)};proposal=[pscustomobject]@{path=$Dummy};baseline=[pscustomobject]@{path=$Dummy};approved_scope=[pscustomobject]@{path=$Dummy};packet_path=$Dummy;claim_path='';expected_facts=[pscustomobject]@{source=[pscustomobject]@{attributes=1;bytes=2;sha256='fake';last_write_utc='fake'}}}
 $P=[pscustomobject]@{executable=$Dummy}
 function Assert-Issue310PreEffect {param($Packet,$Plan,$Hash,$Size,$DecisionId,$Reserve,[switch]$Claimed) $script:Gates++;if($script:FailGate -eq $script:Gates){throw 'SYNTHETIC_GATE_STOP'}}
 function Assert-Issue310Window {param($Plan,$ReserveSeconds)}
 function Read-Host {param($Prompt) return ('a'*64)}
 function Get-Credential {param($UserName,$Message) $script:Prompts++;return [pscredential]::new('WOBBUFFET\ac-runner',(ConvertTo-SecureString 'SYNTHETIC_ONLY' -AsPlainText -Force))}
-function Get-Issue310NativeFacts {param($Packet,$Plan,[switch]$Post) if($script:PostUnknown){throw 'SYNTHETIC_LATE_LOGON_UNKNOWN'};return [pscustomobject]@{source=[pscustomobject]@{attributes=1}}}
+function Assert-Issue310ApprovedScope {param($Packet,$Facts,[switch]$Post)}
+function Invoke-Issue310Postread {param($Packet,$Plan,$Hash,$PidToObserve) $script:Postreads++;return [pscustomobject]@{available=(-not $script:PostUnknown);owned_exit_confirmed=$true;owned_pid_absent=$true;facts=[pscustomobject]@{source=[pscustomobject]@{attributes=1}}}}
 function Get-CimInstance {param($ClassName,$Filter,$OperationTimeoutSec) return @()}
 $Out=@()
-foreach($Case in @('success','missing-b','preprompt-expiry','postprompt-expiry','startup-timeout','collector-timeout','exit-failure','late-logon','forged-boolean')){
+foreach($Case in @('success','missing-b','preprompt-expiry','postprompt-expiry','startup-timeout','collector-timeout','exit-failure','late-logon','forged-boolean','throw','malformed')){
     $script:Prompts=0;$script:Gates=0;$script:FailGate=0;$script:PostUnknown=$false
+    $script:Postreads=0;$global:Issue310Mode=$Case
     $K.claim_path=Join-Path $Root ($Case+'.claim')
     $global:Issue310Report=[pscustomobject]@{status='DIAGNOSTIC_POLICY_OBSERVED';startup_confirmed=$true;policy_observed=$true;broker_exit_confirmed=$true;independent_poststate=$true;independent_process_exit=$true;worker=[pscustomobject]@{status='TARGET_CONTEXT_RELEASED';owned_exit_confirmed=$true;release_confirmed=$true;target_exit_code=0;target_pid=123}}
     switch($Case){
@@ -193,7 +237,7 @@ foreach($Case in @('success','missing-b','preprompt-expiry','postprompt-expiry',
     }
     $Status=''
     try{$Status=(Invoke-Issue310Execution $K $P ('a'*64) 1 9999999999).status}catch{$Status=$_.Exception.Message}
-    $Out+=@{case=$Case;status=$Status;prompts=$script:Prompts;claim=(Test-Path -LiteralPath $K.claim_path)}
+    $Out+=@{case=$Case;status=$Status;prompts=$script:Prompts;claim=(Test-Path -LiteralPath $K.claim_path);postreads=$script:Postreads}
 }
 $Out|ConvertTo-Json -Compress
 """, temp)
@@ -204,9 +248,11 @@ $Out|ConvertTo-Json -Compress
         self.assertEqual(by_case["preprompt-expiry"]["prompts"], 0)
         for case in ("missing-b", "preprompt-expiry", "postprompt-expiry"):
             self.assertEqual(by_case[case]["status"], "SYNTHETIC_GATE_STOP")
-        for case in ("startup-timeout", "collector-timeout", "exit-failure", "late-logon", "forged-boolean"):
+            self.assertEqual(by_case[case]["postreads"], 0)
+        for case in ("startup-timeout", "collector-timeout", "exit-failure", "late-logon", "forged-boolean", "throw", "malformed"):
             self.assertEqual(by_case[case]["status"], "STOP_PARTIAL_PROFILE_STATE")
             self.assertTrue(by_case[case]["claim"])
+            self.assertEqual(by_case[case]["postreads"], 1)
 
 
 if __name__ == "__main__":

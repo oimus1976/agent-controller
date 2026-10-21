@@ -15,6 +15,7 @@ CANDIDATE_SHA = "c135d9357f0ed82cf07fd41a6a68b3a71eeebea51899a0f51c852a543b2ec57
 TARGET_SID = "S-1-5-21-3783647055-311371106-158726857-1007"
 BROKER_SID = "S-1-5-21-3783647055-311371106-158726857-1002"
 PS_SHA = "60c9b29843624dd8af6b6a7b26147753be6aeef65098b9a503cc50850afe410f"
+SCOPE_SHA = "121ce884b3f6994cc6d87fff9d7a8899b63d8af9ec5bca680c48a008cd081a3d"
 INVOCATION = "& '<powershell>' -NoProfile -ExecutionPolicy Bypass -File '<entry>' -Stage EXECUTE_EXACT_OWNER_B -PacketPath '<packet>' -ExpectedPacketSha256 <packet_sha256> -BCommentId <new_human_web_comment_id>"
 
 
@@ -81,10 +82,16 @@ def prospective_plan(proposal):
 
 
 def assemble(spec):
-    if set(spec) != {"schema", "proposal", "baseline", "candidate", "entry", "authority", "packet_path", "plan_path"} or spec["schema"] != "issue310.preparation.v1":
+    if set(spec) != {"schema", "proposal", "baseline", "approved_scope", "candidate", "entry", "authority", "packet_path", "plan_path"} or spec["schema"] != "issue310.preparation.v1":
         raise ValueError("SPEC_SHAPE")
     proposal = json.loads(read_pin(spec["proposal"]))
     baseline = json.loads(read_pin(spec["baseline"]))
+    scope_raw = read_pin(spec["approved_scope"]).replace(b"\r\n", b"\n")
+    if digest(scope_raw) != SCOPE_SHA:
+        raise ValueError("APPROVED_SCOPE_DIGEST")
+    for key, value in json.loads(scope_raw)["approved_facts"].items():
+        if baseline.get(key) != value:
+            raise ValueError("UNCHANGED_A_SCOPE_DRIFT:" + key)
     plan = prospective_plan(proposal)
     if proposal["prospective_operation_binding"]["candidate_path"] != spec["candidate"]["path"]:
         raise ValueError("CANDIDATE_PATH_DRIFT")

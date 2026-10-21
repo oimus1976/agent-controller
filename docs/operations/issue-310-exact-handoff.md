@@ -33,6 +33,7 @@ loaded-hive access, policy compatibility, profile restoration or live readiness.
 |---|---|
 | `proposal` | Pin to a **new**, immutable `issue305.decision-b-plan.NON_EXECUTABLE.v2` proposal, false B/execution flags and null live binding. Historical files are never edited. |
 | `baseline` | Pin to the fresh native facts object returned by `Get-Issue310NativeFacts` in this reviewed entry, without credentials or target operations. Missing/access-denied facts block; never supply fabricated zero/absent facts. |
+| `approved_scope` | Pin to `issue-310-approved-scope.json`, the fixed projection of unchanged A plus the four-field delta. Both implementations pin normalized LF SHA `121ce884b3f6994cc6d87fff9d7a8899b63d8af9ec5bca680c48a008cd081a3d`; a new baseline cannot redefine these facts. |
 | `candidate` | Pin to actual approved Windows CRLF candidate, `c135d935…2ec571`, 32421 bytes; no regeneration/normalization at execution. |
 | `entry` | Pin to actual merged `scripts/Issue310-ExactHandoff.ps1` Windows file bytes. |
 | `authority` | `main_sha` (40 lowercase hex); `a_body_sha256`, `delta_body_sha256` (SHA256 of GitHub comment body's exact UTF-8 text); `latest216`, `latest195` (latest comment IDs). Re-read all on GitHub. |
@@ -66,9 +67,24 @@ the exact proposed B text. It performs no target observation or credential/claim
 operation and does not declare native readiness. Its input is still a prospective
 packet, not the old approved JSON. Baseline acquisition is a separate read-only
 operation, subject to the same governance; the function is available for that
-later reviewed binding. A normal broker may be unable to observe another process's
-owner SID. Such inability is **PROCESS_OWNER_UNKNOWN**, not an empty inventory;
-do not elevate, omit processes or loosen the gate. Report the binding blocker.
+later reviewed binding. [Original A's checkpoint #6103856605](https://github.com/oimus1976/agent-controller/issues/305#issuecomment-6103856605)
+records **139 unreadable process owners** under the normal token. Thus the known
+approved environment is expected to hit **PROCESS_OWNER_UNKNOWN** before a credential
+prompt. This is a **known feasibility/human scope gate**, not just an untested risk.
+Do not elevate, omit processes or loosen the gate. The current Draft is not a
+usable live handoff on that recorded environment. A separate owner design decision
+must establish a permitted way to obtain the required observation or reassess the
+requirement/effect scope; this PR grants neither. Do not generate another real B
+window while that blocker remains. No new native observation was made in #310.
+
+The fixed scope projection records the exact executable/working-directory DACLs,
+file-version resource, profile/source owner/ACL and source SHA/size/time accepted
+by A, with the approved executable hash/time amendment. The runtime version and
+signer thumbprint are separately pinned in code. Sources are original A's native
+evidence checkpoint and its preserved matching #6251063570 snapshot, not old B's
+expired execution authority. LF/CRLF normalization applies **only to this static
+scope config**; every actual input still has its own raw SHA/size pin. Historical
+records are unchanged. Altering the scope config cannot silently authorize drift.
 
 ## New human B and exact owner invocation
 
@@ -146,7 +162,13 @@ is in `finally`. A cancelled/slow dialog cannot bypass time/authority checks.
 Invoke the unchanged candidate once, retaining its `-ExpectedPlanSha256` and
 candidate SHA checks. Require every typed startup/collector/owned-exit/release /
 independent PID/poststate condition, worker exit code zero, and policy observation.
-Additionally read native state independently, including SID_Classes, target
+After **every invocation**, including failure/malformed report/timeout, attempt a
+separate normal-broker read-only child with an eight-second stdout deadline and
+retained-handle cleanup. Preserve parsed candidate diagnostics, readback facts or
+explicit unavailable/owned-exit status; never discard partial evidence. This
+`INDEPENDENT_POSTREAD` stage cannot prompt, launch a target or grant authority, and
+can read state after B expiry. It cannot clear an already uncertain startup.
+Read native state independently, including SID_Classes, target
 process absence, profile Loaded=false, sessions=0 and account/source/profile ACLs.
 Source NTUSER.DAT bytes/time/size may normally change; those fields are excluded
 only from **post** comparison. ACLs and all other baseline facts remain mandatory.

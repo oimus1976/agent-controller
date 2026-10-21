@@ -20,6 +20,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - Added a deterministic prospective NON_EXECUTABLE proposal-to-live-schema assembler and a narrowly scoped Windows PowerShell 5.1 human entry. A new direct-human B must pin packet/plan/code bytes, invocation and fixed window; true flags and historical GitHub prose confer no authority.
 - Added pre-prompt and post-input authority/native/hash/time gates, retained input locks, one fixed-operation exclusive no-retry claim, human-only secure credential entry and conservative independent diagnostic postread. Existing #305 candidate/template/renderer and Controller/Phase0 logic are unchanged.
 - Added portable and native synthetic tests, concurrent disposable claim tests and Windows CI coverage. Fixtures do not prove loaded-hive access or restoration. Original A remains unused; expired B is not reusable. No real diagnostic/credential/profile/runner/dispatch action; Ready/merge remain human-final.
+- Independent review remediation pins unchanged A scope independently of supplied baseline and attempts bounded readback on every invoked outcome, retaining partial evidence. The recorded normal-token process visibility cannot satisfy the strict owner-SID gate; Draft remains blocked for a separate owner feasibility/scope decision, not live-ready.
 
 ---
 

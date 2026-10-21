@@ -1,7 +1,7 @@
 # Narrow owner-present #305 handoff. No target operation in PREPARED_FOR_OWNER_B.
 [CmdletBinding()]
-param([ValidateSet('PREPARED_FOR_OWNER_B','EXECUTE_EXACT_OWNER_B')][string]$Stage,
-      [string]$PacketPath, [string]$ExpectedPacketSha256, [long]$BCommentId)
+param([ValidateSet('PREPARED_FOR_OWNER_B','EXECUTE_EXACT_OWNER_B','INDEPENDENT_POSTREAD')][string]$Stage,
+      [string]$PacketPath, [string]$ExpectedPacketSha256, [long]$BCommentId, [int]$ObservedPid)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 
@@ -135,6 +135,11 @@ function Assert-Issue310Runtime($Exe, $Signature) {
         $Signature.SignerCertificate.Subject -cne 'CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US') { throw 'MICROSOFT_RUNTIME_DRIFT' }
 }
 
+function Assert-Issue310ProcessOwner($Owner, [string]$Name, [string]$TargetSid) {
+    if ($Owner.ReturnValue -ne 0 -or $Owner.Sid -isnot [string] -or $Owner.Sid -cnotmatch '^S-1-[0-9]+(?:-[0-9]+)+$') { throw 'PROCESS_OWNER_UNKNOWN' }
+    if ($Owner.Sid -ceq $TargetSid -or $Name -match 'runner|actions') { throw 'TARGET_OR_RUNNER_PROCESS' }
+}
+
 function Get-Issue310NativeFacts($Packet, $Plan, [switch]$Post) {
     $Identity=[Security.Principal.WindowsIdentity]::GetCurrent()
     $Principal=New-Object Security.Principal.WindowsPrincipal($Identity)
@@ -175,8 +180,7 @@ function Get-Issue310NativeFacts($Packet, $Plan, [switch]$Post) {
     foreach ($Process in @(Get-CimInstance Win32_Process -OperationTimeoutSec 2)) {
         if ($Process.ProcessId -eq 0) { continue }
         $Owner=Invoke-CimMethod -InputObject $Process -MethodName GetOwnerSid -OperationTimeoutSec 2
-        if ($Owner.ReturnValue -ne 0 -or [string]::IsNullOrEmpty($Owner.Sid)) { throw 'PROCESS_OWNER_UNKNOWN' }
-        if ($Owner.Sid -ceq $Plan.target_sid -or $Process.Name -match 'runner|actions') { throw 'TARGET_OR_RUNNER_PROCESS' }
+        Assert-Issue310ProcessOwner $Owner $Process.Name $Plan.target_sid
     }
     if (@(Get-CimInstance Win32_Service -OperationTimeoutSec 2 | Where-Object {$_.Name -match 'runner|actions' -or $_.DisplayName -match 'runner|actions'}).Count -ne 0 -or
         @(Get-ScheduledTask | Where-Object {$_.TaskName -match 'runner|actions' -or $_.TaskPath -match 'runner|actions'}).Count -ne 0) { throw 'RUNNER_PRESENT' }
@@ -230,6 +234,23 @@ function Assert-Issue310Packet($Packet, $Plan, [string]$Entry, [string]$PacketFi
         Assert-Issue310Equal $Binding.$Name $Plan.$Name
     }
     Assert-Issue310Equal (ConvertFrom-Issue310Json (Read-Issue310Pin $Packet.baseline)) $Packet.expected_facts
+    Assert-Issue310ApprovedScope $Packet $Packet.expected_facts
+}
+
+function Assert-Issue310ApprovedScope($Packet, $Facts, [switch]$Post) {
+    # These bytes project unchanged original A + only the four approved delta
+    # fields. A later B/baseline cannot silently approve a different ACL/source.
+    $Raw=Read-Issue310Pin $Packet.approved_scope
+    $Text=[Text.Encoding]::UTF8.GetString($Raw).Replace("`r`n","`n")
+    if ((Get-Issue310Hash ([Text.Encoding]::UTF8.GetBytes($Text))) -cne '121ce884b3f6994cc6d87fff9d7a8899b63d8af9ec5bca680c48a008cd081a3d') { throw 'APPROVED_SCOPE_DIGEST' }
+    $Scope=ConvertFrom-Issue310Json ([Text.Encoding]::UTF8.GetBytes($Text))
+    foreach ($Name in $Scope.approved_facts.PSObject.Properties.Name) {
+        $Expected=$Scope.approved_facts.$Name
+        if ($Post -and $Name -ceq 'source') {
+            foreach ($Variable in @('bytes','last_write_utc','sha256')) { $Expected.PSObject.Properties.Remove($Variable) }
+        }
+        Assert-Issue310Equal $Expected $Facts.$Name
+    }
 }
 
 function New-Issue310Claim([string]$Path, [string]$PacketHash) {
@@ -256,12 +277,60 @@ function Assert-Issue310Result($Result) {
         $Result.worker.release_confirmed -ne $true -or $Result.worker.target_exit_code -ne 0 -or $Result.worker.target_pid -le 0) { throw 'STOP_PARTIAL_PROFILE_STATE' }
 }
 
+function Start-Issue310Postread($Packet, $Plan, [string]$Hash, [int]$PidToObserve) {
+    return [Diagnostics.Process]::Start((New-Object Diagnostics.ProcessStartInfo -Property @{
+        FileName=$Plan.executable
+        Arguments="-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$($Packet.entry.path)`" -Stage INDEPENDENT_POSTREAD -PacketPath `"$($Packet.packet_path)`" -ExpectedPacketSha256 $Hash -ObservedPid $PidToObserve"
+        UseShellExecute=$false;CreateNoWindow=$true;WorkingDirectory=$Plan.working_directory
+        RedirectStandardOutput=$true;RedirectStandardError=$true
+    }))
+}
+
+function Wait-Issue310Read($Task, [int]$Milliseconds) {
+    $Clock=[Diagnostics.Stopwatch]::StartNew()
+    while (-not $Task.IsCompleted) {
+        if ($Clock.ElapsedMilliseconds -ge $Milliseconds) { throw 'POSTREAD_DEADLINE' }
+        Write-Host "issue310 independent postread: $($Clock.ElapsedMilliseconds)ms" -InformationAction Continue
+        Start-Sleep -Milliseconds 250
+    }
+    if ($Task.IsFaulted -or $Task.IsCanceled) { throw 'POSTREAD_CHANNEL' }
+    return $Task.Result
+}
+
+function Invoke-Issue310Postread($Packet, $Plan, [string]$Hash, [int]$PidToObserve) {
+    $Process=$null
+    $Readback=[pscustomobject]@{available=$false;facts=$null;owned_pid_absent=$false;owned_exit_confirmed=$false;reason='POSTREAD_UNAVAILABLE_OR_DEADLINE'}
+    try {
+        $Process=Start-Issue310Postread $Packet $Plan $Hash $PidToObserve
+        $Out=$Process.StandardOutput.ReadToEndAsync();$Err=$Process.StandardError.ReadToEndAsync()
+        $Text=Wait-Issue310Read $Out 8000
+        $Errors=Wait-Issue310Read $Err 1000
+        if (-not $Process.WaitForExit(1000) -or $Process.ExitCode -ne 0 -or $Errors.Length -ne 0 -or $Text.Length -gt 131072) { throw 'POSTREAD_INVALID' }
+        $Parsed=$Text | ConvertFrom-Json
+        if ($Parsed.owned_pid_absent -isnot [bool]) { throw 'POSTREAD_UNKNOWN' }
+        $Readback.facts=$Parsed.facts;$Readback.owned_pid_absent=$Parsed.owned_pid_absent
+        $Readback.available=$true;$Readback.reason='OBSERVED'
+    } catch { $Readback.available=$false }
+    finally {
+        if ($null -ne $Process) {
+            try {
+                if (-not $Process.HasExited) { $Process.Kill();$null=$Process.WaitForExit(5000) }
+                $Readback.owned_exit_confirmed=$Process.HasExited
+            } catch { $Readback.owned_exit_confirmed=$false }
+            $Process.Dispose()
+        }
+    }
+    return $Readback
+}
+
 function Invoke-Issue310Execution($Packet, $Plan, [string]$Hash, [int]$Size, [long]$DecisionId) {
     $Credential=$null; $Claim=$null; $Invoked=$false
+    $CandidateValid=$false
+    $Outcome=[pscustomobject]@{status='STOP_PARTIAL_PROFILE_STATE';candidate=$null;postread=$null;phase0_readiness='BLOCKED'}
     $Locks=New-Object 'System.Collections.Generic.List[System.IDisposable]'
     try {
         # Deny replacement/write/delete of every approved input through cleanup.
-        foreach ($Path in @($Packet.entry.path,$Packet.candidate.path,$Packet.plan.path,$Packet.proposal.path,$Packet.baseline.path,$Packet.packet_path,$Plan.executable)) {
+        foreach ($Path in @($Packet.entry.path,$Packet.candidate.path,$Packet.plan.path,$Packet.proposal.path,$Packet.baseline.path,$Packet.approved_scope.path,$Packet.packet_path,$Plan.executable)) {
             $Locks.Add([IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read))
         }
         Assert-Issue310PreEffect $Packet $Plan $Hash $Size $DecisionId 240
@@ -280,33 +349,48 @@ function Invoke-Issue310Execution($Packet, $Plan, [string]$Hash, [int]$Size, [lo
         # command line; only the unchanged candidate's private stdin envelope is used.
         $Report=& $Packet.candidate.path -PlanPath $Packet.plan.path -ExpectedPlanSha256 $Packet.plan.sha256 -Credential $Credential
         $Result=$Report | ConvertFrom-Json
+        $Outcome.candidate=$Result
         Assert-Issue310Result $Result
-        $After=Get-Issue310NativeFacts $Packet $Plan -Post
-        $Before=$Packet.expected_facts | ConvertTo-Json -Depth 20 | ConvertFrom-Json
-        foreach ($Name in @('bytes','last_write_utc','sha256')) { $Before.source.PSObject.Properties.Remove($Name) }
-        Assert-Issue310Equal $Before $After
-        if (@(Get-CimInstance Win32_Process -Filter "ProcessId=$($Result.worker.target_pid)" -OperationTimeoutSec 2).Count -ne 0) { throw 'STOP_PARTIAL_PROFILE_STATE' }
-        # End-to-end elapsed time cannot upgrade a late result into timely evidence.
-        Assert-Issue310Window $Plan 0
-        return [pscustomobject]@{status='DIAGNOSTIC_POLICY_OBSERVED';candidate=$Result;phase0_readiness='BLOCKED'}
+        $CandidateValid=$true
     } catch {
-        if ($Invoked) { return [pscustomobject]@{status='STOP_PARTIAL_PROFILE_STATE';phase0_readiness='BLOCKED'} }
-        throw
+        if (-not $Invoked) { throw }
     } finally {
+        if ($Invoked) {
+            # Always attempt a bounded independent read, including malformed report,
+            # throw/timeout and unknown startup. Empty poststate NEVER clears STOP.
+            $Outcome.postread=[pscustomobject]@{available=$false;reason='POSTREAD_EXCEPTION';owned_exit_confirmed=$false}
+            try {
+                $PidToObserve=0
+                if ($CandidateValid) { $PidToObserve=$Outcome.candidate.worker.target_pid }
+                $Outcome.postread=Invoke-Issue310Postread $Packet $Plan $Hash $PidToObserve
+                if ($CandidateValid -and $Outcome.postread.available -eq $true -and $Outcome.postread.owned_exit_confirmed -eq $true -and $Outcome.postread.owned_pid_absent -eq $true) {
+                    $After=$Outcome.postread.facts
+                    Assert-Issue310ApprovedScope $Packet $After -Post
+                    $Before=$Packet.expected_facts | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+                    foreach ($Name in @('bytes','last_write_utc','sha256')) { $Before.source.PSObject.Properties.Remove($Name) }
+                    Assert-Issue310Equal $Before $After
+                    Assert-Issue310Window $Plan 0
+                    $Outcome.status='DIAGNOSTIC_POLICY_OBSERVED'
+                }
+            } catch { $Outcome.status='STOP_PARTIAL_PROFILE_STATE' }
+        }
         if ($null -ne $Credential) { $Credential.Password.Dispose(); $Credential=$null }
         if ($null -ne $Claim) { $Claim.Dispose() }
         foreach ($Lock in $Locks) { $Lock.Dispose() }
         # Claim always survives cancellation, uncertainty, partial write and success.
     }
+    return $Outcome
 }
 
 function Assert-Issue310PreEffect($Packet, $Plan, [string]$Hash, [int]$Size, [long]$DecisionId, [int]$Reserve, [switch]$Claimed) {
     Assert-Issue310Window $Plan $Reserve
-    foreach ($Pin in @($Packet.entry,$Packet.candidate,$Packet.plan,$Packet.proposal,$Packet.baseline)) { $null=Read-Issue310Pin $Pin }
+    foreach ($Pin in @($Packet.entry,$Packet.candidate,$Packet.plan,$Packet.proposal,$Packet.baseline,$Packet.approved_scope)) { $null=Read-Issue310Pin $Pin }
     $Raw=[IO.File]::ReadAllBytes($Packet.packet_path)
     if ($Raw.Length -ne $Size -or (Get-Issue310Hash $Raw) -cne $Hash) { throw 'PACKET_DRIFT' }
     Assert-Issue310Authority $Packet $Plan $DecisionId $Hash $Size
-    Assert-Issue310Equal $Packet.expected_facts (Get-Issue310NativeFacts $Packet $Plan)
+    $Facts=Get-Issue310NativeFacts $Packet $Plan
+    Assert-Issue310ApprovedScope $Packet $Facts
+    Assert-Issue310Equal $Packet.expected_facts $Facts
     if ($Claimed) {
         $Claim=[IO.File]::ReadAllText($Packet.claim_path,[Text.Encoding]::ASCII)
         if ($Claim -cne "ISSUE310_RESERVED_NO_RETRY`n$Hash`n") { throw 'CLAIM_UNCERTAIN' }
@@ -325,6 +409,14 @@ $Packet=ConvertFrom-Issue310Json $PacketRaw
 $Plan=ConvertFrom-Issue310Json (Read-Issue310Pin $Packet.plan)
 Assert-Issue310Packet $Packet $Plan $PSCommandPath $PacketPath
 foreach ($Pin in @($Packet.entry,$Packet.candidate)) { $null=Read-Issue310Pin $Pin }
+if ($Stage -ceq 'INDEPENDENT_POSTREAD') {
+    # Read-only child, no B/credential/target launch, also usable after expiry.
+    $Facts=Get-Issue310NativeFacts $Packet $Plan -Post
+    $Absent=$false
+    if ($ObservedPid -gt 0) { $Absent=@(Get-CimInstance Win32_Process -Filter "ProcessId=$ObservedPid" -OperationTimeoutSec 2).Count -eq 0 }
+    [pscustomobject]@{facts=$Facts;owned_pid_absent=$Absent} | ConvertTo-Json -Depth 20 -Compress
+    exit 0
+}
 if ($Stage -ceq 'PREPARED_FOR_OWNER_B') {
     # No OS/target/credential/claim operation; no live readiness or B window renewal.
     'PREPARED_FOR_OWNER_B: prospective pins only; NOT live readiness or authority'

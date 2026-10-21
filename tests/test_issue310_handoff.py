@@ -39,9 +39,12 @@ def fixture(directory):
     candidate = CANDIDATE.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
     candidate_pin = pin(directory / "candidate.ps1", candidate)
     p = proposal(directory / "candidate.ps1")
+    scope_raw=(ROOT / 'docs/operations/issue-310-approved-scope.json').read_bytes()
+    scope=json.loads(scope_raw)
     spec = dict(schema="issue310.preparation.v1",
                 proposal=pin(directory / "proposal.json", bridge.encode(p)),
-                baseline=pin(directory / "baseline.json", bridge.encode({"synthetic": True})),
+                baseline=pin(directory / "baseline.json", bridge.encode(scope['approved_facts'])),
+                approved_scope=pin(directory / 'scope.json',scope_raw),
                 candidate=candidate_pin, entry=pin(directory / "entry.ps1", ENTRY.read_bytes()),
                 authority=dict(main_sha="a" * 40, a_body_sha256="b" * 64, delta_body_sha256="c" * 64,
                                latest216=1, latest195=2),
@@ -89,11 +92,22 @@ class Issue310PreparationTests(unittest.TestCase):
     def test_raw_sha_size_and_source_are_never_silently_rehashed(self):
         with tempfile.TemporaryDirectory(dir=ROOT) as temp:
             _, spec = fixture(Path(temp))
-            for key in ("proposal", "baseline", "candidate", "entry"):
+            for key in ("proposal", "baseline", "approved_scope", "candidate", "entry"):
                 for field, value in (("sha256", "0" * 64), ("bytes", 1)):
                     changed = copy.deepcopy(spec); changed[key][field] = value
                     with self.subTest(key=key, field=field), self.assertRaises(ValueError):
                         bridge.assemble(changed)
+
+    def test_rehashed_baseline_cannot_redefine_unchanged_a_scope(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temp:
+            _, spec=fixture(Path(temp))
+            for key, field in (("runtime","dacl"),("working_directory","owner"),("profile","dacl"),("source","sha256")):
+                changed=copy.deepcopy(spec)
+                baseline=json.loads(Path(spec['baseline']['path']).read_bytes())
+                baseline[key][field]='REBASED_BUT_NOT_APPROVED'
+                changed['baseline']=pin(Path(temp)/'changed-baseline.json',bridge.encode(baseline))
+                with self.subTest(key=key,field=field),self.assertRaisesRegex(ValueError,'UNCHANGED_A_SCOPE_DRIFT'):
+                    bridge.assemble(changed)
 
     def test_no_production_candidate_or_renderer_diff(self):
         raw = CANDIDATE.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
