@@ -276,9 +276,11 @@ Assert-Issue310StaticFacts $Before $After
 $After.profile.dacl='drift'
 $Blocked=$false
 try{Assert-Issue310StaticFacts $Before $After}catch{$Blocked=$true}
-@{blocked=$Blocked;before=$Before.process_observation.unverified_unrelated_owner_count;after=$After.process_observation.unverified_unrelated_owner_count}|ConvertTo-Json -Compress
+$TypedBlocked=$false
+try{Assert-Issue310StaticFacts ([pscustomobject]@{count=1}) ([pscustomobject]@{count=[double]1})}catch{$TypedBlocked=$true}
+@{blocked=$Blocked;typed_blocked=$TypedBlocked;before=$Before.process_observation.unverified_unrelated_owner_count;after=$After.process_observation.unverified_unrelated_owner_count}|ConvertTo-Json -Compress
 """)
-        self.assertEqual(result, dict(blocked=True, before=139, after=140))
+        self.assertEqual(result, dict(blocked=True, typed_blocked=True, before=139, after=140))
 
     def test_scoped_path_boundaries_case_and_descendant_closure(self):
         result = self.execute(SCOPED + r"""

@@ -212,11 +212,15 @@ function Get-Issue310ProcessObservation($Packet, $Plan, $Target, [int]$Operation
 function Assert-Issue310StaticFacts($Expected, $Actual) {
     # Only the explicitly dynamic observation is projected out. All original
     # identity/account/profile/source/ACL/authority fields still compare exactly.
-    $Before=$Expected | ConvertTo-Json -Depth 20 | ConvertFrom-Json
-    $After=$Actual | ConvertTo-Json -Depth 20 | ConvertFrom-Json
-    $Before.PSObject.Properties.Remove('process_observation')
-    $After.PSObject.Properties.Remove('process_observation')
-    Assert-Issue310Equal $Before $After
+    if ($Expected -isnot [pscustomobject] -or $Actual -isnot [pscustomobject]) { throw 'FACT_SHAPE' }
+    $Before=[ordered]@{};$After=[ordered]@{}
+    foreach ($Property in $Expected.PSObject.Properties) {
+        if ($Property.Name -cne 'process_observation') { $Before[$Property.Name]=$Property.Value }
+    }
+    foreach ($Property in $Actual.PSObject.Properties) {
+        if ($Property.Name -cne 'process_observation') { $After[$Property.Name]=$Property.Value }
+    }
+    Assert-Issue310Equal ([pscustomobject]$Before) ([pscustomobject]$After)
 }
 
 function Get-Issue310NativeFacts($Packet, $Plan, [switch]$Post, [int]$OperationPid) {
