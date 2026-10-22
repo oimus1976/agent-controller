@@ -25,6 +25,23 @@ $A.FindAll({param($N)$N -is [System.Management.Automation.Language.FunctionDefin
     ForEach-Object { . ([ScriptBlock]::Create($_.Extent.Text)) }
 """
 
+SCOPED = r"""
+$K=[pscustomobject]@{candidate=[pscustomobject]@{path='C:\Review\candidate.ps1'};entry=[pscustomobject]@{path='C:\Review\entry.ps1'};claim_path='C:\Handoff\operation.claim'}
+$P=[pscustomobject]@{target_sid='S-1-5-21-1-2-3-1007';profile_path='C:\Users\ac-runner'}
+$Target=[pscustomobject]@{sid=$P.target_sid;profile_path=$P.profile_path;profile_list_path=$P.profile_path;loaded=$false;hku_absent=$true;hku_classes_absent=$true;sessions=0}
+$script:Queries=@();$script:Inventory=@();$script:Owners=@{}
+function New-Process($Id,$Parent,$Name,$Image){[pscustomobject]@{ProcessId=$Id;ParentProcessId=$Parent;SessionId=0;Name=$Name;ExecutablePath=$Image}}
+function Get-CimInstance {param($ClassName,$Property,$OperationTimeoutSec)
+    if($ClassName -cne 'Win32_Process' -or ($Property -join ',') -cne 'ProcessId,ParentProcessId,SessionId,Name,ExecutablePath'){throw 'UNSCOPED_METADATA_QUERY'}
+    return $script:Inventory
+}
+function Invoke-CimMethod {param($InputObject,$MethodName,$OperationTimeoutSec)
+    if($MethodName -cne 'GetOwnerSid'){throw 'UNEXPECTED_METHOD'}
+    $script:Queries+=@($InputObject.ProcessId)
+    return $script:Owners[$InputObject.ProcessId]
+}
+"""
+
 
 @unittest.skipUnless(os.name == "nt", "Windows PowerShell 5.1 synthetic boundary")
 class Issue310WindowsTests(unittest.TestCase):
@@ -120,9 +137,11 @@ $B.performed_via_github_app=$null;$B.body+=' forged'
 try{Assert-Issue310Authority $K $P 9999999999 ('a'*64) 123}catch{$Blocked++}
 $B.body=Get-Issue310ApprovalText $K $P ('a'*64) 123;$B.user.id=1
 try{Assert-Issue310Authority $K $P 9999999999 ('a'*64) 123}catch{$Blocked++}
+$B.user.id=22843471;$K.authority.a_body_sha256=('0'*64)
+try{Assert-Issue310Authority $K $P 9999999999 ('a'*64) 123}catch{$Blocked++}
 @{blocked=$Blocked}|ConvertTo-Json -Compress
 """)
-        self.assertEqual(result["blocked"], 5)
+        self.assertEqual(result["blocked"], 6)
 
     def test_typed_snapshot_unknown_and_every_required_drift(self):
         result = self.execute(r"""
@@ -149,6 +168,132 @@ Assert-Issue310ProcessOwner ([pscustomobject]@{ReturnValue=0;Sid='S-1-5-18'}) 'S
 @{blocked=$Blocked}|ConvertTo-Json -Compress
 """)
         self.assertEqual(result['blocked'],3)
+
+    def test_scoped_139_unrelated_owners_are_unverified_and_never_queried(self):
+        result = self.execute(SCOPED + r"""
+foreach($Id in 100..238){
+    $script:Inventory+=@(New-Process $Id 4 'svchost.exe' 'C:\Windows\System32\svchost.exe')
+    $script:Owners[$Id]=[pscustomobject]@{ReturnValue=2;Sid=$null}
+}
+$script:Inventory+=@(New-Process 300 1 'powershell.exe' 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe')
+$script:Owners[300]=[pscustomobject]@{ReturnValue=0;Sid='S-1-5-21-1-2-3-1002'}
+$Report=Get-Issue310ProcessObservation $K $P $Target 0
+@{report=$Report;queries=@($script:Queries)}|ConvertTo-Json -Depth 5 -Compress
+""")
+        self.assertEqual(result['queries'], [300])
+        self.assertEqual(result['report']['unverified_unrelated_owner_count'], 139)
+        self.assertEqual(result['report']['related_owner_checked_count'], 1)
+        self.assertFalse(result['report']['ownership_complete'])
+        self.assertEqual(result['report']['limitation'], 'UNVERIFIED_UNRELATED_PROCESS_OWNER')
+
+    def test_scoped_related_unknown_target_and_runner_activity_stop(self):
+        result = self.execute(SCOPED + r"""
+$Out=@()
+foreach($Case in @('unknown','malformed','target','runner','path-runner','descendant','bound-pid','bound-descendant','operation-path')){
+    $script:Queries=@();$script:Owners=@{}
+    $script:Inventory=@(New-Process 300 1 'powershell.exe' 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe')
+    $script:Owners[300]=[pscustomobject]@{ReturnValue=0;Sid='S-1-5-18'}
+    $Bound=0
+    switch($Case){
+        'unknown' {$script:Owners[300]=[pscustomobject]@{ReturnValue=2;Sid=$null}}
+        'malformed' {$script:Owners[300]=[pscustomobject]@{ReturnValue=0;Sid='garbage'}}
+        'target' {$script:Owners[300].Sid=$P.target_sid}
+        'runner' {$script:Inventory[0]=New-Process 300 1 'Runner.Listener.exe' 'C:\Program Files\Agent\Runner.Listener.exe'}
+        'path-runner' {$script:Inventory[0]=New-Process 300 1 'node.exe' 'C:\Program Files\actions\node.exe'}
+        'descendant' {$script:Inventory+=@(New-Process 301 300 'svchost.exe' 'C:\Windows\System32\svchost.exe');$script:Owners[301]=[pscustomobject]@{ReturnValue=2;Sid=$null}}
+        'bound-pid' {$Bound=301;$script:Inventory=@(New-Process 301 1 'svchost.exe' 'C:\Windows\System32\svchost.exe');$script:Owners[301]=[pscustomobject]@{ReturnValue=2;Sid=$null}}
+        'bound-descendant' {$Bound=299;$script:Inventory=@(New-Process 301 299 'svchost.exe' 'C:\Windows\System32\svchost.exe');$script:Owners[301]=[pscustomobject]@{ReturnValue=2;Sid=$null}}
+        'operation-path' {$script:Inventory=@(New-Process 301 1 'ordinary.exe' 'C:\Review\ordinary.exe');$script:Owners[301]=[pscustomobject]@{ReturnValue=2;Sid=$null}}
+    }
+    $Status='UNEXPECTED_PASS'
+    try{$null=Get-Issue310ProcessObservation $K $P $Target $Bound}catch{$Status=$_.Exception.Message}
+    $Out+=@{case=$Case;status=$Status;queries=@($script:Queries)}
+}
+$Out|ConvertTo-Json -Depth 5 -Compress
+""")
+        by_case = {r['case']: r for r in result}
+        for case in ('unknown', 'malformed', 'descendant', 'bound-pid', 'bound-descendant', 'operation-path'):
+            self.assertEqual(by_case[case]['status'], 'PROCESS_OWNER_UNKNOWN')
+        for case in ('target', 'runner', 'path-runner'):
+            self.assertEqual(by_case[case]['status'], 'TARGET_OR_RUNNER_PROCESS')
+        self.assertEqual(by_case['descendant']['queries'], [300, 301])
+        self.assertEqual(by_case['bound-pid']['queries'], [301])
+        self.assertEqual(by_case['runner']['queries'], [])
+
+    def test_scoped_missing_target_evidence_blocks_before_process_queries(self):
+        result = self.execute(SCOPED + r"""
+$Out=@()
+foreach($Name in @('sid','profile_path','profile_list_path','loaded','hku_absent','hku_classes_absent','sessions')){
+    foreach($Bad in @('missing','unknown','active')){
+        $T=$Target|ConvertTo-Json|ConvertFrom-Json
+        if($Bad -eq 'missing'){$T.PSObject.Properties.Remove($Name)}
+        elseif($Bad -eq 'unknown'){$T.$Name=$null}
+        else{$T.$Name=$(switch($Name){'loaded'{$true};'sessions'{1};'hku_absent'{$false};'hku_classes_absent'{$false};default{'wrong'}})}
+        $Blocked=$false
+        try{$null=Get-Issue310ProcessObservation $K $P $T 0}catch{$Blocked=$true}
+        $Out+=@{blocked=$Blocked;queries=@($script:Queries)}
+    }
+}
+$Out|ConvertTo-Json -Depth 4 -Compress
+""")
+        self.assertEqual(len(result), 21)
+        self.assertTrue(all(r['blocked'] and r['queries'] == [] for r in result))
+
+    def test_scoped_unknown_metadata_paths_bounds_and_pid_collision_stop(self):
+        result = self.execute(SCOPED + r"""
+$Out=@()
+foreach($Case in @('missing-path','relative','dot-path','unc','wrong-name','outside','prefix','missing-session','boolean-pid','duplicate','empty','overflow')){
+    $script:Inventory=@(New-Process 100 4 'service.exe' 'C:\Windows\System32\service.exe')
+    switch($Case){
+        'missing-path' {$script:Inventory[0].ExecutablePath=$null}
+        'relative' {$script:Inventory[0].ExecutablePath='service.exe'}
+        'dot-path' {$script:Inventory[0].ExecutablePath='C:\Windows\System32\..\service.exe'}
+        'unc' {$script:Inventory[0].ExecutablePath='\\host\Windows\service.exe'}
+        'wrong-name' {$script:Inventory[0].Name='other.exe'}
+        'outside' {$script:Inventory[0].ExecutablePath='C:\Unknown\service.exe'}
+        'prefix' {$script:Inventory[0].ExecutablePath='C:\Windows-old\service.exe'}
+        'missing-session' {$script:Inventory[0].SessionId=$null}
+        'boolean-pid' {$script:Inventory[0].ProcessId=$true}
+        'duplicate' {$script:Inventory+=@($script:Inventory[0])}
+        'empty' {$script:Inventory=@()}
+        'overflow' {$script:Inventory=@(1..4097|ForEach-Object {New-Process $_ 0 'service.exe' 'C:\Windows\service.exe'})}
+    }
+    $Blocked=$false
+    try{$null=Get-Issue310ProcessObservation $K $P $Target 0}catch{$Blocked=$true}
+    $Out+=@{case=$Case;blocked=$Blocked;queries=@($script:Queries)}
+}
+$Out|ConvertTo-Json -Depth 4 -Compress
+""")
+        self.assertEqual(len(result), 12)
+        self.assertTrue(all(r['blocked'] and r['queries'] == [] for r in result))
+
+    def test_dynamic_observation_does_not_hide_fixed_fact_drift(self):
+        result = self.execute(r"""
+$Before=[pscustomobject]@{profile=[pscustomobject]@{owner='target';dacl='original'};process_observation=[pscustomobject]@{unverified_unrelated_owner_count=139}}
+$After=$Before|ConvertTo-Json -Depth 5|ConvertFrom-Json
+$After.process_observation.unverified_unrelated_owner_count=140
+Assert-Issue310StaticFacts $Before $After
+$After.profile.dacl='drift'
+$Blocked=$false
+try{Assert-Issue310StaticFacts $Before $After}catch{$Blocked=$true}
+@{blocked=$Blocked;before=$Before.process_observation.unverified_unrelated_owner_count;after=$After.process_observation.unverified_unrelated_owner_count}|ConvertTo-Json -Compress
+""")
+        self.assertEqual(result, dict(blocked=True, before=139, after=140))
+
+    def test_scoped_path_boundaries_case_and_descendant_closure(self):
+        result = self.execute(SCOPED + r"""
+$K.candidate.path='C:\Program Files\Review\candidate.ps1';$K.entry.path='C:\Program Files\Review\entry.ps1'
+$script:Inventory=@(
+    (New-Process 303 302 'child.exe' 'C:\Windows\child.exe'),
+    (New-Process 302 301 'middle.exe' 'C:\Windows\middle.exe'),
+    (New-Process 301 1 'ordinary.exe' 'c:\program files\review\ordinary.exe'),
+    (New-Process 304 1 'ordinary.exe' 'C:\Program Files\Reviewer\ordinary.exe'))
+foreach($Id in 301..303){$script:Owners[$Id]=[pscustomobject]@{ReturnValue=0;Sid='S-1-5-18'}}
+$Report=Get-Issue310ProcessObservation $K $P $Target 0
+@{report=$Report;queries=@($script:Queries)}|ConvertTo-Json -Depth 5 -Compress
+""")
+        self.assertEqual(result['queries'], [303, 302, 301])
+        self.assertEqual(result['report']['unverified_unrelated_owner_count'], 1)
 
     def test_independent_readback_timeout_retains_owned_cleanup_result(self):
         result=self.execute(r"""
@@ -212,15 +357,15 @@ $Dummy=Join-Path $Root 'dummy';[IO.File]::WriteAllText($Dummy,'SYNTHETIC')
 $script:Prompts=0;$script:Gates=0;$script:FailGate=0;$script:PostUnknown=$false
 $script:K=[pscustomobject]@{entry=[pscustomobject]@{path=$Dummy};candidate=[pscustomobject]@{path=$Candidate};plan=[pscustomobject]@{path=$Dummy;sha256=('a'*64)};proposal=[pscustomobject]@{path=$Dummy};baseline=[pscustomobject]@{path=$Dummy};approved_scope=[pscustomobject]@{path=$Dummy};packet_path=$Dummy;claim_path='';expected_facts=[pscustomobject]@{source=[pscustomobject]@{attributes=1;bytes=2;sha256='fake';last_write_utc='fake'}}}
 $P=[pscustomobject]@{executable=$Dummy}
-function Assert-Issue310PreEffect {param($Packet,$Plan,$Hash,$Size,$DecisionId,$Reserve,[switch]$Claimed) $script:Gates++;if($script:FailGate -eq $script:Gates){throw 'SYNTHETIC_GATE_STOP'}}
+function Assert-Issue310PreEffect {param($Packet,$Plan,$Hash,$Size,$DecisionId,$Reserve,[switch]$Claimed) $script:Gates++;if($script:FailGate -eq $script:Gates){throw 'SYNTHETIC_GATE_STOP'};return [pscustomobject]@{limitation='UNVERIFIED_UNRELATED_PROCESS_OWNER';unverified_unrelated_owner_count=139}}
 function Assert-Issue310Window {param($Plan,$ReserveSeconds)}
 function Read-Host {param($Prompt) return ('a'*64)}
 function Get-Credential {param($UserName,$Message) $script:Prompts++;return [pscredential]::new('WOBBUFFET\ac-runner',(ConvertTo-SecureString 'SYNTHETIC_ONLY' -AsPlainText -Force))}
 function Assert-Issue310ApprovedScope {param($Packet,$Facts,[switch]$Post)}
-function Invoke-Issue310Postread {param($Packet,$Plan,$Hash,$PidToObserve) $script:Postreads++;return [pscustomobject]@{available=(-not $script:PostUnknown);owned_exit_confirmed=$true;owned_pid_absent=$true;facts=[pscustomobject]@{source=[pscustomobject]@{attributes=1}}}}
+function Invoke-Issue310Postread {param($Packet,$Plan,$Hash,$PidToObserve) $script:Postreads++;return [pscustomobject]@{available=(-not $script:PostUnknown);owned_exit_confirmed=($global:Issue310Mode -ne 'reader-exit-unknown');owned_pid_absent=($global:Issue310Mode -ne 'pid-present');facts=[pscustomobject]@{source=[pscustomobject]@{attributes=$(if($global:Issue310Mode -eq 'restoration-drift'){9}else{1})};process_observation=[pscustomobject]@{limitation='UNVERIFIED_UNRELATED_PROCESS_OWNER';unverified_unrelated_owner_count=140}}}}
 function Get-CimInstance {param($ClassName,$Filter,$OperationTimeoutSec) return @()}
 $Out=@()
-foreach($Case in @('success','missing-b','preprompt-expiry','postprompt-expiry','startup-timeout','collector-timeout','exit-failure','late-logon','forged-boolean','throw','malformed')){
+foreach($Case in @('success','missing-b','preprompt-expiry','postprompt-expiry','startup-timeout','collector-timeout','exit-failure','late-logon','forged-boolean','throw','malformed','reader-exit-unknown','pid-present','restoration-drift')){
     $script:Prompts=0;$script:Gates=0;$script:FailGate=0;$script:PostUnknown=$false
     $script:Postreads=0;$global:Issue310Mode=$Case
     $K.claim_path=Join-Path $Root ($Case+'.claim')
@@ -236,20 +381,24 @@ foreach($Case in @('success','missing-b','preprompt-expiry','postprompt-expiry',
         'forged-boolean' {$global:Issue310Report.startup_confirmed='True'}
     }
     $Status=''
-    try{$Status=(Invoke-Issue310Execution $K $P ('a'*64) 1 9999999999).status}catch{$Status=$_.Exception.Message}
-    $Out+=@{case=$Case;status=$Status;prompts=$script:Prompts;claim=(Test-Path -LiteralPath $K.claim_path);postreads=$script:Postreads}
+    $Observations=@();$PostCount=0
+    try{$Report=Invoke-Issue310Execution $K $P ('a'*64) 1 9999999999;$Status=$Report.status;$Observations=@($Report.preflight_observations);$PostCount=$Report.postread.facts.process_observation.unverified_unrelated_owner_count}catch{$Status=$_.Exception.Message}
+    $Out+=@{case=$Case;status=$Status;prompts=$script:Prompts;claim=(Test-Path -LiteralPath $K.claim_path);postreads=$script:Postreads;observations=$Observations;post_count=$PostCount}
 }
-$Out|ConvertTo-Json -Compress
+$Out|ConvertTo-Json -Depth 6 -Compress
 """, temp)
         by_case = {r["case"]: r for r in result}
         self.assertEqual(by_case["success"]["status"], "DIAGNOSTIC_POLICY_OBSERVED")
+        self.assertEqual(len(by_case['success']['observations']), 3)
+        self.assertTrue(all(r['unverified_unrelated_owner_count'] == 139 for r in by_case['success']['observations']))
+        self.assertEqual(by_case['success']['post_count'], 140)
         self.assertFalse(by_case["missing-b"]["claim"])
         self.assertEqual(by_case["missing-b"]["prompts"], 0)
         self.assertEqual(by_case["preprompt-expiry"]["prompts"], 0)
         for case in ("missing-b", "preprompt-expiry", "postprompt-expiry"):
             self.assertEqual(by_case[case]["status"], "SYNTHETIC_GATE_STOP")
             self.assertEqual(by_case[case]["postreads"], 0)
-        for case in ("startup-timeout", "collector-timeout", "exit-failure", "late-logon", "forged-boolean", "throw", "malformed"):
+        for case in ("startup-timeout", "collector-timeout", "exit-failure", "late-logon", "forged-boolean", "throw", "malformed", "reader-exit-unknown", "pid-present", "restoration-drift"):
             self.assertEqual(by_case[case]["status"], "STOP_PARTIAL_PROFILE_STATE")
             self.assertTrue(by_case[case]["claim"])
             self.assertEqual(by_case[case]["postreads"], 1)

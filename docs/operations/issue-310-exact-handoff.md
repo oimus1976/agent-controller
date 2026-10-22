@@ -68,14 +68,57 @@ operation and does not declare native readiness. Its input is still a prospectiv
 packet, not the old approved JSON. Baseline acquisition is a separate read-only
 operation, subject to the same governance; the function is available for that
 later reviewed binding. [Original A's checkpoint #6103856605](https://github.com/oimus1976/agent-controller/issues/305#issuecomment-6103856605)
-records **139 unreadable process owners** under the normal token. Thus the known
-approved environment is expected to hit **PROCESS_OWNER_UNKNOWN** before a credential
-prompt. This is a **known feasibility/human scope gate**, not just an untested risk.
-Do not elevate, omit processes or loosen the gate. The current Draft is not a
-usable live handoff on that recorded environment. A separate owner design decision
-must establish a permitted way to obtain the required observation or reassess the
-requirement/effect scope; this PR grants neither. Do not generate another real B
-window while that blocker remains. No new native observation was made in #310.
+records **139 unreadable process owners** under the normal token. The later
+[owner design approval #6339925221](https://github.com/oimus1976/agent-controller/issues/310#issuecomment-6339925221)
+replaces #310's added universal owner-SID predicate with the scoped observation
+below. It changes no A effects and grants no B or native observation authority.
+No new native observation was made in #310. The historical 139 are not assumed
+to meet the new metadata requirements; native feasibility remains unverified.
+
+### Scoped process observation and its limits
+
+First independently verify the exact enabled non-admin SID, matching profile and
+ProfileList, `Loaded=false`, both exact HKU keys absent, and zero target logon
+sessions. Metadata discovery then requests only PID, parent PID, session ID, image
+name and executable path, with a 4096-record ceiling. It never reads process
+arguments, command lines or environment. Missing, malformed, duplicate or excessive
+metadata stops. PID 0's exact idle accounting record is excluded; there is no
+protected-process/PID 4 ownership exemption.
+
+Owner-SID queries apply only to operation-relevant candidate PIDs: PowerShell,
+PowerShell ISE, pwsh, cmd, wscript, cscript, mshta, conhost and OpenConsole images;
+images within the exact target profile, candidate/entry directories or operation
+handoff directory; the independently bound operation PID; and their descendants
+in the metadata snapshot, even if the bound parent PID has already disappeared.
+Runner/actions image names or paths stop immediately. Unknown candidate ownership
+or a target-SID match stops. Runner/actions services/tasks and exact target service
+or task principals also stop. Failed mandatory queries stop, without escalation.
+
+Other PIDs are classified as unrelated **within this exact operation's observation
+model only** when their metadata is complete, their canonical image path is within
+`C:\Windows`, `C:\Program Files` or `C:\Program Files (x86)`, none of the candidate
+grounds match, and all independent target prerequisites above hold. Windows path
+comparison respects case and directory boundaries. Installed-system path placement
+is a limited association signal, not proof of owner, image trust or process safety.
+Their owners remain **unqueried**, counted as
+`UNVERIFIED_UNRELATED_PROCESS_OWNER`; the report explicitly records
+`ownership_complete=false`. The count includes all such unqueried owners, not a
+claimed count of observed access denials. A synthetic 139-denial fixture tests
+that those ambient owner methods are never called.
+
+This never proves global host quiescence or zero target-owned processes. Unknown
+relevance, unreadable executable paths or metadata outside the documented grounds
+stop. [Win32_Process documents executable-path privilege requirements](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-process),
+so protected processes may still prevent a normal-token binding. That is a **human
+feasibility/scope gate**; do not guess, elevate or obtain another real B to work
+around it. No live usability is inferred from synthetic fixtures.
+
+Every completed preflight records its scoped counts and displays the non-exhaustive
+visibility warning before credentials. All three preflight observations and the
+independent postread observation are retained in the outcome. Only the named
+`process_observation` field is excluded from static baseline equality because
+ambient counts can change; all original account/profile/source/ACL/authority facts
+still compare exactly. The native baseline retains its original observation too.
 
 The fixed scope projection records the exact executable/working-directory DACLs,
 file-version resource, profile/source owner/ACL and source SHA/size/time accepted
@@ -132,7 +175,7 @@ Immediately before the credential dialog, the entry requires all of:
 - Raw candidate/entry/source/plan/packet hashes and sizes. Open read handles deny
   write/replacement/deletion of approved inputs through cleanup.
 - Matching enabled non-admin target SID, ProfileList/profile/status, absent exact
-  HKU SID **and SID_Classes**, zero target sessions/processes, no runner activity,
+  HKU SID **and SID_Classes**, zero target sessions, scoped process observation and no runner activity,
   source metadata/SHA/ACL, all 16 canonical slots and dedicated output absent,
   unchanged consumed-authority and generation metadata. No broker HKCU policy
   fallback. HKCU is consulted only for the **broker's logging policy**.
@@ -168,8 +211,8 @@ retained-handle cleanup. Preserve parsed candidate diagnostics, readback facts o
 explicit unavailable/owned-exit status; never discard partial evidence. This
 `INDEPENDENT_POSTREAD` stage cannot prompt, launch a target or grant authority, and
 can read state after B expiry. It cannot clear an already uncertain startup.
-Read native state independently, including SID_Classes, target
-process absence, profile Loaded=false, sessions=0 and account/source/profile ACLs.
+Read native state independently, including SID_Classes, exact operation PID
+absence, scoped process observation, profile Loaded=false, sessions=0 and account/source/profile ACLs.
 Source NTUSER.DAT bytes/time/size may normally change; those fields are excluded
 only from **post** comparison. ACLs and all other baseline facts remain mandatory.
 Require a final in-window postread. Diagnostic evidence is written exclusively to
@@ -194,6 +237,7 @@ fixtures. Ready, merge and every target operation remain human-final under ADR #
 | Deterministic mapping/raw pins; false/forged flags rejected; A/delta subject/runtime/window bounds | `test_issue310_handoff.py` |
 | PS5.1 parser/current UTC/reserves; fresh fake direct-owner B; missing/historic/app/forged/wrong-owner B | `test_issue310_handoff_windows.py` |
 | Typed facts including unavailable HKU/profile/slots/signature/ACL; cancellation and gates before prompts | same native synthetic suite |
+| Actual scoped selection: 139 unqueried unrelated owners; related/target/runner/descendant/bound-PID uncertainty; missing target facts and metadata; path boundaries; retained changing observations | same native synthetic suite, all CIM/target boundaries mocked |
 | Two concurrent exclusive reservations; empty partial claim; no replay | same suite, disposable workspace files only |
 | Startup/collector timeout, exit failure, unknown late logon, false success downgrade | same suite, fake diagnostic and API boundaries |
 | Existing strict policy, retained handles, timeout/independent restoration and current-user pipe lease | unchanged #305, Phase0 policy/collector and Phase4 contract suites |

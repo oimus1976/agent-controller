@@ -140,7 +140,86 @@ function Assert-Issue310ProcessOwner($Owner, [string]$Name, [string]$TargetSid) 
     if ($Owner.Sid -ceq $TargetSid -or $Name -match 'runner|actions') { throw 'TARGET_OR_RUNNER_PROCESS' }
 }
 
-function Get-Issue310NativeFacts($Packet, $Plan, [switch]$Post) {
+function Get-Issue310ProcessObservation($Packet, $Plan, $Target, [int]$OperationPid) {
+    # These independent target facts are prerequisites, not inferred from process owners.
+    if ($Target.sid -cne $Plan.target_sid -or $Target.profile_path -cne $Plan.profile_path -or
+        $Target.profile_list_path -cne $Plan.profile_path -or $Target.loaded -isnot [bool] -or $Target.loaded -or
+        $Target.hku_absent -isnot [bool] -or -not $Target.hku_absent -or
+        $Target.hku_classes_absent -isnot [bool] -or -not $Target.hku_classes_absent -or
+        $Target.sessions -isnot [int] -or $Target.sessions -ne 0) { throw 'TARGET_STATE_UNKNOWN_OR_ACTIVE' }
+    # No command lines, arguments, environment, or ambient owner-SID inventory.
+    $Processes=@(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,SessionId,Name,ExecutablePath -OperationTimeoutSec 2 | Select-Object -First 4097)
+    if ($Processes.Count -eq 0 -or $Processes.Count -gt 4096) { throw 'PROCESS_METADATA_LIMIT' }
+    $Related=@{};$Seen=@{};$Images=@{}
+    $Roots=@($Plan.profile_path,[IO.Path]::GetDirectoryName($Packet.candidate.path),[IO.Path]::GetDirectoryName($Packet.entry.path),[IO.Path]::GetDirectoryName($Packet.claim_path))
+    foreach ($Process in $Processes) {
+        foreach ($Name in @('ProcessId','ParentProcessId','SessionId')) {
+            if (($Process.$Name -isnot [int] -and $Process.$Name -isnot [uint32] -and $Process.$Name -isnot [long]) -or
+                $Process.$Name -lt 0 -or $Process.$Name -gt [uint32]::MaxValue) { throw 'PROCESS_METADATA_UNKNOWN' }
+        }
+        $Key=[long]$Process.ProcessId
+        if ($Seen.ContainsKey($Key) -or [string]::IsNullOrWhiteSpace($Process.Name)) { throw 'PROCESS_METADATA_UNKNOWN' }
+        $Seen[$Key]=$true
+        # PID 0 is the non-executable idle accounting record, not an owner exemption.
+        if ($Key -eq 0) {
+            if ($Process.Name -cne 'System Idle Process' -or $Process.ParentProcessId -ne 0 -or $Process.SessionId -ne 0) { throw 'PROCESS_METADATA_UNKNOWN' }
+            continue
+        }
+        $Image=$Process.ExecutablePath
+        if ($Image -isnot [string] -or $Image -notmatch '^[a-zA-Z]:\\' -or $Image -ine [IO.Path]::GetFullPath($Image) -or
+            [IO.Path]::GetFileName($Image) -ine $Process.Name) { throw 'PROCESS_RELEVANCE_UNKNOWN' }
+        $Images[$Key]=$Image
+        if (($Process.Name+' '+$Image) -match 'runner|actions') { throw 'TARGET_OR_RUNNER_PROCESS' }
+        $Candidate=($Key -eq $OperationPid -and $OperationPid -gt 0) -or
+            $Process.Name -match '^(powershell|powershell_ise|pwsh|cmd|wscript|cscript|mshta|conhost|OpenConsole)\.exe$'
+        foreach ($Root in $Roots) {
+            if ($Image.StartsWith($Root.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) { $Candidate=$true }
+        }
+        if ($Candidate) { $Related[$Key]=$true }
+    }
+    # Include descendants even when their names and paths are otherwise ordinary.
+    do {
+        $Changed=$false
+        foreach ($Process in $Processes) {
+            $Key=[long]$Process.ProcessId
+            if ($Key -gt 0 -and -not $Related.ContainsKey($Key) -and
+                ($Related.ContainsKey([long]$Process.ParentProcessId) -or ($OperationPid -gt 0 -and $Process.ParentProcessId -eq $OperationPid))) {
+                $Related[$Key]=$true;$Changed=$true
+            }
+        }
+    } while ($Changed)
+    $Unverified=0;$Checked=0
+    foreach ($Process in $Processes) {
+        $Key=[long]$Process.ProcessId
+        if ($Key -eq 0) { continue }
+        if ($Related.ContainsKey($Key)) {
+            $Owner=Invoke-CimMethod -InputObject $Process -MethodName GetOwnerSid -OperationTimeoutSec 2
+            Assert-Issue310ProcessOwner $Owner $Process.Name $Plan.target_sid
+            $Checked++
+        } else {
+            # A complete canonical installed-system image, no operation path/host/
+            # lineage match, plus the independent target prerequisites above.
+            # This is scoped non-association, NEVER proof of its owner or safety.
+            if ($Images[$Key] -notmatch '^C:\\(?:Windows|Program Files|Program Files \(x86\))\\') { throw 'PROCESS_RELEVANCE_UNKNOWN' }
+            $Unverified++
+        }
+    }
+    return [pscustomobject]@{scope='EXACT_OPERATION_METADATA_ONLY';ownership_complete=$false;
+        limitation='UNVERIFIED_UNRELATED_PROCESS_OWNER';unverified_unrelated_owner_count=$Unverified;
+        related_owner_checked_count=$Checked;metadata_count=$Processes.Count}
+}
+
+function Assert-Issue310StaticFacts($Expected, $Actual) {
+    # Only the explicitly dynamic observation is projected out. All original
+    # identity/account/profile/source/ACL/authority fields still compare exactly.
+    $Before=$Expected | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    $After=$Actual | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    $Before.PSObject.Properties.Remove('process_observation')
+    $After.PSObject.Properties.Remove('process_observation')
+    Assert-Issue310Equal $Before $After
+}
+
+function Get-Issue310NativeFacts($Packet, $Plan, [switch]$Post, [int]$OperationPid) {
     $Identity=[Security.Principal.WindowsIdentity]::GetCurrent()
     $Principal=New-Object Security.Principal.WindowsPrincipal($Identity)
     if ($env:COMPUTERNAME -cne 'WOBBUFFET' -or $Identity.Name -cne 'WOBBUFFET\c-admin' -or $Identity.User.Value -cne $Packet.broker_sid -or
@@ -174,16 +253,15 @@ function Get-Issue310NativeFacts($Packet, $Plan, [switch]$Post) {
     }
     $Accounts=@(Get-CimInstance Win32_UserAccount -Filter "SID='$($Plan.target_sid)'" -OperationTimeoutSec 2)
     if ($Accounts.Count -ne 1) { throw 'ACCOUNT_UNKNOWN' }
-    if (@(Get-CimAssociatedInstance -InputObject $Accounts[0] -Association Win32_LoggedOnUser -OperationTimeoutSec 2).Count -ne 0) { throw 'TARGET_SESSION' }
-    # Inaccessible process ownership is UNKNOWN, never zero. This can block a
-    # normal broker; do not elevate or relax it to obtain a runnable result.
-    foreach ($Process in @(Get-CimInstance Win32_Process -OperationTimeoutSec 2)) {
-        if ($Process.ProcessId -eq 0) { continue }
-        $Owner=Invoke-CimMethod -InputObject $Process -MethodName GetOwnerSid -OperationTimeoutSec 2
-        Assert-Issue310ProcessOwner $Owner $Process.Name $Plan.target_sid
-    }
-    if (@(Get-CimInstance Win32_Service -OperationTimeoutSec 2 | Where-Object {$_.Name -match 'runner|actions' -or $_.DisplayName -match 'runner|actions'}).Count -ne 0 -or
-        @(Get-ScheduledTask | Where-Object {$_.TaskName -match 'runner|actions' -or $_.TaskPath -match 'runner|actions'}).Count -ne 0) { throw 'RUNNER_PRESENT' }
+    $Sessions=@(Get-CimAssociatedInstance -InputObject $Accounts[0] -Association Win32_LoggedOnUser -OperationTimeoutSec 2).Count
+    if ($Sessions -ne 0) { throw 'TARGET_SESSION' }
+    $Target=[pscustomobject]@{sid=$User.SID.Value;profile_path=$Profiles[0].LocalPath;
+        profile_list_path=[Environment]::ExpandEnvironmentVariables($List.ProfileImagePath);loaded=$Profiles[0].Loaded;
+        hku_absent=$true;hku_classes_absent=$true;sessions=$Sessions}
+    $Observation=Get-Issue310ProcessObservation $Packet $Plan $Target $OperationPid
+    $TargetNames=@($Plan.target_sid,'ac-runner','.\ac-runner','WOBBUFFET\ac-runner')
+    if (@(Get-CimInstance Win32_Service -OperationTimeoutSec 2 | Where-Object {$_.Name -match 'runner|actions' -or $_.DisplayName -match 'runner|actions' -or $_.StartName -in $TargetNames}).Count -ne 0 -or
+        @(Get-ScheduledTask | Where-Object {$_.TaskName -match 'runner|actions' -or $_.TaskPath -match 'runner|actions' -or $_.Principal.UserId -in $TargetNames}).Count -ne 0) { throw 'RUNNER_OR_TARGET_ACTIVITY' }
     $Root='C:\Users\Public\Documents\agent-controller-handoff'
     $Slots=@('issue216-pilot-identity-freeze.json','issue216-phase0-canonical.json','issue225-registration-handoff.json',
         'issue225-phase4-target-environment-candidate.ps1','issue225-phase4-plan.json','issue225-phase4-result.json','issue225-phase4-target-environment.log',
@@ -203,6 +281,7 @@ function Get-Issue310NativeFacts($Packet, $Plan, [switch]$Post) {
         output_root=(Get-Issue310Metadata $Root)
         authority=(Get-Issue310DirectoryMetadata 'C:\ProgramData\agent-controller-private-ci-authority')
         generations=(Get-Issue310DirectoryMetadata 'C:\ProgramData\agent-controller\private-ci')
+        process_observation=$Observation
     }
 }
 
@@ -326,23 +405,23 @@ function Invoke-Issue310Postread($Packet, $Plan, [string]$Hash, [int]$PidToObser
 function Invoke-Issue310Execution($Packet, $Plan, [string]$Hash, [int]$Size, [long]$DecisionId) {
     $Credential=$null; $Claim=$null; $Invoked=$false
     $CandidateValid=$false
-    $Outcome=[pscustomobject]@{status='STOP_PARTIAL_PROFILE_STATE';candidate=$null;postread=$null;phase0_readiness='BLOCKED'}
+    $Outcome=[pscustomobject]@{status='STOP_PARTIAL_PROFILE_STATE';candidate=$null;postread=$null;preflight_observations=@();phase0_readiness='BLOCKED'}
     $Locks=New-Object 'System.Collections.Generic.List[System.IDisposable]'
     try {
         # Deny replacement/write/delete of every approved input through cleanup.
         foreach ($Path in @($Packet.entry.path,$Packet.candidate.path,$Packet.plan.path,$Packet.proposal.path,$Packet.baseline.path,$Packet.approved_scope.path,$Packet.packet_path,$Plan.executable)) {
             $Locks.Add([IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read))
         }
-        Assert-Issue310PreEffect $Packet $Plan $Hash $Size $DecisionId 240
+        $Outcome.preflight_observations+=@(Assert-Issue310PreEffect $Packet $Plan $Hash $Size $DecisionId 240)
         $Claim=New-Issue310Claim $Packet.claim_path $Hash
         # Trusted interactive human step; no credential arguments/files/env/logs.
         # An arbitrarily slow/cancelled dialog cannot start a target: full recheck follows.
         $Confirm=Read-Host 'Human owner: confirm the exact approved packet SHA-256'
         if ($Confirm -cne $Hash) { throw 'HUMAN_CONFIRMATION_REQUIRED' }
-        Assert-Issue310PreEffect $Packet $Plan $Hash $Size $DecisionId 240 -Claimed
+        $Outcome.preflight_observations+=@(Assert-Issue310PreEffect $Packet $Plan $Hash $Size $DecisionId 240 -Claimed)
         $Credential=Get-Credential -UserName 'WOBBUFFET\ac-runner' -Message 'Human only: one exact #305 diagnostic. Cancel to STOP; claim is never reusable.'
         if ($null -eq $Credential -or $Credential.UserName -cne 'WOBBUFFET\ac-runner') { throw 'HUMAN_CREDENTIAL_CANCELLED' }
-        Assert-Issue310PreEffect $Packet $Plan $Hash $Size $DecisionId 180 -Claimed
+        $Outcome.preflight_observations+=@(Assert-Issue310PreEffect $Packet $Plan $Hash $Size $DecisionId 180 -Claimed)
         Assert-Issue310Window $Plan 180
         $Invoked=$true
         # PSCredential stays in this process. & is script invocation, not a native
@@ -368,7 +447,7 @@ function Invoke-Issue310Execution($Packet, $Plan, [string]$Hash, [int]$Size, [lo
                     Assert-Issue310ApprovedScope $Packet $After -Post
                     $Before=$Packet.expected_facts | ConvertTo-Json -Depth 20 | ConvertFrom-Json
                     foreach ($Name in @('bytes','last_write_utc','sha256')) { $Before.source.PSObject.Properties.Remove($Name) }
-                    Assert-Issue310Equal $Before $After
+                    Assert-Issue310StaticFacts $Before $After
                     Assert-Issue310Window $Plan 0
                     $Outcome.status='DIAGNOSTIC_POLICY_OBSERVED'
                 }
@@ -390,13 +469,15 @@ function Assert-Issue310PreEffect($Packet, $Plan, [string]$Hash, [int]$Size, [lo
     Assert-Issue310Authority $Packet $Plan $DecisionId $Hash $Size
     $Facts=Get-Issue310NativeFacts $Packet $Plan
     Assert-Issue310ApprovedScope $Packet $Facts
-    Assert-Issue310Equal $Packet.expected_facts $Facts
+    Assert-Issue310StaticFacts $Packet.expected_facts $Facts
     if ($Claimed) {
         $Claim=[IO.File]::ReadAllText($Packet.claim_path,[Text.Encoding]::ASCII)
         if ($Claim -cne "ISSUE310_RESERVED_NO_RETRY`n$Hash`n") { throw 'CLAIM_UNCERTAIN' }
     } elseif (Test-Path -LiteralPath $Packet.claim_path) { throw 'CLAIM_EXISTS_NO_RETRY' }
     if (Test-Path -LiteralPath $Packet.result_path) { throw 'OUTPUT_CONFLICT' }
     Assert-Issue310Window $Plan $Reserve
+    Write-Host "issue310 UNVERIFIED_UNRELATED_PROCESS_OWNER: $($Facts.process_observation.unverified_unrelated_owner_count); ownership visibility is non-exhaustive"
+    return $Facts.process_observation
 }
 
 # Tests extract functions from the AST; never dot-source this entry.
@@ -411,7 +492,7 @@ Assert-Issue310Packet $Packet $Plan $PSCommandPath $PacketPath
 foreach ($Pin in @($Packet.entry,$Packet.candidate)) { $null=Read-Issue310Pin $Pin }
 if ($Stage -ceq 'INDEPENDENT_POSTREAD') {
     # Read-only child, no B/credential/target launch, also usable after expiry.
-    $Facts=Get-Issue310NativeFacts $Packet $Plan -Post
+    $Facts=Get-Issue310NativeFacts $Packet $Plan -Post -OperationPid $ObservedPid
     $Absent=$false
     if ($ObservedPid -gt 0) { $Absent=@(Get-CimInstance Win32_Process -Filter "ProcessId=$ObservedPid" -OperationTimeoutSec 2).Count -eq 0 }
     [pscustomobject]@{facts=$Facts;owned_pid_absent=$Absent} | ConvertTo-Json -Depth 20 -Compress
