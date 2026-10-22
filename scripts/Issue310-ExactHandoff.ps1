@@ -174,7 +174,7 @@ function Get-Issue310ProcessObservation($Packet, $Plan, $Target, [int]$Operation
         if ($Image -is [string]) {
             try {
                 $ImageName=[IO.Path]::GetFileName($Image)
-                if ($Image -match '^[a-zA-Z]:\\') {
+                if ($Image -match '^[a-zA-Z]:[\\/]') {
                     $NormalizedImage=[IO.Path]::GetFullPath($Image)
                     $ValidImage=($Image -ieq $NormalizedImage -and $ImageName -ieq $Process.Name)
                 }

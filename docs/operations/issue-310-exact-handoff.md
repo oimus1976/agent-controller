@@ -96,9 +96,10 @@ Positively identified **operation-related candidates** include script hosts
 OpenConsole), the bound operation PID, any *available* image-path match within
 the exact target profile, candidate/entry or claim directories, and descendants
 of those candidates, including descendants of a bound operation PID which is
-already absent. An available script-host **image basename** and a drive-rooted image path
-whose normalized form enters an operation directory are positive candidate
-evidence even when the reported Name or raw path conflicts. These cases must
+already absent. An available script-host **image basename** and a drive-absolute
+image path (with either `\` or `/` after the drive) whose normalized form enters
+an operation directory are positive candidate evidence even when the reported
+Name or raw path conflicts. These cases must
 STOP on the mandatory canonical image/name verification; they cannot enter the
 ambient visibility fallback. A runner/actions name or an available image path
 containing runner/actions STOP immediately, irrespective of ownership. Relevant process

@@ -323,6 +323,56 @@ $Out|ConvertTo-Json -Depth 4 -Compress
             self.assertEqual(row['status'],'PROCESS_RELEVANCE_UNKNOWN',row)
             self.assertEqual(row['queries'],[],row)
 
+    def test_drive_absolute_separator_variants_preserve_operation_root_evidence(self):
+        result = self.execute(SCOPED + r"""
+$K.candidate.path='C:\Candidate\candidate.ps1';$K.entry.path='C:\Entry\entry.ps1'
+$P.profile_path='C:\Profiles\Target'
+$Target.profile_path=$P.profile_path;$Target.profile_list_path=$P.profile_path
+$Cases=@(
+    @{case='candidate';image='C:/Candidate/ordinary.exe'},
+    @{case='normalized-candidate';image='C:/Elsewhere/../Candidate/ordinary.exe'},
+    @{case='null-child-first';image='C:/Elsewhere/../Candidate/ordinary.exe'},
+    @{case='mixed-separators';image='C:\Elsewhere/../Candidate/ordinary.exe'},
+    @{case='entry';image='C:/Entry/ordinary.exe'},
+    @{case='claim';image='C:/Handoff/ordinary.exe'},
+    @{case='profile';image='C:/Profiles/Target/ordinary.exe'},
+    @{case='case-insensitive';image='C:/cAnDiDaTe/ordinary.exe'},
+    @{case='sibling';image='C:/Candidate-Other/ordinary.exe'},
+    @{case='normalized-sibling';image='C:/Candidate/../Candidate-Other/ordinary.exe'},
+    @{case='canonical';image='C:\Candidate\ordinary.exe'}
+)
+$Out=@()
+foreach($Case in $Cases){
+    $script:Queries=@();$script:Owners=@{}
+    $Parent=New-Process 300 4 'ordinary.exe' $Case.image
+    $script:Inventory=@($Parent)
+    if($Case.case -eq 'null-child-first'){
+        $script:Inventory=@((New-Process 301 300 'child.exe' $null),$Parent)
+    }
+    $script:Owners[300]=[pscustomobject]@{ReturnValue=0;Sid='S-1-5-18'}
+    $Status='PASS';$Observation=$null
+    try{$Observation=Get-Issue310ProcessObservation $K $P $Target 0}catch{$Status=$_.Exception.Message}
+    $Out+=@{case=$Case.case;status=$Status;queries=@($script:Queries);
+        normalized=[IO.Path]::GetFullPath($Case.image);observation=$Observation}
+}
+$Out|ConvertTo-Json -Depth 5 -Compress
+""")
+        self.assertEqual(len(result), 11)
+        for row in result:
+            if row['case'] in ('sibling', 'normalized-sibling'):
+                self.assertEqual(row['status'], 'PASS', row)
+                self.assertEqual(row['queries'], [], row)
+                self.assertEqual(row['observation']['unverified_ambient_process_count'], 1)
+                self.assertEqual(row['observation']['limitation'], 'UNVERIFIED_AMBIENT_PROCESS_VISIBILITY')
+                self.assertFalse(row['observation']['ownership_complete'])
+            elif row['case'] == 'canonical':
+                self.assertEqual(row['status'], 'PASS', row)
+                self.assertEqual(row['queries'], [300], row)
+                self.assertEqual(row['observation']['related_owner_checked_count'], 1)
+            else:
+                self.assertEqual(row['status'], 'PROCESS_RELEVANCE_UNKNOWN', row)
+                self.assertEqual(row['queries'], [], row)
+
     def test_mandatory_process_name_requires_actual_string_before_ambient_fallback(self):
         result = self.execute(SCOPED + r"""
 $Out=@()
