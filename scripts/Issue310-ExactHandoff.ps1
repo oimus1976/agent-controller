@@ -150,7 +150,7 @@ function Get-Issue310ProcessObservation($Packet, $Plan, $Target, [int]$Operation
     # No command lines, arguments, environment, or ambient owner-SID inventory.
     $Processes=@(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,SessionId,Name,ExecutablePath -OperationTimeoutSec 2 | Select-Object -First 4097)
     if ($Processes.Count -eq 0 -or $Processes.Count -gt 4096) { throw 'PROCESS_METADATA_LIMIT' }
-    $Related=@{};$Seen=@{};$Images=@{}
+    $Related=@{};$Seen=@{};$Images=@{};$Canonical=@{}
     $Roots=@($Plan.profile_path,[IO.Path]::GetDirectoryName($Packet.candidate.path),[IO.Path]::GetDirectoryName($Packet.entry.path),[IO.Path]::GetDirectoryName($Packet.claim_path))
     foreach ($Process in $Processes) {
         foreach ($Name in @('ProcessId','ParentProcessId','SessionId')) {
@@ -166,14 +166,25 @@ function Get-Issue310ProcessObservation($Packet, $Plan, $Target, [int]$Operation
             continue
         }
         $Image=$Process.ExecutablePath
-        if ($Image -isnot [string] -or $Image -notmatch '^[a-zA-Z]:\\' -or $Image -ine [IO.Path]::GetFullPath($Image) -or
-            [IO.Path]::GetFileName($Image) -ine $Process.Name) { throw 'PROCESS_RELEVANCE_UNKNOWN' }
         $Images[$Key]=$Image
-        if (($Process.Name+' '+$Image) -match 'runner|actions') { throw 'TARGET_OR_RUNNER_PROCESS' }
+        # Ambient image paths can be NULL for protected/system processes under
+        # the required non-elevated broker. Do not call them safe or target-free.
+        # Only operation-related PIDs require a verified image/owner.
+        $ValidImage=$false
+        if ($Image -is [string] -and $Image -match '^[a-zA-Z]:\\') {
+            try {
+                $ValidImage=($Image -ieq [IO.Path]::GetFullPath($Image) -and
+                    [IO.Path]::GetFileName($Image) -ieq $Process.Name)
+            } catch { $ValidImage=$false }
+        }
+        $Canonical[$Key]=$ValidImage
+        if (($Process.Name+' '+[string]$Image) -match 'runner|actions') { throw 'TARGET_OR_RUNNER_PROCESS' }
         $Candidate=($Key -eq $OperationPid -and $OperationPid -gt 0) -or
             $Process.Name -match '^(powershell|powershell_ise|pwsh|cmd|wscript|cscript|mshta|conhost|OpenConsole)\.exe$'
-        foreach ($Root in $Roots) {
-            if ($Image.StartsWith($Root.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) { $Candidate=$true }
+        if ($Image -is [string]) {
+            foreach ($Root in $Roots) {
+                if ($Image.StartsWith($Root.TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) { $Candidate=$true }
+            }
         }
         if ($Candidate) { $Related[$Key]=$true }
     }
@@ -188,24 +199,29 @@ function Get-Issue310ProcessObservation($Packet, $Plan, $Target, [int]$Operation
             }
         }
     } while ($Changed)
-    $Unverified=0;$Checked=0
+    $Unverified=0;$MissingImage=0;$Checked=0
     foreach ($Process in $Processes) {
         $Key=[long]$Process.ProcessId
         if ($Key -eq 0) { continue }
         if ($Related.ContainsKey($Key)) {
+            # Unknown owner/image of a positively identified operation candidate
+            # stays a hard STOP; no universal ambient visibility predicate.
+            if (-not $Canonical[$Key]) { throw 'PROCESS_RELEVANCE_UNKNOWN' }
             $Owner=Invoke-CimMethod -InputObject $Process -MethodName GetOwnerSid -OperationTimeoutSec 2
             Assert-Issue310ProcessOwner $Owner $Process.Name $Plan.target_sid
             $Checked++
         } else {
-            # A complete canonical installed-system image, no operation path/host/
-            # lineage match, plus the independent target prerequisites above.
-            # This is scoped non-association, NEVER proof of its owner or safety.
-            if ($Images[$Key] -notmatch '^C:\\(?:Windows|Program Files|Program Files \(x86\))\\') { throw 'PROCESS_RELEVANCE_UNKNOWN' }
+            # Unknown ambient ownership/relevance is a disclosed residual risk,
+            # NOT an assertion that the PID is unrelated or harmless.
             $Unverified++
+            if (-not $Canonical[$Key]) { $MissingImage++ }
         }
     }
     return [pscustomobject]@{scope='EXACT_OPERATION_METADATA_ONLY';ownership_complete=$false;
-        limitation='UNVERIFIED_UNRELATED_PROCESS_OWNER';unverified_unrelated_owner_count=$Unverified;
+        image_path_complete=($MissingImage -eq 0);
+        limitation='UNVERIFIED_AMBIENT_PROCESS_VISIBILITY';
+        unverified_ambient_process_count=$Unverified;
+        unverified_ambient_image_path_count=$MissingImage;
         related_owner_checked_count=$Checked;metadata_count=$Processes.Count}
 }
 
@@ -480,7 +496,7 @@ function Assert-Issue310PreEffect($Packet, $Plan, [string]$Hash, [int]$Size, [lo
     } elseif (Test-Path -LiteralPath $Packet.claim_path) { throw 'CLAIM_EXISTS_NO_RETRY' }
     if (Test-Path -LiteralPath $Packet.result_path) { throw 'OUTPUT_CONFLICT' }
     Assert-Issue310Window $Plan $Reserve
-    Write-Host "issue310 UNVERIFIED_UNRELATED_PROCESS_OWNER: $($Facts.process_observation.unverified_unrelated_owner_count); ownership visibility is non-exhaustive"
+    Write-Host "issue310 UNVERIFIED_AMBIENT_PROCESS_VISIBILITY: $($Facts.process_observation.unverified_ambient_process_count) ambient PIDs unverified, $($Facts.process_observation.unverified_ambient_image_path_count) with unreadable images; host visibility is non-exhaustive"
     return $Facts.process_observation
 }
 
