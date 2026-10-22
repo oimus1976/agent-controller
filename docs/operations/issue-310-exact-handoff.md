@@ -68,50 +68,61 @@ operation and does not declare native readiness. Its input is still a prospectiv
 packet, not the old approved JSON. Baseline acquisition is a separate read-only
 operation, subject to the same governance; the function is available for that
 later reviewed binding. [Original A's checkpoint #6103856605](https://github.com/oimus1976/agent-controller/issues/305#issuecomment-6103856605)
-records **139 unreadable process owners** under the normal token. The later
-[owner design approval #6339925221](https://github.com/oimus1976/agent-controller/issues/310#issuecomment-6339925221)
-replaces #310's added universal owner-SID predicate with the scoped observation
-below. It changes no A effects and grants no B or native observation authority.
-No new native observation was made in #310. The historical 139 are not assumed
-to meet the new metadata requirements; native feasibility remains unverified.
+records **139 unreadable process owners** under the normal token. The
+[owner decision #6339925221](https://github.com/oimus1976/agent-controller/issues/310#issuecomment-6339925221)
+removed the universal owner-SID requirement. A later non-elevated
+[read-only feasibility observation #6342086088](https://github.com/oimus1976/agent-controller/issues/310#issuecomment-6342086088)
+found **134 NULL ExecutablePath values in 247 processes** (including PID0;
+133 excluding PID0), showing that universal image-path readability also fails.
+The [new human decision #6342893201](https://github.com/oimus1976/agent-controller/issues/310#issuecomment-6342893201)
+accepts **incomplete ambient process visibility as a disclosed risk** and permits
+this second narrow remediation, not a wider live effect or new B approval.
 
 ### Scoped process observation and its limits
 
-First independently verify the exact enabled non-admin SID, matching profile and
-ProfileList, `Loaded=false`, both exact HKU keys absent, and zero target logon
-sessions. Metadata discovery then requests only PID, parent PID, session ID, image
-name and executable path, with a 4096-record ceiling. It never reads process
-arguments, command lines or environment. Missing, malformed, duplicate or excessive
-metadata stops. PID 0's exact idle accounting record is excluded; there is no
-protected-process/PID 4 ownership exemption.
+Before considering processes, independently verify exact target SID, enabled
+non-admin account, matching ProfileList/profile/source baseline, `Loaded=false`,
+both exact HKU SID and SID_Classes absent, zero target logon sessions and
+operation/authority/output absence. Unknown or contradictory *target* facts STOP.
+Process metadata discovery requests only PID, parent PID, session ID, name
+and optional ExecutablePath, with a 4096-record ceiling; no command lines,
+arguments or environment. Missing/invalid PID, parent/session or name, duplicate
+PIDs and over-limit inventory STOP. The exact PID0 idle accounting record
+is excluded from ownership/visibility counts; PID4 is **not** a privileged
+exception or declared safe.
 
-Owner-SID queries apply only to operation-relevant candidate PIDs: PowerShell,
-PowerShell ISE, pwsh, cmd, wscript, cscript, mshta, conhost and OpenConsole images;
-images within the exact target profile, candidate/entry directories or operation
-handoff directory; the independently bound operation PID; and their descendants
-in the metadata snapshot, even if the bound parent PID has already disappeared.
-Runner/actions image names or paths stop immediately. Unknown candidate ownership
-or a target-SID match stops. Runner/actions services/tasks and exact target service
-or task principals also stop. Failed mandatory queries stop, without escalation.
+Positively identified **operation-related candidates** include script hosts
+(PowerShell, PowerShell ISE, pwsh, cmd, wscript, cscript, mshta, conhost and
+OpenConsole), the bound operation PID, any *available* image-path match within
+the exact target profile, candidate/entry or claim directories, and descendants
+of those candidates, including descendants of a bound operation PID which is
+already absent. A runner/actions name or an available image path containing
+runner/actions STOP immediately, irrespective of ownership. Relevant process
+owners are checked through `GetOwnerSid`, **but only after** a canonical exact
+image-path/name match is established. A NULL/malformed/mismatched image,
+unknown owner, target SID match or unverifiable lineage in this positively
+identified candidate set STOP. Services/tasks with runner/actions indicators
+or the exact target principal also STOP.
 
-Other PIDs are classified as unrelated **within this exact operation's observation
-model only** when their metadata is complete, their canonical image path is within
-`C:\Windows`, `C:\Program Files` or `C:\Program Files (x86)`, none of the candidate
-grounds match, and all independent target prerequisites above hold. Windows path
-comparison respects case and directory boundaries. Installed-system path placement
-is a limited association signal, not proof of owner, image trust or process safety.
-Their owners remain **unqueried**, counted as
-`UNVERIFIED_UNRELATED_PROCESS_OWNER`; the report explicitly records
-`ownership_complete=false`. The count includes all such unqueried owners, not a
-claimed count of observed access denials. A synthetic 139-denial fixture tests
-that those ambient owner methods are never called.
+**Ambient PIDs not positively associated with the operation** do not receive
+an owner lookup. If `ExecutablePath` is NULL, inaccessible, malformed or
+noncanonical on such an ambient PID, it is counted as incomplete visibility,
+not treated as unrelated/safe, nor inferred to be a Windows system process.
+The observation explicitly reports `limitation=UNVERIFIED_AMBIENT_PROCESS_VISIBILITY`,
+`ownership_complete=false`, `unverified_ambient_process_count`,
+`unverified_ambient_image_path_count` and `image_path_complete`.
+The ambient count includes all non-candidate PIDs not queried; the image count
+includes only their unavailable/noncanonical image paths. Counts are not access
+denial counts and do not prove their owners, absence of a hidden target process,
+or **global host quiescence**. Known candidate metadata ambiguity continues
+to STOP; incomplete *ambient* visibility is the precise newly accepted
+residual risk, not a universal unknown-is-safe rule.
 
-This never proves global host quiescence or zero target-owned processes. Unknown
-relevance, unreadable executable paths or metadata outside the documented grounds
-stop. [Win32_Process documents executable-path privilege requirements](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-process),
-so protected processes may still prevent a normal-token binding. That is a **human
-feasibility/scope gate**; do not guess, elevate or obtain another real B to work
-around it. No live usability is inferred from synthetic fixtures.
+These scoped observations alone cannot prove real Windows profile-load,
+loaded-hive access, process restoration or future executability. The original
+#305 candidate, one-use owner authority, strict handles, bound target PID/SID
+and post-effect independent PID/HKU/profile/session/ACL proof remain unchanged.
+No new B window should be created until native read-only binding is verified.
 
 Every completed preflight records its scoped counts and displays the non-exhaustive
 visibility warning before credentials. All three preflight observations and the
