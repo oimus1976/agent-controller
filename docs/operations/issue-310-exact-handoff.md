@@ -86,7 +86,7 @@ both exact HKU SID and SID_Classes absent, zero target logon sessions and
 operation/authority/output absence. Unknown or contradictory *target* facts STOP.
 Process metadata discovery requests only PID, parent PID, session ID, name
 and optional ExecutablePath, with a 4096-record ceiling; no command lines,
-arguments or environment. Missing/invalid PID, parent/session or name, duplicate
+arguments or environment. Missing/invalid PID, parent/session or **non-string/blank name**, duplicate
 PIDs and over-limit inventory STOP. The exact PID0 idle accounting record
 is excluded from ownership/visibility counts; PID4 is **not** a privileged
 exception or declared safe.
@@ -96,8 +96,12 @@ Positively identified **operation-related candidates** include script hosts
 OpenConsole), the bound operation PID, any *available* image-path match within
 the exact target profile, candidate/entry or claim directories, and descendants
 of those candidates, including descendants of a bound operation PID which is
-already absent. A runner/actions name or an available image path containing
-runner/actions STOP immediately, irrespective of ownership. Relevant process
+already absent. An available script-host **image basename** and a drive-rooted image path
+whose normalized form enters an operation directory are positive candidate
+evidence even when the reported Name or raw path conflicts. These cases must
+STOP on the mandatory canonical image/name verification; they cannot enter the
+ambient visibility fallback. A runner/actions name or an available image path
+containing runner/actions STOP immediately, irrespective of ownership. Relevant process
 owners are checked through `GetOwnerSid`, **but only after** a canonical exact
 image-path/name match is established. A NULL/malformed/mismatched image,
 unknown owner, target SID match or unverifiable lineage in this positively
