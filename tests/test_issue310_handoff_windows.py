@@ -298,6 +298,54 @@ $Out|ConvertTo-Json -Depth 4 -Compress
         for case in ('empty','overflow'):
             self.assertEqual(by_case[case]['status'],'PROCESS_METADATA_LIMIT')
 
+    def test_positive_image_host_and_normalized_operation_root_stop_even_if_name_conflicts(self):
+        result = self.execute(SCOPED + r"""
+$Out=@()
+foreach($Case in @('image-host-name-contradiction','normalized-operation-root','image-host-null-child','normalized-root-null-child')){
+    $script:Queries=@();$script:Owners=@{}
+    if($Case -match 'image-host'){
+        $script:Inventory=@(New-Process 300 4 'ordinary.exe' 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe')
+    }else{
+        $script:Inventory=@(New-Process 300 4 'ordinary.exe' 'C:\Windows\..\Review\ordinary.exe')
+    }
+    if($Case -match 'null-child'){
+        $script:Inventory+=@(New-Process 301 300 'service.exe' $null)
+    }
+    $script:Owners[300]=[pscustomobject]@{ReturnValue=0;Sid='S-1-5-18'}
+    $Status='UNEXPECTED_PASS'
+    try{$null=Get-Issue310ProcessObservation $K $P $Target 0}catch{$Status=$_.Exception.Message}
+    $Out+=@{case=$Case;status=$Status;queries=@($script:Queries)}
+}
+$Out|ConvertTo-Json -Depth 4 -Compress
+""")
+        self.assertEqual(len(result),4)
+        for row in result:
+            self.assertEqual(row['status'],'PROCESS_RELEVANCE_UNKNOWN',row)
+            self.assertEqual(row['queries'],[],row)
+
+    def test_mandatory_process_name_requires_actual_string_before_ambient_fallback(self):
+        result = self.execute(SCOPED + r"""
+$Out=@()
+foreach($Case in @('number','boolean','null','array')){
+    $script:Queries=@();$script:Owners=@{}
+    $script:Inventory=@(New-Process 300 4 'ordinary.exe' $null)
+    switch($Case){
+        'number' {$script:Inventory[0].Name=42}
+        'boolean' {$script:Inventory[0].Name=$true}
+        'null' {$script:Inventory[0].Name=$null}
+        'array' {$script:Inventory[0].Name=@('ordinary.exe')}
+    }
+    $Status='UNEXPECTED_PASS'
+    try{$null=Get-Issue310ProcessObservation $K $P $Target 0}catch{$Status=$_.Exception.Message}
+    $Out+=@{case=$Case;status=$Status;queries=@($script:Queries)}
+}
+$Out|ConvertTo-Json -Depth 4 -Compress
+""")
+        self.assertEqual(len(result),4)
+        for row in result:
+            self.assertEqual(row['status'],'PROCESS_METADATA_UNKNOWN',row)
+            self.assertEqual(row['queries'],[],row)
+
     def test_dynamic_observation_does_not_hide_fixed_fact_drift(self):
         result = self.execute(r"""
 $Before=[pscustomobject]@{profile=[pscustomobject]@{owner='target';dacl='original'};process_observation=[pscustomobject]@{unverified_ambient_process_count=139}}
