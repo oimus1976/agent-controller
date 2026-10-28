@@ -15,6 +15,16 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-10-22 — Exact owner-present #305 handoff (Issue #310, Draft / unmerged)
+
+- Added a deterministic prospective NON_EXECUTABLE proposal-to-live-schema assembler and a narrowly scoped Windows PowerShell 5.1 human entry. A new direct-human B must pin packet/plan/code bytes, invocation and fixed window; true flags and historical GitHub prose confer no authority.
+- Added pre-prompt and post-input authority/native/hash/time gates, retained input locks, one fixed-operation exclusive no-retry claim, human-only secure credential entry and conservative independent diagnostic postread. Existing #305 candidate/template/renderer and Controller/Phase0 logic are unchanged.
+- Added portable and native synthetic tests, concurrent disposable claim tests and Windows CI coverage. Fixtures do not prove loaded-hive access or restoration. Original A remains unused; expired B is not reusable. No real diagnostic/credential/profile/runner/dispatch action; Ready/merge remain human-final.
+- Independent review remediation pins unchanged A scope independently of supplied baseline and attempts bounded readback on every invoked outcome, retaining partial evidence.
+- Owner design approval #6339925221 replaces universal process-owner interrogation with bounded metadata discovery and owner queries only for operation-related candidates. Unqueried unrelated ownership is counted as non-exhaustive visibility, never host quiescence. Target-state/relevant-owner uncertainty, unknown exit and restoration still stop. Synthetic PS5.1 regressions cover selection, 139 unqueried owners, target/runner activity, ambiguity and retained observations; native metadata feasibility remains a human gate. Original A/candidate/scope bytes and effects are unchanged.
+
+---
+
 ## 2026-10-11 — Verified checkpoint advisory resume (Issue #307, Draft / unmerged)
 
 - Added a bounded read-only resume classifier using existing task/workstream and trusted human approval validation contracts. Externally verified completed outcomes and unchanged scope decisions remain planning context; fresh facts, scope drift, revocation, expiry and partial effects determine the first actionable stage with structured reasons.
