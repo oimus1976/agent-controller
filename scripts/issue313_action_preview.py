@@ -124,7 +124,7 @@ def main():
     parser.add_argument("plan", type=Path, help="Existing prospective plan, read only")
     args = parser.parse_args()
     card = preview(args.packet.read_bytes(), args.plan.read_bytes())
-    print(json.dumps(card, ensure_ascii=False, indent=2, sort_keys=True))
+    print(json.dumps(card, ensure_ascii=True, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
