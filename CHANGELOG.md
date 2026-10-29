@@ -15,6 +15,12 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-10-30 — Non-executing human-action preview (Issue #313, Draft / unmerged)
+
+- Added a read-only Japanese scope/risk action-card adapter for existing #310 prospective packet/plan bytes, with synthetic rejection of malformed or inconsistent pins. It deliberately omits execution commands, host identifiers and credential material; it never reports owner consent or native freshness.
+- The desired one-action local human-final entry remains a **design and an unverified trust-boundary dependency**, not implemented consent. Same-principal GitHub comments, static flags and agent-operated UI cannot prove a human decision. No new B/window, credential dialog, claim, target operation, Phase0, runner or dispatch.
+- Linux scratch synthetic tests passed before Draft publication; exact-head GitHub CI and independent review must be checked separately. This entry describes Draft work, not merged functionality.
+
 ## 2026-10-22 — Exact owner-present #305 handoff (Issue #310, Draft / unmerged)
 
 - Added a deterministic prospective NON_EXECUTABLE proposal-to-live-schema assembler and a narrowly scoped Windows PowerShell 5.1 human entry. A new direct-human B must pin packet/plan/code bytes, invocation and fixed window; true flags and historical GitHub prose confer no authority.
