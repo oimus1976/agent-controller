@@ -102,9 +102,23 @@ function Assert-Issue310Authority($Packet, $Plan, [long]$DecisionId, [string]$Ha
         $Before=Read-Issue310GitHub "issues/$($Pair[0])"
         if ($Before.comments -le 0) { throw 'AUTHORITY_UNAVAILABLE' }
         $Page=[int][Math]::Ceiling($Before.comments/100.0)
-        $Comments=@(Read-Issue310GitHub "issues/$($Pair[0])/comments?per_page=100&page=$Page")
+        $PageResult=Read-Issue310GitHub "issues/$($Pair[0])/comments?per_page=100&page=$Page"
+        $Comments=@($PageResult)
+        # Windows PowerShell 5.1 can preserve the REST JSON array as one nested
+        # Object[] in the function result. Unwrap that single collection layer,
+        # never treating an array as an individual comment.
+        if ($Comments.Count -eq 1 -and $Comments[0] -is [array]) {
+            $Comments=@($Comments[0] | ForEach-Object { $_ })
+        }
         $After=Read-Issue310GitHub "issues/$($Pair[0])"
-        if ($Before.comments -ne $After.comments -or $Before.updated_at -cne $After.updated_at -or $Comments.Count -eq 0 -or $Comments[-1].id -ne $Pair[1]) { throw 'LATEST_AUTHORITY_DRIFT' }
+        $ExpectedPageCount=[int]($Before.comments - 100*($Page-1))
+        if ($Before.comments -ne $After.comments -or $Before.updated_at -cne $After.updated_at -or
+            $Comments.Count -ne $ExpectedPageCount) { throw 'LATEST_AUTHORITY_DRIFT' }
+        foreach ($Record in $Comments) {
+            if ($Record -isnot [pscustomobject] -or $Record.PSObject.Properties.Name -notcontains 'id' -or
+                ($Record.id -isnot [long] -and $Record.id -isnot [int])) { throw 'LATEST_AUTHORITY_DRIFT' }
+        }
+        if ($Comments[-1].id -ne $Pair[1]) { throw 'LATEST_AUTHORITY_DRIFT' }
     }
 }
 
