@@ -143,6 +143,51 @@ try{Assert-Issue310Authority $K $P 9999999999 ('a'*64) 123}catch{$Blocked++}
 """)
         self.assertEqual(result["blocked"], 6)
 
+    def test_ps51_nested_39_comment_page_and_stale_or_malformed_fail_closed(self):
+        result = self.execute(r"""
+$Now=[DateTime]::UtcNow
+$P=[pscustomobject]@{not_before_utc=$Now.AddSeconds(-10).ToString('yyyy-MM-ddTHH:mm:ssZ');expires_utc=$Now.AddSeconds(500).ToString('yyyy-MM-ddTHH:mm:ssZ')}
+$K=[pscustomobject]@{operation_id='fixture';entry=[pscustomobject]@{sha256=('e'*64)};plan=[pscustomobject]@{sha256=('f'*64)};authority=[pscustomobject]@{a_body_sha256=(Get-Issue310Hash ([Text.Encoding]::UTF8.GetBytes('FAKE_A')));delta_body_sha256=(Get-Issue310Hash ([Text.Encoding]::UTF8.GetBytes('FAKE_A')));main_sha=('a'*40);latest216=216;latest195=195}}
+$script:B=[pscustomobject]@{id=[long]9999999999;user=[pscustomobject]@{id=22843471;login='oimus1976';type='User'};author_association='OWNER';performed_via_github_app=$null;issue_url='https://api.github.com/repos/oimus1976/agent-controller/issues/305';created_at=$Now.ToString('yyyy-MM-ddTHH:mm:ssZ');updated_at=$Now.ToString('yyyy-MM-ddTHH:mm:ssZ');body=(Get-Issue310ApprovalText $K $P ('a'*64) 123)}
+$script:Shape='nested'
+function Read-Issue310GitHub($Suffix){
+    if($Suffix -match '^issues/comments/(6104605714|6244245123)$'){return [pscustomobject]@{id=[long]$Matches[1];user=[pscustomobject]@{id=22843471};body='FAKE_A'}}
+    if($Suffix -eq 'issues/comments/9999999999'){return $script:B}
+    if($Suffix -eq 'git/ref/heads/main'){return [pscustomobject]@{object=[pscustomobject]@{sha=('a'*40)}}}
+    if($Suffix -match '^issues/(305|216|195)/comments\?'){
+        $Issue=[int]$Matches[1]
+        if($Issue -ne 305){return [pscustomobject]@{id=[long]$Issue}}
+        $Rows=@(1..38 | ForEach-Object { [pscustomobject]@{id=[long]$_} })
+        $Rows+=@([pscustomobject]@{id=[long]9999999999})
+        if($script:Shape -eq 'wrong_last'){$Rows[-1]=[pscustomobject]@{id=[long]7}}
+        if($script:Shape -eq 'short'){$Rows=@($Rows[0..37])}
+        if($script:Shape -eq 'malformed'){$Rows[0]='not-a-comment'}
+        if($script:Shape -eq 'flat'){return $Rows}
+        # One wrapped Object[] models the observed PowerShell 5.1 response.
+        return ,$Rows
+    }
+    if($Suffix -match '^issues/(305|216|195)$'){
+        $N=[int]$Matches[1]
+        return [pscustomobject]@{comments=$(if($N -eq 305){39}else{1});updated_at='fixture'}
+    }
+    throw 'UNEXPECTED_API'
+}
+Assert-Issue310Authority $K $P 9999999999 ('a'*64) 123
+$script:Shape='flat'
+Assert-Issue310Authority $K $P 9999999999 ('a'*64) 123
+$Blocked=0
+foreach($Shape in @('wrong_last','short','malformed')){
+    $script:Shape=$Shape
+    try{Assert-Issue310Authority $K $P 9999999999 ('a'*64) 123}catch{
+        if($_.Exception.Message -ne 'LATEST_AUTHORITY_DRIFT'){throw}
+        $Blocked++
+    }
+}
+@{flat_and_nested_passed=$true;blocked=$Blocked}|ConvertTo-Json -Compress
+""")
+        self.assertTrue(result["flat_and_nested_passed"])
+        self.assertEqual(result["blocked"], 3)
+
     def test_typed_snapshot_unknown_and_every_required_drift(self):
         result = self.execute(r"""
 $Base=[pscustomobject]@{host='FIXTURE';sid='fixture';sha256='fake';size=1;subject='Microsoft';thumbprint='fake';dacl='fake';working_directory='fixture';source='fixture';hku_absent=$true;profile_idle=$true;slots_absent=$true;processes_idle=$true}
