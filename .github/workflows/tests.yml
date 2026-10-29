@@ -51,6 +51,8 @@ jobs:
         run: python -m unittest discover -s tests -p "test_private_ci_ast_producer_windows.py" -v
       - name: Run non-live Issue 310 exact handoff fixtures (no target logon)
         run: python -m unittest discover -s tests -p "test_issue310*" -v
+      - name: Run #313 non-executing human-action preview fixtures
+        run: python -m unittest discover -s tests -p "test_issue313_action_preview.py" -v
       - name: Run read-only Phase 0 target policy fixtures (#303)
         run: python -m unittest discover -s tests -p "test_private_ci_phase0_policy_windows.py" -v
       - name: Run non-live target-context probe fixtures (#305)
