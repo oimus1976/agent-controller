@@ -143,6 +143,35 @@ try{Assert-Issue310Authority $K $P 9999999999 ('a'*64) 123}catch{$Blocked++}
 """)
         self.assertEqual(result["blocked"], 6)
 
+    def test_ps51_comment_page_shape_and_invalid_ids(self):
+        result = self.execute(r"""
+$Rows=@(1..38 | ForEach-Object { [pscustomobject]@{id=[long]$_} })
+$Rows+=@([pscustomobject]@{id=[long]9999999999})
+$Flat=ConvertTo-Issue310CommentPage $Rows
+if($Flat.unwrapped -or $Flat.comments.Count -ne 39){throw 'FLAT_SHAPE'}
+$Nested=,$Rows
+if($Nested.Count -ne 1 -or $Nested[0] -isnot [array] -or $Nested[0].Count -ne 39){throw 'FIXTURE_NOT_NESTED'}
+$Result=ConvertTo-Issue310CommentPage $Nested
+if(-not $Result.unwrapped -or $Result.comments.Count -ne 39 -or $Result.comments[-1].id -ne 9999999999){throw 'UNWRAP_NOT_EXERCISED'}
+$Blocked=0
+$Double=,$Nested
+try{ConvertTo-Issue310CommentPage $Double | Out-Null}catch{
+    if($_.Exception.Message -ne 'LATEST_AUTHORITY_DRIFT'){throw}
+    $Blocked++
+}
+foreach($Id in @([long]0,[long]-1)){
+    $Bad=@($Rows.Clone())
+    $Bad[0]=[pscustomobject]@{id=$Id}
+    try{ConvertTo-Issue310CommentPage $Bad | Out-Null}catch{
+        if($_.Exception.Message -ne 'LATEST_AUTHORITY_DRIFT'){throw}
+        $Blocked++
+    }
+}
+@{unwrapped=$Result.unwrapped;blocked=$Blocked}|ConvertTo-Json -Compress
+""")
+        self.assertTrue(result["unwrapped"])
+        self.assertEqual(result["blocked"], 3)
+
     def test_ps51_nested_39_comment_page_and_stale_or_malformed_fail_closed(self):
         result = self.execute(r"""
 $Now=[DateTime]::UtcNow
@@ -162,6 +191,9 @@ function Read-Issue310GitHub($Suffix){
         if($script:Shape -eq 'wrong_last'){$Rows[-1]=[pscustomobject]@{id=[long]7}}
         if($script:Shape -eq 'short'){$Rows=@($Rows[0..37])}
         if($script:Shape -eq 'malformed'){$Rows[0]='not-a-comment'}
+        if($script:Shape -eq 'zero_id'){$Rows[0]=[pscustomobject]@{id=[long]0}}
+        if($script:Shape -eq 'negative_id'){$Rows[0]=[pscustomobject]@{id=[long]-1}}
+        if($script:Shape -eq 'deep_nested'){return ,(,$Rows)}
         if($script:Shape -eq 'flat'){return $Rows}
         # One wrapped Object[] models the observed PowerShell 5.1 response.
         return ,$Rows
@@ -176,7 +208,7 @@ Assert-Issue310Authority $K $P 9999999999 ('a'*64) 123
 $script:Shape='flat'
 Assert-Issue310Authority $K $P 9999999999 ('a'*64) 123
 $Blocked=0
-foreach($Shape in @('wrong_last','short','malformed')){
+foreach($Shape in @('wrong_last','short','malformed','zero_id','negative_id','deep_nested')){
     $script:Shape=$Shape
     try{Assert-Issue310Authority $K $P 9999999999 ('a'*64) 123}catch{
         if($_.Exception.Message -ne 'LATEST_AUTHORITY_DRIFT'){throw}
@@ -186,7 +218,7 @@ foreach($Shape in @('wrong_last','short','malformed')){
 @{flat_and_nested_passed=$true;blocked=$Blocked}|ConvertTo-Json -Compress
 """)
         self.assertTrue(result["flat_and_nested_passed"])
-        self.assertEqual(result["blocked"], 3)
+        self.assertEqual(result["blocked"], 6)
 
     def test_typed_snapshot_unknown_and_every_required_drift(self):
         result = self.execute(r"""
