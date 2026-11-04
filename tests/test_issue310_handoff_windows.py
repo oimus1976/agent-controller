@@ -193,7 +193,7 @@ function Read-Issue310GitHub($Suffix){
         if($script:Shape -eq 'malformed'){$Rows[0]='not-a-comment'}
         if($script:Shape -eq 'zero_id'){$Rows[0]=[pscustomobject]@{id=[long]0}}
         if($script:Shape -eq 'negative_id'){$Rows[0]=[pscustomobject]@{id=[long]-1}}
-        if($script:Shape -eq 'deep_nested'){return ,(,$Rows)}
+        if($script:Shape -eq 'deep_nested'){return ,(,(,$Rows))}
         if($script:Shape -eq 'flat'){return $Rows}
         # One wrapped Object[] models the observed PowerShell 5.1 response.
         return ,$Rows
@@ -207,6 +207,10 @@ function Read-Issue310GitHub($Suffix){
 Assert-Issue310Authority $K $P 9999999999 ('a'*64) 123
 $script:Shape='flat'
 Assert-Issue310Authority $K $P 9999999999 ('a'*64) 123
+$script:Shape='deep_nested'
+$Deep=Read-Issue310GitHub 'issues/305/comments?per_page=100&page=1'
+if($Deep -isnot [array] -or $Deep.Count -ne 1 -or $Deep[0] -isnot [array] -or
+    $Deep[0].Count -ne 1 -or $Deep[0][0] -isnot [array] -or $Deep[0][0].Count -ne 39){throw 'DEEP_FIXTURE_NOT_DOUBLE_WRAPPED'}
 $Blocked=0
 foreach($Shape in @('wrong_last','short','malformed','zero_id','negative_id','deep_nested')){
     $script:Shape=$Shape
