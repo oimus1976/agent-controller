@@ -88,6 +88,10 @@ function ConvertTo-Issue310CommentPage($PageResult) {
         $Unwrapped=$true
     }
     if ($Rows -isnot [array]) { $Rows=@($Rows) }
+    foreach ($Record in $Rows) {
+        if ($Record -isnot [pscustomobject] -or $Record.PSObject.Properties.Name -notcontains 'id' -or
+            (($Record.id -isnot [long] -and $Record.id -isnot [int]) -or $Record.id -le 0)) { throw 'LATEST_AUTHORITY_DRIFT' }
+    }
     return [pscustomobject]@{comments=$Rows;unwrapped=$Unwrapped}
 }
 
