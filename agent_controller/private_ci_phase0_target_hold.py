@@ -59,7 +59,7 @@ if ($User.Enabled -isnot [bool] -or $Profiles[0].Loaded -isnot [bool] -or $null 
 $ProfilePath = $Profiles[0].LocalPath
 $Listed = Get-ItemProperty -LiteralPath "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$Sid"
 if ([Environment]::ExpandEnvironmentVariables($Listed.ProfileImagePath) -cne $ProfilePath) { throw 'PROFILE_BINDING' }
-# Name enumeration, not OpenSubKey: a standard-user broker can be denied read
+# Name enumeration, not OpenSubKey: a non-elevated broker can be denied read
 # access to another user's loaded hive, and that must not hide the mount.
 $Mounted = @([Microsoft.Win32.Registry]::Users.GetSubKeyNames()) -contains $Sid
 $Admin = Get-LocalGroup -SID 'S-1-5-32-544'

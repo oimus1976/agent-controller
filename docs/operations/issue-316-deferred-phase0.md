@@ -68,8 +68,9 @@ Phase 0 v3 (#303) and the #305 design both assume that the non-elevated broker
 can open `HKU\<target SID>` once the target is logged on. Read-only
 observations on the pilot host on 2026-11-11 make that unlikely:
 
-- the broker account is a standard user: its token has no
-  `BUILTIN\Administrators` group, not even deny-only;
+- the broker account is a member of Administrators, but the normal broker
+  process runs a UAC-filtered medium-integrity token in which
+  `BUILTIN\Administrators` is "deny only", so that membership grants nothing;
 - from that account, `Registry.Users.OpenSubKey` is denied for the other
   principals' loaded hives (`S-1-5-19`, `S-1-5-20`) and succeeds only for its
   own hive, `.DEFAULT` and `S-1-5-18`;
@@ -79,22 +80,25 @@ observations on the pilot host on 2026-11-11 make that unlikely:
 The target hive itself has never been observed loaded from the broker, so this
 is an expectation, not a measurement. If it holds, a live run of this one-shot
 ends `BLOCKED` (exit 2) in the unchanged collector with "target UserPolicy SID
-hive/policy unreadable", after one real logon and a verified restore. It cannot
-produce a false PASS. The mount check itself uses name enumeration and does not
+hive/policy unreadable" after one real logon, or exit 3 if the restore cannot
+be verified. It cannot produce a false PASS. The mount check itself uses name enumeration and does not
 need read access.
 
 Ways forward, an owner decision because each changes what Phase 0 evidence means:
 
-1. **Measure inside the target.** Let the fixed target child read its own
+1. **Run this one-shot once from an elevated console of the same account.**
+   Administrators can read a loaded user hive, so the unchanged strict
+   collector keeps its broker-observed evidence. Needs one UAC consent, a
+   one-line change so the hold child accepts elevation for this run, and an
+   explicit exception to the non-elevated-broker rule for a read-only
+   collection. The target child stays the non-admin `ac-runner` logon.
+2. **Measure inside the target.** Let the fixed target child read its own
    `HKCU` policy with the same strict reader and report it; record the source
-   in the evidence. Smallest change, and no hold across collection is needed.
-   It replaces "broker-observed" with "reported by the fixed command running as
-   the target", which #305 explicitly declined.
-2. **Run this one-shot once as the measurement.** Costs one authorized logon
-   that most likely ends `BLOCKED`, and then still needs option 1 or 3.
-3. **Collect from an elevated administrator.** The broker account is not an
-   administrator, so this needs a second account and reverses the
-   non-elevated-broker rule. Not recommended.
+   in the evidence. Stays non-elevated and needs no hold across collection, but
+   replaces "broker-observed" with "reported by the fixed command running as
+   the target", which #305 explicitly declined, and touches the collector.
+3. **Run this one-shot as it is, as the measurement.** Costs one authorized
+   logon that most likely ends `BLOCKED`, and then still needs option 1 or 2.
 
 ## #195 mapping
 
