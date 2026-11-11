@@ -39,6 +39,7 @@ PHASE0_FILENAME = "issue216-phase0-canonical.json"
 PILOT_FREEZE_FILENAME = "issue216-pilot-identity-freeze.json"
 EXIT_BLOCKED = 2
 EXIT_STOP_PARTIAL = 3
+EXIT_STOP_READBACK = 4
 
 
 def _controller_repo_root() -> Path:
@@ -174,6 +175,13 @@ def run(
                 "report to the owner for a separate recovery decision."
             )
             return EXIT_STOP_PARTIAL
+        if str(error) == "STOP_CANONICAL_READBACK_MISMATCH":
+            log(
+                "STOP_CANONICAL_READBACK_MISMATCH: a canonical file was created but its "
+                "readback differs. It is left in place; do not use, overwrite or retry. "
+                "Report to the owner."
+            )
+            return EXIT_STOP_READBACK
         log(f"BLOCKED: {error}")
         log("NO_PHASE0_EVIDENCE_WRITTEN")
         return EXIT_BLOCKED

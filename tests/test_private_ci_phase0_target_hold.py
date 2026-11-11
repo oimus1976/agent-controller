@@ -261,6 +261,26 @@ class TargetProfileHoldTests(unittest.TestCase):
         self.assertFalse(hold.release_and_verify())
         self.assertTrue(hold.outcome["poststate_idle"])
 
+    def test_logon_stage_seen_only_while_draining_is_still_partial(self):
+        # Credential deadline in Python, human submits at that instant, hold
+        # then dies without a report: never "no effect".
+        process = FakeHold(["HOLD_AWAITING_CREDENTIAL", Ellipsis], ["HOLD_STARTING_TARGET"], exit_code=1)
+        hold = make(process, States(state()))
+        hold.preflight()
+        with self.assertRaisesRegex(RuntimeError, "deadline: credential"):
+            hold.acquire()
+        self.assertFalse(hold.release_and_verify())
+        self.assertTrue(hold.outcome["target_stage_entered"])
+
+    def test_credential_deadline_with_hung_dialog_is_partial(self):
+        process = FakeHold(["HOLD_AWAITING_CREDENTIAL", Ellipsis], [Ellipsis], hangs=True)
+        hold = make(process, States(state()))
+        hold.preflight()
+        with self.assertRaises(RuntimeError):
+            hold.acquire()
+        self.assertFalse(hold.release_and_verify())
+        self.assertTrue(process.killed)
+
     def test_poststate_must_become_idle_and_match_baseline(self):
         for name, after in {
             "still loaded": state(**HELD),
@@ -383,6 +403,25 @@ class OneShotCliTests(unittest.TestCase):
         self.assertEqual((code, written, events), (cli.EXIT_STOP_PARTIAL, None, ["collect"]))
         self.assertNotIn("PHASE0_PASS", lines)
         self.assertTrue(any(line.startswith("STOP_PARTIAL_PROFILE_STATE") for line in lines))
+
+    def test_readback_mismatch_has_its_own_stop(self):
+        def corrupting_collector(controller_root, *, pilot_freeze):
+            return collect_validated_phase0_evidence(
+                Path(pilot_freeze.controller_tree), pilot_freeze=pilot_freeze,
+                command_runner=FakeRunner(), path_exists=lambda _: False,
+            )
+
+        original = cli.write_exclusive
+        cli.write_exclusive = lambda path, content: path.write_bytes(content + b"x")
+        try:
+            code, lines, written, _ = self.invoke(
+                good_hold(), States(state(), state(**HELD), state()), collector=corrupting_collector)
+        finally:
+            cli.write_exclusive = original
+        self.assertEqual(code, cli.EXIT_STOP_READBACK)
+        self.assertIsNotNone(written)
+        self.assertNotIn("PHASE0_PASS", lines)
+        self.assertNotIn("NO_PHASE0_EVIDENCE_WRITTEN", lines)
 
     def test_cancelled_credential_is_blocked_not_partial(self):
         process = FakeHold(["HOLD_AWAITING_CREDENTIAL", "HOLD_BLOCKED_NO_EFFECT"], exit_code=3)

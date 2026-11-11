@@ -59,9 +59,9 @@ if ($User.Enabled -isnot [bool] -or $Profiles[0].Loaded -isnot [bool] -or $null 
 $ProfilePath = $Profiles[0].LocalPath
 $Listed = Get-ItemProperty -LiteralPath "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$Sid"
 if ([Environment]::ExpandEnvironmentVariables($Listed.ProfileImagePath) -cne $ProfilePath) { throw 'PROFILE_BINDING' }
-$Mount = [Microsoft.Win32.Registry]::Users.OpenSubKey($Sid, $false)
-$Mounted = $null -ne $Mount
-if ($null -ne $Mount) { $Mount.Dispose() }
+# Name enumeration, not OpenSubKey: a standard-user broker can be denied read
+# access to another user's loaded hive, and that must not hide the mount.
+$Mounted = @([Microsoft.Win32.Registry]::Users.GetSubKeyNames()) -contains $Sid
 $Admin = Get-LocalGroup -SID 'S-1-5-32-544'
 $AdminSids = @(Get-LocalGroupMember -Group $Admin.Name | ForEach-Object { $_.SID.Value })
 $Account = Get-CimInstance Win32_UserAccount -Filter "SID='$Sid'" -OperationTimeoutSec 5
@@ -365,6 +365,10 @@ class TargetProfileHold:
             if line.startswith(FRAME_REPORT_PREFIX):
                 self._report = _report_from_frame(line)
                 break
+            if line == FRAME_STARTING_TARGET or line.startswith(FRAME_READY_PREFIX):
+                # Seen only while draining (e.g. after a credential deadline):
+                # the logon stage was entered all the same.
+                self._target_stage_entered = True
         exit_code = self._process.wait(EXIT_TIMEOUT_SECONDS)
         if exit_code is None:
             # Our own child, our own handle. Its target sees EOF and exits by

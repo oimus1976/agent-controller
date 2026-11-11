@@ -56,8 +56,8 @@ def deferred_phase0_commit(
 ) -> DeferredPhase0Result:
     """Stage validated evidence in memory, release, then exclusively commit.
 
-    Caller must ensure a fresh deterministic #195 operator-step and exact owner
-    authorization before *any* target profile load. This function grants none.
+    Caller must hold the owner's exact authorization (including any #195
+    decision) before *any* target profile load. This function grants none.
     The release callback MUST independently prove owned-child exit and restored
     PID/HKU/ProfileList/session baseline; false/exception means no canonical write.
     """
@@ -106,5 +106,5 @@ def deferred_phase0_commit(
     # A mismatching file is left in place on purpose: the slot stays occupied,
     # so nothing can retry or overwrite it without a human decision.
     if output.read_bytes() != pending:
-        raise RuntimeError("canonical readback mismatch; STOP")
+        raise RuntimeError("STOP_CANONICAL_READBACK_MISMATCH")
     return DeferredPhase0Result(hashlib.sha256(pending).hexdigest(), output)
