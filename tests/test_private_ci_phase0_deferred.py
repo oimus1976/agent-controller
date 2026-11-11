@@ -4,7 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_controller.private_ci_phase0_deferred import deferred_phase0_commit
+from agent_controller.private_ci_phase0_deferred import (
+    deferred_phase0_commit,
+    write_exclusive,
+)
 from agent_controller.private_ci_phase0_collector import collect_validated_phase0_evidence
 from agent_controller.private_ci_pilot_identity import pilot_identity_freeze_bytes
 from scripts.collect_private_ci_phase0 import _write_exclusive
@@ -81,6 +84,53 @@ class DeferredPhase0Tests(unittest.TestCase):
                     )
                 self.assertFalse(output.exists())
                 self.assertEqual(events, [] if mode == "freeze" else ["collect", "release"])
+
+    def test_release_exception_is_partial_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = pilot_identity_freeze_bytes(valid_freeze())
+            path = root / "freeze.json"
+            path.write_bytes(raw)
+            output = root / "canonical.json"
+
+            def release():
+                raise OSError("postread failed")
+
+            with self.assertRaisesRegex(RuntimeError, "STOP_PARTIAL_PROFILE_STATE"):
+                deferred_phase0_commit(
+                    freeze_path=path, expected_freeze_sha256=hashlib.sha256(raw).hexdigest(),
+                    output=output,
+                    collect=lambda value: collect_validated_phase0_evidence(
+                        Path(value.controller_tree), pilot_freeze=value,
+                        command_runner=FakeRunner(), path_exists=lambda _: False,
+                    ),
+                    release_and_verify=release, exclusive_write=write_exclusive,
+                )
+            self.assertFalse(output.exists())
+
+    def test_slot_taken_during_hold_is_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = pilot_identity_freeze_bytes(valid_freeze())
+            path = root / "freeze.json"
+            path.write_bytes(raw)
+            output = root / "canonical.json"
+
+            def release():
+                output.write_bytes(b"competing writer")
+                return True
+
+            with self.assertRaises(FileExistsError):
+                deferred_phase0_commit(
+                    freeze_path=path, expected_freeze_sha256=hashlib.sha256(raw).hexdigest(),
+                    output=output,
+                    collect=lambda value: collect_validated_phase0_evidence(
+                        Path(value.controller_tree), pilot_freeze=value,
+                        command_runner=FakeRunner(), path_exists=lambda _: False,
+                    ),
+                    release_and_verify=release, exclusive_write=write_exclusive,
+                )
+            self.assertEqual(output.read_bytes(), b"competing writer")
 
 
 if __name__ == "__main__":

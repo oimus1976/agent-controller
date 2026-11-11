@@ -1,11 +1,14 @@
-"""Non-live #316 deferred Phase 0 transaction primitive.
+"""#316 deferred Phase 0 transaction primitive.
 
-A caller must supply independently verified target release/poststate callbacks.
-This module never starts target processes, reads credentials, or claims live authority.
+A caller must supply an independently verified target release/poststate
+callback (``private_ci_phase0_target_hold.TargetProfileHold`` for the real
+path). This module never starts target processes, reads credentials, or claims
+live authority.
 """
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -23,6 +26,23 @@ from agent_controller.private_ci_pilot_identity import (
 class DeferredPhase0Result:
     sha256: str
     output: Path
+
+
+def write_exclusive(path: Path, content: bytes) -> None:
+    """Create-only write; an existing slot is never overwritten."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def deferred_phase0_commit(
@@ -65,7 +85,11 @@ def deferred_phase0_commit(
         # Release is attempted even if collection fails. Any uncertain release
         # blocks the canonical write; never treat a synthetic callback as proof
         # of the real WOBBUFFET native poststate.
-        restored = release_and_verify()
+        # An exception from the callback is as uncertain as a False result.
+        try:
+            restored = release_and_verify()
+        except BaseException as exc:
+            raise RuntimeError("STOP_PARTIAL_PROFILE_STATE") from exc
         if restored is not True:
             raise RuntimeError("STOP_PARTIAL_PROFILE_STATE")
     if collection_error is not None:
@@ -79,6 +103,8 @@ def deferred_phase0_commit(
     if freeze_path.read_bytes() != raw_freeze:
         raise RuntimeError("freeze changed during collection")
     exclusive_write(output, pending)
+    # A mismatching file is left in place on purpose: the slot stays occupied,
+    # so nothing can retry or overwrite it without a human decision.
     if output.read_bytes() != pending:
         raise RuntimeError("canonical readback mismatch; STOP")
     return DeferredPhase0Result(hashlib.sha256(pending).hexdigest(), output)

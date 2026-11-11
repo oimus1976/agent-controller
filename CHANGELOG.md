@@ -15,6 +15,16 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-11-11 — One-shot Phase 0 with target-profile hold (Issue #316, Draft / unmerged)
+
+- #216 の Phase 0 は対象 `ac-runner` の SID ハイブが読み込まれている間しか通らない。#305 診断スーパーバイザーとの接続（A）、手動 `runas`（C）と比較し、本人が起動する一回限りのコマンド（B）を採用した。#305 の別個の診断実行・Decision A/B・UTC 時間枠は主経路から外した。
+- `scripts/collect_private_ci_phase0_with_target_hold.py` が、読み取り専用の事前確認 → Windows 資格情報ダイアログ（人間が入力）→ 固定の非管理者ターゲット子プロセスによるプロファイル保持 → 既存の厳格な Phase 0 v3 収集（メモリ内に保留）→ 解放 → 保持ハンドルでの終了確認と独立した事後状態確認 → 排他書き込み、の順で実行する。canonical `PHASE0_PASS` は事後確認が成功した後にしか書かれない。
+- 復元を証明できない場合は `STOP_PARTIAL_PROFILE_STATE` で停止し、再試行・アンロード・修復は行わない。コレクター、freeze、evidence v3、#305 の成果物、#195 の汎用ゲートは変更していない。
+- #195 の AST 認証はこの起動形を扱えないため `PASS_TO_OPERATOR` ではない。実行には、マージ後の正確な commit に対する本人の一回限りの承認（#195 例外を含む）が必要。期限切れの #305 Decision B は再利用しない。
+- テストは二重化した境界と実 PowerShell 5.1 での構文解析・フレーム通信・子プロセスのリースを検証する。実ターゲットのログオン、資格情報、freeze、canonical 書き込み、runner 登録、dispatch は行っていない。Ready / merge は人間が行う。
+
+---
+
 ## 2026-10-22 — Exact owner-present #305 handoff (Issue #310, Draft / unmerged)
 
 - Added a deterministic prospective NON_EXECUTABLE proposal-to-live-schema assembler and a narrowly scoped Windows PowerShell 5.1 human entry. A new direct-human B must pin packet/plan/code bytes, invocation and fixed window; true flags and historical GitHub prose confer no authority.
