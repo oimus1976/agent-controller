@@ -176,6 +176,15 @@ class Issue316HoldScriptTests(unittest.TestCase):
         self.assertIn("if (-not $Principal.IsInRole(", body)
         result = self.powershell(EXTRACT + "Assert-Issue316Broker $env:COMPUTERNAME 'S-1-5-21-1-2-3-1007'")
         self.assertNotEqual(result.returncode, 0)
+        identity = subprocess.run(["whoami"], capture_output=True, text=True).stdout.strip().lower()
+        elevated = self.powershell(
+            "(New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent()))"
+            ".IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"
+        ).stdout.strip() == "True"
+        if not identity.endswith(r"\c-admin"):
+            self.assertIn("BROKER_BINDING", result.stderr)
+        elif not elevated:
+            self.assertIn("ELEVATED_BROKER_REQUIRED", result.stderr)
 
     def test_real_child_lease_fragment_under_current_identity(self):
         source = self.powershell(EXTRACT + "Get-Issue316ChildSource").stdout.strip()

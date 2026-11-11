@@ -29,9 +29,9 @@ launch shape, the #305 child/lease idea and state observations.
 from the frozen controller tree, in an **elevated** console of `<HOST>\c-admin`:
 
 1. **Read-only checks.** Canonical slot empty, freeze digest, tree binding,
-   console elevated (a non-elevated launch stops here with no effect),
    target idle (hive not mounted, profile not loaded, no session, enabled,
-   non-admin). Any failure stops with no effect. `--preflight-only` ends here.
+   non-admin), then console elevated. Any failure stops with no effect.
+   `--preflight-only` ends here and also works from a non-elevated console.
 2. **Credential dialog.** The hold child (`scripts/Issue316-TargetProfileHold.ps1`)
    opens the Windows credential dialog. The human types the `ac-runner`
    password there. Cancel stops with no effect. The password exists only as a
@@ -94,8 +94,12 @@ What elevation changes, and what it does not:
 - It is an exception to the non-elevated-broker rule, limited to this
   read-only collection. Later pilot phases keep that rule.
 - `git`, `gh`, PowerShell and Python run with full administrator rights for
-  the duration of the run. They execute only the frozen controller tree
-  (clean, `HEAD` = remote `main` = freeze) and read-only queries.
+  the duration of the run. The collector checks during the run that the tree
+  is clean and `HEAD` = remote `main` = freeze, but that is after elevated
+  code has started and it does not see ignored files. The tree is writable
+  only by the broker account, SYSTEM and Administrators, so the exposure is
+  other processes of the same account, not `ac-runner`. The pre-launch
+  checklist below covers it.
 - The target child is still a separate `ac-runner` logon without
   administrator rights; it refuses to run as an administrator and receives no
   broker environment or credential.
@@ -104,6 +108,17 @@ What elevation changes, and what it does not:
   the profile is unloaded.
 - The hold child refuses a non-elevated launch before the credential dialog,
   so a wrong console costs nothing.
+
+Pre-launch checklist for the elevated run (owner, or agent read-only where
+possible):
+
+1. No other agent session is working in the controller tree.
+2. Open the elevated console as Windows PowerShell with `-NoProfile`.
+3. `git -C <tree> status --porcelain --ignored --untracked-files=all` shows
+   nothing except expected ignored entries, and the tree root has no `*.exe`.
+4. Use the full interpreter path `C:\Program Files\Python312\python.exe`.
+5. Run `--preflight-only` in that same elevated console first: an elevated
+   token can list logon sessions that a non-elevated preflight does not see.
 
 If the hive read is denied even when elevated, the run ends `BLOCKED` (exit 2)
 in the unchanged collector, or exit 3 if the restore cannot be verified. It
