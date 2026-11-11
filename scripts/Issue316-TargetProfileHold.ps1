@@ -1,7 +1,7 @@
 # Issue #316 one-shot target-profile hold (Windows PowerShell 5.1 x64).
 #
 # Started only by scripts/collect_private_ci_phase0_with_target_hold.py, which
-# the owner launches personally. This file holds one fixed non-admin target
+# the owner launches personally from an elevated console of the broker account. This file holds one fixed non-admin target
 # child with its profile loaded until the parent sends RELEASE on stdin, then
 # reports the retained-handle exit. It writes no file, reads no policy, runs no
 # target repository code and never emits Phase 0 evidence or PASS. The target
@@ -39,8 +39,12 @@ function Assert-Issue316Broker([string]$HostName, [string]$TargetSid) {
     if ($HostName -cnotmatch '^[A-Za-z0-9-]+$' -or $TargetSid -cnotmatch '^S-1-5-21-(?:[0-9]+-){3}[0-9]+$') { throw 'BINDING_FORMAT' }
     $Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
-    if ($env:COMPUTERNAME -cne $HostName -or $Identity.Name -cne "$HostName\c-admin" -or
-        $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'NORMAL_BROKER_REQUIRED' }
+    if ($env:COMPUTERNAME -cne $HostName -or $Identity.Name -cne "$HostName\c-admin") { throw 'BROKER_BINDING' }
+    # Owner decision 2026-11-11 (#316): this one read-only collection runs from
+    # an elevated console of the broker account, because a UAC-filtered token
+    # cannot read another user's loaded hive. Refuse before the credential
+    # dialog rather than spend a logon on a run that cannot pass.
+    if (-not $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'ELEVATED_BROKER_REQUIRED' }
     $User = Get-LocalUser -Name 'ac-runner'
     if ($User.SID.Value -cne $TargetSid -or $User.Enabled -ne $true) { throw 'TARGET_BINDING' }
     $Mount = [Microsoft.Win32.Registry]::Users.OpenSubKey($TargetSid, $false)

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """#316 one-shot: hold the target profile, collect Phase 0, release, verify, commit.
 
-Owner-launched from the frozen controller tree:
+Owner-launched from the frozen controller tree, in an ELEVATED console of the
+broker account (owner decision 2026-11-11, #316):
 
     python.exe -s -E -B -m scripts.collect_private_ci_phase0_with_target_hold --expected-freeze-sha256 <sha>
 
@@ -40,6 +41,15 @@ PILOT_FREEZE_FILENAME = "issue216-pilot-identity-freeze.json"
 EXIT_BLOCKED = 2
 EXIT_STOP_PARTIAL = 3
 EXIT_STOP_READBACK = 4
+
+
+def _broker_elevated() -> bool:
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
 
 
 def _controller_repo_root() -> Path:
@@ -88,6 +98,7 @@ def run(
     *,
     preflight_only: bool,
     hold_factory=TargetProfileHold,
+    is_elevated=_broker_elevated,
     collector=collect_validated_phase0_evidence,
     state_command_runner=_run,
     controller_root: Path | None = None,
@@ -133,11 +144,18 @@ def run(
             progress=log,
         )
         hold.preflight()
+        elevated = is_elevated() is True
         if preflight_only:
             log("PREFLIGHT_OK target idle; freeze and tree bound")
+            if not elevated:
+                log("NOTE console is not elevated; the real run requires an elevated console")
             log("NO_EFFECT_PERFORMED")
             return 0
 
+        if not elevated:
+            raise RuntimeError(
+                "elevated console of the broker account required for this one-shot; no effect performed"
+            )
         transcript = log.open() if isinstance(log, _Transcript) else None
         log(f"start one-shot Phase 0 with target hold freeze_sha256={expected_freeze_sha256}")
 

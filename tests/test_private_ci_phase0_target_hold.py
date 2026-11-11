@@ -305,7 +305,7 @@ class TargetProfileHoldTests(unittest.TestCase):
 
 
 class OneShotCliTests(unittest.TestCase):
-    def invoke(self, process, states, *, collector=None, preflight_only=False, sha=None, prepare=None):
+    def invoke(self, process, states, *, collector=None, preflight_only=False, sha=None, prepare=None, elevated=True):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             hold_script = root / hold_module.HOLD_SCRIPT_NAME
@@ -343,7 +343,8 @@ class OneShotCliTests(unittest.TestCase):
 
             code = cli.run(
                 sha or hashlib.sha256(raw).hexdigest(), preflight_only=preflight_only,
-                hold_factory=hold_factory, collector=collector or default_collector,
+                hold_factory=hold_factory, is_elevated=lambda: elevated,
+                collector=collector or default_collector,
                 controller_root=tree, hold_script=hold_script, output=output, freeze_path=freeze_path,
                 log=lines.append,
             )
@@ -366,6 +367,15 @@ class OneShotCliTests(unittest.TestCase):
         code, lines, written, events = self.invoke(process, States(state()), preflight_only=True)
         self.assertEqual((code, written, events, process.command), (0, None, [], None))
         self.assertIn("NO_EFFECT_PERFORMED", lines)
+
+    def test_non_elevated_console_blocks_before_effect(self):
+        process = good_hold()
+        code, lines, written, events = self.invoke(process, States(state()), elevated=False)
+        self.assertEqual((code, written, events, process.command), (cli.EXIT_BLOCKED, None, [], None))
+        self.assertTrue(any("elevated console" in line for line in lines))
+        code, lines, _, _ = self.invoke(good_hold(), States(state()), elevated=False, preflight_only=True)
+        self.assertEqual(code, 0)
+        self.assertTrue(any(line.startswith("NOTE console is not elevated") for line in lines))
 
     def test_blocked_before_effect(self):
         for name, keywords in {

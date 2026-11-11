@@ -168,6 +168,15 @@ class Issue316HoldScriptTests(unittest.TestCase):
             result = self.powershell(EXTRACT + f"Assert-Issue316Broker {arguments}")
             self.assertNotEqual(result.returncode, 0, arguments)
 
+    def test_broker_assertion_orders_binding_then_elevation_before_any_target_read(self):
+        text = SCRIPT.read_text(encoding="ascii")
+        body = text[text.index("function Assert-Issue316Broker"):text.index("function Start-Issue316Target")]
+        self.assertLess(body.index("'BROKER_BINDING'"), body.index("'ELEVATED_BROKER_REQUIRED'"))
+        self.assertLess(body.index("'ELEVATED_BROKER_REQUIRED'"), body.index("Get-LocalUser"))
+        self.assertIn("if (-not $Principal.IsInRole(", body)
+        result = self.powershell(EXTRACT + "Assert-Issue316Broker $env:COMPUTERNAME 'S-1-5-21-1-2-3-1007'")
+        self.assertNotEqual(result.returncode, 0)
+
     def test_real_child_lease_fragment_under_current_identity(self):
         source = self.powershell(EXTRACT + "Get-Issue316ChildSource").stdout.strip()
         self.assertLess(len(source), 900)
