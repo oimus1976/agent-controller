@@ -30,7 +30,8 @@ from the frozen controller tree, in an **elevated** console of `<HOST>\c-admin`:
 
 1. **Read-only checks.** Canonical slot empty, freeze digest, tree binding,
    target idle (hive not mounted, profile not loaded, no session, enabled,
-   non-admin), then console elevated. Any failure stops with no effect.
+   non-admin), target password usable (#318), then console elevated. Any
+   failure stops with no effect.
    `--preflight-only` ends here and also works from a non-elevated console.
 2. **Credential dialog.** The hold child (`scripts/Issue316-TargetProfileHold.ps1`)
    opens the Windows credential dialog. The human types the `ac-runner`
@@ -57,6 +58,30 @@ from the frozen controller tree, in an **elevated** console of `<HOST>\c-admin`:
 | 2 `BLOCKED` | A check or the collection failed; the profile is verified restored or was never touched | not written |
 | 3 `STOP_PARTIAL_PROFILE_STATE` | Restoration is not proven (unknown child exit, logon possibly in flight, credential dialog left open past 300 s, collection longer than the 240 s hold, profile still loaded, baseline drift) | not written |
 | 4 `STOP_CANONICAL_READBACK_MISMATCH` | The exclusive write happened but the readback differs | left in place, not usable |
+
+## Diagnosability (#318)
+
+The first owner run (2026-11-11) ended `BLOCKED` with `TARGET_START_FAILED`
+0.3 s after the credential dialog; read-only diagnosis found the target
+password had expired. Two additions make that visible without a logon:
+
+- **Preflight blocks on the target password.** The read-only state script
+  also reports `password_expired`: true when the ADSI `WinNT` `PasswordExpired`
+  flag is set (must change at next logon), `UF_PASSWORD_EXPIRED` is set, or
+  `Get-LocalUser` `PasswordExpires` is in the past. The ADSI entry must carry
+  the same SID. If anything cannot be proven the value is `null`. Only
+  `false` passes; `true` or `null` stops with `BLOCKED: target account
+  password is expired, must be changed at next logon, or its expiry could
+  not be read`, before the credential dialog and before any effect, also with
+  `--preflight-only`. The field is not part of the idle test or the
+  baseline/poststate comparison, so it cannot turn a held run partial.
+  Resetting the password is an owner action outside this command.
+- **The hold report carries `start_error_code`.** When starting the target
+  throws, the hold child records the integer `NativeErrorCode` of the first
+  `Win32Exception` in the exception chain (for example 1326 bad user name or
+  password, 1330 password expired, 1907 must change at next logon), or `null`.
+  The message text is never recorded. The value appears in the transcript's
+  `outcome=` line.
 
 There is no retry, unload, kill-by-PID or repair path. After exit 3 the host
 needs a separate human recovery decision. After exit 4 the mismatching file is
