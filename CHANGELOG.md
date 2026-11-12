@@ -15,6 +15,15 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-11-12 — #316 one-shot diagnosability (Issue #318, Draft / unmerged)
+
+- 2026-11-11 の本人実行は資格情報ダイアログの 0.3 秒後に `TARGET_START_FAILED` で `BLOCKED` となり、読み取り専用の診断で対象パスワードの期限切れが原因と判明した。ログオンを消費せずにこれを検出・記録できるようにした。
+- 読み取り専用の状態スクリプトが `password_expired`（ADSI `PasswordExpired`、`UF_PASSWORD_EXPIRED`、`PasswordExpires` と現在時刻の比較。同一 SID の ADSI エントリに限る）を返す。証明できない場合は `null`。事前確認は `false` のときだけ通過し、`true` / `null` は資格情報ダイアログと一切の効果の前に `BLOCKED` で停止する（`--preflight-only` でも同様）。この項目は idle 判定と baseline / poststate の比較には含めない。
+- ホールド子プロセスは対象の起動失敗時に、例外連鎖中の `Win32Exception.NativeErrorCode`（整数）だけを `start_error_code` として報告し、`TargetProfileHold.outcome` 経由でトランスクリプトに残す。例外メッセージやパスワード由来の値は記録しない。
+- 厳格なコレクター、freeze、evidence v3、PASS 不変条件、昇格要件は変更していない。マージは `main` を動かし、待機中の pilot freeze を無効にするため、Ready / merge の時期は本人が決める。
+
+---
+
 ## 2026-11-12 — Phase 3 config.cmd launch independent of NoDefaultCurrentDirectoryInExePath (Issue #320, Draft / unmerged)
 
 - #216 の Phase 3 runner 登録 apply が、runner root に `config.cmd` が存在するにもかかわらず子プロセスの stderr `'config.cmd' is not recognized ...` で失敗した。起動シェルのプロセス環境に `NoDefaultCurrentDirectoryInExePath=1` があり、cmd.exe が裸のコマンド名をカレントディレクトリから探さなかったことが原因である。

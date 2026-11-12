@@ -162,6 +162,30 @@ class Issue316HoldScriptTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["report"]["status"], "TARGET_START_FAILED")
         self.assertFalse(payload["report"]["target_started"])
+        self.assertIsNone(payload["report"]["start_error_code"])
+
+    def test_failed_start_records_only_the_native_error_code(self):
+        win32 = "(New-Object System.ComponentModel.Win32Exception {code}, 'SECRET-ECHO')"
+        for change, expected in (
+            ("function Start-Issue316Target { throw " + win32.format(code=1330) + " }", 1330),
+            # Process.Start called from PowerShell surfaces as MethodInvocationException.
+            ("function Start-Issue316Target { throw (New-Object System.Management.Automation.MethodInvocationException"
+             " 'SECRET-ECHO', " + win32.format(code=1907) + ") }", 1907),
+            # A real native start failure under the worker's own identity (file not found).
+            (r"function Start-Issue316Target { [System.Diagnostics.Process]::Start("
+             r"(New-Object System.Diagnostics.ProcessStartInfo -Property @{FileName='C:\no-such-dir-318\x.exe'; UseShellExecute=$false})) }", 2),
+        ):
+            payload, stdout = self.hold(change)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["report"]["status"], "TARGET_START_FAILED")
+            self.assertEqual(payload["report"]["start_error_code"], expected, change)
+            self.assertIs(type(payload["report"]["start_error_code"]), int)
+            self.assertNotIn("SECRET-ECHO", stdout)
+
+    def test_native_error_code_ignored_after_target_started(self):
+        payload, _ = self.hold("$Process.StandardOutput.Line=$null")
+        self.assertTrue(payload["report"]["target_started"])
+        self.assertIsNone(payload["report"]["start_error_code"])
 
     def test_broker_assertion_blocks_wrong_host_and_bad_binding(self):
         for arguments in ("'NOT-THIS-HOST' 'S-1-5-21-1-2-3-1007'", "$env:COMPUTERNAME 'S-1-5-32-544'", "'bad host' 'S-1-5-21-1-2-3-1007'"):
@@ -199,6 +223,17 @@ class Issue316HoldScriptTests(unittest.TestCase):
                 self.skipTest("test worker is elevated; the child refuses administrators by design")
             self.assertEqual(result.returncode, expected, result.stderr)
             self.assertEqual(result.stdout.strip().count("|"), 3)
+
+    def test_state_reader_reads_password_expiry_for_current_account(self):
+        # Read-only observation of the test worker's own logged-on account.
+        def runner(*command):
+            return subprocess.run(list(command), capture_output=True, text=True, timeout=60)
+
+        try:
+            payload = read_target_profile_state(runner, os.environ.get("USERNAME", ""))
+        except ValueError:
+            self.skipTest("current account is not a local account with a single profile")
+        self.assertIs(payload["password_expired"], False)
 
     def test_state_reader_fails_closed_without_target_account(self):
         def runner(*command):

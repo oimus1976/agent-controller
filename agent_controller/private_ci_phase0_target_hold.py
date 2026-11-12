@@ -67,6 +67,21 @@ $AdminSids = @(Get-LocalGroupMember -Group $Admin.Name | ForEach-Object { $_.SID
 $Account = Get-CimInstance Win32_UserAccount -Filter "SID='$Sid'" -OperationTimeoutSec 5
 if ($null -eq $Account) { throw 'ACCOUNT_UNKNOWN' }
 $Sessions = @(Get-CimAssociatedInstance -InputObject $Account -Association Win32_LoggedOnUser -OperationTimeoutSec 5)
+# #318: an expired or must-change password makes the target logon fail after
+# the credential dialog. Read-only; anything unprovable stays $null, which the
+# preflight treats as blocking. Not part of the idle or stability comparison.
+$PasswordExpired = $null
+try {
+    $Entry = [ADSI]"WinNT://$env:COMPUTERNAME/__TARGET_IDENTITY__,user"
+    $EntrySid = New-Object Security.Principal.SecurityIdentifier(([byte[]]$Entry.InvokeGet('objectSid')), 0)
+    $ExpiredFlag = $Entry.InvokeGet('PasswordExpired')
+    $UserFlags = $Entry.InvokeGet('UserFlags')
+    if ($EntrySid.Value -ceq $Sid -and $ExpiredFlag -is [int] -and $UserFlags -is [int] -and
+        ($ExpiredFlag -eq 0 -or $ExpiredFlag -eq 1)) {
+        $PasswordExpired = [bool](($ExpiredFlag -eq 1) -or (($UserFlags -band 0x800000) -ne 0) -or
+            ($null -ne $User.PasswordExpires -and $User.PasswordExpires -le (Get-Date)))
+    }
+} catch { $PasswordExpired = $null }
 $Hive = Join-Path $ProfilePath 'NTUSER.DAT'
 foreach ($Path in @($ProfilePath, $Hive)) {
     if ((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'REPARSE' }
@@ -78,6 +93,7 @@ foreach ($Path in @($ProfilePath, $Hive)) {
     account_description = [string]$User.Description
     profile_acl = (Get-Acl -LiteralPath $ProfilePath).Sddl
     hive_acl = (Get-Acl -LiteralPath $Hive).Sddl
+    password_expired = $PasswordExpired
 } | ConvertTo-Json -Compress
 """.strip()
 
@@ -93,6 +109,9 @@ _STATE_TYPES = {
     "account_description": str,
     "profile_acl": str,
     "hive_acl": str,
+    # True, False, or None when it could not be proven; only False passes the
+    # preflight. Deliberately not in STABLE_STATE_KEYS or the idle test.
+    "password_expired": (bool, type(None)),
 }
 
 CommandRunner = Callable[..., subprocess.CompletedProcess]
@@ -126,7 +145,8 @@ def read_target_profile_state(
     if type(payload) is not dict or set(payload) != set(_STATE_TYPES):
         raise ValueError("target profile state shape invalid")
     for key, expected in _STATE_TYPES.items():
-        if type(payload[key]) is not expected:
+        allowed = expected if type(expected) is tuple else (expected,)
+        if type(payload[key]) not in allowed:
             raise ValueError(f"target profile state field invalid: {key}")
     return payload
 
@@ -141,6 +161,11 @@ def target_state_idle(state: object) -> bool:
         and type(state.get("sessions")) is int
         and state.get("sessions") == 0
     )
+
+
+def target_password_usable(state: object) -> bool:
+    """Only a proven not-expired, not-must-change password passes."""
+    return type(state) is dict and state.get("password_expired") is False
 
 
 def target_state_stable(before: object, after: object) -> bool:
@@ -253,6 +278,12 @@ def _report_from_frame(line: str) -> Optional[dict[str, object]]:
     return report if type(report) is dict else None
 
 
+def _start_error_code(report: Optional[dict[str, object]]) -> Optional[int]:
+    # Integer native code only (e.g. 1330 password expired, 1907 must change).
+    code = None if report is None else report.get("start_error_code")
+    return code if type(code) is int else None
+
+
 class TargetProfileHold:
     """preflight -> acquire -> (caller collects) -> release_and_verify.
 
@@ -297,6 +328,12 @@ class TargetProfileHold:
         if not target_state_idle(state):
             raise RuntimeError(
                 "target profile is not idle (mounted/loaded/session/admin/disabled); no effect performed"
+            )
+        if not target_password_usable(state):
+            raise RuntimeError(
+                "target account password is expired, must be changed at next logon, or its "
+                "expiry could not be read; the owner must resolve this before the run. "
+                "No credential dialog opened; no effect performed"
             )
         self._baseline = state
         return state
@@ -445,6 +482,7 @@ class TargetProfileHold:
             "target_stage_entered": self._target_stage_entered,
             "acquired": self._acquired,
             "report_status": None if report is None else report.get("status"),
+            "start_error_code": _start_error_code(report),
             "target_cleared": target_cleared,
             "clean_release": clean_release,
             "poststate_idle": idle,

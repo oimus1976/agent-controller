@@ -13,6 +13,7 @@ from agent_controller.private_ci_phase0_collector import (
 from agent_controller.private_ci_phase0_target_hold import (
     TargetProfileHold,
     read_target_profile_state,
+    target_password_usable,
     target_state_idle,
     target_state_stable,
 )
@@ -34,6 +35,7 @@ def state(**changes):
         "loaded": False, "sessions": 0, "profile": r"C:\Users\ac-runner",
         "profile_status": 0, "account_description": "",
         "profile_acl": "O:S-1-5-21D:(A;;FA;;;SY)", "hive_acl": "O:S-1-5-21D:(A;;FA;;;SY)",
+        "password_expired": False,
     }
     base.update(changes)
     return base
@@ -129,14 +131,31 @@ class TargetStateTests(unittest.TestCase):
             self.assertFalse(target_state_stable(state(), state(**{key: "drift"})), key)
         self.assertFalse(target_state_stable(state(), None))
 
+    def test_password_expiry_gates_only_the_preflight(self):
+        self.assertTrue(target_password_usable(state()))
+        for value in (True, None, 0, "False"):
+            self.assertFalse(target_password_usable(state(password_expired=value)), value)
+        self.assertFalse(target_password_usable(None))
+        # Never part of idleness or the baseline/poststate equality.
+        self.assertNotIn("password_expired", hold_module.STABLE_STATE_KEYS)
+        for value in (True, None):
+            self.assertTrue(target_state_idle(state(password_expired=value)))
+            self.assertTrue(target_state_stable(state(), state(password_expired=value)))
+
     def test_state_reader_rejects_failure_and_bad_shape(self):
         def runner(payload, code=0):
             return lambda *command: subprocess.CompletedProcess(command, code, payload, "")
 
         self.assertEqual(read_target_profile_state(runner(json.dumps(state())), "ac-runner"), state())
+        for value in (True, None):
+            unknown = state(password_expired=value)
+            self.assertEqual(read_target_profile_state(runner(json.dumps(unknown)), "ac-runner"), unknown)
         bad = [runner(json.dumps(state()), 1), runner("not json"), runner("[]"),
                runner(json.dumps({**state(), "extra": 1})),
                runner(json.dumps({**state(), "mounted": "False"})),
+               runner(json.dumps({**state(), "password_expired": 0})),
+               runner(json.dumps({**state(), "password_expired": "False"})),
+               runner(json.dumps({key: value for key, value in state().items() if key != "password_expired"})),
                runner(json.dumps({key: value for key, value in state().items() if key != "loaded"}))]
         for case in bad:
             with self.assertRaises(ValueError):
@@ -154,8 +173,12 @@ class TargetStateTests(unittest.TestCase):
         read_target_profile_state(runner, "ac-runner")
         self.assertIn("-NonInteractive", seen[0])
         script = seen[0][-1]
-        for verb in ("Set-Item", "Set-Acl", "Set-LocalUser", "New-Item", "Remove-", "reg.exe", "RegLoadKey", "Start-Process", "Stop-"):
+        for verb in ("Set-Item", "Set-Acl", "Set-LocalUser", "New-Item", "Remove-", "reg.exe", "RegLoadKey", "Start-Process", "Stop-",
+                     "SetInfo", "SetPassword", "ChangePassword", "InvokeSet", ".Invoke(", "Put("):
             self.assertNotIn(verb, script)
+        # #318: expiry is read through ADSI and bound to the same SID.
+        self.assertIn("InvokeGet('PasswordExpired')", script)
+        self.assertIn("$EntrySid.Value -ceq $Sid", script)
 
 
 class TargetProfileHoldTests(unittest.TestCase):
@@ -179,6 +202,24 @@ class TargetProfileHoldTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "preflight missing"):
                 hold.acquire()
             self.assertIsNone(process.command)
+
+    def test_expired_or_unknown_password_blocks_before_any_process(self):
+        for value in (True, None):
+            with self.subTest(password_expired=value):
+                process = good_hold()
+                hold = make(process, States(state(password_expired=value)))
+                with self.assertRaisesRegex(RuntimeError, "password is expired.*no effect performed"):
+                    hold.preflight()
+                with self.assertRaisesRegex(RuntimeError, "preflight missing"):
+                    hold.acquire()
+                self.assertIsNone(process.command)
+
+    def test_poststate_ignores_password_expiry(self):
+        # Expiry observed only after the hold must not turn a clean run partial.
+        hold = make(good_hold(), States(state(), state(**HELD), state(password_expired=True)))
+        hold.preflight()
+        hold.acquire()
+        self.assertTrue(hold.release_and_verify())
 
     def test_single_use(self):
         hold = make(good_hold(), States(state(), state(**HELD), state()))
@@ -211,6 +252,25 @@ class TargetProfileHoldTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "reported failure"):
             hold.acquire()
         self.assertTrue(hold.release_and_verify())
+        self.assertIsNone(hold.outcome["start_error_code"])
+
+    def test_failed_logon_native_code_reaches_outcome(self):
+        for code, expected in ((1330, 1330), (1907, 1907), (None, None), (True, None), ("1330", None)):
+            with self.subTest(code=code):
+                process = FakeHold(
+                    ["HOLD_AWAITING_CREDENTIAL", "HOLD_STARTING_TARGET",
+                     report(status="TARGET_START_FAILED", target_started=False, ready=False,
+                            release_confirmed=False, exit_confirmed=False, target_exit_code=None,
+                            start_error_code=code)],
+                    exit_code=5,
+                )
+                hold = make(process, States(state()))
+                hold.preflight()
+                with self.assertRaises(RuntimeError):
+                    hold.acquire()
+                self.assertTrue(hold.release_and_verify())
+                self.assertEqual(hold.outcome["start_error_code"], expected)
+                self.assertIs(type(hold.outcome["start_error_code"]), type(expected))
 
     def test_hive_not_mounted_during_hold_never_acquires(self):
         hold = make(good_hold(), States(state(), state(), state()))
@@ -382,6 +442,8 @@ class OneShotCliTests(unittest.TestCase):
             "bad digest": dict(sha="0" * 64),
             "digest shape": dict(sha="XYZ"),
             "target busy": dict(states=States(state(**HELD))),
+            "password expired": dict(states=States(state(password_expired=True))),
+            "password expiry unknown": dict(states=States(state(password_expired=None))),
             "slot occupied": dict(prepare=lambda output, _freeze: output.write_bytes(b"old")),
             "freeze missing": dict(prepare=lambda _output, freeze: freeze.unlink()),
         }.items():
@@ -432,6 +494,26 @@ class OneShotCliTests(unittest.TestCase):
         self.assertIsNotNone(written)
         self.assertNotIn("PHASE0_PASS", lines)
         self.assertNotIn("NO_PHASE0_EVIDENCE_WRITTEN", lines)
+
+    def test_expired_password_blocks_preflight_only_too(self):
+        process = good_hold()
+        code, lines, written, events = self.invoke(
+            process, States(state(password_expired=True)), preflight_only=True)
+        self.assertEqual((code, written, events, process.command), (cli.EXIT_BLOCKED, None, [], None))
+        self.assertNotIn("PREFLIGHT_OK target idle; freeze and tree bound", lines)
+        self.assertTrue(any(line.startswith("BLOCKED: target account password is expired") for line in lines), lines)
+
+    def test_failed_start_native_code_lands_in_transcript(self):
+        process = FakeHold(
+            ["HOLD_AWAITING_CREDENTIAL", "HOLD_STARTING_TARGET",
+             report(status="TARGET_START_FAILED", target_started=False, ready=False,
+                    release_confirmed=False, exit_confirmed=False, target_exit_code=None,
+                    start_error_code=1330)],
+            exit_code=5,
+        )
+        code, lines, written, events = self.invoke(process, States(state()))
+        self.assertEqual((code, written, events), (cli.EXIT_BLOCKED, None, []))
+        self.assertTrue(any(line.startswith("outcome=") and "'start_error_code': 1330" in line for line in lines), lines)
 
     def test_cancelled_credential_is_blocked_not_partial(self):
         process = FakeHold(["HOLD_AWAITING_CREDENTIAL", "HOLD_BLOCKED_NO_EFFECT"], exit_code=3)

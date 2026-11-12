@@ -69,6 +69,15 @@ function Start-Issue316Target([string]$Executable, [string]$HostName, [Security.
     }))
 }
 
+function Get-Issue316NativeErrorCode($Exception) {
+    # #318: only the integer Win32 code (e.g. 1330 password expired, 1907 must
+    # change at next logon). Never the message text, which can echo input.
+    for ($Current = $Exception; $null -ne $Current; $Current = $Current.InnerException) {
+        if ($Current -is [System.ComponentModel.Win32Exception]) { return [int]$Current.NativeErrorCode }
+    }
+    return $null
+}
+
 function Invoke-Issue316Hold([string]$Executable, [string]$HostName, [string]$TargetSid,
                              [Security.SecureString]$Password, $ReleaseReader, [int]$ReleaseWaitMs) {
     $Target = $null
@@ -76,7 +85,7 @@ function Invoke-Issue316Hold([string]$Executable, [string]$HostName, [string]$Ta
     $Report = [ordered]@{
         status = 'TARGET_START_FAILED'; target_started = $false; ready = $false
         release_confirmed = $false; exit_confirmed = $false; target_exit_code = $null
-        target_pid = $null; stderr_empty = $false
+        target_pid = $null; stderr_empty = $false; start_error_code = $null
     }
     try {
         $Target = Start-Issue316Target $Executable $HostName $Password
@@ -99,6 +108,9 @@ function Invoke-Issue316Hold([string]$Executable, [string]$HostName, [string]$Ta
         $Report.status = 'TARGET_HOLD_RELEASED'
     } catch {
         # The status already names the failed stage; cleanup below always runs.
+        if (-not $Report.target_started) {
+            try { $Report.start_error_code = Get-Issue316NativeErrorCode $_.Exception } catch { $Report.start_error_code = $null }
+        }
     } finally {
         if ($null -ne $Password) { $Password.Dispose() }
         if ($null -ne $Target) {
