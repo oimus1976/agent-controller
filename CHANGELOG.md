@@ -15,6 +15,16 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-11-12 — Phase 3 config.cmd launch independent of NoDefaultCurrentDirectoryInExePath (Issue #320, Draft / unmerged)
+
+- #216 の Phase 3 runner 登録 apply が、runner root に `config.cmd` が存在するにもかかわらず子プロセスの stderr `'config.cmd' is not recognized ...` で失敗した。起動シェルのプロセス環境に `NoDefaultCurrentDirectoryInExePath=1` があり、cmd.exe が裸のコマンド名をカレントディレクトリから探さなかったことが原因である。
+- `WindowsEphemeralRegistrationRuntime.run_registration` の argv を `config.cmd` から `.\config.cmd` に変えた（cwd は runner root のまま）。レビュー済み candidate の記載（`.\config.cmd`）と実装が一致するようになった。
+- 実 cmd.exe と既定のコマンドランナーで、その変数を設定した状態から `config.cmd` を起動する Windows 回帰テストを追加し、`windows-junction` CI ジョブに 1 ステップ追加した。修正前のコードでは失敗し、修正後に通ることを確認した。
+- 子プロセス環境の削除・書き換え、plan / evidence スキーマ、RUNNER_* ピン、candidate / spec の文言（attested digest）は変更していない。Phase 5 の `run.cmd` 起動（対象ユーザーとして CreateProcessWithLogonW、環境ブロックを渡さない）は、ブローカーの環境を引き継がないと判断して変更していない。
+- 実 runner 登録、トークン取得、GitHub への接続、dispatch などの live effect は行っていない。Ready / merge は人間が行う。
+
+---
+
 ## 2026-11-11 — One-shot Phase 0 with target-profile hold (Issue #316, Draft / unmerged)
 
 - #216 の Phase 0 は対象 `ac-runner` の SID ハイブが読み込まれている間しか通らない。#305 診断スーパーバイザーとの接続（A）、手動 `runas`（C）と比較し、本人が起動する一回限りのコマンド（B）を採用した。#305 の別個の診断実行・Decision A/B・UTC 時間枠は主経路から外した。
