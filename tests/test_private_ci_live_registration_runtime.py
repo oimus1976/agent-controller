@@ -298,6 +298,12 @@ class PrivateCiLiveRegistrationRuntimeTests(unittest.TestCase):
             config_calls = [command for command, _ in seen if command[0] == "cmd.exe"]
             self.assertEqual(len(config_calls), 1)
             config_call = config_calls[0]
+            self.assertEqual(
+                config_call[0:5],
+                ("cmd.exe", "/d", "/s", "/c", ".\\config.cmd"),
+            )
+            config_kwargs = [kwargs for command, kwargs in seen if command[0] == "cmd.exe"]
+            self.assertEqual(Path(config_kwargs[0]["cwd"]), root)
             self.assertIn("--ephemeral", config_call)
             self.assertIn("--no-default-labels", config_call)
             self.assertIn("--disableupdate", config_call)
