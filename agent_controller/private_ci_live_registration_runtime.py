@@ -619,7 +619,7 @@ $RunnerTasks = @(
             "/d",
             "/s",
             "/c",
-            "config.cmd",
+            ".\\config.cmd",
             "--unattended",
             "--url",
             repository_url,
