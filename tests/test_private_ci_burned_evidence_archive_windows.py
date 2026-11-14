@@ -1853,9 +1853,10 @@ finally:
 
     def test_session_manager_proof_accepts_exact_identity(self):
         self.assertIs(self._session_manager_proof_with(), True)
+        # windows-latest reports the Session Manager as WinTcb-Light (0).
         self.assertIs(
             self._session_manager_proof_with(
-                identity=(r"c:\windows\SYSTEM32\SMSS.EXE", 4, 0, 5)
+                identity=(r"c:\windows\SYSTEM32\SMSS.EXE", 4, 0, 0)
             ),
             True,
         )
@@ -1870,7 +1871,10 @@ finally:
             "child instance parent": good[:1] + (604,) + good[2:],
             "interactive session": good[:2] + (1,) + good[3:],
             "unprotected": good[:3] + (m.PROTECTION_LEVEL_NONE,),
-            "light protection": good[:3] + (0,),
+            "windows signer": good[:3] + (1,),
+            "windows light signer": good[:3] + (2,),
+            "antimalware light signer": good[:3] + (3,),
+            "lsa light signer": good[:3] + (4,),
         }
         for name, identity in cases.items():
             with self.subTest(name):

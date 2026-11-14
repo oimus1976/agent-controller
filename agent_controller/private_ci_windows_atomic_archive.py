@@ -57,7 +57,14 @@ SE_PRIVILEGE_ENABLED = 0x00000002
 ERROR_NOT_ALL_ASSIGNED = 1300
 PROCESS_PROTECTION_LEVEL_INFO_CLASS = 7
 PROTECTION_LEVEL_NONE = 0xFFFFFFFE
+PROTECTION_LEVEL_WINTCB_LIGHT = 0x00000000
 PROTECTION_LEVEL_WINTCB = 0x00000005
+# The boot Session Manager runs with the WinTcb signer. Current Windows
+# reports it as WinTcb-Light (observed on windows-latest, Issue #322); the
+# full WinTcb level is the same signer and is accepted as well.
+SESSION_MANAGER_PROTECTION_LEVELS = frozenset(
+    {PROTECTION_LEVEL_WINTCB_LIGHT, PROTECTION_LEVEL_WINTCB}
+)
 PROCESS_BASIC_INFORMATION_CLASS = 0
 SESSION_MANAGER_IMAGE_NAME = "smss.exe"
 SYSTEM_PROCESS_ID = 4
@@ -843,7 +850,7 @@ def _is_trusted_session_manager(pid: int) -> bool:
     """Positive proof that pid is the boot Session Manager (Issue #322).
 
     The master smss.exe is a TCB process: started by the kernel (parent
-    PID 4), session 0, WinTcb protection, image in the trusted system
+    PID 4), session 0, WinTcb-signer protection, image in the trusted system
     directory. Per-session child instances (parent = master smss) and any
     process that cannot be fully queried are not trusted.
     """
@@ -859,7 +866,7 @@ def _is_trusted_session_manager(pid: int) -> bool:
         == os.path.normcase(os.path.normpath(str(expected)))
         and parent == SYSTEM_PROCESS_ID
         and session == 0
-        and protection == PROTECTION_LEVEL_WINTCB
+        and protection in SESSION_MANAGER_PROTECTION_LEVELS
     )
 
 

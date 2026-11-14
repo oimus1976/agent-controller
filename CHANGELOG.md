@@ -19,9 +19,9 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 - #216 の旧証拠アーカイブで、本人承認の 1 回限りの apply（plan `ab5e8f91…`、NordVPN の Malware scanner OFF・アプリ終了の条件下）が、最初の外部ハンドル走査で `uninspectable external mutation handle: pid=<smss>` により `BLOCKED` となった。アーカイブへの効果はなく、証拠・ACL は変わっていないことを読み取りで確認した。
 - `smss.exe`（ブート時のセッションマネージャー）は WinTcb で保護された TCB プロセスで、起動中ずっと書き込み可能な File ハンドルを持つ。保護プロセスのハンドルは検査できないため、従来の実装では PID 4 以外は必ず止まり、実ホストでは通らない構造だった（#263 の PID 4 と同じ理由）。
-- `_require_no_external_mutation_handles` で、検査不能な候補を信頼する条件を、PID 4 に加えて「本物のセッションマネージャー」にも広げた。条件は次のすべて：画像パスが信頼済みシステムディレクトリの `smss.exe`、親 PID 4、セッション 0、保護レベル WinTcb（`PROCESS_QUERY_LIMITED_INFORMATION` だけで照会し、失敗は信頼しない）、その Object の保持者がそのプロセスだけ、#263 と同じ新しい SMB 公開チェックで証拠ルートが非特殊共有から到達できないこと。
+- `_require_no_external_mutation_handles` で、検査不能な候補を信頼する条件を、PID 4 に加えて「本物のセッションマネージャー」にも広げた。条件は次のすべて：画像パスが信頼済みシステムディレクトリの `smss.exe`、親 PID 4、セッション 0、署名者 WinTcb の保護レベル（WinTcb-Light または WinTcb。windows-latest の実 smss は WinTcb-Light だった。`PROCESS_QUERY_LIMITED_INFORMATION` だけで照会し、失敗は信頼しない）、その Object の保持者がそのプロセスだけ、#263 と同じ新しい SMB 公開チェックで証拠ルートが非特殊共有から到達できないこと。
 - それ以外（ほかの保護プロセス、セッションごとの子 smss、受け渡されたハンドル、複製できないハンドル、SMB 公開を否定できない場合）は従来どおり止まる。NordVPN などのアプリ個別の許可は追加していない（#294 の範囲）。
-- 実 Windows 回帰（ランナーの実 smss と PID 4 のハンドルを対象にする）、実 smss の身元証明、身元・排他性・SMB の単体テストを追加した。修正前の head では失敗することを CI で確認する。
+- 実 Windows 回帰（ランナーの実 smss と PID 4 のハンドルを対象にする）、実 smss の身元証明、身元・排他性・SMB の単体テストを追加した。修正前の head（`373c070`）では、ランナーの実 smss（書き込み可能な File 候補 9 件）で `uninspectable … pid=<smss>` となり失敗することを CI で確認した。
 - アーカイブの対象・承認と消費・ソースとハッシュの束縛・UAC 転送・トランザクション順序は変更していない。マージは archive apply を承認しない。マージ後は main 同期 → 新しい plan → plan 確認 → 新しい 1 回限りの本人承認が必要。Ready / merge は人間が行う。
 
 ---
