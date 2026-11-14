@@ -1572,11 +1572,16 @@ finally:
         extra_live_pids=(),
         extra_readonly_pids=(),
         smb_exposure=None,
+        session_manager=None,
+        session_manager_calls=None,
     ):
         """Run quiescence with one fake uninspectable candidate.
 
         smb_exposure: True/False patches _evidence_root_exposed_by_smb; an
         Exception instance makes it raise; None leaves it unpatched.
+        session_manager: True/False patches _is_trusted_session_manager
+        (Issue #322) and records queried PIDs in session_manager_calls;
+        None leaves it unpatched.
         Returns the RuntimeError raised, or None.
         """
         from agent_controller import private_ci_windows_atomic_archive as m
@@ -1654,9 +1659,28 @@ finally:
                             side_effect=exposure,
                         )
                     )
-                for patch in patches:
-                    patch.start()
+                if session_manager is not None:
+
+                    def session_manager_proof(pid):
+                        if session_manager_calls is not None:
+                            session_manager_calls.append(pid)
+                        return session_manager
+
+                    patches.append(
+                        mock.patch.object(
+                            m,
+                            "_is_trusted_session_manager",
+                            side_effect=session_manager_proof,
+                        )
+                    )
+                started = []
                 try:
+                    # Start inside try so a patch that cannot start (for
+                    # example a missing attribute) never leaks the fake
+                    # kernel32 into later tests.
+                    for patch in patches:
+                        patch.start()
+                        started.append(patch)
                     m._require_no_external_mutation_handles(
                         handle,
                         "authoritative evidence root",
@@ -1665,7 +1689,7 @@ finally:
                 except RuntimeError as exc:
                     return exc, exposure_calls
                 finally:
-                    for patch in reversed(patches):
+                    for patch in reversed(started):
                         patch.stop()
             finally:
                 handle.close()
@@ -1727,6 +1751,247 @@ finally:
         self.assertIsNotNone(error)
         self.assertIn("uninspectable external mutation handle", str(error))
         self.assertEqual(calls, [])
+
+    # Issue #322: the Session Manager (smss.exe) is a WinTcb-protected TCB
+    # process that always holds write-class File handles the broker cannot
+    # inspect. It gets the same SMB-gated trust as PID 4, but only after a
+    # positive identity proof and exclusive ownership of the Object.
+
+    def test_session_manager_candidate_is_trusted_when_root_not_smb_exposed(self):
+        proof_calls = []
+        error, calls = self._run_fake_uninspectable_candidate(
+            candidate_pid=604,
+            smb_exposure=False,
+            session_manager=True,
+            session_manager_calls=proof_calls,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(proof_calls, [604])
+        self.assertEqual(len(calls), 1)
+
+    def test_session_manager_candidate_blocks_when_root_smb_exposed(self):
+        error, calls = self._run_fake_uninspectable_candidate(
+            candidate_pid=604,
+            smb_exposure=True,
+            session_manager=True,
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("uninspectable external mutation handle", str(error))
+        self.assertEqual(len(calls), 1)
+
+    def test_session_manager_candidate_blocks_when_smb_exposure_unknown(self):
+        error, _ = self._run_fake_uninspectable_candidate(
+            candidate_pid=604,
+            smb_exposure=RuntimeError("SMB share enumeration failed: status=5"),
+            session_manager=True,
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("SMB share enumeration failed", str(error))
+
+    def test_unproven_session_manager_candidate_blocks_without_smb_check(self):
+        proof_calls = []
+        error, calls = self._run_fake_uninspectable_candidate(
+            candidate_pid=604,
+            smb_exposure=False,
+            session_manager=False,
+            session_manager_calls=proof_calls,
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("uninspectable external mutation handle", str(error))
+        self.assertEqual(proof_calls, [604])
+        self.assertEqual(calls, [])
+
+    def test_session_manager_object_shared_with_another_process_blocks(self):
+        for kwargs in ({"extra_live_pids": (5555,)}, {"extra_readonly_pids": (5555,)}):
+            with self.subTest(**kwargs):
+                proof_calls = []
+                error, calls = self._run_fake_uninspectable_candidate(
+                    candidate_pid=604,
+                    smb_exposure=False,
+                    session_manager=True,
+                    session_manager_calls=proof_calls,
+                    **kwargs,
+                )
+                self.assertIsNotNone(error)
+                self.assertIn(
+                    "uninspectable external mutation handle", str(error)
+                )
+                self.assertEqual(proof_calls, [])
+                self.assertEqual(calls, [])
+
+    def test_pid4_trust_does_not_query_session_manager_proof(self):
+        proof_calls = []
+        error, _ = self._run_fake_uninspectable_candidate(
+            candidate_pid=4,
+            smb_exposure=False,
+            session_manager=False,
+            session_manager_calls=proof_calls,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(proof_calls, [])
+
+    def _session_manager_proof_with(self, *, pid=604, identity=None, error=None):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        system_directory = Path(r"C:\Windows\System32")
+        if identity is None:
+            identity = (
+                str(system_directory / "smss.exe"),
+                m.SYSTEM_PROCESS_ID,
+                0,
+                m.PROTECTION_LEVEL_WINTCB,
+            )
+        identity_patch = (
+            mock.patch.object(m, "_process_identity", side_effect=error)
+            if error is not None
+            else mock.patch.object(m, "_process_identity", return_value=identity)
+        )
+        with identity_patch, mock.patch.object(
+            m, "_trusted_system_directory", return_value=system_directory
+        ):
+            return m._is_trusted_session_manager(pid)
+
+    def test_session_manager_proof_accepts_exact_identity(self):
+        self.assertIs(self._session_manager_proof_with(), True)
+        # windows-latest reports the Session Manager as WinTcb-Light (0).
+        self.assertIs(
+            self._session_manager_proof_with(
+                identity=(r"c:\windows\SYSTEM32\SMSS.EXE", 4, 0, 0)
+            ),
+            True,
+        )
+
+    def test_session_manager_proof_rejects_each_mismatch(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        good = (r"C:\Windows\System32\smss.exe", 4, 0, m.PROTECTION_LEVEL_WINTCB)
+        cases = {
+            "wrong image": (r"C:\Temp\smss.exe",) + good[1:],
+            "lookalike name": (r"C:\Windows\System32\smss.exe.exe",) + good[1:],
+            "child instance parent": good[:1] + (604,) + good[2:],
+            "interactive session": good[:2] + (1,) + good[3:],
+            "unprotected": good[:3] + (m.PROTECTION_LEVEL_NONE,),
+            "windows signer": good[:3] + (1,),
+            "windows light signer": good[:3] + (2,),
+            "antimalware light signer": good[:3] + (3,),
+            "lsa light signer": good[:3] + (4,),
+        }
+        for name, identity in cases.items():
+            with self.subTest(name):
+                self.assertIs(
+                    self._session_manager_proof_with(identity=identity), False
+                )
+
+    def test_session_manager_proof_fails_closed_on_query_error(self):
+        self.assertIs(
+            self._session_manager_proof_with(error=OSError(5, "denied")),
+            False,
+        )
+
+    def test_session_manager_proof_never_applies_to_idle_or_system(self):
+        for pid in (0, 4):
+            with self.subTest(pid=pid):
+                self.assertIs(self._session_manager_proof_with(pid=pid), False)
+
+    def _real_session_manager_pid(self):
+        if not ctypes.windll.shell32.IsUserAnAdmin():
+            self.skipTest("Session Manager identity requires an elevated token")
+        completed = subprocess.run(
+            ["tasklist.exe", "/FI", "IMAGENAME eq smss.exe", "/FO", "CSV", "/NH"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        pids = [
+            int(line.split('","')[1])
+            for line in completed.stdout.splitlines()
+            if line.lower().startswith('"smss.exe"')
+        ]
+        self.assertEqual(len(pids), 1, msg=completed.stdout)
+        return pids[0]
+
+    def test_real_session_manager_identity_is_proven(self):
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        pid = self._real_session_manager_pid()
+        image, parent, session, protection = m._process_identity(pid)
+        print(
+            f"issue322 smss identity: parent={parent} session={session} "
+            f"protection={protection} image={Path(image).name}",
+            flush=True,
+        )
+        self.assertIs(m._is_trusted_session_manager(pid), True)
+
+    def test_real_session_manager_handles_do_not_block_when_root_not_smb_exposed(self):
+        # Issue #322 RED/GREEN: on the real host the archive stopped with
+        # "uninspectable external mutation handle: pid=<smss>". Reproduce it
+        # with the runner's live Session Manager and System handles in scope.
+        from agent_controller import private_ci_windows_atomic_archive as m
+
+        smss_pid = self._real_session_manager_pid()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "evidence"
+            root.mkdir()
+            real_system_handle_entries = m._system_handle_entries
+
+            def own_system_and_smss_entries():
+                allowed_pids = {os.getpid(), 4, smss_pid}
+                return tuple(
+                    entry
+                    for entry in real_system_handle_entries()
+                    if int(entry.UniqueProcessId) in allowed_pids
+                )
+
+            if m._evidence_root_exposed_by_smb(root):
+                self.skipTest(
+                    "temporary evidence root is SMB-exposed on this host; "
+                    "TCB handles are correctly not trusted here"
+                )
+            handle = m._open_locked_directory(root)
+            try:
+                entries = own_system_and_smss_entries()
+                own_type = [
+                    int(entry.ObjectTypeIndex)
+                    for entry in entries
+                    if int(entry.UniqueProcessId) == os.getpid()
+                    and int(entry.HandleValue) == int(handle.handle)
+                ]
+                self.assertEqual(len(own_type), 1)
+                smss_candidates = [
+                    entry
+                    for entry in entries
+                    if int(entry.UniqueProcessId) == smss_pid
+                    and int(entry.ObjectTypeIndex) == own_type[0]
+                    and int(entry.GrantedAccess) & m.DIRECTORY_MUTATION_ACCESS
+                ]
+                print(
+                    f"issue322 smss write-class File candidates: {len(smss_candidates)}",
+                    flush=True,
+                )
+                if not smss_candidates:
+                    self.skipTest(
+                        "this runner's Session Manager holds no write-class "
+                        "File handle; the unit doubles cover the contract"
+                    )
+                with mock.patch.object(
+                    m,
+                    "_system_handle_entries",
+                    side_effect=own_system_and_smss_entries,
+                ):
+                    try:
+                        m._require_no_external_mutation_handles(
+                            handle,
+                            "authoritative evidence root",
+                        )
+                    except RuntimeError as exc:
+                        print(
+                            "::error title=issue322-smss-quiescence::"
+                            + str(exc).replace("\n", " "),
+                            flush=True,
+                        )
+                        raise
+            finally:
+                handle.close()
 
     def test_real_share_enumeration_and_temp_root_exposure(self):
         from agent_controller import private_ci_windows_atomic_archive as m
