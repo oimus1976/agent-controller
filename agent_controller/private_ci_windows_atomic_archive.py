@@ -57,6 +57,9 @@ SE_PRIVILEGE_ENABLED = 0x00000002
 ERROR_NOT_ALL_ASSIGNED = 1300
 PROCESS_PROTECTION_LEVEL_INFO_CLASS = 7
 PROTECTION_LEVEL_NONE = 0xFFFFFFFE
+PROTECTION_LEVEL_WINTCB = 0x00000005
+PROCESS_BASIC_INFORMATION_CLASS = 0
+SESSION_MANAGER_IMAGE_NAME = "smss.exe"
 SYSTEM_PROCESS_ID = 4
 NERR_SUCCESS = 0
 ERROR_MORE_DATA = 234
@@ -207,6 +210,17 @@ class PROCESS_PROTECTION_LEVEL_INFORMATION(ctypes.Structure):
     _fields_ = [("ProtectionLevel", wintypes.DWORD)]
 
 
+class PROCESS_BASIC_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("ExitStatus", ctypes.c_long),
+        ("PebBaseAddress", wintypes.LPVOID),
+        ("AffinityMask", ctypes.c_size_t),
+        ("BasePriority", ctypes.c_long),
+        ("UniqueProcessId", ctypes.c_size_t),
+        ("InheritedFromUniqueProcessId", ctypes.c_size_t),
+    ]
+
+
 class LockedHandle:
     def __init__(self, handle: int, path: Path):
         self.handle = handle
@@ -287,6 +301,29 @@ if os.name == "nt":
         ctypes.POINTER(wintypes.ULONG),
     ]
     _ntdll.NtQueryObject.restype = ctypes.c_long
+
+    _ntdll.NtQueryInformationProcess.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        ctypes.POINTER(wintypes.ULONG),
+    ]
+    _ntdll.NtQueryInformationProcess.restype = ctypes.c_long
+
+    _kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+
+    _kernel32.ProcessIdToSessionId.argtypes = [
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _kernel32.ProcessIdToSessionId.restype = wintypes.BOOL
 
     _kernel32.CreateFileW.argtypes = [
         wintypes.LPCWSTR,
@@ -740,6 +777,90 @@ def _process_is_protected(process: int) -> bool:
     ):
         raise ctypes.WinError(ctypes.get_last_error())
     return int(info.ProtectionLevel) != PROTECTION_LEVEL_NONE
+
+
+def _process_identity(pid: int) -> tuple[str, int, int, int]:
+    """Return (Win32 image path, parent PID, session id, protection level).
+
+    Uses only PROCESS_QUERY_LIMITED_INFORMATION, which an elevated caller
+    may hold even on protected processes. Any failure raises.
+    """
+    process = _kernel32.OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION,
+        False,
+        pid,
+    )
+    if not process:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        size = wintypes.DWORD(32768)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not _kernel32.QueryFullProcessImageNameW(
+            process,
+            0,
+            buffer,
+            ctypes.byref(size),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        protection = PROCESS_PROTECTION_LEVEL_INFORMATION()
+        if not _kernel32.GetProcessInformation(
+            process,
+            PROCESS_PROTECTION_LEVEL_INFO_CLASS,
+            ctypes.byref(protection),
+            ctypes.sizeof(protection),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        basic = PROCESS_BASIC_INFORMATION()
+        returned = wintypes.ULONG()
+        status = _ntdll.NtQueryInformationProcess(
+            process,
+            PROCESS_BASIC_INFORMATION_CLASS,
+            ctypes.byref(basic),
+            ctypes.sizeof(basic),
+            ctypes.byref(returned),
+        )
+        if status != 0:
+            raise RuntimeError(
+                "NtQueryInformationProcess failed: "
+                f"ntstatus=0x{_ntstatus_code(status):08x}"
+            )
+        if int(basic.UniqueProcessId) != pid:
+            raise RuntimeError("process identity query returned another PID")
+    finally:
+        _kernel32.CloseHandle(process)
+    session = wintypes.DWORD()
+    if not _kernel32.ProcessIdToSessionId(pid, ctypes.byref(session)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return (
+        buffer.value,
+        int(basic.InheritedFromUniqueProcessId),
+        int(session.value),
+        int(protection.ProtectionLevel),
+    )
+
+
+def _is_trusted_session_manager(pid: int) -> bool:
+    """Positive proof that pid is the boot Session Manager (Issue #322).
+
+    The master smss.exe is a TCB process: started by the kernel (parent
+    PID 4), session 0, WinTcb protection, image in the trusted system
+    directory. Per-session child instances (parent = master smss) and any
+    process that cannot be fully queried are not trusted.
+    """
+    if pid in (0, SYSTEM_PROCESS_ID):
+        return False
+    try:
+        image, parent, session, protection = _process_identity(pid)
+        expected = _trusted_system_directory() / SESSION_MANAGER_IMAGE_NAME
+    except Exception:
+        return False
+    return (
+        os.path.normcase(os.path.normpath(image))
+        == os.path.normcase(os.path.normpath(str(expected)))
+        and parent == SYSTEM_PROCESS_ID
+        and session == 0
+        and protection == PROTECTION_LEVEL_WINTCB
+    )
 
 
 def _handle_entry_key(
@@ -1219,6 +1340,7 @@ def _require_no_external_mutation_handles(
                 )
 
         system_handles_trusted: bool | None = None
+        session_manager_by_pid: dict[int, bool] = {}
         for pending_kind, entry in pending:
             object_pointer = int(entry.Object or 0)
             if object_pointer == 0:
@@ -1229,19 +1351,32 @@ def _require_no_external_mutation_handles(
             if not live_pids:
                 continue
             original_pid = int(entry.UniqueProcessId)
-            if (
-                pending_kind == "uninspectable"
-                and original_pid == SYSTEM_PROCESS_ID
-                and live_pids == {SYSTEM_PROCESS_ID}
+            exclusive_holder = (
+                live_pids == {original_pid}
                 and all_holders_by_object.get(object_pointer)
-                == {SYSTEM_PROCESS_ID}
-            ):
+                == {original_pid}
+            )
+            trusted_tcb_holder = False
+            if pending_kind == "uninspectable" and exclusive_holder:
+                if original_pid == SYSTEM_PROCESS_ID:
+                    trusted_tcb_holder = True
+                else:
+                    # Issue #322: the boot Session Manager (smss.exe) is a
+                    # WinTcb-protected TCB process like PID 4. Trust it only
+                    # on positive identity proof; any query failure blocks.
+                    if original_pid not in session_manager_by_pid:
+                        session_manager_by_pid[original_pid] = (
+                            _is_trusted_session_manager(original_pid)
+                        )
+                    trusted_tcb_holder = session_manager_by_pid[original_pid]
+            if trusted_tcb_holder:
                 # Issue #263 (owner decision): the System process always holds
                 # write-class kernel File handles that cannot be inspected.
                 # Kernel handles are trusted like administrators, except that
                 # the SMB server opens files in the System process for remote
                 # clients. Trust them only when a fresh share enumeration
                 # proves no non-administrative disk share reaches the root.
+                # Issue #322 applies the same SMB gate to the Session Manager.
                 if system_handles_trusted is None:
                     system_handles_trusted = not _evidence_root_exposed_by_smb(
                         handle.path
