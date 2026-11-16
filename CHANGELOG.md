@@ -15,6 +15,13 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-11-16 — Phase 6 handles auto-deregistered ephemeral runners (#229, Draft / unmerged)
+
+- #216 の private-CI pilot では、Phase 5 が成功した one-job / `--ephemeral` runner が GitHub 側で自動登録解除される。その通常経路で Phase 6 候補が runner 0 件を拒否していたため、当該 STOP を解除する。
+- 正規の Phase 5 PASS 証拠から生成した Phase 6 plan に限り、リモートの一致 runner が 0 件なら DELETE だけを省略する。1 件ある場合は従来どおり ID・名前・ラベル・busy の一致を検証して必要な削除を実施する。複数・曖昧な一致、読取異常、未終了の Actions run は BLOCKED のまま。
+- 既存の generation / target-process / service / scheduled-task / reparse / ACL / 事後 runner 確認と、一回限りの本人承認境界は変更しない。新規の Phase 6/7 CLI、持続する承認消費、失敗時 cleanup 手順は #229 の別作業として残る。
+- 回帰テストは生成される PowerShell 候補の 0 件経路と DELETE 条件、重複・ID ずれ・事後残存の停止条件を固定する。実機 cleanup、freeze、workflow dispatch、runner 登録は行わない。
+
 ## 2026-11-14 — Session Manager trust in archive quiescence (Issue #322, Draft / unmerged)
 
 - #216 の旧証拠アーカイブで、本人承認の 1 回限りの apply（plan `ab5e8f91…`、NordVPN の Malware scanner OFF・アプリ終了の条件下）が、最初の外部ハンドル走査で `uninspectable external mutation handle: pid=<smss>` により `BLOCKED` となった。アーカイブへの効果はなく、証拠・ACL は変わっていないことを読み取りで確認した。

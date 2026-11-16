@@ -178,6 +178,59 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
             "SELF_HOSTED_PRIVATE_CI_PASS",
         )
 
+    def test_ephemeral_runner_absent_after_phase5_pass_skips_only_remote_delete(self):
+        m = self.module()
+        plan = self.plan()
+        self.assertEqual(
+            plan.phase5_result_sha256,
+            hashlib.sha256(phase5_result_bytes(phase5_evidence())).hexdigest(),
+        )
+        candidate = m.render_phase6_cleanup_candidate(plan)
+
+        # Zero registered runners is normal after the frozen ephemeral job.
+        # A duplicate or mismatched live runner must still fail closed.
+        self.assertIn(
+            "if ($BridgeEligibleRunners.Count -gt 1) { throw 'Phase 6 ambiguous runner identity' }",
+            candidate,
+        )
+        self.assertIn(
+            "if ($BridgeEligibleRunners.Count -eq 0) {",
+            candidate,
+        )
+        self.assertIn(
+            "Phase 6 ephemeral runner already absent after Phase 5 PASS",
+            candidate,
+        )
+        self.assertNotIn(
+            "Phase 6 runner absent without exact prior cleanup evidence",
+            candidate,
+        )
+        self.assertIn(
+            "if ($BridgeEligibleRunners.Count -eq 1) {",
+            candidate,
+        )
+        self.assertIn(
+            "Phase 6 runner identity drift",
+            candidate,
+        )
+        self.assertIn(
+            "Phase 6 runner remains busy",
+            candidate,
+        )
+        self.assertIn(
+            "if ($BridgeRemoteRunnerPresent) {",
+            candidate,
+        )
+        self.assertIn(
+            "Phase 6 runner residual after deregistration",
+            candidate,
+        )
+        self.assertEqual(candidate.count("gh.exe api --method DELETE"), 1)
+        self.assertLess(
+            candidate.index("if ($BridgeRemoteRunnerPresent) {"),
+            candidate.index("gh.exe api --method DELETE"),
+        )
+
     def test_cleanup_candidate_is_canonical_exact_and_no_broad_sweep(self):
         m = self.module()
         plan = self.plan()
@@ -202,7 +255,6 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
             "icacls.exe $BridgeRunnerRoot /inheritance:r /grant:r",
             "Invoke-PrivateCiGenerationRetirement",
             "PHASE6_GENERATION_RETIREMENT_IDENTITY_BOUND",
-            "Phase 6 runner absent without exact prior cleanup evidence",
             "Phase 6 target PR binding drift",
             "Phase 6 trusted workflow SHA drift",
             "Phase 6 active workflow readback failed",
