@@ -45,6 +45,32 @@ PHASE6_ACL_BLOCK_BEGIN = "# BEGIN phase6-acl-lock"
 PHASE6_ACL_BLOCK_END = "# END phase6-acl-lock"
 
 
+def _phase6_reparse_scan_lines() -> list[str]:
+    """Walk the generation tree without following links; stop on any reparse point.
+
+    This is the existing pre-delete scan. #327 review MAJOR-1: it must run
+    before every elevated ``icacls`` change, because ``icacls /T`` follows a
+    junction and would rewrite ACLs outside the approved generation.
+    """
+    return [
+        "Write-Host 'progress phase=phase6 step=reparse-scan'",
+        "$BridgePendingPaths = @($BridgeGenerationRoot)",
+        "while ($BridgePendingPaths.Count -gt 0) {",
+        "    $BridgeCurrentPath = $BridgePendingPaths[0]",
+        "    if ($BridgePendingPaths.Count -eq 1) { $BridgePendingPaths = @() }",
+        "    else { $BridgePendingPaths = @($BridgePendingPaths[1..($BridgePendingPaths.Count - 1)]) }",
+        "    $BridgeCurrentItem = Get-Item -LiteralPath $BridgeCurrentPath -Force -ErrorAction Stop",
+        "    if (($BridgeCurrentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw ('Phase 6 reparse point blocked before ACL change: ' + $BridgeCurrentItem.FullName) }",
+        "    if ($BridgeCurrentItem.PSIsContainer) {",
+        "        foreach ($BridgeChildItem in @(Get-ChildItem -LiteralPath $BridgeCurrentPath -Force -ErrorAction Stop)) {",
+        "            if (($BridgeChildItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw ('Phase 6 reparse point blocked before ACL change: ' + $BridgeChildItem.FullName) }",
+        "            if ($BridgeChildItem.PSIsContainer) { $BridgePendingPaths += $BridgeChildItem.FullName }",
+        "        }",
+        "    }",
+        "}",
+    ]
+
+
 def _phase6_acl_lock_lines(stage: str) -> list[str]:
     """Lock the generation tree to SYSTEM/Administrators and prove it.
 
@@ -56,6 +82,8 @@ def _phase6_acl_lock_lines(stage: str) -> list[str]:
     """
     return [
         PHASE6_ACL_BLOCK_BEGIN + " stage=" + stage,
+        # No elevated ACL change before the whole tree is proven link-free.
+        *_phase6_reparse_scan_lines(),
         "icacls.exe $BridgeGenerationRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' /C",
         "$BridgeAclRootGrantExitCode = $LASTEXITCODE",
         "if ($BridgeAclRootGrantExitCode -ne 0) { throw 'Phase 6 generation-root ACL lock failed' }",
@@ -547,21 +575,6 @@ def render_phase6_cleanup_candidate(plan: Phase6CleanupPlan) -> str:
             "}",
             "if ($BridgeTargetOwnedAfterStop.Count -ne 0) { throw 'Phase 6 target-owned process remains after stop' }",
             "",
-            "Write-Host 'progress phase=phase6 step=reparse-scan'",
-            "$BridgePendingPaths = @($BridgeGenerationRoot)",
-            "while ($BridgePendingPaths.Count -gt 0) {",
-            "    $BridgeCurrentPath = $BridgePendingPaths[0]",
-            "    if ($BridgePendingPaths.Count -eq 1) { $BridgePendingPaths = @() }",
-            "    else { $BridgePendingPaths = @($BridgePendingPaths[1..($BridgePendingPaths.Count - 1)]) }",
-            "    $BridgeCurrentItem = Get-Item -LiteralPath $BridgeCurrentPath -Force -ErrorAction Stop",
-            "    if (($BridgeCurrentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Phase 6 reparse point blocked before delete' }",
-            "    if ($BridgeCurrentItem.PSIsContainer) {",
-            "        foreach ($BridgeChildItem in @(Get-ChildItem -LiteralPath $BridgeCurrentPath -Force -ErrorAction Stop)) {",
-            "            if (($BridgeChildItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Phase 6 reparse point blocked before delete' }",
-            "            if ($BridgeChildItem.PSIsContainer) { $BridgePendingPaths += $BridgeChildItem.FullName }",
-            "        }",
-            "    }",
-            "}",
             "Write-Host 'progress phase=phase6 step=acl-relock'",
             *_phase6_acl_lock_lines("post-stop"),
             "",

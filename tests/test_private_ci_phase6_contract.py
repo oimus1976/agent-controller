@@ -313,6 +313,16 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
                     self.assertIn(fragment, text)
         # Both blocks are rendered from one helper.
         self.assertEqual(blocks[0][1:-2], blocks[1][1:-2])
+        # Review MAJOR-1: the whole tree is scanned for reparse points before
+        # the first elevated icacls change in each block.
+        for block in blocks:
+            scan = block.index("Write-Host 'progress phase=phase6 step=reparse-scan'")
+            first_icacls = next(i for i, line in enumerate(block) if "icacls.exe" in line)
+            self.assertLess(scan, first_icacls)
+            self.assertTrue(
+                any("Phase 6 reparse point blocked before ACL change" in line for line in block[scan:first_icacls])
+            )
+        self.assertEqual(candidate.count("step=reparse-scan"), 2)
 
         first_end = ends[0]
         second_end = ends[1]

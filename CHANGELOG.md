@@ -21,6 +21,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 - ACL の固定方法を Phase 4 と同じにした：generation root だけを保護して SYSTEM / Administrators に継承付きのフル制御を与え、配下は `icacls <generation>\* /reset /T /C` で root からの継承だけに戻す。runner 停止の前と後（削除・登録解除・generation 退避の前）の 2 回行う。
 - icacls の exit code を信用せず、generation 配下の全要素を `Get-Acl` で読み戻す。root は保護され SYSTEM / Administrators の明示 `OI`+`CI` フル制御だけ、配下は保護されず両者の継承エントリだけであること。列挙・読取できない要素、対象 ID を含むそれ以外の主体、拒否エントリがあれば、runner 停止・登録解除・generation 退避の前に止まる。
 - 実 Windows 回帰（CI の昇格環境、使い捨ての対象アカウント）を追加：#216 と同じ形の対象所有ツリーは通り対象 ACE が残らないこと、昇格 broker が再設定も読取もできない要素があると止まること。
+- 独立レビュー MAJOR-1 への対応：既存のリンクをたどらない reparse point 走査を ACL 固定ブロックの先頭に移し、runner 停止の前と後の 2 回とも、最初の昇格 `icacls` より前に generation 全体を走査する（`icacls /T` は junction をたどるため）。回帰として、generation 内に外部の兄弟ディレクトリへ向く junction を置くと停止し、外部 sentinel の ACL・内容、generation root の ACL が変わらないことを実 Windows（昇格）で確認する。走査から `icacls` までの間に runner がリンクを作る競合（TOCTOU）は残存リスクであり、原子的に防ぐことは証明していない。
 - 運用メモ `docs/operations/private-ci-pilot-invocation.md` に、pilot スクリプトはリポジトリ root から `python -m scripts.<module>` で起動することを明記した（ファイルパス起動は `ModuleNotFoundError: agent_controller`）。
 - Phase 6/7 の全体設計、承認・消費の境界、#216 の記録（1 ジョブ成功・Phase 6 `NOT_PASS`・手動復旧・Phase 7 読み取り PASS）は変更しない。マージは実機の Phase 6 を承認しない。
 

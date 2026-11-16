@@ -362,6 +362,67 @@ class PrivateCiPhase6AclWindowsTests(unittest.TestCase):
         self.assertNotIn("ACL_BLOCK_COMPLETED", completed.stdout)
         self.assertNotIn("step=acl-verified", completed.stdout)
 
+    def _sddl_and_content(self, paths: list[Path]) -> dict[str, str]:
+        read = _run_powershell(
+            "\n".join(
+                [
+                    "$ErrorActionPreference = 'Stop'",
+                    "$Report = [ordered]@{}",
+                    *[
+                        f"$Report[{_ps_quote(str(path))}] = [string](Get-Acl -LiteralPath {_ps_quote(str(path))}).Sddl"
+                        for path in paths
+                    ],
+                    "ConvertTo-Json -InputObject $Report -Compress",
+                ]
+            ),
+            directory=self.work,
+        )
+        self.assertEqual(read.returncode, 0, read.stderr)
+        return json.loads(read.stdout)
+
+    def test_acl_block_blocks_junction_before_touching_outside_acl(self):
+        # Review MAJOR-1: icacls /T follows a directory junction. A junction
+        # inside the generation that points at an outside sibling must stop
+        # the block before any elevated ACL change, and the outside sentinel
+        # must keep its ACL and content.
+        generation = self._prepare_generation()
+        outside = self.base / "outside-sentinel"
+        sentinel = outside / "sentinel.txt"
+        junction = generation / "runner" / "_work" / "repo" / "escape"
+        target = f"*{self.target_sid}"
+        setup = _run_powershell(
+            "\n".join(
+                [
+                    "$ErrorActionPreference = 'Stop'",
+                    f"New-Item -ItemType Directory -Path {_ps_quote(str(outside))} | Out-Null",
+                    f"Set-Content -LiteralPath {_ps_quote(str(sentinel))} -Value 'sentinel-327' -Encoding ASCII",
+                    # A distinctive ACL the block would overwrite if it followed the link.
+                    f"icacls.exe {_ps_quote(str(outside))} /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' '{target}:(OI)(CI)(RX)' /C /Q | Out-Null",
+                    "if ($LASTEXITCODE -ne 0) { throw 'outside ACL failed' }",
+                    f"New-Item -ItemType Junction -Path {_ps_quote(str(junction))} -Target {_ps_quote(str(outside))} | Out-Null",
+                ]
+            ),
+            directory=self.work,
+        )
+        self.assertEqual(setup.returncode, 0, setup.stderr)
+        watched = [outside, sentinel, generation, generation / "runner"]
+        before = self._sddl_and_content(watched)
+        self.assertIn(self.target_sid, before[str(sentinel)])
+
+        completed = self._run_block(generation)
+        output = completed.stdout + completed.stderr
+        self.assertNotEqual(completed.returncode, 0, "ACL block passed with a junction: " + output)
+        self.assertNotIn("ACL_BLOCK_COMPLETED", completed.stdout)
+        self.assertNotIn("step=acl-verified", completed.stdout)
+        self.assertIn("Phase 6 reparse point blocked before ACL change", " ".join(output.split()))
+
+        after = self._sddl_and_content(watched)
+        # Outside the generation nothing changed; inside, the scan stopped
+        # before the first icacls, so the root ACLs are unchanged too.
+        self.assertEqual(after, before)
+        self.assertEqual(sentinel.read_text(encoding="ascii").strip(), "sentinel-327")
+        self.assertTrue(junction.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
