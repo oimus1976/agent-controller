@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from typing import Any, Mapping
+import hashlib
+import json
 
 from .executor import load_policy
 from .inspector import (
@@ -20,6 +22,23 @@ from .review_evidence import canonical_review_from_mapping
 
 
 ACTION = "REQUEST_CODEX_REMEDIATION"
+
+
+def remediation_findings_sha256(inspection):
+    """Bind a scope confirmation to current-head Codex finding contents."""
+    head = inspection["head_sha"]
+    findings = []
+    for thread in inspection["review_threads_graphql"]:
+        root = thread["comments"]["nodes"][0]
+        if (root.get("originalCommit") or {}).get("oid") != head:
+            continue
+        if (root.get("author") or {}).get("login") not in {
+                "chatgpt-codex-connector[bot]", "chatgpt-codex-connector"}:
+            continue
+        if thread.get("isResolved") is False:
+            findings.append([thread.get("id"), root])
+    encoded = sorted(json.dumps(item, sort_keys=True) for item in findings)
+    return hashlib.sha256(json.dumps(encoded).encode("utf-8")).hexdigest()
 
 
 def _repo_full_name(repo_data: Any) -> str | None:
@@ -353,6 +372,7 @@ def execute_codex_remediation_request(
     pr_number: int,
     policy_path: str | None,
     apply: bool = False,
+    expected_findings_sha256: str | None = None,
 ) -> dict[str, Any]:
     expected_repo = f"{owner}/{repo}"
     source_head = plan.get("source_head_sha")
@@ -482,6 +502,10 @@ def execute_codex_remediation_request(
         )
         if final_canonical is None or not final_canonical.collection_complete:
             result["failure_reason"] = "REVIEW_EVIDENCE_UNAVAILABLE"
+            return result
+        if (expected_findings_sha256 is not None and
+                remediation_findings_sha256(final_review_inspection) != expected_findings_sha256):
+            result["failure_reason"] = "REMEDIATION_FINDINGS_CHANGED"
             return result
         if (
             final_canonical.verdict != "BLOCKING"

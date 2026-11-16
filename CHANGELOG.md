@@ -19,6 +19,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 - `advance-pr` が最新HEADのCI・canonicalレビュー証拠を読み、CI待ち、レビュー／修正要求、タスク観測・適用待ち、HEAD変更、容量不足、Ready判断待ちをJSONで区別する。既存planner/executorを再利用し、`--apply` でも1回最大1要求。Ready/mergeは人間の操作。
 - 同一source-head要求markerで重複を抑止。修正には現HEADの意味的スコープ確認と有限予算が必要。容量は既存policyに5分の鮮度制限を適用し、不明・期限切れ・追加課金が必要な経路では停止する。
+- スコープ確認をHEADと指摘集合SHA256へ結び、同一HEADでも指摘編集後には再確認する。既存executorの最終確認で照合し、P1確認後にP3へ変わった指摘へ要求する再現経路を防ぐ。
 - Cloud Codexのタスク完了／Update branch可否は自動取得できない。UI観測を任意入力し、未確認と適用待ちを区別する。新HEADで以前のCI・レビューを再利用しない。回帰テストと[単一入口の手順](docs/operations/advance-pr.md)を追加。
 
 ## 2026-11-16 — Phase 6 ACL lock is proven by read-back (Issue #327, Draft / unmerged)

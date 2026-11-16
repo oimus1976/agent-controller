@@ -49,13 +49,26 @@ GitHub認証と操作許可は既存 `request-codex-review` / `request-codex-rem
 
 ## 修正範囲の確認
 
-既存plannerは変更パスを検証するが、指摘の意味的スコープを判定しない。入口では現HEADの未解決Codex inline指摘のうち `P0` / `P1` / `BLOCKER` / `MAJOR` だけを候補にし、未分類・P2/P3は `STOP_FINDINGS` で止める。修正要求は固定文面 `@codex address that feedback` のため、指摘の一部だけを選べない。人間は現HEADの全指摘が凍結したIssue/AC内の狭い変更で解決できることを確認してから、`advance_pr.bounded_remediation_head` に40桁の現HEADを設定する。MINORのみ、分類不明、要件変更、新依存・外部サービス・課金経路・権限変更が必要なら設定せず停止する。
+既存plannerは変更パスを検証するが、指摘の意味的スコープを判定しない。入口では現HEADの未解決Codex inline指摘のうち `P0` / `P1` / `BLOCKER` / `MAJOR` だけを候補にし、未分類・P2/P3は `STOP_FINDINGS` で止める。修正要求は固定文面 `@codex address that feedback` のため、指摘の一部だけを選べない。人間は現HEADの全指摘が凍結したIssue/AC内の狭い変更で解決できることを確認してから、次の2項目をローカルpolicyに設定する。
+
+```json
+{
+  "advance_pr": {
+    "bounded_remediation_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bounded_remediation_findings": "<出力のfinding_set_sha256をコピー>"
+  }
+}
+```
+
+これは先のpolicyへ追記する部分だけを示す。`bounded_remediation_findings` は64桁のSHA256で、自分で計算せず出力値を使う。MINORのみ、分類不明、要件変更、新依存・外部サービス・課金経路・権限変更が必要なら設定せず停止する。
+
+HEADが同じでも指摘は編集される。P1指摘を確認した後、P3へ変わった同一HEADに修正要求できる経路が独立レビューで再現されたため、HEADだけでなく指摘集合も固定する。実行時の最終確認でも照合し、指摘が変われば再確認へ戻す。既存policyの小さな確認項目であり、別の承認サービスや台帳は追加しない。
 
 この確認はHEAD変更で無効になる。`max_remediation_rounds` はこのPRのtrusted修正要求markerにある異なるsource-head数の上限で、起動ごとにリセットしない。履歴を残すこと。0なら新規修正要求を許可しない。既に修正要求したHEADと同じ本文（空白等を正規化）の指摘が現HEADに再発すると `INEFFECTIVE_REMEDIATION` で停止する。意味の同じ言い換えまで検出する機能はない。新しい指摘が出るたびに無制限に上限を増やさない。
 
 ## Codexタスクと適用待ち
 
-Cloud Codexタスクの完了／Update branch可否を取得するAPIは既存コードにない。`observe-codex` はローカルrollout観測でありCloudタスクの代用にならない。同一source-headへの要求済みmarkerがあれば再要求を止める。
+Cloud Codexタスクの完了／Update branch可否を取得するAPIは既存コードにない。GitHub側のタスク自動pollingも行わない。`observe-codex` はローカルrollout観測でありCloudタスクの代用にならない。同一source-headへの要求済みmarkerがあれば再要求を止める。
 
 UIで直接確認できた状態は、任意のローカルJSONを `--codex-task-observation task.local.json` に渡せる：
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_controller.advance_pr import advance_pr_once
+from agent_controller.remediation_request import remediation_findings_sha256
 from agent_controller.inspector import build_canonical_review_evidence
 from agent_controller.remediation_request_mutator import codex_remediation_request_marker
 from agent_controller.review_evidence import REQUIRED_GITHUB_SURFACES, ReviewSurfaceStatus
@@ -70,9 +71,13 @@ class AdvancePrTests(unittest.TestCase):
                                         "observed_at": datetime.now(timezone.utc).isoformat()}},
         }
 
-    def run_advance(self, evidence=None, *, fresh_head=HEAD, apply=False, task=None):
+    def run_advance(self, evidence=None, *, fresh_head=HEAD, apply=False, task=None,
+                    confirm_findings=True):
+        evidence = evidence or inspection()
+        if confirm_findings:
+            self.policy["advance_pr"]["bounded_remediation_findings"] = remediation_findings_sha256(evidence)
         Path(self.policy_path).write_text(json.dumps(self.policy))
-        with patch("agent_controller.advance_pr.inspect_pr", return_value=evidence or inspection()), \
+        with patch("agent_controller.advance_pr.inspect_pr", return_value=evidence), \
              patch("agent_controller.advance_pr.get_pr_details", return_value=pr_snapshot(fresh_head)):
             return advance_pr_once(owner="oimus1976", repo="agent-controller", pr_number=215,
                                    policy_path=self.policy_path, scope_policy={"allowed_paths": ["agent_controller/*"]}, apply=apply,
@@ -183,7 +188,7 @@ class AdvancePrTests(unittest.TestCase):
                 with patch("agent_controller.advance_pr.plan_codex_remediation_request", return_value={
                     "decision": "EXECUTABLE", "source_head_sha": head}), patch(
                         "agent_controller.advance_pr.execute_codex_remediation_request",
-                        return_value={"final_outcome": "SUCCESS"}) as executor:
+                        return_value={"final_outcome": "PASS"}) as executor:
                     result = self.run_advance(evidence,
                                               fresh_head=head, apply=True)
                 self.assertEqual(result["state"], "WAIT_REMEDIATION")
@@ -248,6 +253,55 @@ class AdvancePrTests(unittest.TestCase):
         advance.assert_called_once()
         self.assertEqual(advance.call_args.kwargs["pr_number"], 215)
         self.assertTrue(advance.call_args.kwargs["apply"])
+
+    def test_same_head_changed_findings_invalidate_scope_confirmation(self):
+        self.policy["advance_pr"]["bounded_remediation_findings"] = remediation_findings_sha256(
+            inspection("BLOCKING"))
+        evidence = inspection("BLOCKING")
+        evidence["review_threads_graphql"][0]["comments"]["nodes"][0]["body"] = "[P1] Newly reported finding"
+        with patch("agent_controller.advance_pr.execute_codex_remediation_request") as executor:
+            result = self.run_advance(evidence, apply=True, confirm_findings=False)
+        self.assertEqual(result["state"], "STOP_REMEDIATION_SCOPE")
+        executor.assert_not_called()
+
+    def test_real_remediation_composition_returns_wait_and_passes_finding_digest(self):
+        evidence = inspection("BLOCKING")
+        enriched = dict(evidence, head_ref="codex/issue-215", head_repo=REPO,
+                        base_ref="main", base_sha="c" * 40, base_repo=REPO,
+                        default_branch="main")
+        comments = [{"id": 1, "user": {"login": "oimus1976"},
+                     "body": "@codex address that feedback\n" +
+                     codex_remediation_request_marker(HEAD)}]
+        with patch("agent_controller.remediation_request._inspect_remediation_request", return_value=enriched), \
+             patch("agent_controller.remediation_request.get_pr_details", return_value=pr_snapshot()), \
+             patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="oimus1976"), \
+             patch("agent_controller.remediation_request.get_actions_runs", return_value={"total_count": 1, "workflow_runs": [
+                 {"head_sha": HEAD, "event": "pull_request", "status": "completed", "conclusion": "success"}]}), \
+             patch("agent_controller.remediation_request.get_pr_issue_comments", return_value=comments), \
+             patch("agent_controller.remediation_request.post_codex_remediation_request") as post:
+            result = self.run_advance(evidence, apply=True)
+        self.assertEqual(result["state"], "WAIT_REMEDIATION", result)
+        self.assertEqual(result["execution"]["final_outcome"], "PASS")
+        post.assert_called_once()
+
+    def test_real_remediation_rejects_same_head_minor_finding_at_final_gate(self):
+        evidence = inspection("BLOCKING")
+        enriched = dict(evidence, head_ref="codex/issue-215", head_repo=REPO,
+                        base_ref="main", base_sha="c" * 40, base_repo=REPO,
+                        default_branch="main")
+        changed = inspection("BLOCKING")
+        changed["review_threads_graphql"][0]["comments"]["nodes"][0]["body"] = "[P3] Minor new finding"
+        changed.update(head_ref="codex/issue-215", head_repo=REPO, base_ref="main",
+                       base_sha="c" * 40, base_repo=REPO, default_branch="main")
+        with patch("agent_controller.remediation_request._inspect_remediation_request",
+                   side_effect=[enriched, enriched, changed]), \
+             patch("agent_controller.remediation_request.get_pr_details", return_value=pr_snapshot()), \
+             patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="oimus1976"), \
+             patch("agent_controller.remediation_request.post_codex_remediation_request") as post:
+            result = self.run_advance(evidence, apply=True)
+        self.assertEqual(result["state"], "STOP_PROVIDER")
+        self.assertEqual(result["reason"], "REMEDIATION_FINDINGS_CHANGED")
+        post.assert_not_called()
 
 
 if __name__ == "__main__":

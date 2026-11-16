@@ -10,7 +10,7 @@ from .provider_capacity import (
 )
 from .remediation_request import (
     _validate_safe_pr_snapshot, plan_codex_remediation_request,
-    execute_codex_remediation_request,
+    execute_codex_remediation_request, remediation_findings_sha256,
 )
 from .review_request import _safe_scope_status, plan_codex_review_request, execute_codex_review_request
 from .review_evidence import canonical_review_from_mapping
@@ -168,10 +168,12 @@ def advance_pr_once(*, owner, repo, pr_number, policy_path=None, scope_policy=No
             finding_error = "FINDING_CLASSIFICATION_UNAVAILABLE"
         if finding_error:
             return finish("STOP_FINDINGS", finding_error, "Human: inspect the current findings before another remediation.")
+        result["finding_set_sha256"] = remediation_findings_sha256(inspection)
         # Existing path checks cannot prove that semantic changes fit the Issue.
         # Require a concise human scope confirmation for this exact finding set.
-        if config.get("bounded_remediation_head") != head:
-            return finish("STOP_REMEDIATION_SCOPE", "REMEDIATION_SCOPE_REVIEW_REQUIRED", "Confirm all current-head findings are bounded to the Issue, then set advance_pr.bounded_remediation_head.")
+        if (config.get("bounded_remediation_head") != head or
+                config.get("bounded_remediation_findings") != result["finding_set_sha256"]):
+            return finish("STOP_REMEDIATION_SCOPE", "REMEDIATION_SCOPE_REVIEW_REQUIRED", "Confirm these findings are bounded to the Issue, then set advance_pr.bounded_remediation_head and bounded_remediation_findings.")
         rounds = config.get("max_remediation_rounds")
         if isinstance(rounds, bool) or not isinstance(rounds, int) or rounds < 0:
             return finish("STOP_POLICY", "FINITE_REMEDIATION_BUDGET_REQUIRED", "Set advance_pr.max_remediation_rounds to a finite nonnegative integer.")
@@ -199,10 +201,16 @@ def advance_pr_once(*, owner, repo, pr_number, policy_path=None, scope_policy=No
         return finish("WAIT_CAPACITY", reason, "Observe Codex capacity/cost and update advance_pr policy; no paid fallback.")
     if not apply:
         return finish(state, "DRY_RUN", "Rerun the same advance-pr command with --apply.")
+    # A policy edit during the fresh planner must not reuse our old capacity or
+    # scope confirmation. The executor retains its own pre-effect checks too.
+    if load_policy(policy_path) != policy:
+        return finish("STOP_POLICY", "POLICY_CHANGED", "Rerun advance-pr with the current policy.")
+    extra = {"expected_findings_sha256": result["finding_set_sha256"]} if state == "REMEDIATE_SCOPED" else {}
     execution = executor(plan=plan, owner=owner, repo=repo, pr_number=pr_number,
-                         policy_path=policy_path, apply=True)
+                         policy_path=policy_path, apply=True, **extra)
     result["execution"] = execution
-    if execution.get("final_outcome") != "SUCCESS":
+    success = "PASS" if state == "REMEDIATE_SCOPED" else "SUCCESS"
+    if execution.get("final_outcome") != success:
         return finish("STOP_PROVIDER", execution.get("failure_reason"), "Inspect the request result before retrying.")
     # Publication may race provider execution; never carry evidence across heads.
     try:
