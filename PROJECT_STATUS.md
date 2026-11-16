@@ -2,7 +2,7 @@
 
 > **This file is an index, not an authority.** Do not infer PR, head, CI, review, or authorization state from it. Before acting, re-read those facts from GitHub and CI. For each workstream, the authority is its Issue: read the latest checkpoint comment there.
 
-- **as_of:** 2026-10-01, reconciled against post-#291 `main` at `e12b002dfb1e2f8ce31003c9558d44d9962d46a6`. This is an advisory freshness hint only.
+- **as_of:** 2026-11-17, #215 slice starts from `main` at `2ecd98e`. This is an advisory freshness hint only; unrelated older rows still require fresh reads.
 - **Entry point for workers:** [`AGENTS.md`](AGENTS.md). **Rules:** [`docs/governance/rules.md`](docs/governance/rules.md).
 
 ## Goal
@@ -15,10 +15,9 @@ Product compass: [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md) restates the end-to-
 
 ## Main line
 
-- **[#216](https://github.com/oimus1976/agent-controller/issues/216)** — the first human-authorized live Windows one-job private-CI pilot.
-  - Parents: [#207](https://github.com/oimus1976/agent-controller/issues/207) and [#195](https://github.com/oimus1976/agent-controller/issues/195).
-  - Its operational log, authorizations, and probe results are the comments on #216. Read the newest checkpoint or comment there.
-  - Live effects need a separate human authorization for the exact plan ([rules §8](docs/governance/rules.md)).
+- **[#215](https://github.com/oimus1976/agent-controller/issues/215)** — on-demand Draft PR review/remediation advancement, per [owner direction](https://github.com/oimus1976/agent-controller/issues/215#issuecomment-6925020137).
+  - Reuse canonical inspection and existing requests; [operator entry point](docs/operations/advance-pr.md). Ready/merge remain human-final.
+  - #216 is closed (`not_planned`), #327 closed (`completed`); #229 Phase 6/7 harness is deferred. Do not restart live pilot work from this index.
 
 ## Active workstreams
 
@@ -27,8 +26,7 @@ This table lists pointers only. Status comes from each authority Issue's latest 
 | Workstream | Authority Issue | Related Issues / PRs | Checkpoints |
 |---|---|---|---|
 | Exact human-final #305 execution handoff (implementation/non-live tests only) | [#310](https://github.com/oimus1976/agent-controller/issues/310) | parent [#305](https://github.com/oimus1976/agent-controller/issues/305); Draft [#311](https://github.com/oimus1976/agent-controller/pull/311); [handoff design](docs/operations/issue-310-exact-handoff.md) | comments on #310; [scoped observation design approval](https://github.com/oimus1976/agent-controller/issues/310#issuecomment-6339925221); native metadata feasibility/binding and new B remain human gates; original A unused, old B expired |
-| Private-CI live pilot (main line) | [#216](https://github.com/oimus1976/agent-controller/issues/216) | [#229](https://github.com/oimus1976/agent-controller/issues/229), [#243](https://github.com/oimus1976/agent-controller/issues/243) | comments on #216 |
-| Phase 6 ACL lock: read back every item instead of trusting icacls exit 0; `python -m` pilot invocation note | [#327](https://github.com/oimus1976/agent-controller/issues/327) | parent [#229](https://github.com/oimus1976/agent-controller/issues/229), scope [#297](https://github.com/oimus1976/agent-controller/issues/297); [invocation note](docs/operations/private-ci-pilot-invocation.md); merge authorizes no live Phase 6 | comments on #327 |
+| Draft PR one-step review/remediation (main line) | [#215](https://github.com/oimus1976/agent-controller/issues/215) | [#194](https://github.com/oimus1976/agent-controller/issues/194), [#200](https://github.com/oimus1976/agent-controller/issues/200); [runbook](docs/operations/advance-pr.md) | comments on #215 |
 | Verified checkpoint advisory resume (independent B:FOLLOW_UP) | [#307](https://github.com/oimus1976/agent-controller/issues/307) | [#17](https://github.com/oimus1976/agent-controller/issues/17), [#20](https://github.com/oimus1976/agent-controller/issues/20), [#195](https://github.com/oimus1976/agent-controller/issues/195); separate from the live pilot | comments on #307; read-only planning, no live execution authority |
 | One-off target-context profile-load probe (design/non-live tests/Draft review only) | [#305](https://github.com/oimus1976/agent-controller/issues/305) | parents [#216](https://github.com/oimus1976/agent-controller/issues/216), [#297](https://github.com/oimus1976/agent-controller/issues/297); general [#195](https://github.com/oimus1976/agent-controller/issues/195) unchanged | latest owner direction / checkpoints on #305; no target execution or live authority |
 | Bounded Phase 0 target execution-policy gate (implementation/tests/review only) | [#303](https://github.com/oimus1976/agent-controller/issues/303) | parents [#216](https://github.com/oimus1976/agent-controller/issues/216), [#297](https://github.com/oimus1976/agent-controller/issues/297); completed retirement [#302](https://github.com/oimus1976/agent-controller/issues/302) | comments on #303; no fresh pilot/freeze/registration/credential acquisition/dispatch performed |
@@ -55,7 +53,7 @@ This table lists pointers only. Status comes from each authority Issue's latest 
 These Issues are open but not being worked on. Their order is an owner decision. The last recorded queue is in a [#55 comment](https://github.com/oimus1976/agent-controller/issues/55) dated 2026-09-04 and may be stale. Before selecting one, confirm it with the owner.
 
 - Enforcement: [#200](https://github.com/oimus1976/agent-controller/issues/200) Codex task apply states.
-- Orchestration: [#215](https://github.com/oimus1976/agent-controller/issues/215) review-remediation loop, [#173](https://github.com/oimus1976/agent-controller/issues/173) verified-head / single-writer, [#178](https://github.com/oimus1976/agent-controller/issues/178) canonical TaskSpec.
+- Orchestration: [#173](https://github.com/oimus1976/agent-controller/issues/173) verified-head / single-writer, [#178](https://github.com/oimus1976/agent-controller/issues/178) canonical TaskSpec.
 - Efficiency / capacity: [#55](https://github.com/oimus1976/agent-controller/issues/55) (umbrella), [#174](https://github.com/oimus1976/agent-controller/issues/174), [#176](https://github.com/oimus1976/agent-controller/issues/176), [#177](https://github.com/oimus1976/agent-controller/issues/177), [#182](https://github.com/oimus1976/agent-controller/issues/182).
 - Providers: [#159](https://github.com/oimus1976/agent-controller/issues/159), [#170](https://github.com/oimus1976/agent-controller/issues/170) Jules; [#183](https://github.com/oimus1976/agent-controller/issues/183) Antigravity review-only adapter.
 - Policy consumption: [#180](https://github.com/oimus1976/agent-controller/issues/180) ai-dev-starter branch-cleanup policy.
