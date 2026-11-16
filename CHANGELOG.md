@@ -15,6 +15,16 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-11-16 — Phase 6 ACL lock is proven by read-back (Issue #327, Draft / unmerged)
+
+- #216 の Phase 6 実行（pilot `ed95e72a61b9f31b`、昇格コンソール）で、`icacls <generation> /remove:g <target> /T /C` が 181 件でアクセス拒否となったが、icacls は exit 0 を返し、候補はそのまま進んだ（fail-open）。直前の `/grant:r … (OI)(CI) /T` がファイルを空の保護 DACL にし、所有者が `ac-runner` のファイル（Phase 5 の runner ログ、`run-helper.cmd` など）に対して昇格 broker が WRITE_DAC を失ったため。Phase 4（#265）と同じ原因。ホストの icacls 出力は日本語なので、出力の件数行で判定する方法は採らない。
+- ACL の固定方法を Phase 4 と同じにした：generation root だけを保護して SYSTEM / Administrators に継承付きのフル制御を与え、配下は `icacls <generation>\* /reset /T /C` で root からの継承だけに戻す。runner 停止の前と後（削除・登録解除・generation 退避の前）の 2 回行う。
+- icacls の exit code を信用せず、generation 配下の全要素を `Get-Acl` で読み戻す。root は保護され SYSTEM / Administrators の明示 `OI`+`CI` フル制御だけ、配下は保護されず両者の継承エントリだけであること。列挙・読取できない要素、対象 ID を含むそれ以外の主体、拒否エントリがあれば、runner 停止・登録解除・generation 退避の前に止まる。
+- 実 Windows 回帰（CI の昇格環境、使い捨ての対象アカウント）を追加：#216 と同じ形の対象所有ツリーは通り対象 ACE が残らないこと、昇格 broker が再設定も読取もできない要素があると止まること。
+- 独立レビュー MAJOR-1 への対応：既存のリンクをたどらない reparse point 走査を ACL 固定ブロックの先頭に移し、runner 停止の前と後の 2 回とも、最初の昇格 `icacls` より前に generation 全体を走査する（`icacls /T` は junction をたどるため）。回帰として、generation 内に外部の兄弟ディレクトリへ向く junction を置くと停止し、外部 sentinel の ACL・内容、generation root の ACL が変わらないことを実 Windows（昇格）で確認する。走査から `icacls` までの間に runner がリンクを作る競合（TOCTOU）は残存リスクであり、原子的に防ぐことは証明していない。
+- 運用メモ `docs/operations/private-ci-pilot-invocation.md` に、pilot スクリプトはリポジトリ root から `python -m scripts.<module>` で起動することを明記した（ファイルパス起動は `ModuleNotFoundError: agent_controller`）。
+- Phase 6/7 の全体設計、承認・消費の境界、#216 の記録（1 ジョブ成功・Phase 6 `NOT_PASS`・手動復旧・Phase 7 読み取り PASS）は変更しない。マージは実機の Phase 6 を承認しない。
+
 ## 2026-11-16 — Phase 6 handles auto-deregistered ephemeral runners (#229, Draft / unmerged)
 
 - #216 の private-CI pilot では、Phase 5 が成功した one-job / `--ephemeral` runner が GitHub 側で自動登録解除される。その通常経路で Phase 6 候補が runner 0 件を拒否していたため、当該 STOP を解除する。
