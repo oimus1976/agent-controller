@@ -80,7 +80,8 @@ def _finding_gate(inspection, head, requests):
         if source != head or thread.get("isResolved") is not False:
             continue
         # P0/P1 are the first slice's conservative BLOCKER/MAJOR candidates.
-        if not re.search(r"\[P[01]\]|\b(?:BLOCKER|MAJOR)\b", body):
+        severity = re.search(r"\[P([0-3])(?: Badge)?\]|\b(BLOCKER|MAJOR|MINOR)\b", body)
+        if not severity or not (severity.group(1) in {"0", "1"} or severity.group(2) in {"BLOCKER", "MAJOR"}):
             return "FINDING_SEVERITY_REQUIRES_HUMAN"
         current.add(fingerprint)
     if not current:

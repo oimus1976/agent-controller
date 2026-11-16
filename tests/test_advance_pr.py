@@ -89,6 +89,16 @@ class AdvancePrTests(unittest.TestCase):
         self.assertEqual(result["head_sha"], HEAD)
         self.assertEqual(result["pr_url"], "https://github.com/oimus1976/agent-controller/pull/215")
 
+    def test_native_codex_p1_badge_can_request_bounded_remediation(self):
+        evidence = inspection("BLOCKING")
+        evidence["review_threads_graphql"][0]["comments"]["nodes"][0]["body"] = (
+            '**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)'
+            '</sub></sub> Correct this bounded defect**')
+        with patch("agent_controller.advance_pr.plan_codex_remediation_request", return_value={
+                "decision": "EXECUTABLE", "source_head_sha": HEAD}):
+            result = self.run_advance(evidence)
+        self.assertEqual(result["state"], "REMEDIATE_SCOPED")
+
     def test_pending_ci_does_not_request_review(self):
         with patch("agent_controller.advance_pr.plan_codex_review_request") as planner:
             result = self.run_advance(inspection(ci="PENDING"))
