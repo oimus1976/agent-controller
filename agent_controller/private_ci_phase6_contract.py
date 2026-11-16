@@ -41,6 +41,77 @@ PHASE5_RESULT_PRODUCER_OPERATION_ID = "issue225-phase5-exactly-one-job"
 PHASE5_RESULT_PRODUCER_STEP_ID = "run-exactly-one-job"
 PHASE6_PRIVATE_CI_ROOT = r"C:\ProgramData\agent-controller\private-ci"
 GITHUB_API_VERSION = "2026-03-10"
+PHASE6_ACL_BLOCK_BEGIN = "# BEGIN phase6-acl-lock"
+PHASE6_ACL_BLOCK_END = "# END phase6-acl-lock"
+
+
+def _phase6_acl_lock_lines(stage: str) -> list[str]:
+    """Lock the generation tree to SYSTEM/Administrators and prove it.
+
+    #327: on #216 a recursive ``/grant:r ... (OI)(CI) /T`` left files with an
+    empty protected DACL, so the following ``/remove:g ... /T /C`` was denied
+    on 181 target-owned files while icacls still exited 0. Protect the root
+    with inheritable grants only, reset every descendant to inherit from it,
+    and then read back every item instead of trusting the exit code.
+    """
+    return [
+        PHASE6_ACL_BLOCK_BEGIN + " stage=" + stage,
+        "icacls.exe $BridgeGenerationRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' /C",
+        "$BridgeAclRootGrantExitCode = $LASTEXITCODE",
+        "if ($BridgeAclRootGrantExitCode -ne 0) { throw 'Phase 6 generation-root ACL lock failed' }",
+        "icacls.exe $BridgeGenerationRoot /remove:g $BridgeQualifiedTargetIdentity /C",
+        "$BridgeAclRootRemoveExitCode = $LASTEXITCODE",
+        "if ($BridgeAclRootRemoveExitCode -ne 0) { throw 'Phase 6 generation-root target ACL removal failed' }",
+        "icacls.exe ($BridgeGenerationRoot + '\\*') /reset /T /C /Q",
+        "$BridgeAclResetExitCode = $LASTEXITCODE",
+        "if ($BridgeAclResetExitCode -ne 0) { throw 'Phase 6 generation-tree ACL reset failed' }",
+        # icacls /T /C reports exit 0 after per-item failures. Any item that
+        # cannot be listed or read, or that holds anything but the two
+        # inherited full-control entries, stops Phase 6 here.
+        "$BridgeAclSidAlias = @{ 'SY' = 'S-1-5-18'; 'BA' = 'S-1-5-32-544' }",
+        "$BridgeAclExpected = @{ 'S-1-5-18' = 'FA'; 'S-1-5-32-544' = 'FA' }",
+        "$BridgeAclItems = @(Get-Item -LiteralPath $BridgeGenerationRoot -Force -ErrorAction Stop) + @(Get-ChildItem -LiteralPath $BridgeGenerationRoot -Recurse -Force -ErrorAction Stop)",
+        "$BridgeAclIsRoot = $true",
+        "foreach ($BridgeAclItem in $BridgeAclItems) {",
+        "    if (($BridgeAclItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw ('Phase 6 ACL read-back reparse point blocked: ' + $BridgeAclItem.FullName) }",
+        "    $BridgeAclSddl = [string](Get-Acl -LiteralPath $BridgeAclItem.FullName -ErrorAction Stop).Sddl",
+        "    $BridgeAclDacl = @($BridgeAclSddl -split 'D:', 2)",
+        "    if ($BridgeAclDacl.Count -ne 2) { throw ('Phase 6 ACL has no DACL: ' + $BridgeAclItem.FullName) }",
+        "    $BridgeAclItemIsRoot = $BridgeAclIsRoot",
+        "    $BridgeAclIsRoot = $false",
+        "    $BridgeAclParts = @($BridgeAclDacl[1] -split '\\(')",
+        "    $BridgeAclProtected = $BridgeAclParts[0] -clike '*P*'",
+        "    if ($BridgeAclItemIsRoot -and -not $BridgeAclProtected) { throw 'Phase 6 generation-root ACL inheritance is not protected' }",
+        "    if (-not $BridgeAclItemIsRoot -and $BridgeAclProtected) { throw ('Phase 6 ACL descendant is protected: ' + $BridgeAclItem.FullName + ' sddl=' + $BridgeAclSddl) }",
+        "    $BridgeAclSeen = @{}",
+        "    foreach ($BridgeAclPart in @($BridgeAclParts | Select-Object -Skip 1)) {",
+        "        $BridgeAclFields = @(($BridgeAclPart -replace '\\).*$', '') -split ';')",
+        "        if ($BridgeAclFields.Count -ne 6) { throw ('Phase 6 ACL entry malformed: ' + $BridgeAclItem.FullName + ' sddl=' + $BridgeAclSddl) }",
+        "        if ($BridgeAclFields[0] -cne 'A') { throw ('Phase 6 ACL non-allow entry: ' + $BridgeAclItem.FullName + ' sddl=' + $BridgeAclSddl) }",
+        "        $BridgeAclFlags = @($BridgeAclFields[1] -split '(..)' | Where-Object { $_ -ne '' })",
+        "        if ($BridgeAclItemIsRoot) { $BridgeAclFlagsOk = ($BridgeAclFlags.Count -eq 2 -and $BridgeAclFlags -ccontains 'OI' -and $BridgeAclFlags -ccontains 'CI') }",
+        "        elseif ($BridgeAclItem.PSIsContainer) { $BridgeAclFlagsOk = ($BridgeAclFlags.Count -eq 3 -and $BridgeAclFlags -ccontains 'OI' -and $BridgeAclFlags -ccontains 'CI' -and $BridgeAclFlags -ccontains 'ID') }",
+        "        else { $BridgeAclFlagsOk = ($BridgeAclFlags.Count -eq 1 -and $BridgeAclFlags -ccontains 'ID') }",
+        "        if (-not $BridgeAclFlagsOk) { throw ('Phase 6 ACL entry inheritance mismatch: ' + $BridgeAclItem.FullName + ' sddl=' + $BridgeAclSddl) }",
+        "        $BridgeAclSid = $BridgeAclFields[5]",
+        "        $BridgeAclMappedSid = $BridgeAclSidAlias[$BridgeAclSid]",
+        "        if ($null -ne $BridgeAclMappedSid) { $BridgeAclSid = $BridgeAclMappedSid }",
+        "        $BridgeAclWanted = $BridgeAclExpected[$BridgeAclSid]",
+        "        if ($null -eq $BridgeAclWanted) { throw ('Phase 6 ACL unexpected principal: ' + $BridgeAclItem.FullName + ' sddl=' + $BridgeAclSddl) }",
+        "        $BridgeAclRights = $BridgeAclFields[2]",
+        "        if ($BridgeAclRights -ieq '0x1f01ff') { $BridgeAclRights = 'FA' }",
+        "        if ($BridgeAclRights -ine $BridgeAclWanted) { throw ('Phase 6 ACL rights mismatch: ' + $BridgeAclItem.FullName + ' sddl=' + $BridgeAclSddl) }",
+        "        $BridgeAclSeen[$BridgeAclSid] = $true",
+        "    }",
+        "    foreach ($BridgeAclExpectedSid in @($BridgeAclExpected.Keys)) {",
+        "        if ($true -ne $BridgeAclSeen[$BridgeAclExpectedSid]) { throw ('Phase 6 ACL missing principal: ' + $BridgeAclItem.FullName + ' sddl=' + $BridgeAclSddl) }",
+        "    }",
+        "}",
+        "Write-Host ('progress phase=phase6 step=acl-verified stage="
+        + stage
+        + " items=' + $BridgeAclItems.Count)",
+        PHASE6_ACL_BLOCK_END + " stage=" + stage,
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -454,18 +525,7 @@ def render_phase6_cleanup_candidate(plan: Phase6CleanupPlan) -> str:
             "if ($BridgeGenerationTasks.Count -ne 0) { throw 'Phase 6 unexpected generation-bound scheduled task' }",
             "",
             "Write-Host 'progress phase=phase6 step=acl-lock'",
-            "icacls.exe $BridgeGenerationRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' /T /C",
-            "$BridgeGenerationAclGrantExitCode = $LASTEXITCODE",
-            "if ($BridgeGenerationAclGrantExitCode -ne 0) { throw 'Phase 6 generation-root ACL lock failed' }",
-            "icacls.exe $BridgeGenerationRoot /remove:g $BridgeQualifiedTargetIdentity /T /C",
-            "$BridgeGenerationAclRemoveExitCode = $LASTEXITCODE",
-            "if ($BridgeGenerationAclRemoveExitCode -ne 0) { throw 'Phase 6 generation target ACL removal failed' }",
-            "icacls.exe $BridgeRunnerRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)'",
-            "$BridgeAclRootGrantExitCode = $LASTEXITCODE",
-            "if ($BridgeAclRootGrantExitCode -ne 0) { throw 'Phase 6 runner-root ACL lock failed' }",
-            "icacls.exe $BridgeRunnerRoot /remove:g $BridgeQualifiedTargetIdentity",
-            "$BridgeAclRootRemoveExitCode = $LASTEXITCODE",
-            "if ($BridgeAclRootRemoveExitCode -ne 0) { throw 'Phase 6 target ACL removal failed' }",
+            *_phase6_acl_lock_lines("pre-stop"),
             "",
             "if ($BridgeRunnerProcessPresent) {",
             "    Write-Host 'progress phase=phase6 step=stop-runner'",
@@ -502,12 +562,8 @@ def render_phase6_cleanup_candidate(plan: Phase6CleanupPlan) -> str:
             "        }",
             "    }",
             "}",
-            "icacls.exe $BridgeRunnerRoot /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' /T /C",
-            "$BridgeAclTreeGrantExitCode = $LASTEXITCODE",
-            "if ($BridgeAclTreeGrantExitCode -ne 0) { throw 'Phase 6 recursive ACL lock failed' }",
-            "icacls.exe $BridgeRunnerRoot /remove:g $BridgeQualifiedTargetIdentity /T /C",
-            "$BridgeAclTreeRemoveExitCode = $LASTEXITCODE",
-            "if ($BridgeAclTreeRemoveExitCode -ne 0) { throw 'Phase 6 recursive target ACL removal failed' }",
+            "Write-Host 'progress phase=phase6 step=acl-relock'",
+            *_phase6_acl_lock_lines("post-stop"),
             "",
             "if ($BridgeRemoteRunnerPresent) {",
             "    Write-Host 'progress phase=phase6 step=deregister-runner'",

@@ -252,7 +252,7 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
             "Get-CimInstance Win32_Service",
             "Get-ScheduledTask",
             "Stop-Process -Id $BridgeRunnerProcessId",
-            "icacls.exe $BridgeRunnerRoot /inheritance:r /grant:r",
+            "icacls.exe $BridgeGenerationRoot /inheritance:r /grant:r",
             "Invoke-PrivateCiGenerationRetirement",
             "PHASE6_GENERATION_RETIREMENT_IDENTITY_BOUND",
             "Phase 6 target PR binding drift",
@@ -280,6 +280,50 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
         self.assertNotIn("Stop-Process -Name", candidate)
         self.assertNotIn("Remove-Item -Path", candidate)
         self.assertNotIn("-ErrorAction SilentlyContinue", candidate)
+
+    def test_acl_lock_reads_back_every_item_before_destructive_steps(self):
+        # #327: on #216 icacls /remove:g ... /T /C was denied on 181 items and
+        # still exited 0. The candidate must not use the recursive grant that
+        # empties file DACLs, and must prove the ACL state by read-back before
+        # stopping the runner, deregistering it or retiring the generation.
+        m = self.module()
+        candidate = m.render_phase6_cleanup_candidate(self.plan())
+        lines = candidate.splitlines()
+
+        self.assertNotIn("/grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' /T", candidate)
+        self.assertNotIn("/remove:g $BridgeQualifiedTargetIdentity /T", candidate)
+        self.assertEqual(candidate.count("icacls.exe ($BridgeGenerationRoot + '\\*') /reset /T /C /Q"), 2)
+
+        begins = [i for i, line in enumerate(lines) if line.startswith(m.PHASE6_ACL_BLOCK_BEGIN)]
+        ends = [i for i, line in enumerate(lines) if line.startswith(m.PHASE6_ACL_BLOCK_END)]
+        self.assertEqual(len(begins), 2)
+        self.assertEqual(len(ends), 2)
+        blocks = [lines[b : e + 1] for b, e in zip(begins, ends)]
+        for block in blocks:
+            text = "\n".join(block)
+            for fragment in (
+                "Get-ChildItem -LiteralPath $BridgeGenerationRoot -Recurse -Force -ErrorAction Stop",
+                "Get-Acl -LiteralPath $BridgeAclItem.FullName -ErrorAction Stop",
+                "Phase 6 ACL unexpected principal",
+                "Phase 6 ACL descendant is protected",
+                "Phase 6 generation-root ACL inheritance is not protected",
+                "Phase 6 ACL missing principal",
+            ):
+                with self.subTest(fragment=fragment):
+                    self.assertIn(fragment, text)
+        # Both blocks are rendered from one helper.
+        self.assertEqual(blocks[0][1:-2], blocks[1][1:-2])
+
+        first_end = ends[0]
+        second_end = ends[1]
+        stop = candidate.index("Stop-Process -Id $BridgeRunnerProcessId")
+        delete = candidate.index("gh.exe api --method DELETE")
+        retire = candidate.index("\nInvoke-PrivateCiGenerationRetirement\n")
+        offset = lambda index: len("\n".join(lines[: index + 1]))
+        self.assertLess(offset(first_end), stop)
+        self.assertLess(stop, offset(begins[1]))
+        self.assertLess(offset(second_end), delete)
+        self.assertLess(offset(second_end), retire)
 
 
 if __name__ == "__main__":
