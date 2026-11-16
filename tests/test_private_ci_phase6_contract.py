@@ -202,7 +202,7 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
             candidate,
         )
         self.assertNotIn(
-            "Phase 6 ephemeral runner already absent after Phase 5 PASS",
+            "Phase 6 runner absent without exact prior cleanup evidence",
             candidate,
         )
         self.assertIn(
