@@ -222,6 +222,21 @@ class AdvancePrTests(unittest.TestCase):
                 self.assertEqual(result["reason"], "FINDING_SEVERITY_REQUIRES_HUMAN")
                 executor.assert_not_called()
 
+    def test_dismissed_review_thread_does_not_block_active_p1_remediation(self):
+        evidence = inspection("BLOCKING")
+        dismissed = {"id": 102, "user": {"login": "chatgpt-codex-connector[bot]"},
+                     "commit_id": HEAD, "state": "DISMISSED", "body": ""}
+        evidence["reviews"].append(dismissed)
+        evidence["review_threads_graphql"].append({
+            "id": "thread-2", "isResolved": False, "comments": {"nodes": [{
+                "author": {"login": "chatgpt-codex-connector[bot]"},
+                "body": "[P3] Dismissed nit", "originalCommit": {"oid": HEAD},
+                "pullRequestReview": {"databaseId": 102}}]}})
+        with patch("agent_controller.advance_pr.plan_codex_remediation_request", return_value={
+                "decision": "EXECUTABLE", "source_head_sha": HEAD}):
+            result = self.run_advance(evidence)
+        self.assertEqual(result["state"], "REMEDIATE_SCOPED")
+
     def test_reappearing_finding_stops_instead_of_spending_another_round(self):
         old_request = {"id": 1, "user": {"login": "oimus1976"},
                        "body": "@codex address that feedback\n" +

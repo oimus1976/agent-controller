@@ -67,10 +67,15 @@ def _capacity(config, target):
 
 def _finding_gate(inspection, head, requests):
     current, previous = set(), set()
+    # Match the canonical inspector: threads of dismissed reviews are not findings.
+    dismissed = {review.get("id") for review in inspection.get("reviews") or []
+                 if str(review.get("state", "")).upper() == "DISMISSED"}
     for thread in inspection.get("review_threads_graphql") or []:
         root = thread["comments"]["nodes"][0]
         if (root.get("author") or {}).get("login") not in {
                 "chatgpt-codex-connector[bot]", "chatgpt-codex-connector"}:
+            continue
+        if (root.get("pullRequestReview") or {}).get("databaseId") in dismissed:
             continue
         source = (root.get("originalCommit") or {}).get("oid")
         body = root.get("body", "")
