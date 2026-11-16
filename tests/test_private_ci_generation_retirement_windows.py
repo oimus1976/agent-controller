@@ -1,5 +1,7 @@
+import ctypes
 import importlib.util
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -46,6 +48,66 @@ class PrivateCiGenerationRetirementWindowsTests(unittest.TestCase):
                 list(parent.glob(f".retiring-{generation}-*")),
                 [],
             )
+
+    def test_handle_rename_produces_exactly_the_intended_name(self):
+        # #325: KernelBase reads FileRenameInfo.FileName as a NUL-terminated
+        # path. Poison the bytes just past the size the helper requests so a
+        # missing terminator deterministically shows up as a corrupted name.
+        real_create_string_buffer = ctypes.create_string_buffer
+
+        def poisoned_create_string_buffer(init, size=None):
+            if not isinstance(init, int) or size is not None:
+                return real_create_string_buffer(init, size)
+            buffer = real_create_string_buffer(init + 16)
+            ctypes.memset(ctypes.addressof(buffer) + init, 0x41, 8)
+            return buffer
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            parent = Path(temporary_directory)
+            source = parent / "ac-pilot-0011223344556677"
+            source.mkdir()
+            intended = parent / ".retiring-ac-pilot-0011223344556677-0123abcd"
+
+            kernel32, handle = self.helper._open_directory_handle(source)
+            try:
+                with patch.object(
+                    self.helper.ctypes,
+                    "create_string_buffer",
+                    poisoned_create_string_buffer,
+                ):
+                    self.helper._rename_by_handle(kernel32, handle, intended)
+            finally:
+                kernel32.CloseHandle(handle)
+
+            self.assertEqual(os.listdir(parent), [intended.name])
+            self.assertTrue(intended.is_dir())
+
+    def test_generation_retirement_deletes_read_only_descendants(self):
+        # #325: runner _work checkouts contain read-only git objects.
+        generation = "ac-pilot-00aa11bb22cc33dd"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            parent = Path(temporary_directory) / "private-ci"
+            generation_root = parent / generation
+            objects = generation_root / "runner" / "_work" / "repo" / ".git" / "objects" / "ab"
+            objects.mkdir(parents=True)
+            read_only_file = objects / "cdef0123456789"
+            read_only_file.write_bytes(b"blob")
+            os.chmod(read_only_file, stat.S_IREAD)
+            read_only_dir = generation_root / "runner" / "_work" / "read-only-dir"
+            read_only_dir.mkdir()
+            (read_only_dir / "inner.txt").write_text("x", encoding="utf-8")
+            os.chmod(read_only_dir / "inner.txt", stat.S_IREAD)
+            os.chmod(read_only_dir, stat.S_IREAD)
+
+            try:
+                with patch.object(self.helper, "PRIVATE_CI_ROOT", parent):
+                    self.helper.retire_generation(generation_root, generation)
+            finally:
+                for path in parent.rglob("*"):
+                    os.chmod(path, stat.S_IWRITE)
+
+            self.assertFalse(generation_root.exists())
+            self.assertEqual(list(parent.iterdir()), [])
 
     def test_generation_retirement_blocks_junction_without_touching_target(self):
         generation = "ac-pilot-fedcba9876543210"
