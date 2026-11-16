@@ -11,6 +11,7 @@ from .provider_capacity import (
 from .remediation_request import (
     _validate_safe_pr_snapshot, plan_codex_remediation_request,
     execute_codex_remediation_request, remediation_findings_sha256,
+    standalone_codex_blockers,
 )
 from .review_request import _safe_scope_status, plan_codex_review_request, execute_codex_review_request
 from .review_evidence import canonical_review_from_mapping
@@ -89,6 +90,10 @@ def _finding_gate(inspection, head, requests):
         if not severity or not (severity.group(1) in {"0", "1"} or severity.group(2) in {"BLOCKER", "MAJOR"}):
             return "FINDING_SEVERITY_REQUIRES_HUMAN"
         current.add(fingerprint)
+    # A standalone CHANGES_REQUESTED review blocks canonically but has no
+    # classifiable thread, so it can never be scope-confirmed here.
+    if standalone_codex_blockers(inspection, head):
+        return "FINDING_SEVERITY_REQUIRES_HUMAN"
     if not current:
         return "FINDING_CLASSIFICATION_UNAVAILABLE"
     if current & previous:

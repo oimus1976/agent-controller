@@ -24,10 +24,28 @@ from .review_evidence import canonical_review_from_mapping
 ACTION = "REQUEST_CODEX_REMEDIATION"
 
 
+_CODEX_LOGINS = {"chatgpt-codex-connector[bot]", "chatgpt-codex-connector"}
+
+
+def standalone_codex_blockers(inspection, head):
+    """Current-head Codex CHANGES_REQUESTED reviews that have no inline thread."""
+    threaded = set()
+    for thread in inspection.get("review_threads_graphql") or []:
+        root = thread["comments"]["nodes"][0]
+        if (root.get("originalCommit") or {}).get("oid") == head:
+            threaded.add((root.get("pullRequestReview") or {}).get("databaseId"))
+    return [review for review in inspection.get("reviews") or []
+            if (review.get("user") or {}).get("login") in _CODEX_LOGINS
+            and review.get("commit_id") == head
+            and str(review.get("state", "")).upper() in {"CHANGES_REQUESTED", "REQUEST_CHANGES"}
+            and review.get("id") not in threaded]
+
+
 def remediation_findings_sha256(inspection):
     """Bind a scope confirmation to current-head Codex finding contents."""
     head = inspection["head_sha"]
-    findings = []
+    findings = [["standalone-review", review.get("id"), review.get("body")]
+                for review in standalone_codex_blockers(inspection, head)]
     for thread in inspection["review_threads_graphql"]:
         root = thread["comments"]["nodes"][0]
         if (root.get("originalCommit") or {}).get("oid") != head:

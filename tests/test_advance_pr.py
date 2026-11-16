@@ -237,6 +237,19 @@ class AdvancePrTests(unittest.TestCase):
             result = self.run_advance(evidence)
         self.assertEqual(result["state"], "REMEDIATE_SCOPED")
 
+    def test_standalone_changes_requested_review_needs_human_and_changes_digest(self):
+        evidence = inspection("BLOCKING")
+        before = remediation_findings_sha256(evidence)
+        evidence["reviews"].append({"id": 103, "user": {"login": "chatgpt-codex-connector[bot]"},
+                                    "commit_id": HEAD, "state": "CHANGES_REQUESTED",
+                                    "body": "Out-of-scope request"})
+        self.assertNotEqual(remediation_findings_sha256(evidence), before)
+        with patch("agent_controller.advance_pr.execute_codex_remediation_request") as executor:
+            result = self.run_advance(evidence, apply=True)
+        self.assertEqual(result["state"], "STOP_FINDINGS")
+        self.assertEqual(result["reason"], "FINDING_SEVERITY_REQUIRES_HUMAN")
+        executor.assert_not_called()
+
     def test_reappearing_finding_stops_instead_of_spending_another_round(self):
         old_request = {"id": 1, "user": {"login": "oimus1976"},
                        "body": "@codex address that feedback\n" +
