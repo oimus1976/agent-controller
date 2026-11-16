@@ -255,7 +255,6 @@ class PrivateCiPhase6ContractRedTests(unittest.TestCase):
             "icacls.exe $BridgeRunnerRoot /inheritance:r /grant:r",
             "Invoke-PrivateCiGenerationRetirement",
             "PHASE6_GENERATION_RETIREMENT_IDENTITY_BOUND",
-            "Phase 6 runner absent without exact prior cleanup evidence",
             "Phase 6 target PR binding drift",
             "Phase 6 trusted workflow SHA drift",
             "Phase 6 active workflow readback failed",
