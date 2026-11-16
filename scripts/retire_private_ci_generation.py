@@ -4,6 +4,7 @@ import argparse
 import ctypes
 import os
 import secrets
+import stat
 import sys
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from pathlib import Path
 PRIVATE_CI_ROOT = Path(r"C:\ProgramData\agent-controller\private-ci")
 PASS_MARKER = "PHASE6_GENERATION_RETIREMENT_IDENTITY_BOUND"
 
+_FILE_ATTRIBUTE_READONLY = 0x00000001
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _DELETE = 0x00010000
 _FILE_READ_ATTRIBUTES = 0x00000080
@@ -117,8 +119,13 @@ def _rename_by_handle(kernel32, handle, destination: Path) -> None:
     root_offset = pointer_size
     length_offset = root_offset + pointer_size
     name_offset = length_offset + ctypes.sizeof(ctypes.c_uint32)
-    size = name_offset + len(encoded)
-    buffer = ctypes.create_string_buffer(size)
+    # KernelBase reads FileName as a NUL-terminated DOS path, so the buffer
+    # must carry an explicit UTF-16 NUL and never be smaller than the struct
+    # (including tail padding); otherwise bytes past the end leak into the
+    # new name (#325).
+    struct_size = (name_offset + 2 + pointer_size - 1) // pointer_size * pointer_size
+    size = max(struct_size, name_offset + len(encoded) + 2)
+    buffer = ctypes.create_string_buffer(size)  # zero-filled, NUL included
     buffer[0] = 0
     ctypes.c_void_p.from_buffer(buffer, root_offset).value = None
     ctypes.c_uint32.from_buffer(buffer, length_offset).value = len(encoded)
@@ -175,6 +182,9 @@ def _delete_children(root: Path) -> None:
                 f"generation descendant reparse point blocked: {entry.path}"
             )
         path = Path(entry.path)
+        if attributes & _FILE_ATTRIBUTE_READONLY:
+            # unlink/rmdir fail on read-only entries such as git objects (#325).
+            os.chmod(path, stat.S_IWRITE)
         if entry.is_dir(follow_symlinks=False):
             _delete_children(path)
             os.rmdir(path)
