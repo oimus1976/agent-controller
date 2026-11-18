@@ -15,6 +15,11 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-11-18 — Windows AI Usage refresh preview (Issue #333, unmerged)
+
+- Prepare changes from actual quota observations, preserve unavailable provider data with its original observation time, and run dashboard validation before any publication.
+- Stage an opt-in data-only publication and public-key SFTP path for review. The production scheduler and separate approval boundary remain pending.
+
 ## 2026-11-16 — Phase 6 ACL lock is proven by read-back (Issue #327, Draft / unmerged)
 
 - #216 の Phase 6 実行（pilot `ed95e72a61b9f31b`、昇格コンソール）で、`icacls <generation> /remove:g <target> /T /C` が 181 件でアクセス拒否となったが、icacls は exit 0 を返し、候補はそのまま進んだ（fail-open）。直前の `/grant:r … (OI)(CI) /T` がファイルを空の保護 DACL にし、所有者が `ac-runner` のファイル（Phase 5 の runner ログ、`run-helper.cmd` など）に対して昇格 broker が WRITE_DAC を失ったため。Phase 4（#265）と同じ原因。ホストの icacls 出力は日本語なので、出力の件数行で判定する方法は採らない。

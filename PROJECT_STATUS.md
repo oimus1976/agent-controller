@@ -22,6 +22,8 @@ Product compass: [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md) restates the end-to-
 
 ## Active workstreams
 
+AI Usage refresh automation is tracked in [#333](https://github.com/oimus1976/agent-controller/issues/333) and [life-dashboard #235](https://github.com/oimus1976/life-dashboard/issues/235). This workstream prepares and verifies a local preview. The existing manual production boundary remains in force until a scoped automation decision is recorded.
+
 This table lists pointers only. Status comes from each authority Issue's latest checkpoint and from GitHub.
 
 | Workstream | Authority Issue | Related Issues / PRs | Checkpoints |
