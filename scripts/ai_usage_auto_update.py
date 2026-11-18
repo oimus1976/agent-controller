@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -20,6 +21,7 @@ REPO = "https://github.com/oimus1976/life-dashboard.git"
 PROVIDERS = ("claude-code", "codex", "antigravity")
 ASSET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 BASIC_URL = "https://oimus.net/dashboard/"
+LOG = logging.getLogger(__name__)
 
 
 def run(argv, cwd, *, data=None, ok=(0,), env=None):
@@ -180,7 +182,8 @@ def sftp_commands(config, directory, commands):
     ssh_dir = Path(config["openssh_dir"])
     return run([
         str(ssh_dir / "sftp.exe"), "-oBatchMode=yes", "-oPreferredAuthentications=publickey",
-        "-oIdentitiesOnly=yes", "-oStrictHostKeyChecking=yes", "-oHostKeyAlgorithms=ssh-ed25519",
+        "-oIdentitiesOnly=yes", "-oIdentityAgent=none", "-oStrictHostKeyChecking=yes",
+        "-oHostKeyAlgorithms=ssh-ed25519",
         "-oConnectTimeout=12", "-i", config["sftp_key"], "-b", "-", config["sftp_target"],
     ], directory, data="\n".join([f'cd "{sftp_remote_path(config)}"', "pwd", *commands, "bye"]) + "\n").stdout
 
@@ -283,7 +286,7 @@ def perform(config, *, apply, candidate_file=None):
                 captured = {p: datetime.now(timezone.utc) for p in PROVIDERS}
             candidate = merge_observations(old, fresh, captured)
         if candidate is None:
-            print("SKIP: no quota or reset changes")
+            LOG.info("SKIP: no quota or reset changes")
             return
         if run([*pnpm, "--version"], directory).stdout.strip() != "10.4.1":
             raise RuntimeError("The dashboard build requires pnpm 10.4.1")
@@ -292,7 +295,7 @@ def perform(config, *, apply, candidate_file=None):
         try:
             for command in ("check", "test:ai-usage", "build:static"):
                 run([*pnpm, "run", command], directory)
-                print(f"PASS: pnpm {command}", flush=True)
+                LOG.info("PASS: pnpm %s", command)
             dist = directory / "dist/public"
             relative = files_for_upload(dist)
             if target.read_bytes() != candidate_bytes:
@@ -300,7 +303,7 @@ def perform(config, *, apply, candidate_file=None):
             if git(directory, "status", "--porcelain") != "M " + OBS:
                 raise RuntimeError("Unexpected tracked or untracked checkout changes")
             if not apply:
-                print("PASS: preview complete; dashboard checkout restored, build retained")
+                LOG.info("PASS: preview complete; dashboard checkout restored, build retained")
                 return
             http_preflight()
             root = verify_server(config, dist, relative)
@@ -319,10 +322,10 @@ def perform(config, *, apply, candidate_file=None):
             if git(directory, "ls-remote", "origin", "refs/heads/main") != expected:
                 raise RuntimeError("Remote main does not match the tested commit")
             pending.write_text(json.dumps({"commit": commit, "stage": "production_upload"}) + "\n", encoding="utf-8")
-            print(f"PASS: data-only main update verified at {commit}", flush=True)
+            LOG.info("PASS: data-only main update verified at %s", commit)
             publish_files(config, dist, relative, root)
             pending.unlink()
-            print(f"PASS: published observations and verified deployment at {commit}", flush=True)
+            LOG.info("PASS: published observations and verified deployment at %s", commit)
         finally:
             if not pending.exists() and git(directory, "rev-parse", "HEAD") == head:
                 # Restore only our own preview bytes; avoid overwriting a concurrent edit.
@@ -337,11 +340,16 @@ def main():
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--apply", action="store_true", help="publish to the approved live targets")
     parser.add_argument("--fixture", type=Path, help="use synthetic observations for a local preview")
+    parser.add_argument("--log-file", type=Path)
     args = parser.parse_args()
+    handlers = [logging.StreamHandler(sys.stdout)]
     try:
+        if args.log_file is not None:
+            handlers.append(logging.FileHandler(args.log_file, encoding="utf-8"))
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", handlers=handlers)
         perform(json.loads(args.config.read_bytes()), apply=args.apply, candidate_file=args.fixture)
     except (KeyError, ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-        print(f"STOP: {exc}", file=sys.stderr)
+        LOG.error("STOP: %s", exc)
         return 1
     return 0
 
