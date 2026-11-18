@@ -141,6 +141,23 @@ def _shutdown_process(process: subprocess.Popen) -> None:
             process.wait(timeout=5)
 
 
+def _app_server_argv(command: str) -> list[str]:
+    """Build the argv used to spawn ``codex app-server`` for COMMAND.
+
+    Windows cannot CreateProcess a script directly: a ``.py`` command is
+    run through the current interpreter, and a ``.cmd`` / ``.bat`` shim
+    (how npm installs the codex CLI) is run through ``cmd /c``. Anything
+    else is spawned as a native executable.
+    """
+
+    lowered = command.lower()
+    if lowered.endswith(".py"):
+        return [sys.executable, command, "app-server"]
+    if sys.platform == "win32" and lowered.endswith((".cmd", ".bat")):
+        return ["cmd", "/c", command, "app-server"]
+    return [command, "app-server"]
+
+
 def read_codex_rate_limits_result(command: str, timeout: float) -> str:
     """Run ``codex app-server`` and return the rate-limits result as JSON.
 
@@ -154,7 +171,7 @@ def read_codex_rate_limits_result(command: str, timeout: float) -> str:
         raise ValueError("timeout must be positive")
     try:
         process = subprocess.Popen(
-            [command, "app-server"],
+            _app_server_argv(command),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
