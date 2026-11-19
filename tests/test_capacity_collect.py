@@ -5,8 +5,9 @@ from pathlib import Path
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 
-from agent_controller.capacity_collect import main
+from agent_controller.capacity_collect import _app_server_argv, main
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -208,6 +209,41 @@ class CapacityCollectTests(unittest.TestCase):
                 {record["provider"] for record in document["observations"]},
                 {"antigravity"},
             )
+
+    def test_windows_app_server_argv_resolves_extensionless_command_via_which(self):
+        with mock.patch("agent_controller.capacity_collect.sys.platform", "win32"):
+            with mock.patch(
+                "agent_controller.capacity_collect.shutil.which",
+                return_value=r"C:\Users\owner\AppData\Roaming\npm\codex.CMD",
+            ) as mock_which:
+                self.assertEqual(
+                    _app_server_argv("codex"),
+                    [
+                        "cmd",
+                        "/c",
+                        r"C:\Users\owner\AppData\Roaming\npm\codex.CMD",
+                        "app-server",
+                    ],
+                )
+                mock_which.assert_called_once_with("codex")
+
+            with mock.patch(
+                "agent_controller.capacity_collect.shutil.which",
+                return_value=r"C:\Program Files\OpenAI\Codex\codex.exe",
+            ):
+                self.assertEqual(
+                    _app_server_argv("codex"),
+                    [r"C:\Program Files\OpenAI\Codex\codex.exe", "app-server"],
+                )
+
+            with mock.patch(
+                "agent_controller.capacity_collect.shutil.which",
+                return_value=None,
+            ):
+                self.assertEqual(
+                    _app_server_argv(r"C:\custom\codex.cmd"),
+                    ["cmd", "/c", r"C:\custom\codex.cmd", "app-server"],
+                )
 
 
 if __name__ == "__main__":

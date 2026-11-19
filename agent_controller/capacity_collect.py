@@ -47,6 +47,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -161,16 +162,23 @@ def _app_server_argv(command: str) -> list[str]:
 
     Windows cannot CreateProcess a script directly: a ``.py`` command is
     run through the current interpreter, and a ``.cmd`` / ``.bat`` shim
-    (how npm installs the codex CLI) is run through ``cmd /c``. Anything
-    else is spawned as a native executable.
+    (how npm installs the codex CLI) is run through ``cmd /c``. On Windows,
+    resolve the command through :func:`shutil.which` first so an
+    extensionless ``PATH`` command such as the default ``codex`` still
+    reaches the ``.cmd`` / ``.bat`` branch. Anything else is spawned as a
+    native executable.
     """
 
-    lowered = command.lower()
-    if lowered.endswith(".py"):
+    if command.lower().endswith(".py"):
         return [sys.executable, command, "app-server"]
-    if sys.platform == "win32" and lowered.endswith((".cmd", ".bat")):
-        return ["cmd", "/c", command, "app-server"]
-    return [command, "app-server"]
+    resolved = (
+        (shutil.which(command) or command)
+        if sys.platform == "win32"
+        else command
+    )
+    if sys.platform == "win32" and resolved.lower().endswith((".cmd", ".bat")):
+        return ["cmd", "/c", resolved, "app-server"]
+    return [resolved, "app-server"]
 
 
 def read_codex_rate_limits_result(command: str, timeout: float) -> str:
