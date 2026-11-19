@@ -1,5 +1,6 @@
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -145,6 +146,68 @@ class CapacityCollectTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         document = json.loads(stdout)
         self.assertEqual(len(document["observations"]), 2)
+
+    def test_saved_statusline_preserves_file_capture_time_across_rereads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            saved = Path(tmp) / "claude-statusline.json"
+            saved.write_text(CLAUDE_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+            os.utime(saved, (1794994200, 1794994200))
+
+            first_exit, first_stdout, _ = run_main(
+                ["--claude-code-statusline", str(saved)]
+            )
+            second_exit, second_stdout, _ = run_main(
+                ["--claude-code-statusline", str(saved)]
+            )
+
+            self.assertEqual(first_exit, 0)
+            self.assertEqual(second_exit, 0)
+            for stdout in (first_stdout, second_stdout):
+                document = json.loads(stdout)
+                self.assertEqual(len(document["observations"]), 2)
+                for record in document["observations"]:
+                    self.assertEqual(record["observed_at"], "2026-11-18T09:30:00.000Z")
+                    self.assertEqual(
+                        record["source"]["last_verified_at"],
+                        "2026-11-18T09:30:00.000Z",
+                    )
+
+    def test_empty_pool_source_fails_and_preserves_existing_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_claude = Path(tmp) / "claude-empty.json"
+            empty_claude.write_text(
+                json.dumps({"version": "2.1.999-fixture", "rate_limits": {}}),
+                encoding="utf-8",
+            )
+            out = Path(tmp) / "ai-usage.json"
+            sentinel = '{"existing": "keep"}\n'
+            out.write_text(sentinel, encoding="utf-8")
+
+            exit_code, _, stderr = run_main(
+                ["--claude-code-statusline", str(empty_claude), "--out", str(out)]
+            )
+            self.assertEqual(exit_code, 1)
+            self.assertIn("claude-code: failed: no capacity pools observed", stderr)
+            self.assertEqual(out.read_text(encoding="utf-8"), sentinel)
+
+            exit_code, _, stderr = run_main(
+                [
+                    "--claude-code-statusline",
+                    str(empty_claude),
+                    "--antigravity-statusline",
+                    str(ANTIGRAVITY_FIXTURE),
+                    "--out",
+                    str(out),
+                ]
+            )
+            self.assertEqual(exit_code, 0)
+            self.assertIn("claude-code: failed: no capacity pools observed", stderr)
+            document = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(len(document["observations"]), 2)
+            self.assertEqual(
+                {record["provider"] for record in document["observations"]},
+                {"antigravity"},
+            )
 
 
 if __name__ == "__main__":

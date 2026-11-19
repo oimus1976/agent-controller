@@ -27,12 +27,16 @@ Sources (each optional; only the requested ones are collected):
 - ``--antigravity-statusline <file>``: an Antigravity CLI status-line JSON
   payload saved to a file, read the same way as the Claude Code file.
 
-Failure handling: a source that cannot be collected is reported on stderr
-and skipped; it never produces a fabricated record, and it never stops the
-other sources. The exit code is 0 when at least one source succeeded and 1
-when every requested source failed (or none was requested). The output
-file is written only when at least one source succeeded, so a failed run
-cannot overwrite a good document with an empty one.
+Saved status-line files preserve the file's modification time on disk as
+``observed_at`` so re-reading an unchanged snapshot does not refresh its
+verification timestamp.
+
+Failure handling: a source that cannot be collected or yields zero capacity
+pools is reported on stderr and skipped; it never produces a fabricated record,
+and it never stops the other sources. The exit code is 0 when at least one
+source succeeded and 1 when every requested source failed (or none was
+requested). The output file is written only when at least one source succeeded,
+so a failed or empty run cannot overwrite a good document with an empty one.
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import queue
 import subprocess
@@ -71,13 +76,23 @@ COLLECT_BINDING = {
 DEFAULT_CODEX_TIMEOUT_SECONDS = 30.0
 
 
+def _format_dashboard_timestamp(moment: datetime) -> str:
+    utc = moment.astimezone(timezone.utc)
+    return utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc.microsecond // 1000:03d}Z"
+
+
 def _now_dashboard_timestamp() -> str:
-    now = datetime.now(timezone.utc)
-    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+    return _format_dashboard_timestamp(datetime.now(timezone.utc))
 
 
-def _read_text_file(path: str) -> str:
-    return Path(path).read_text(encoding="utf-8")
+def _read_text_file_with_observed_at(path: str) -> tuple[str, str]:
+    with Path(path).open("r", encoding="utf-8") as handle:
+        stat_result = os.fstat(handle.fileno())
+        payload = handle.read()
+    observed_at = _format_dashboard_timestamp(
+        datetime.fromtimestamp(stat_result.st_mtime, tz=timezone.utc)
+    )
+    return payload, observed_at
 
 
 def _send_message(process: subprocess.Popen, message: dict) -> None:
@@ -222,10 +237,14 @@ def read_codex_rate_limits_result(command: str, timeout: float) -> str:
         _shutdown_process(process)
 
 
-def _collect_file_source(path: str, parser, observed_at: str) -> list[dict]:
-    payload = _read_text_file(path)
+def _collect_file_source(
+    path: str, parser, observed_at: Optional[str] = None
+) -> list[dict]:
+    payload, file_observed_at = _read_text_file_with_observed_at(path)
     pools: tuple[ProviderCapacityPoolObservation, ...] = parser(
-        payload, **COLLECT_BINDING, observed_at=observed_at
+        payload,
+        **COLLECT_BINDING,
+        observed_at=file_observed_at if observed_at is None else observed_at,
     )
     return pool_observations_to_dashboard_records(pools)
 
@@ -309,6 +328,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         nonlocal successes
         try:
             collected = collect()
+            if not collected:
+                raise ValueError("no capacity pools observed")
         except Exception as exc:  # per-source failure must not stop the run
             print(f"capacity_collect: {name}: failed: {exc}", file=sys.stderr)
             return
@@ -325,7 +346,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             lambda: _collect_file_source(
                 args.claude_code_statusline,
                 parse_claude_code_statusline_capacity,
-                observed_at,
             ),
         )
     else:
@@ -343,7 +363,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             lambda: _collect_file_source(
                 args.antigravity_statusline,
                 parse_antigravity_statusline_capacity,
-                observed_at,
             ),
         )
     else:
