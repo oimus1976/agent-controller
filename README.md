@@ -12,6 +12,8 @@ The repository is currently undergoing a public-readiness audit. See [`docs/PUBL
 
 ## Validation
 
+Draft PRを1操作ずつ進める入口は [`advance-pr` 操作手順](docs/operations/advance-pr.md) を参照してください。CI・独立レビュー・修正要求を既存機能で進め、Ready/mergeは人間の判断で止まります。
+
 The deterministic test suite uses Python 3.12. Install the pinned runtime/test dependencies first:
 
 ```text
