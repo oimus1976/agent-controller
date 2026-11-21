@@ -4,6 +4,7 @@ import sys
 from datetime import datetime, timezone
 
 from .attention_queue import AttentionCategory
+from .advance_pr import advance_pr_once
 from .codex_live import CodexSnapshotReadClient
 from .github_target_client import GitHubRestTargetReadClient
 from .inspector import inspect_pr
@@ -63,6 +64,7 @@ def main():
         "command",
         choices=[
             "inspect-pr",
+            "advance-pr",
             "watch-pr",
             "act-pr",
             "reconcile-pr",
@@ -89,6 +91,7 @@ def main():
     parser.add_argument("--policy", help="Path to explicit local policy JSON file")
     parser.add_argument("--receipts-file", default=".action_receipts.json", help="Path to action receipts file (reconcile-pr)")
     parser.add_argument("--apply", action='store_true', help="Actually perform authorized GitHub writes")
+    parser.add_argument("--codex-task-observation", help="Optional JSON file of operator-observed Codex task state (advance-pr)")
 
     parser.add_argument("--targets-file", help="JSON target list for attention-queue")
 
@@ -306,7 +309,22 @@ def main():
         'allow_docs_only': args.allow_docs_only
     }
 
-    if args.command == "inspect-pr":
+    if args.command == "advance-pr":
+        try:
+            task_observation = None
+            if args.codex_task_observation:
+                with open(args.codex_task_observation, encoding="utf-8-sig") as handle:
+                    task_observation = json.load(handle)
+                if not isinstance(task_observation, dict):
+                    raise ValueError("Codex task observation must be an object")
+            result = advance_pr_once(owner=owner, repo=repo, pr_number=args.pr,
+                                     policy_path=args.policy, scope_policy=policy,
+                                     apply=args.apply, task_observation=task_observation)
+            print(json.dumps(result, indent=2))
+        except Exception as e:
+            print(f"Error advancing PR: {e}", file=sys.stderr)
+            sys.exit(1)
+    elif args.command == "inspect-pr":
         try:
             result = inspect_pr(owner, repo, args.pr, scope_policy=policy)
             print(f"PR State: {result['classification']}")
