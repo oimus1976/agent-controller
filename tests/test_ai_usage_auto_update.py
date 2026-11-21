@@ -86,6 +86,67 @@ class PublicationTests(unittest.TestCase):
             self.assertEqual([command for command in commands if command.startswith("put")],
                              ['put "assets/test.js" "assets/test.js"'])
 
+    def _publish_directory(self, root):
+        directory = Path(root)
+        (directory / "assets").mkdir()
+        (directory / "assets" / "test.js").write_bytes(b"abc")
+        (directory / "index.html").write_bytes(b"<html></html>")
+        return directory
+
+    def test_index_is_staged_then_renamed_never_overwritten(self):
+        remote = "/home/test/www/dashboard"
+        def listing(*items):
+            return "\n".join(
+                [f"Remote working directory: {remote}"]
+                + [f"{mode} 1 owner group {size} Nov 18 12:00 {name}" for name, mode, size in items]
+            )
+
+        auth = ((".htaccess", "-rw-r--r--", 104), (".htpasswd", "-rw-r--r--", 64))
+        dirs = (("assets", "drwxr-xr-x", 512), ("fixtures", "drwxr-xr-x", 512))
+        previous = update.mode_map(listing(*auth, ("index.html", "-rw-r--r--", 100), *dirs), remote)
+        with tempfile.TemporaryDirectory() as temp:
+            directory = self._publish_directory(temp)
+            with patch.object(update, "sftp_commands", side_effect=[
+                "", listing(("test.js", "-rw-r--r--", 3)), listing(),
+                listing(*auth, ("index.html", "-rw-r--r--", 100), *dirs),
+                listing(*auth, ("index.html", "-rw-r--r--", 100),
+                        ("index.html.uploading", "-rw-r--r--", 13), *dirs),
+                listing(*auth, ("index.html", "-rw-r--r--", 13), *dirs),
+            ]) as sftp, patch.object(update, "http_preflight"), \
+                    patch.object(update, "http_check", side_effect=[(401, True), (200, False)]):
+                update.publish_files({"sftp_dashboard_dir": remote}, directory,
+                                     ["assets/test.js", "index.html"], copy.deepcopy(previous))
+            commands = [command for call in sftp.call_args_list for command in call.args[2]]
+            self.assertIn('put "index.html" "index.html.uploading"', commands)
+            self.assertIn('rename "index.html.uploading" "index.html"', commands)
+            self.assertNotIn('put "index.html" "index.html"', commands)
+
+    def test_staged_size_mismatch_stops_before_rename(self):
+        remote = "/home/test/www/dashboard"
+        def listing(*items):
+            return "\n".join(
+                [f"Remote working directory: {remote}"]
+                + [f"{mode} 1 owner group {size} Nov 18 12:00 {name}" for name, mode, size in items]
+            )
+
+        auth = ((".htaccess", "-rw-r--r--", 104), (".htpasswd", "-rw-r--r--", 64))
+        dirs = (("assets", "drwxr-xr-x", 512), ("fixtures", "drwxr-xr-x", 512))
+        previous = update.mode_map(listing(*auth, ("index.html", "-rw-r--r--", 100), *dirs), remote)
+        with tempfile.TemporaryDirectory() as temp:
+            directory = self._publish_directory(temp)
+            with patch.object(update, "sftp_commands", side_effect=[
+                "", listing(("test.js", "-rw-r--r--", 3)), listing(),
+                listing(*auth, ("index.html", "-rw-r--r--", 100), *dirs),
+                listing(*auth, ("index.html", "-rw-r--r--", 100),
+                        ("index.html.uploading", "-rw-r--r--", 9), *dirs),
+            ]) as sftp:
+                with self.assertRaisesRegex(RuntimeError, "staged index size differs"):
+                    update.publish_files({"sftp_dashboard_dir": remote}, directory,
+                                         ["assets/test.js", "index.html"], copy.deepcopy(previous))
+            commands = [command for call in sftp.call_args_list for command in call.args[2]]
+            self.assertFalse(any(command.startswith("rename") for command in commands))
+            self.assertNotIn('put "index.html" "index.html"', commands)
+
 
 if __name__ == "__main__":
     unittest.main()

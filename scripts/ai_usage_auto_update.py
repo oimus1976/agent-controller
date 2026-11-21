@@ -243,9 +243,19 @@ def publish_files(config, dist, relative, original):
             raise RuntimeError(f"Remote {folder} mode changed before index publish")
     if any(current.get(name) != original[name] for name in (".htaccess", ".htpasswd", "index.html")):
         raise RuntimeError("Remote index or authentication metadata unexpectedly changed")
-    final = mode_map(sftp_commands(config, dist, ['put "index.html" "index.html"', "ls -la ."]), remote)
+    # Stage the index under a temporary name and swap it in with a server-side
+    # rename, so an interrupted upload can never leave the live index.html
+    # truncated or partially written.
+    staging = mode_map(sftp_commands(config, dist, ['put "index.html" "index.html.uploading"', "ls -la ."]), remote)
+    if staging.get("index.html.uploading", ("", ""))[1] != str((dist / "index.html").stat().st_size):
+        raise RuntimeError("Remote staged index size differs")
+    if staging.get("index.html") != current["index.html"]:
+        raise RuntimeError("Live index changed while staging its replacement")
+    final = mode_map(sftp_commands(config, dist, ['rename "index.html.uploading" "index.html"', "ls -la ."]), remote)
     if final.get("index.html", ("", ""))[1] != str((dist / "index.html").stat().st_size):
         raise RuntimeError("Remote index size differs")
+    if "index.html.uploading" in final:
+        raise RuntimeError("Staged index remains after rename")
     if any(final.get(name) != current[name] for name in (".htaccess", ".htpasswd", "assets", "fixtures")):
         raise RuntimeError("Protected metadata changed")
     http_preflight()

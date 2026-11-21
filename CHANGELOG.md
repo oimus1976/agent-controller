@@ -19,6 +19,7 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 - Prepare changes from actual quota observations, preserve unavailable provider data with its original observation time, and run dashboard validation before any publication.
 - Stage an opt-in data-only publication and public-key SFTP path for review. The production scheduler and separate approval boundary remain pending.
+- Publish the dashboard index by staged upload plus server-side rename, never by overwriting the live file, so an interrupted transfer cannot truncate the production page (PR #334 review remediation).
 
 ## 2026-11-17 — Draft PRを1操作進める入口（Issue #215, Draft / unmerged）
 
