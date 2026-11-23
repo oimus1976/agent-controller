@@ -15,6 +15,12 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-11-18 — Windows AI Usage refresh preview (Issue #333, unmerged)
+
+- Prepare changes from actual quota observations, preserve unavailable provider data with its original observation time, and run dashboard validation before any publication.
+- Stage an opt-in data-only publication and public-key SFTP path for review. The production scheduler and separate approval boundary remain pending.
+- Publish the dashboard index by staged upload plus server-side rename, never by overwriting the live file, so an interrupted transfer cannot truncate the production page (PR #334 review remediation).
+
 ## 2026-11-17 — Draft PRを1操作進める入口（Issue #215, Draft / unmerged）
 
 - `advance-pr` が最新HEADのCI・canonicalレビュー証拠を読み、CI待ち、レビュー／修正要求、タスク観測・適用待ち、HEAD変更、容量不足、Ready判断待ちをJSONで区別する。既存planner/executorを再利用し、`--apply` でも1回最大1要求。Ready/mergeは人間の操作。
