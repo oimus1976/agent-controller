@@ -1,12 +1,17 @@
 """On-demand Draft advancement; existing primitives own all provider mutations."""
 from datetime import datetime, timezone
+import json
+import math
 import re
+import time
 
+from .capacity_collect import DEFAULT_CODEX_TIMEOUT_SECONDS, read_codex_rate_limits_result
+from .codex_capacity import parse_codex_rate_limits_capacity
 from .executor import load_policy
 from .inspector import inspect_pr, get_pr_details
 from .provider_capacity import (
     ProviderAvailability, CapacityObservationSource, ProviderCapacityObservation,
-    ProviderCandidate, recommend_provider,
+    ProviderCandidate, _parse_aware_iso8601, recommend_provider,
 )
 from .remediation_request import (
     _validate_safe_pr_snapshot, plan_codex_remediation_request,
@@ -21,6 +26,22 @@ _REMEDIATION = re.compile(
     r"<!-- agent-controller:codex-remediation-request source_head=([0-9a-f]{40}) -->"
 )
 
+_CAPACITY_FAILURE_REASONS = frozenset({
+    "PAID_USAGE_NOT_AUTHORIZED",
+    "CAPACITY_COLLECTION_FAILED",
+    "CAPACITY_POOL_AMBIGUOUS",
+    "CAPACITY_POOL_MISSING",
+    "CAPACITY_EXHAUSTED",
+    "PROVIDER_UNAVAILABLE",
+    "CAPACITY_REOBSERVATION_REQUIRED",
+    "INSUFFICIENT_CAPABILITY",
+    "PRESERVE_SCARCE_REVIEW_PROVIDER",
+})
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
 
 def _requests(comments, authors):
     return {
@@ -32,14 +53,47 @@ def _requests(comments, authors):
     }
 
 
-def _capacity(config, target):
-    """Reuse capacity policy, adding the dispatch requirement of known capacity."""
-    data = config.get("capacity", {})
-    if not isinstance(data, dict):
-        return "CAPACITY_REOBSERVATION_REQUIRED"
+def _evaluate_observations(config, observations, target, *, observed_monotonic=None):
+    """Evaluate all relevant Codex capacity observations via provider_capacity."""
     # Absence of a price observation must not silently authorize paid routing.
     if config.get("additional_paid_usage_required") is not False:
         return "PAID_USAGE_NOT_AUTHORIZED"
+    if not observations:
+        return "CAPACITY_REOBSERVATION_REQUIRED"
+    if observed_monotonic is not None and (time.monotonic() - observed_monotonic) >= 300:
+        return "CAPACITY_REOBSERVATION_REQUIRED"
+    try:
+        decision_at = _utc_now_iso()
+        decision_dt = _parse_aware_iso8601("decision_at", decision_at)
+        for observation in observations:
+            observed_dt = _parse_aware_iso8601("observed_at", observation.observed_at)
+            if decision_dt < observed_dt:
+                return "CAPACITY_REOBSERVATION_REQUIRED"
+            recommendation = recommend_provider(
+                controller_task_id=target, workstream_id=target, operation_id=target,
+                operation_version="1", decision_at=decision_at,
+                candidates=[ProviderCandidate("codex", True)],
+                capacity_observations=[observation], max_observation_validity_seconds=300,
+            )
+            if recommendation.deferred:
+                return recommendation.deferred[0].reason.value
+            if (observation.provider != "codex"
+                    or observation.source == CapacityObservationSource.UNKNOWN
+                    or observation.availability not in {
+                        ProviderAvailability.AVAILABLE, ProviderAvailability.DEGRADED}):
+                return "CAPACITY_REOBSERVATION_REQUIRED"
+    except (KeyError, ValueError, TypeError):
+        return "CAPACITY_REOBSERVATION_REQUIRED"
+    return None
+
+
+def _manual_capacity_gate(config, target):
+    """Reuse capacity policy from local config without modifying it."""
+    if config.get("additional_paid_usage_required") is not False:
+        return "PAID_USAGE_NOT_AUTHORIZED", None
+    data = config.get("capacity", {})
+    if not isinstance(data, dict):
+        return "CAPACITY_REOBSERVATION_REQUIRED", None
     try:
         observation = ProviderCapacityObservation(
             controller_task_id=target, workstream_id=target, operation_id=target,
@@ -49,21 +103,78 @@ def _capacity(config, target):
             source=CapacityObservationSource(data["source"]),
             reset_at=data.get("reset_at"),
         )
-        recommendation = recommend_provider(
-            controller_task_id=target, workstream_id=target, operation_id=target,
-            operation_version="1", decision_at=datetime.now(timezone.utc).isoformat(),
-            candidates=[ProviderCandidate("codex", True)],
-            capacity_observations=[observation], max_observation_validity_seconds=300,
-        )
-        if recommendation.deferred:
-            return recommendation.deferred[0].reason.value
-        if (observation.source == CapacityObservationSource.UNKNOWN
-                or observation.availability not in {
-                    ProviderAvailability.AVAILABLE, ProviderAvailability.DEGRADED}):
-            return "CAPACITY_REOBSERVATION_REQUIRED"
     except (KeyError, ValueError, TypeError):
-        return "CAPACITY_REOBSERVATION_REQUIRED"
-    return None
+        return "CAPACITY_REOBSERVATION_REQUIRED", None
+
+    def gate():
+        return _evaluate_observations(config, (observation,), target)
+
+    return gate(), gate
+
+
+def _live_capacity_gate(config, target, *, codex_command, codex_timeout):
+    """Collect and validate live Codex 5-hour and weekly pools without fallback."""
+    if config.get("additional_paid_usage_required") is not False:
+        return "PAID_USAGE_NOT_AUTHORIZED", None
+    if (
+        not isinstance(codex_command, str)
+        or not codex_command.strip()
+        or isinstance(codex_timeout, bool)
+        or not isinstance(codex_timeout, (int, float))
+        or not math.isfinite(float(codex_timeout))
+        or float(codex_timeout) <= 0
+    ):
+        return "CAPACITY_COLLECTION_FAILED", None
+
+    observed_at = _utc_now_iso()
+    observed_monotonic = time.monotonic()
+    try:
+        payload = read_codex_rate_limits_result(codex_command, float(codex_timeout))
+        pools = parse_codex_rate_limits_capacity(
+            payload,
+            controller_task_id=target,
+            workstream_id=target,
+            operation_id=target,
+            operation_version="1",
+            observed_at=observed_at,
+        )
+    except Exception:
+        return "CAPACITY_COLLECTION_FAILED", None
+
+    try:
+        root = json.loads(payload)
+    except Exception:
+        root = None
+    if isinstance(root, dict):
+        by_limit_id = root.get("rateLimitsByLimitId")
+        if isinstance(by_limit_id, dict) and by_limit_id and set(by_limit_id) != {"codex"}:
+            return "CAPACITY_POOL_AMBIGUOUS", None
+
+    if any(item.observation.provider != "codex" for item in pools):
+        return "CAPACITY_POOL_AMBIGUOUS", None
+    five_hour = [item.observation for item in pools if item.capacity_pool == "codex-five-hour"]
+    weekly = [item.observation for item in pools if item.capacity_pool == "codex-weekly"]
+    unexpected = [
+        item.capacity_pool
+        for item in pools
+        if item.capacity_pool not in {"codex-five-hour", "codex-weekly"}
+    ]
+    if unexpected or len(five_hour) > 1 or len(weekly) > 1:
+        return "CAPACITY_POOL_AMBIGUOUS", None
+    if len(five_hour) != 1 or len(weekly) != 1:
+        return "CAPACITY_POOL_MISSING", None
+
+    observations = (five_hour[0], weekly[0])
+
+    def gate():
+        return _evaluate_observations(
+            config,
+            observations,
+            target,
+            observed_monotonic=observed_monotonic,
+        )
+
+    return gate(), gate
 
 
 def _finding_gate(inspection, head, requests):
@@ -102,7 +213,8 @@ def _finding_gate(inspection, head, requests):
 
 
 def advance_pr_once(*, owner, repo, pr_number, policy_path=None, scope_policy=None,
-                    apply=False, task_observation=None):
+                    apply=False, task_observation=None, live_capacity=False,
+                    codex_command="codex", codex_timeout=DEFAULT_CODEX_TIMEOUT_SECONDS):
     """Fresh inspect, then at most one existing review/remediation request.
 
     Task observations are operator-reported Cloud UI facts, used only to stop;
@@ -115,6 +227,9 @@ def advance_pr_once(*, owner, repo, pr_number, policy_path=None, scope_policy=No
 
     def finish(state, reason, action):
         return dict(result, state=state, reason=reason, next_action=action)
+
+    if not isinstance(live_capacity, bool):
+        return finish("STOP_POLICY", "MALFORMED_POLICY", "Pass a boolean live_capacity option.")
 
     scope_policy = scope_policy or {}
     policy = load_policy(policy_path) or {}
@@ -207,21 +322,46 @@ def advance_pr_once(*, owner, repo, pr_number, policy_path=None, scope_policy=No
                       plan.get("reason"), "Rerun advance-pr to observe the pending operation.")
     if plan.get("decision") != "EXECUTABLE":
         return finish("STOP_PROVIDER", plan.get("reason"), "Resolve the existing request primitive's refusal.")
-    reason = _capacity(config, f"{full_repo}#{pr_number}")
+    # A policy edit during the fresh planner must not reuse stale policy
+    # authorization or skip paid-usage checks before live observation.
+    if apply and load_policy(policy_path) != policy:
+        return finish("STOP_POLICY", "POLICY_CHANGED", "Rerun advance-pr with the current policy.")
+    capacity_action = (
+        "Verify local Codex capacity and advance_pr paid-usage policy, then rerun advance-pr; no manual or paid fallback."
+        if live_capacity
+        else "Observe Codex capacity/cost and update advance_pr policy; no paid fallback."
+    )
+    target = f"{full_repo}#{pr_number}"
+    if live_capacity:
+        reason, capacity_gate = _live_capacity_gate(
+            config,
+            target,
+            codex_command=codex_command,
+            codex_timeout=codex_timeout,
+        )
+    else:
+        reason, capacity_gate = _manual_capacity_gate(config, target)
     if reason:
-        return finish("WAIT_CAPACITY", reason, "Observe Codex capacity/cost and update advance_pr policy; no paid fallback.")
+        return finish("WAIT_CAPACITY", reason, capacity_action)
     if not apply:
         return finish(state, "DRY_RUN", "Rerun the same advance-pr command with --apply.")
-    # A policy edit during the fresh planner must not reuse our old capacity or
-    # scope confirmation. The executor retains its own pre-effect checks too.
+    # A policy edit during capacity observation must not reuse our old capacity
+    # or scope confirmation. The executor retains its own pre-effect checks too.
     if load_policy(policy_path) != policy:
         return finish("STOP_POLICY", "POLICY_CHANGED", "Rerun advance-pr with the current policy.")
+    reason = capacity_gate()
+    if reason:
+        return finish("WAIT_CAPACITY", reason, capacity_action)
     extra = {"expected_findings_sha256": result["finding_set_sha256"]} if state == "REMEDIATE_SCOPED" else {}
     execution = executor(plan=plan, owner=owner, repo=repo, pr_number=pr_number,
-                         policy_path=policy_path, apply=True, **extra)
+                         policy_path=policy_path, apply=True,
+                         pre_mutation_check=capacity_gate, **extra)
     result["execution"] = execution
     success = "PASS" if state == "REMEDIATE_SCOPED" else "SUCCESS"
     if execution.get("final_outcome") != success:
+        if (not execution.get("mutation_attempted")
+                and execution.get("failure_reason") in _CAPACITY_FAILURE_REASONS):
+            return finish("WAIT_CAPACITY", execution.get("failure_reason"), capacity_action)
         return finish("STOP_PROVIDER", execution.get("failure_reason"), "Inspect the request result before retrying.")
     # Publication may race provider execution; never carry evidence across heads.
     try:

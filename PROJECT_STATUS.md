@@ -2,8 +2,9 @@
 
 > **This file is an index, not an authority.** Do not infer PR, head, CI, review, or authorization state from it. Before acting, re-read those facts from GitHub and CI. For each workstream, the authority is its Issue: read the latest checkpoint comment there.
 
-- **as_of:** 2026-11-17, #215 slice starts from `main` at `2ecd98e`. This is an advisory freshness hint only; unrelated older rows still require fresh reads.
+- **as_of:** 2026-11-25, #335 slice starts from `main` at `2f9279a`. This is an advisory freshness hint only; unrelated older rows still require fresh reads.
 - **Entry point for workers:** [`AGENTS.md`](AGENTS.md). **Rules:** [`docs/governance/rules.md`](docs/governance/rules.md).
+- **Roadmap and priority authority:** [#336](https://github.com/oimus1976/agent-controller/issues/336) (adopted 2026-11-25) owns stage ordering and priority; individual workstream Issues/GitHub/CI own per-workstream specs, status, and operational authorization, and existing ADRs ([#12](https://github.com/oimus1976/agent-controller/issues/12), [#90](https://github.com/oimus1976/agent-controller/issues/90), [#179](https://github.com/oimus1976/agent-controller/issues/179), [#199](https://github.com/oimus1976/agent-controller/issues/199)) remain unchanged.
 
 ## Goal
 
@@ -15,6 +16,7 @@ Product compass: [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md) restates the end-to-
 
 ## Main line
 
+- **[#335](https://github.com/oimus1976/agent-controller/issues/335)** — Stage 2 priority under roadmap [#336](https://github.com/oimus1976/agent-controller/issues/336): connect live Codex capacity observations to `advance-pr`, building on merged Stage 1 ([#215](https://github.com/oimus1976/agent-controller/issues/215) / PR [#329](https://github.com/oimus1976/agent-controller/pull/329), [#331](https://github.com/oimus1976/agent-controller/issues/331) / PR [#332](https://github.com/oimus1976/agent-controller/pull/332)). AC-7 real-usage measurement is tracked separately from code integration and remains unmeasured.
 - **[#215](https://github.com/oimus1976/agent-controller/issues/215)** — on-demand Draft PR review/remediation advancement, per [owner direction](https://github.com/oimus1976/agent-controller/issues/215#issuecomment-6925020137).
   - Reuse canonical inspection and existing requests; [operator entry point](docs/operations/advance-pr.md). Ready/merge remain human-final.
   - #216 is closed (`not_planned`), #327 closed (`completed`); #229 Phase 6/7 harness is deferred. Do not restart live pilot work from this index.
@@ -27,6 +29,7 @@ This table lists pointers only. Status comes from each authority Issue's latest 
 
 | Workstream | Authority Issue | Related Issues / PRs | Checkpoints |
 |---|---|---|---|
+| Live Codex capacity opt-in for `advance-pr` (Stage 2) | [#335](https://github.com/oimus1976/agent-controller/issues/335) | roadmap [#336](https://github.com/oimus1976/agent-controller/issues/336), [#215](https://github.com/oimus1976/agent-controller/issues/215), [#331](https://github.com/oimus1976/agent-controller/issues/331); [runbook](docs/operations/advance-pr.md) | comments on #335; AC-7 real-usage effect unmeasured and separated from code integration |
 | Exact human-final #305 execution handoff (implementation/non-live tests only) | [#310](https://github.com/oimus1976/agent-controller/issues/310) | parent [#305](https://github.com/oimus1976/agent-controller/issues/305); Draft [#311](https://github.com/oimus1976/agent-controller/pull/311); [handoff design](docs/operations/issue-310-exact-handoff.md) | comments on #310; [scoped observation design approval](https://github.com/oimus1976/agent-controller/issues/310#issuecomment-6339925221); native metadata feasibility/binding and new B remain human gates; original A unused, old B expired |
 | Draft PR one-step review/remediation (main line) | [#215](https://github.com/oimus1976/agent-controller/issues/215) | [#194](https://github.com/oimus1976/agent-controller/issues/194), [#200](https://github.com/oimus1976/agent-controller/issues/200); [runbook](docs/operations/advance-pr.md) | comments on #215 |
 | Verified checkpoint advisory resume (independent B:FOLLOW_UP) | [#307](https://github.com/oimus1976/agent-controller/issues/307) | [#17](https://github.com/oimus1976/agent-controller/issues/17), [#20](https://github.com/oimus1976/agent-controller/issues/20), [#195](https://github.com/oimus1976/agent-controller/issues/195); separate from the live pilot | comments on #307; read-only planning, no live execution authority |
@@ -45,6 +48,7 @@ This table lists pointers only. Status comes from each authority Issue's latest 
 
 ## Standing decisions
 
+- Development roadmap and priority authority: [#336](https://github.com/oimus1976/agent-controller/issues/336) (adopted 2026-11-25) defines stage ordering and evaluation criteria without modifying [ADR #90](https://github.com/oimus1976/agent-controller/issues/90) human-final rules, [ADR #199](https://github.com/oimus1976/agent-controller/issues/199) independent review, or per-workstream Issue authority.
 - Personal-development priority: unless the owner explicitly changes the context, optimize for a single-owner project, with cost-effectiveness and time to a usable release as the primary decision criteria. Prefer minimum sufficient controls and concise human steps over speculative automation or organization-scale governance ([#279](https://github.com/oimus1976/agent-controller/issues/279), [ADR #90](https://github.com/oimus1976/agent-controller/issues/90), [rules](docs/governance/rules.md)).
 - ADRs: [#12](https://github.com/oimus1976/agent-controller/issues/12) provider-neutral / reuse-first; [#90](https://github.com/oimus1976/agent-controller/issues/90) human-final; [#179](https://github.com/oimus1976/agent-controller/issues/179) specification-driven; [#199](https://github.com/oimus1976/agent-controller/issues/199) independent review.
 - Capacity policy: there is no fixed WIP cap; check provider capacity before starting new work ([rules §7](docs/governance/rules.md)).
@@ -52,7 +56,7 @@ This table lists pointers only. Status comes from each authority Issue's latest 
 
 ## Backlog (open, not active)
 
-These Issues are open but not being worked on. Their order is an owner decision. The last recorded queue is in a [#55 comment](https://github.com/oimus1976/agent-controller/issues/55) dated 2026-09-04 and may be stale. Before selecting one, confirm it with the owner.
+These Issues are open but not being worked on. Priority ordering follows roadmap [#336](https://github.com/oimus1976/agent-controller/issues/336) and owner decisions. The earlier queue in a [#55 comment](https://github.com/oimus1976/agent-controller/issues/55) dated 2026-09-04 is preserved as a historical record and is superseded where it conflicts with [#336](https://github.com/oimus1976/agent-controller/issues/336). Before selecting an item, confirm it with the owner.
 
 - Enforcement: [#200](https://github.com/oimus1976/agent-controller/issues/200) Codex task apply states.
 - Orchestration: [#173](https://github.com/oimus1976/agent-controller/issues/173) verified-head / single-writer, [#178](https://github.com/oimus1976/agent-controller/issues/178) canonical TaskSpec.

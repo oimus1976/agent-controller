@@ -1,10 +1,12 @@
 import argparse
 import json
+import math
 import sys
 from datetime import datetime, timezone
 
 from .attention_queue import AttentionCategory
 from .advance_pr import advance_pr_once
+from .capacity_collect import DEFAULT_CODEX_TIMEOUT_SECONDS
 from .codex_live import CodexSnapshotReadClient
 from .github_target_client import GitHubRestTargetReadClient
 from .inspector import inspect_pr
@@ -92,6 +94,21 @@ def main():
     parser.add_argument("--receipts-file", default=".action_receipts.json", help="Path to action receipts file (reconcile-pr)")
     parser.add_argument("--apply", action='store_true', help="Actually perform authorized GitHub writes")
     parser.add_argument("--codex-task-observation", help="Optional JSON file of operator-observed Codex task state (advance-pr)")
+    parser.add_argument(
+        "--codex-live-capacity",
+        action='store_true',
+        help="Collect live Codex rate-limit capacity via local codex app-server for executable advance-pr requests",
+    )
+    parser.add_argument(
+        "--codex-command",
+        help="Codex executable for --codex-live-capacity (default: --codex-bin or 'codex')",
+    )
+    parser.add_argument(
+        "--codex-timeout",
+        type=float,
+        default=None,
+        help="Timeout in seconds for --codex-live-capacity (default: 30)",
+    )
 
     parser.add_argument("--targets-file", help="JSON target list for attention-queue")
 
@@ -310,6 +327,42 @@ def main():
     }
 
     if args.command == "advance-pr":
+        if not args.codex_live_capacity:
+            if (
+                args.codex_command is not None
+                or args.codex_timeout is not None
+                or args.codex_bin is not None
+            ):
+                parser.error(
+                    "--codex-command, --codex-bin, and --codex-timeout require --codex-live-capacity for advance-pr"
+                )
+            advance_kwargs = {"live_capacity": False}
+        else:
+            if (
+                args.codex_command is not None
+                and args.codex_bin is not None
+                and args.codex_command != args.codex_bin
+            ):
+                parser.error("specify at most one of --codex-command and --codex-bin")
+            codex_command = (
+                args.codex_command
+                if args.codex_command is not None
+                else (args.codex_bin if args.codex_bin is not None else "codex")
+            )
+            if not codex_command.strip():
+                parser.error("--codex-command must not be empty")
+            codex_timeout = (
+                DEFAULT_CODEX_TIMEOUT_SECONDS
+                if args.codex_timeout is None
+                else args.codex_timeout
+            )
+            if not math.isfinite(codex_timeout) or codex_timeout <= 0:
+                parser.error("--codex-timeout must be a positive finite number")
+            advance_kwargs = {
+                "live_capacity": True,
+                "codex_command": codex_command,
+                "codex_timeout": codex_timeout,
+            }
         try:
             task_observation = None
             if args.codex_task_observation:
@@ -319,7 +372,8 @@ def main():
                     raise ValueError("Codex task observation must be an object")
             result = advance_pr_once(owner=owner, repo=repo, pr_number=args.pr,
                                      policy_path=args.policy, scope_policy=policy,
-                                     apply=args.apply, task_observation=task_observation)
+                                     apply=args.apply, task_observation=task_observation,
+                                     **advance_kwargs)
             print(json.dumps(result, indent=2))
         except Exception as e:
             print(f"Error advancing PR: {e}", file=sys.stderr)

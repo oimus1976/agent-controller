@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .executor import load_policy
 from .inspector import (
@@ -327,6 +327,7 @@ def execute_codex_review_request(
     pr_number: int,
     policy_path: str | None,
     apply: bool = False,
+    pre_mutation_check: Callable[[], str | None] | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "planned_head_sha": plan.get("head_sha"),
@@ -454,6 +455,19 @@ def execute_codex_review_request(
     if posting_login not in set(final_trusted_authors):
         result["failure_reason"] = "UNTRUSTED_POSTING_IDENTITY"
         return result
+
+    if pre_mutation_check is not None:
+        try:
+            check_failure = pre_mutation_check()
+        except Exception:
+            check_failure = "CAPACITY_REOBSERVATION_REQUIRED"
+        if check_failure is not None:
+            result["failure_reason"] = (
+                check_failure
+                if isinstance(check_failure, str) and check_failure
+                else "CAPACITY_REOBSERVATION_REQUIRED"
+            )
+            return result
 
     result["mutation_attempted"] = True
     result["mutation_type"] = ACTION
