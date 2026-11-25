@@ -327,7 +327,7 @@ def execute_codex_review_request(
     pr_number: int,
     policy_path: str | None,
     apply: bool = False,
-    pre_mutation_check: Callable[[], str | None] | None = None,
+    pre_mutation_check: Callable[[Mapping[str, Any]], str | None] | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "planned_head_sha": plan.get("head_sha"),
@@ -458,7 +458,7 @@ def execute_codex_review_request(
 
     if pre_mutation_check is not None:
         try:
-            check_failure = pre_mutation_check()
+            check_failure = pre_mutation_check(final_policy)
         except Exception:
             check_failure = "CAPACITY_REOBSERVATION_REQUIRED"
         if check_failure is not None:

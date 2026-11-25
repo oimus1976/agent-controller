@@ -391,7 +391,7 @@ def execute_codex_remediation_request(
     policy_path: str | None,
     apply: bool = False,
     expected_findings_sha256: str | None = None,
-    pre_mutation_check: Callable[[], str | None] | None = None,
+    pre_mutation_check: Callable[[Mapping[str, Any]], str | None] | None = None,
 ) -> dict[str, Any]:
     expected_repo = f"{owner}/{repo}"
     source_head = plan.get("source_head_sha")
@@ -585,8 +585,12 @@ def execute_codex_remediation_request(
         return result
 
     if pre_mutation_check is not None:
+        latest_policy = load_policy(policy_path)
+        if not isinstance(latest_policy, Mapping) or latest_policy != final_policy:
+            result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
+            return result
         try:
-            check_failure = pre_mutation_check()
+            check_failure = pre_mutation_check(latest_policy)
         except Exception:
             check_failure = "CAPACITY_REOBSERVATION_REQUIRED"
         if check_failure is not None:

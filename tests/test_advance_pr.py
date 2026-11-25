@@ -13,10 +13,16 @@ from agent_controller.provider_capacity import (
     ProviderCapacityObservation,
 )
 from agent_controller.provider_capacity_pool import ProviderCapacityPoolObservation
-from agent_controller.remediation_request import remediation_findings_sha256
+from agent_controller.remediation_request import (
+    execute_codex_remediation_request as real_execute_codex_remediation_request,
+    remediation_findings_sha256,
+)
 from agent_controller.inspector import build_canonical_review_evidence
 from agent_controller.remediation_request_mutator import codex_remediation_request_marker
 from agent_controller.review_evidence import REQUIRED_GITHUB_SURFACES, ReviewSurfaceStatus
+from agent_controller.review_request import (
+    execute_codex_review_request as real_execute_codex_review_request,
+)
 from agent_controller.review_request_mutator import codex_review_request_marker
 
 
@@ -349,6 +355,9 @@ class AdvancePrTests(unittest.TestCase):
         post.assert_not_called()
 
 
+_OMIT = object()
+
+
 def _codex_rate_limits_payload(
     *,
     now=None,
@@ -363,26 +372,20 @@ def _codex_rate_limits_payload(
     limit_id="codex",
     extra_buckets=None,
     credits=None,
+    ordinary_usage_allowed=_OMIT,
 ):
     base = now or datetime.now(timezone.utc)
-    primary = (
-        {
-            "usedPercent": primary_used,
-            "windowDurationMins": primary_mins,
-            "resetsAt": int((base + primary_reset_offset).timestamp()),
-        }
-        if include_primary
-        else None
-    )
-    secondary = (
-        {
-            "usedPercent": secondary_used,
-            "windowDurationMins": secondary_mins,
-            "resetsAt": int((base + secondary_reset_offset).timestamp()),
-        }
-        if include_secondary
-        else None
-    )
+
+    def _window(used, mins, reset_offset):
+        item = {"usedPercent": used, "windowDurationMins": mins}
+        if reset_offset is None:
+            item["resetsAt"] = None
+        elif reset_offset != "OMIT":
+            item["resetsAt"] = int((base + reset_offset).timestamp())
+        return item
+
+    primary = _window(primary_used, primary_mins, primary_reset_offset) if include_primary else None
+    secondary = _window(secondary_used, secondary_mins, secondary_reset_offset) if include_secondary else None
     bucket = {
         "limitId": limit_id,
         "limitName": None if limit_id == "codex" else limit_id,
@@ -396,10 +399,13 @@ def _codex_rate_limits_payload(
     by_limit_id = {limit_id: bucket}
     if extra_buckets:
         by_limit_id.update(extra_buckets)
-    return json.dumps({
+    result = {
         "rateLimits": bucket,
         "rateLimitsByLimitId": by_limit_id,
-    })
+    }
+    if ordinary_usage_allowed is not _OMIT:
+        result["ordinaryUsageAllowed"] = ordinary_usage_allowed
+    return json.dumps(result)
 
 
 class LiveCapacityAdvancePrTests(unittest.TestCase):
@@ -553,10 +559,17 @@ class LiveCapacityAdvancePrTests(unittest.TestCase):
             main()
         self.assertEqual(advance.call_args.kwargs["codex_command"], "bin-codex")
 
+        with patch("sys.argv", [
+            "agent_controller", "advance-pr", "--repo", REPO, "--pr", "215",
+            "--codex-bin", "codex",
+        ]), patch("agent_controller.cli.advance_pr_once", return_value={"state": "REQUEST_REVIEW"}) as advance, \
+             patch("sys.stdout", new_callable=io.StringIO):
+            main()
+        self.assertEqual(advance.call_args.kwargs["live_capacity"], False)
+
         for bad_argv in (
             ["agent_controller", "advance-pr", "--repo", REPO, "--pr", "215", "--codex-command", "codex"],
             ["agent_controller", "advance-pr", "--repo", REPO, "--pr", "215", "--codex-timeout", "10"],
-            ["agent_controller", "advance-pr", "--repo", REPO, "--pr", "215", "--codex-bin", "codex"],
             ["agent_controller", "advance-pr", "--repo", REPO, "--pr", "215",
              "--codex-live-capacity", "--codex-command", "a", "--codex-bin", "b"],
             ["agent_controller", "advance-pr", "--repo", REPO, "--pr", "215",
@@ -744,26 +757,32 @@ class LiveCapacityAdvancePrTests(unittest.TestCase):
                 self.assertEqual(res["reason"], "CAPACITY_COLLECTION_FAILED")
                 executor.assert_not_called()
 
+        target = f"{REPO}#215"
+        observed_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        future_5h_reset = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+        future_wk_reset = (datetime.now(timezone.utc) + timedelta(days=5)).isoformat().replace("+00:00", "Z")
         unknown_pools = (
             ProviderCapacityPoolObservation(
                 capacity_pool="codex-five-hour",
                 observation=ProviderCapacityObservation(
-                    controller_task_id="t", workstream_id="w", operation_id="o",
+                    controller_task_id=target, workstream_id=target, operation_id=target,
                     operation_version="1", provider="codex",
-                    observed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    observed_at=observed_iso,
                     availability=ProviderAvailability.UNKNOWN,
                     source=CapacityObservationSource.PROVIDER_TELEMETRY,
+                    reset_at=future_5h_reset,
                 ),
                 provenance="codex-app-server/account/rateLimits/read",
             ),
             ProviderCapacityPoolObservation(
                 capacity_pool="codex-weekly",
                 observation=ProviderCapacityObservation(
-                    controller_task_id="t", workstream_id="w", operation_id="o",
+                    controller_task_id=target, workstream_id=target, operation_id=target,
                     operation_version="1", provider="codex",
-                    observed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    observed_at=observed_iso,
                     availability=ProviderAvailability.AVAILABLE,
                     source=CapacityObservationSource.PROVIDER_TELEMETRY,
+                    reset_at=future_wk_reset,
                 ),
                 provenance="codex-app-server/account/rateLimits/read",
             ),
@@ -989,6 +1008,323 @@ class LiveCapacityAdvancePrTests(unittest.TestCase):
         self.assertEqual(dup_res["state"], "WAIT_CURRENT_HEAD_REVIEW")
         self.assertEqual(dup_res["reason"], "REVIEW_ALREADY_REQUESTED_FOR_HEAD")
         collector.assert_not_called()
+
+    def test_major1_inflight_paid_usage_policy_flip_before_executor_replan_blocks_review_and_remediation(self):
+        payload = _codex_rate_limits_payload()
+        review_evidence = dict(inspection("ABSENT"), draft=True, merged=False, state="open", graphql_error=False)
+
+        def mutate_paid_usage(policy_obj):
+            mutated = json.loads(json.dumps(policy_obj))
+            mutated["advance_pr"]["additional_paid_usage_required"] = True
+            self.policy_path.write_text(json.dumps(mutated), encoding="utf-8")
+
+        def flip_before_review_exec(**kwargs):
+            mutate_paid_usage(self.policy)
+            return real_execute_codex_review_request(**kwargs)
+
+        with patch("agent_controller.advance_pr.read_codex_rate_limits_result", return_value=payload), \
+             patch("agent_controller.advance_pr.execute_codex_review_request", side_effect=flip_before_review_exec), \
+             patch("agent_controller.review_request._inspect_review_request", return_value=review_evidence), \
+             patch("agent_controller.review_request.get_pr_details", return_value=pr_snapshot()), \
+             patch("agent_controller.review_request.get_authenticated_github_login", return_value="oimus1976"), \
+             patch("agent_controller.review_request.post_codex_review_request") as post_review:
+            review_res = self.run_live(review_evidence, apply=True)
+        self.assertEqual(review_res["state"], "WAIT_CAPACITY")
+        self.assertEqual(review_res["reason"], "PAID_USAGE_NOT_AUTHORIZED")
+        self.assertFalse(review_res["execution"]["mutation_attempted"])
+        post_review.assert_not_called()
+
+        # Manual mode shares the same final policy binding against paid-usage edits.
+        manual_policy = json.loads(json.dumps(self.policy))
+        manual_policy["advance_pr"]["capacity"] = {
+            "availability": "AVAILABLE",
+            "source": "OPERATOR_OBSERVED",
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        manual_policy["advance_pr"]["bounded_remediation_findings"] = remediation_findings_sha256(review_evidence)
+        self.policy_path.write_text(json.dumps(manual_policy), encoding="utf-8")
+
+        def flip_manual_before_review_exec(**kwargs):
+            mutate_paid_usage(manual_policy)
+            return real_execute_codex_review_request(**kwargs)
+
+        with patch("agent_controller.advance_pr.inspect_pr", return_value=review_evidence), \
+             patch("agent_controller.advance_pr.get_pr_details", return_value=pr_snapshot()), \
+             patch("agent_controller.advance_pr.execute_codex_review_request", side_effect=flip_manual_before_review_exec), \
+             patch("agent_controller.review_request._inspect_review_request", return_value=review_evidence), \
+             patch("agent_controller.review_request.get_pr_details", return_value=pr_snapshot()), \
+             patch("agent_controller.review_request.get_authenticated_github_login", return_value="oimus1976"), \
+             patch("agent_controller.review_request.post_codex_review_request") as post_manual:
+            manual_res = advance_pr_once(
+                owner="oimus1976", repo="agent-controller", pr_number=215,
+                policy_path=str(self.policy_path),
+                scope_policy={"allowed_paths": ["agent_controller/*"]},
+                apply=True, live_capacity=False,
+            )
+        self.assertEqual(manual_res["state"], "WAIT_CAPACITY")
+        self.assertEqual(manual_res["reason"], "PAID_USAGE_NOT_AUTHORIZED")
+        self.assertFalse(manual_res["execution"]["mutation_attempted"])
+        post_manual.assert_not_called()
+
+        # Remediation path: flip before executor replanning.
+        rem_evidence = dict(
+            inspection("BLOCKING"),
+            head_ref="codex/issue-215",
+            head_repo=REPO,
+            base_ref="main",
+            base_sha="c" * 40,
+            base_repo=REPO,
+            default_branch="main",
+        )
+
+        def flip_before_rem_exec(**kwargs):
+            mutate_paid_usage(self.policy)
+            return real_execute_codex_remediation_request(**kwargs)
+
+        with patch("agent_controller.advance_pr.read_codex_rate_limits_result", return_value=payload), \
+             patch("agent_controller.advance_pr.execute_codex_remediation_request", side_effect=flip_before_rem_exec), \
+             patch("agent_controller.remediation_request._inspect_remediation_request", return_value=rem_evidence), \
+             patch("agent_controller.remediation_request.get_pr_details", return_value=pr_snapshot()), \
+             patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="oimus1976"), \
+             patch("agent_controller.remediation_request.get_actions_runs", return_value={
+                 "total_count": 1,
+                 "workflow_runs": [
+                     {"head_sha": HEAD, "event": "pull_request", "status": "completed", "conclusion": "success"}
+                 ],
+             }), \
+             patch("agent_controller.remediation_request.post_codex_remediation_request") as post_rem:
+            rem_res = self.run_live(rem_evidence, apply=True)
+        self.assertEqual(rem_res["state"], "WAIT_CAPACITY")
+        self.assertEqual(rem_res["reason"], "PAID_USAGE_NOT_AUTHORIZED")
+        self.assertFalse(rem_res["execution"]["mutation_attempted"])
+        post_rem.assert_not_called()
+
+        # Remediation path: flip after final_policy check during get_actions_runs.
+        def flip_during_actions(*_args, **_kwargs):
+            mutate_paid_usage(self.policy)
+            return {
+                "total_count": 1,
+                "workflow_runs": [
+                    {"head_sha": HEAD, "event": "pull_request", "status": "completed", "conclusion": "success"}
+                ],
+            }
+
+        with patch("agent_controller.advance_pr.read_codex_rate_limits_result", return_value=payload), \
+             patch("agent_controller.remediation_request._inspect_remediation_request", return_value=rem_evidence), \
+             patch("agent_controller.remediation_request.get_pr_details", return_value=pr_snapshot()), \
+             patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="oimus1976"), \
+             patch("agent_controller.remediation_request.get_actions_runs", side_effect=flip_during_actions), \
+             patch("agent_controller.remediation_request.post_codex_remediation_request") as post_rem_late:
+            late_res = self.run_live(rem_evidence, apply=True)
+        self.assertEqual(late_res["state"], "STOP_POLICY")
+        self.assertEqual(late_res["reason"], "POLICY_CHANGED")
+        self.assertFalse(late_res["execution"]["mutation_attempted"])
+        post_rem_late.assert_not_called()
+
+    def test_major2_ordinary_usage_disallowed_blocks_before_post_without_affecting_manual_mode(self):
+        review_evidence = dict(inspection("ABSENT"), draft=True, merged=False, state="open", graphql_error=False)
+        rem_evidence = dict(
+            inspection("BLOCKING"),
+            head_ref="codex/issue-215",
+            head_repo=REPO,
+            base_ref="main",
+            base_sha="c" * 40,
+            base_repo=REPO,
+            default_branch="main",
+        )
+        disallowed_payload = _codex_rate_limits_payload(
+            primary_used=10, secondary_used=10, ordinary_usage_allowed=False
+        )
+        with patch("agent_controller.advance_pr.read_codex_rate_limits_result", return_value=disallowed_payload), \
+             patch("agent_controller.review_request._inspect_review_request", return_value=review_evidence), \
+             patch("agent_controller.review_request.get_pr_details", return_value=pr_snapshot()), \
+             patch("agent_controller.review_request.get_authenticated_github_login", return_value="oimus1976"), \
+             patch("agent_controller.review_request.post_codex_review_request") as post_review:
+            res = self.run_live(review_evidence, apply=True)
+        self.assertEqual(res["state"], "WAIT_CAPACITY")
+        self.assertEqual(res["reason"], "ORDINARY_USAGE_NOT_ALLOWED")
+        post_review.assert_not_called()
+
+        with patch("agent_controller.advance_pr.read_codex_rate_limits_result", return_value=disallowed_payload), \
+             patch("agent_controller.remediation_request._inspect_remediation_request", return_value=rem_evidence), \
+             patch("agent_controller.remediation_request.get_pr_details", return_value=pr_snapshot()), \
+             patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="oimus1976"), \
+             patch("agent_controller.remediation_request.post_codex_remediation_request") as post_rem:
+            rem_res = self.run_live(rem_evidence, apply=True)
+        self.assertEqual(rem_res["state"], "WAIT_CAPACITY")
+        self.assertEqual(rem_res["reason"], "ORDINARY_USAGE_NOT_ALLOWED")
+        post_rem.assert_not_called()
+
+        for val, expected_reason in (
+            (None, "CAPACITY_REOBSERVATION_REQUIRED"),
+            ("false", "CAPACITY_COLLECTION_FAILED"),
+        ):
+            payload = _codex_rate_limits_payload(
+                primary_used=10, secondary_used=10, ordinary_usage_allowed=val
+            )
+            with self.subTest(ordinary_usage_allowed=val), \
+                 patch("agent_controller.advance_pr.read_codex_rate_limits_result", return_value=payload), \
+                 patch("agent_controller.review_request._inspect_review_request", return_value=review_evidence), \
+                 patch("agent_controller.review_request.get_pr_details", return_value=pr_snapshot()), \
+                 patch("agent_controller.review_request.get_authenticated_github_login", return_value="oimus1976"), \
+                 patch("agent_controller.review_request.post_codex_review_request") as post_review:
+                bad_res = self.run_live(review_evidence, apply=True)
+            self.assertEqual(bad_res["state"], "WAIT_CAPACITY")
+            self.assertEqual(bad_res["reason"], expected_reason)
+            post_review.assert_not_called()
+
+        allowed_payload = _codex_rate_limits_payload(
+            primary_used=10, secondary_used=10, ordinary_usage_allowed=True
+        )
+        posted_comments = [
+            {
+                "id": 1,
+                "user": {"login": "oimus1976"},
+                "body": "@codex review\n\n" + codex_review_request_marker(HEAD),
+            }
+        ]
+        with patch("agent_controller.advance_pr.read_codex_rate_limits_result", return_value=allowed_payload), \
+             patch("agent_controller.review_request._inspect_review_request", return_value=review_evidence), \
+             patch("agent_controller.review_request.get_pr_details", return_value=pr_snapshot()), \
+             patch("agent_controller.review_request.get_authenticated_github_login", return_value="oimus1976"), \
+             patch("agent_controller.review_request.get_pr_issue_comments", return_value=posted_comments), \
+             patch("agent_controller.review_request.post_codex_review_request") as post_review:
+            ok_res = self.run_live(review_evidence, apply=True)
+        self.assertEqual(ok_res["state"], "WAIT_CURRENT_HEAD_REVIEW")
+        post_review.assert_called_once()
+
+    def test_major3_missing_or_null_reset_on_either_window_blocks_before_post(self):
+        review_evidence = dict(inspection("ABSENT"), draft=True, merged=False, state="open", graphql_error=False)
+        rem_evidence = dict(
+            inspection("BLOCKING"),
+            head_ref="codex/issue-215",
+            head_repo=REPO,
+            base_ref="main",
+            base_sha="c" * 40,
+            base_repo=REPO,
+            default_branch="main",
+        )
+        cases = (
+            ("five_hour_reset_omitted", {"primary_reset_offset": "OMIT"}),
+            ("five_hour_reset_null", {"primary_reset_offset": None}),
+            ("weekly_reset_omitted", {"secondary_reset_offset": "OMIT"}),
+            ("weekly_reset_null", {"secondary_reset_offset": None}),
+        )
+        for label, overrides in cases:
+            payload = _codex_rate_limits_payload(**overrides)
+            with self.subTest(case=label, mode="review"), \
+                 patch("agent_controller.advance_pr.read_codex_rate_limits_result", return_value=payload), \
+                 patch("agent_controller.review_request._inspect_review_request", return_value=review_evidence), \
+                 patch("agent_controller.review_request.get_pr_details", return_value=pr_snapshot()), \
+                 patch("agent_controller.review_request.get_authenticated_github_login", return_value="oimus1976"), \
+                 patch("agent_controller.review_request.post_codex_review_request") as post_review:
+                res = self.run_live(review_evidence, apply=True)
+                self.assertEqual(res["state"], "WAIT_CAPACITY")
+                self.assertEqual(res["reason"], "CAPACITY_REOBSERVATION_REQUIRED")
+                post_review.assert_not_called()
+
+            with self.subTest(case=label, mode="remediation"), \
+                 patch("agent_controller.advance_pr.read_codex_rate_limits_result", return_value=payload), \
+                 patch("agent_controller.remediation_request._inspect_remediation_request", return_value=rem_evidence), \
+                 patch("agent_controller.remediation_request.get_pr_details", return_value=pr_snapshot()), \
+                 patch("agent_controller.remediation_request.get_authenticated_github_login", return_value="oimus1976"), \
+                 patch("agent_controller.remediation_request.post_codex_remediation_request") as post_rem:
+                rem_res = self.run_live(rem_evidence, apply=True)
+                self.assertEqual(rem_res["state"], "WAIT_CAPACITY")
+                self.assertEqual(rem_res["reason"], "CAPACITY_REOBSERVATION_REQUIRED")
+                post_rem.assert_not_called()
+
+        # Manual mode continues to permit omitted reset_at.
+        manual_policy = json.loads(json.dumps(self.policy))
+        manual_policy["advance_pr"]["capacity"] = {
+            "availability": "AVAILABLE",
+            "source": "OPERATOR_OBSERVED",
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self.policy_path.write_text(json.dumps(manual_policy), encoding="utf-8")
+        posted_comments = [
+            {
+                "id": 1,
+                "user": {"login": "oimus1976"},
+                "body": "@codex review\n\n" + codex_review_request_marker(HEAD),
+            }
+        ]
+        with patch("agent_controller.advance_pr.inspect_pr", return_value=review_evidence), \
+             patch("agent_controller.advance_pr.get_pr_details", return_value=pr_snapshot()), \
+             patch("agent_controller.review_request._inspect_review_request", return_value=review_evidence), \
+             patch("agent_controller.review_request.get_pr_details", return_value=pr_snapshot()), \
+             patch("agent_controller.review_request.get_authenticated_github_login", return_value="oimus1976"), \
+             patch("agent_controller.review_request.get_pr_issue_comments", return_value=posted_comments), \
+             patch("agent_controller.review_request.post_codex_review_request") as post_manual:
+            manual_res = advance_pr_once(
+                owner="oimus1976", repo="agent-controller", pr_number=215,
+                policy_path=str(self.policy_path),
+                scope_policy={"allowed_paths": ["agent_controller/*"]},
+                apply=True, live_capacity=False,
+            )
+        self.assertEqual(manual_res["state"], "WAIT_CURRENT_HEAD_REVIEW")
+        post_manual.assert_called_once()
+
+    def test_minor5_unknown_availability_or_source_is_rejected_with_valid_bindings_and_resets(self):
+        target = f"{REPO}#215"
+        observed_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        future_5h_reset = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+        future_wk_reset = (datetime.now(timezone.utc) + timedelta(days=5)).isoformat().replace("+00:00", "Z")
+
+        def make_pools(
+            *,
+            five_avail=ProviderAvailability.AVAILABLE,
+            five_source=CapacityObservationSource.PROVIDER_TELEMETRY,
+            wk_avail=ProviderAvailability.AVAILABLE,
+            wk_source=CapacityObservationSource.PROVIDER_TELEMETRY,
+        ):
+            return (
+                ProviderCapacityPoolObservation(
+                    capacity_pool="codex-five-hour",
+                    observation=ProviderCapacityObservation(
+                        controller_task_id=target, workstream_id=target, operation_id=target,
+                        operation_version="1", provider="codex",
+                        observed_at=observed_iso, availability=five_avail,
+                        source=five_source, reset_at=future_5h_reset,
+                    ),
+                    provenance="codex-app-server/account/rateLimits/read",
+                ),
+                ProviderCapacityPoolObservation(
+                    capacity_pool="codex-weekly",
+                    observation=ProviderCapacityObservation(
+                        controller_task_id=target, workstream_id=target, operation_id=target,
+                        operation_version="1", provider="codex",
+                        observed_at=observed_iso, availability=wk_avail,
+                        source=wk_source, reset_at=future_wk_reset,
+                    ),
+                    provenance="codex-app-server/account/rateLimits/read",
+                ),
+            )
+
+        # Control: exact same bindings and future reset_at values pass when AVAILABLE + PROVIDER_TELEMETRY.
+        with patch("agent_controller.advance_pr.read_codex_rate_limits_result", return_value=_codex_rate_limits_payload()), \
+             patch("agent_controller.advance_pr.parse_codex_rate_limits_capacity", return_value=make_pools()), \
+             patch("agent_controller.advance_pr.plan_codex_review_request", return_value={
+                 "decision": "EXECUTABLE", "head_sha": HEAD}):
+            ok_res = self.run_live(apply=False)
+        self.assertEqual(ok_res["state"], "REQUEST_REVIEW")
+
+        for label, kw in (
+            ("five_hour_unknown_availability", {"five_avail": ProviderAvailability.UNKNOWN}),
+            ("weekly_unknown_availability", {"wk_avail": ProviderAvailability.UNKNOWN}),
+            ("five_hour_unknown_source", {"five_source": CapacityObservationSource.UNKNOWN}),
+            ("weekly_unknown_source", {"wk_source": CapacityObservationSource.UNKNOWN}),
+        ):
+            with self.subTest(case=label), \
+                 patch("agent_controller.advance_pr.read_codex_rate_limits_result", return_value=_codex_rate_limits_payload()), \
+                 patch("agent_controller.advance_pr.parse_codex_rate_limits_capacity", return_value=make_pools(**kw)), \
+                 patch("agent_controller.advance_pr.plan_codex_review_request", return_value={
+                     "decision": "EXECUTABLE", "head_sha": HEAD}), \
+                 patch("agent_controller.advance_pr.execute_codex_review_request") as executor:
+                res = self.run_live(apply=True)
+            self.assertEqual(res["state"], "WAIT_CAPACITY")
+            self.assertEqual(res["reason"], "CAPACITY_REOBSERVATION_REQUIRED")
+            executor.assert_not_called()
 
 
 if __name__ == "__main__":

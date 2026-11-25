@@ -328,13 +328,9 @@ def main():
 
     if args.command == "advance-pr":
         if not args.codex_live_capacity:
-            if (
-                args.codex_command is not None
-                or args.codex_timeout is not None
-                or args.codex_bin is not None
-            ):
+            if args.codex_command is not None or args.codex_timeout is not None:
                 parser.error(
-                    "--codex-command, --codex-bin, and --codex-timeout require --codex-live-capacity for advance-pr"
+                    "--codex-command and --codex-timeout require --codex-live-capacity for advance-pr"
                 )
             advance_kwargs = {"live_capacity": False}
         else:
