@@ -15,6 +15,14 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-11-25 — Issue受付からローカルClaude Codeを1回だけ起動する準備（Issue #338, unmerged）
+
+- 固定の非公開repo・ラベル・作成者ID・開始後の新規Issue・固定タスク種別だけを受け付ける1回pollの受付を追加した。Issue本文はCLIにもシェルにも渡さない。
+- 起動前にO_EXCLで1回分を消費し、多重起動・再起動・失敗後の再実行を防ぐ。未ログイン、API key認証、容量不明・低残量、入力改変の場合は消費せずに見送る。
+- 実機preflightで、単体CLIの未ログインと容量観測の欠落を確認した。live実行、受付repo作成、認証・設定変更は本人承認待ちである。
+
+---
+
 ## 2026-11-18 — Windows AI Usage refresh preview (Issue #333, unmerged)
 
 - Prepare changes from actual quota observations, preserve unavailable provider data with its original observation time, and run dashboard validation before any publication.
