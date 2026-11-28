@@ -15,6 +15,11 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-11-28 — Draft PRの有界followと停止通知（Issue #340、Draft）
+
+- `advance-pr --follow` はexact HEADでCI・レビュー完了を有界に待ち、既存の操作許可と容量判定を通った要求だけを送る。修正要求後は #200 の人間による確認へ渡す。Readyとmergeは人間が行う。
+- follow、単発apply、reconcileでPR単位のローカルロックを共有する。競合した起動は実行中の結果ファイルを保全する。停止結果は原子的に保存し、任意の通知は保存後に一度だけ有界で実行する。起動・再読手順は [runbook](docs/operations/advance-pr.md) に記載。
+
 ## 2026-11-25 — 6段階ロードマップ採用（Issue #336）と `advance-pr` の live Codex 容量接続（Issue #335, Draft / unmerged）
 
 - **6段階開発ロードマップと評価指標の採用（[Issue #336](https://github.com/oimus1976/agent-controller/issues/336)）:** 2026-11-25 の本人指示により、実利用フェーズの6段階ロードマップを開発優先順位の正本として採用し、`PROJECT_STATUS.md` に反映（旧 [#55](https://github.com/oimus1976/agent-controller/issues/55) の優先順位表は履歴として保全）。評価基準として全体所要時間、実装・CI・レビュー/修正・**人間判断待ち時間**の内訳、人間介在回数、AIクレジット・CI費用を記録対象とした（未測定項目は未測定と明記し、新規監視基盤や常駐監視は追加しない）。ADR #90 の human-final 規則・ADR #199 の独立 exact-head レビュー・各 workstream Issue の仕様/権限境界は変更しない。

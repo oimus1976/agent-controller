@@ -2,7 +2,7 @@
 
 > **This file is an index, not an authority.** Do not infer PR, head, CI, review, or authorization state from it. Before acting, re-read those facts from GitHub and CI. For each workstream, the authority is its Issue: read the latest checkpoint comment there.
 
-- **as_of:** 2026-11-25, #335 slice starts from `main` at `2f9279a`. This is an advisory freshness hint only; unrelated older rows still require fresh reads.
+- **as_of:** 2026-11-28, #340 slice starts from `main` at `cdaad10`. This is an advisory freshness hint only; unrelated older rows still require fresh reads.
 - **Entry point for workers:** [`AGENTS.md`](AGENTS.md). **Rules:** [`docs/governance/rules.md`](docs/governance/rules.md).
 - **Roadmap and priority authority:** [#336](https://github.com/oimus1976/agent-controller/issues/336) (adopted 2026-11-25) owns stage ordering and priority; individual workstream Issues/GitHub/CI own per-workstream specs, status, and operational authorization, and existing ADRs ([#12](https://github.com/oimus1976/agent-controller/issues/12), [#90](https://github.com/oimus1976/agent-controller/issues/90), [#179](https://github.com/oimus1976/agent-controller/issues/179), [#199](https://github.com/oimus1976/agent-controller/issues/199)) remain unchanged.
 
@@ -16,7 +16,9 @@ Product compass: [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md) restates the end-to-
 
 ## Main line
 
-- **[#335](https://github.com/oimus1976/agent-controller/issues/335)** — Stage 2 priority under roadmap [#336](https://github.com/oimus1976/agent-controller/issues/336): connect live Codex capacity observations to `advance-pr`, building on merged Stage 1 ([#215](https://github.com/oimus1976/agent-controller/issues/215) / PR [#329](https://github.com/oimus1976/agent-controller/pull/329), [#331](https://github.com/oimus1976/agent-controller/issues/331) / PR [#332](https://github.com/oimus1976/agent-controller/pull/332)). AC-7 real-usage measurement is tracked separately from code integration and remains unmeasured.
+- **[#340](https://github.com/oimus1976/agent-controller/issues/340)** — Stage 4 priority under [#336](https://github.com/oimus1976/agent-controller/issues/336): bounded Draft PR follow, exact-head stops, and terminal notification. [Runbook](docs/operations/advance-pr.md). Ready/merge remain human-final.
+
+- **[#335](https://github.com/oimus1976/agent-controller/issues/335)** — Stage 2 foundation under roadmap [#336](https://github.com/oimus1976/agent-controller/issues/336): connect live Codex capacity observations to `advance-pr`, building on merged Stage 1 ([#215](https://github.com/oimus1976/agent-controller/issues/215) / PR [#329](https://github.com/oimus1976/agent-controller/pull/329), [#331](https://github.com/oimus1976/agent-controller/issues/331) / PR [#332](https://github.com/oimus1976/agent-controller/pull/332)). AC-7 real-usage measurement is tracked separately from code integration and remains unmeasured.
 - **[#215](https://github.com/oimus1976/agent-controller/issues/215)** — on-demand Draft PR review/remediation advancement, per [owner direction](https://github.com/oimus1976/agent-controller/issues/215#issuecomment-6925020137).
   - Reuse canonical inspection and existing requests; [operator entry point](docs/operations/advance-pr.md). Ready/merge remain human-final.
   - #216 is closed (`not_planned`), #327 closed (`completed`); #229 Phase 6/7 harness is deferred. Do not restart live pilot work from this index.
@@ -29,6 +31,7 @@ This table lists pointers only. Status comes from each authority Issue's latest 
 
 | Workstream | Authority Issue | Related Issues / PRs | Checkpoints |
 |---|---|---|---|
+| Bounded PR follow and stop notification (Stage 4) | [#340](https://github.com/oimus1976/agent-controller/issues/340) | roadmap [#336](https://github.com/oimus1976/agent-controller/issues/336), [#215](https://github.com/oimus1976/agent-controller/issues/215), [#200](https://github.com/oimus1976/agent-controller/issues/200) | comments on #340 |
 | Live Codex capacity opt-in for `advance-pr` (Stage 2) | [#335](https://github.com/oimus1976/agent-controller/issues/335) | roadmap [#336](https://github.com/oimus1976/agent-controller/issues/336), [#215](https://github.com/oimus1976/agent-controller/issues/215), [#331](https://github.com/oimus1976/agent-controller/issues/331); [runbook](docs/operations/advance-pr.md) | comments on #335; AC-7 real-usage effect unmeasured and separated from code integration |
 | Exact human-final #305 execution handoff (implementation/non-live tests only) | [#310](https://github.com/oimus1976/agent-controller/issues/310) | parent [#305](https://github.com/oimus1976/agent-controller/issues/305); Draft [#311](https://github.com/oimus1976/agent-controller/pull/311); [handoff design](docs/operations/issue-310-exact-handoff.md) | comments on #310; [scoped observation design approval](https://github.com/oimus1976/agent-controller/issues/310#issuecomment-6339925221); native metadata feasibility/binding and new B remain human gates; original A unused, old B expired |
 | Draft PR one-step review/remediation (main line) | [#215](https://github.com/oimus1976/agent-controller/issues/215) | [#194](https://github.com/oimus1976/agent-controller/issues/194), [#200](https://github.com/oimus1976/agent-controller/issues/200); [runbook](docs/operations/advance-pr.md) | comments on #215 |

@@ -53,6 +53,7 @@ def inspection(verdict="ABSENT", *, head=HEAD, ci="PASS", comments=None):
     )
     return {"repo": REPO, "pr": 215, "head_sha": head, "draft": True,
             "merged": False, "state": "open", "changed_files": 1,
+            "base_branch": "main", "base_sha": "c" * 40,
             "files": [{"filename": "agent_controller/example.py", "changes": 1}],
             "actions_ci_status": ci, "graphql_error": False,
             "issue_comments": comments, "reviews": reviews,

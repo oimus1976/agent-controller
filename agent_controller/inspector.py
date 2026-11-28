@@ -646,6 +646,8 @@ def inspect_pr(owner, repo, pr_number, scope_policy=None, provider_review_eviden
         "pr": pr_number,
         "head_sha": head_sha,
         "base_branch": base_branch,
+        "base_sha": pr_data.get("base", {}).get("sha"),
+        "head_after_collection": after_head_sha,
         "draft": is_draft,
         "merged": is_merged,
         "state": state,

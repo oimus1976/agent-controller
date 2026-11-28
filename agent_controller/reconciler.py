@@ -48,6 +48,12 @@ def _save_receipt(receipts_file, new_receipt):
             os.remove(temp_path)
         raise e
 
+def pr_lock_path(owner, repo, pr_number):
+    target = f"{owner}/{repo}#{pr_number}".lower()
+    digest = hashlib.sha256(target.encode("utf-8")).hexdigest()
+    return os.path.join(tempfile.gettempdir(), f"agent_controller_pr_{digest}.lock")
+
+
 class ReconcilerLock:
     def __init__(self, lock_file):
         self.lock_file = lock_file
@@ -73,15 +79,15 @@ class ReconcilerLock:
             self.fd = None
 
 def reconcile_pr_once(owner, repo, pr_number, state_file=".pr_state.json", policy_file=None, receipts_file=".action_receipts.json", apply=False):
-    target_id = f"{owner}/{repo}#{pr_number}"
-    target_hash = hashlib.sha256(target_id.encode('utf-8')).hexdigest()
-    lock_file = os.path.join(tempfile.gettempdir(), f"agent_controller_pr_{target_hash}.lock")
-    lock = ReconcilerLock(lock_file)
+    lock = ReconcilerLock(pr_lock_path(owner, repo, pr_number))
 
     if not lock.acquire():
         return {
             "repo": f"{owner}/{repo}",
             "pr": pr_number,
+            "state": "STOP_CONFLICT",
+            "reason": "CONCURRENT_PR_ADVANCE",
+            "lock_path": lock.lock_file,
             "observation": None,
             "transition_occurred": False,
             "transition_reasons": [],

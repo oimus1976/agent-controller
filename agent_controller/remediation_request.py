@@ -16,7 +16,7 @@ from .remediation_request_mutator import (
     codex_remediation_request_marker,
     post_codex_remediation_request,
 )
-from .review_request import _safe_scope_status, _trusted_request_authors
+from .review_request import _base_target, _safe_scope_status, _trusted_request_authors
 from .review_request_mutator import get_authenticated_github_login
 from .review_evidence import canonical_review_from_mapping
 
@@ -191,10 +191,13 @@ def _inspect_remediation_request(
     base_repo_data = base.get("repo") if isinstance(base, Mapping) else None
     head_sha = head.get("sha") if isinstance(head, Mapping) else None
 
-    if inspection.get("head_sha") != head_sha:
-        raise ValueError("PR head changed after canonical inspection")
-
     result = dict(inspection)
+    if inspection.get("head_sha") != head_sha:
+        codex_remediation_request_marker(head_sha)  # Validate the observed SHA before reporting drift.
+        result["head_after_collection"] = head_sha
+    inspected_base = (inspection.get("base_branch"), inspection.get("base_sha"))
+    if all(inspected_base) and _base_target(pr_data) != inspected_base:
+        result["scope_base_changed"] = True
     result.update({
         "head_ref": head.get("ref") if isinstance(head, Mapping) else None,
         "head_repo": _repo_full_name(head_repo_data),
@@ -281,6 +284,14 @@ def plan_codex_remediation_request(
     actions_ci_status = inspection.get("actions_ci_status")
 
     plan["source_head_sha"] = head_sha
+    after_head = inspection.get("head_after_collection")
+    if isinstance(after_head, str) and after_head != head_sha:
+        plan["head_after_collection"] = after_head
+        plan["reason"] = "STALE_HEAD_SHA"
+        return plan
+    if inspection.get("scope_base_changed") is True:
+        plan["reason"] = "STALE_BASE_TARGET"
+        return plan
     plan["head_ref"] = head_ref
     plan["head_repo"] = head_repo
     plan["base_ref"] = base_ref
@@ -392,6 +403,7 @@ def execute_codex_remediation_request(
     apply: bool = False,
     expected_findings_sha256: str | None = None,
     pre_mutation_check: Callable[[Mapping[str, Any]], str | None] | None = None,
+    recheck_follow_evidence: bool = False,
 ) -> dict[str, Any]:
     expected_repo = f"{owner}/{repo}"
     source_head = plan.get("source_head_sha")
@@ -436,7 +448,13 @@ def execute_codex_remediation_request(
         scope_policy=scope_policy,
     )
     fresh_head = fresh_plan.get("source_head_sha")
+    if fresh_plan.get("head_after_collection"):
+        result["observed_head_sha"] = fresh_plan["head_after_collection"]
+        result["failure_reason"] = "STALE_HEAD_SHA"
+        return result
     result["execution_head_sha"] = fresh_head
+    if fresh_plan.get("reason") == "EXACT_HEAD_CI_NOT_PASS":
+        result["actions_ci_status"] = fresh_plan.get("actions_ci_status")
     if fresh_head is not None and fresh_head != source_head:
         result["failure_reason"] = "STALE_HEAD_SHA"
         return result
@@ -468,6 +486,8 @@ def execute_codex_remediation_request(
         pre_identity_pr, source_head, expected_repo
     )
     if snapshot_error is not None:
+        if snapshot_error == "STALE_HEAD_SHA":
+            result["observed_head_sha"] = pre_identity_pr["head"]["sha"]
         result["failure_reason"] = snapshot_error
         return result
     base_error = _validate_planned_base_snapshot(
@@ -509,9 +529,14 @@ def execute_codex_remediation_request(
         final_review_inspection = _inspect_remediation_request(
             owner, repo, pr_number, scope_policy
         )
-        final_review_head = final_review_inspection.get("head_sha")
+        final_review_head = (final_review_inspection.get("head_after_collection")
+                             or final_review_inspection.get("head_sha"))
         if final_review_head != source_head:
+            result["observed_head_sha"] = final_review_head
             result["failure_reason"] = "STALE_HEAD_SHA"
+            return result
+        if final_review_inspection.get("scope_base_changed") is True:
+            result["failure_reason"] = "STALE_BASE_TARGET"
             return result
         final_canonical = canonical_review_from_mapping(
             final_review_inspection.get("canonical_review_evidence"),
@@ -522,6 +547,15 @@ def execute_codex_remediation_request(
         if final_canonical is None or not final_canonical.collection_complete:
             result["failure_reason"] = "REVIEW_EVIDENCE_UNAVAILABLE"
             return result
+        if recheck_follow_evidence:
+            comments = final_review_inspection.get("issue_comments")
+            if not isinstance(comments, list):
+                result["failure_reason"] = "REVIEW_EVIDENCE_MALFORMED"
+                return result
+            if _has_same_source_head_request(comments, source_head, trusted_authors):
+                result["final_outcome"] = "NOOP"
+                result["failure_reason"] = "REMEDIATION_ALREADY_REQUESTED_FOR_SOURCE_HEAD"
+                return result
         if (expected_findings_sha256 is not None and
                 remediation_findings_sha256(final_review_inspection) != expected_findings_sha256):
             result["failure_reason"] = "REMEDIATION_FINDINGS_CHANGED"
@@ -540,7 +574,16 @@ def execute_codex_remediation_request(
         result["failure_reason"] = "REVIEW_EVIDENCE_UNAVAILABLE"
         return result
 
-    # Final target/policy gate follows the refreshed review evidence.
+    # Actions runs can be re-run without changing the PR head. Refresh the
+    # exact-head pull_request evidence at the final mutation gate so a run that
+    # has become pending or failed cannot leave stale PASS authorization.
+    try:
+        final_actions = get_actions_runs(owner, repo, source_head)
+        final_actions_ci_status = evaluate_actions_ci(final_actions, source_head)
+    except Exception:
+        final_actions_ci_status = "UNAVAILABLE"
+
+    # Re-read the target after CI so HEAD drift during Actions cannot reach POST.
     try:
         final_pr = get_pr_details(owner, repo, pr_number)
     except Exception:
@@ -548,6 +591,8 @@ def execute_codex_remediation_request(
         return result
     snapshot_error = _validate_safe_pr_snapshot(final_pr, source_head, expected_repo)
     if snapshot_error is not None:
+        if snapshot_error == "STALE_HEAD_SHA":
+            result["observed_head_sha"] = final_pr["head"]["sha"]
         result["failure_reason"] = snapshot_error
         return result
     base_error = _validate_planned_base_snapshot(
@@ -572,25 +617,14 @@ def execute_codex_remediation_request(
         result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
         return result
 
-    # Actions runs can be re-run without changing the PR head. Refresh the
-    # exact-head pull_request evidence at the final mutation gate so a run that
-    # has become pending or failed cannot leave stale PASS authorization.
-    try:
-        final_actions = get_actions_runs(owner, repo, source_head)
-        final_actions_ci_status = evaluate_actions_ci(final_actions, source_head)
-    except Exception:
-        final_actions_ci_status = "UNAVAILABLE"
     if final_actions_ci_status != "PASS":
+        result["actions_ci_status"] = final_actions_ci_status
         result["failure_reason"] = "EXACT_HEAD_CI_NOT_PASS"
         return result
 
     if pre_mutation_check is not None:
-        latest_policy = load_policy(policy_path)
-        if not isinstance(latest_policy, Mapping) or latest_policy != final_policy:
-            result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
-            return result
         try:
-            check_failure = pre_mutation_check(latest_policy)
+            check_failure = pre_mutation_check(final_policy)
         except Exception:
             check_failure = "CAPACITY_REOBSERVATION_REQUIRED"
         if check_failure is not None:
@@ -635,6 +669,8 @@ def execute_codex_remediation_request(
         postcondition_pr, source_head, expected_repo
     )
     if snapshot_error is not None:
+        if snapshot_error == "STALE_HEAD_SHA":
+            result["observed_head_sha"] = postcondition_pr["head"]["sha"]
         result["failure_reason"] = snapshot_error
         result["postcondition_result"] = "FAILED"
         return result

@@ -169,6 +169,13 @@ def _validate_exact_pr_snapshot(
     return None
 
 
+def _base_target(pr):
+    base = pr.get("base") if isinstance(pr, Mapping) else None
+    if isinstance(base, Mapping):
+        return base.get("ref"), base.get("sha")
+    return None, None
+
+
 def _inspect_review_request(
     owner: str,
     repo: str,
@@ -241,6 +248,11 @@ def plan_codex_review_request(
     issue_comments = inspection.get("issue_comments")
 
     plan["head_sha"] = head_sha
+    plan["base_ref"] = inspection.get("base_branch")
+    plan["base_sha"] = inspection.get("base_sha")
+    after_head = inspection.get("head_after_collection")
+    if isinstance(after_head, str) and after_head != head_sha:
+        plan["head_after_collection"] = after_head
     plan["draft"] = draft
     plan["actions_ci_status"] = actions_ci_status
 
@@ -328,6 +340,7 @@ def execute_codex_review_request(
     policy_path: str | None,
     apply: bool = False,
     pre_mutation_check: Callable[[Mapping[str, Any]], str | None] | None = None,
+    recheck_follow_evidence: bool = False,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "planned_head_sha": plan.get("head_sha"),
@@ -371,7 +384,13 @@ def execute_codex_review_request(
         scope_policy=scope_policy,
     )
     fresh_head = fresh_plan.get("head_sha")
+    if fresh_plan.get("head_after_collection"):
+        result["observed_head_sha"] = fresh_plan["head_after_collection"]
+        result["failure_reason"] = "STALE_HEAD_SHA"
+        return result
     result["execution_head_sha"] = fresh_head
+    if fresh_plan.get("reason") == "EXACT_HEAD_CI_NOT_PASS":
+        result["actions_ci_status"] = fresh_plan.get("actions_ci_status")
 
     # Only call a head stale if a fresh objective head was actually observed.
     # A policy or evidence gate can block before any GitHub read; None in that
@@ -399,6 +418,8 @@ def execute_codex_review_request(
         return result
     pre_mutation_error = _validate_exact_pr_snapshot(pre_mutation_pr, plan["head_sha"])
     if pre_mutation_error is not None:
+        if pre_mutation_error == "STALE_HEAD_SHA":
+            result["observed_head_sha"] = pre_mutation_pr["head"]["sha"]
         result["failure_reason"] = pre_mutation_error
         return result
 
@@ -427,6 +448,32 @@ def execute_codex_review_request(
         result["failure_reason"] = "POSTING_IDENTITY_READ_FAILED"
         return result
 
+    if recheck_follow_evidence:
+        # While resolving the posting login, CI can be rerun or another
+        # requester can post review evidence without changing this head.
+        final_plan = plan_codex_review_request(
+            owner=owner, repo=repo, pr_number=pr_number, policy_path=policy_path,
+            scope_policy=scope_policy,
+        )
+        final_head = final_plan.get("head_after_collection") or final_plan.get("head_sha")
+        if final_head is not None and final_head != plan["head_sha"]:
+            result["observed_head_sha"] = final_head
+            result["failure_reason"] = "STALE_HEAD_SHA"
+            return result
+        if final_plan.get("decision") != "EXECUTABLE":
+            if final_plan.get("decision") == "NOOP":
+                result["final_outcome"] = "NOOP"
+            result["failure_reason"] = final_plan.get("reason")
+            result["actions_ci_status"] = final_plan.get("actions_ci_status")
+            return result
+        if ((final_plan.get("base_ref"), final_plan.get("base_sha"))
+                != (plan.get("base_ref"), plan.get("base_sha"))):
+            result["failure_reason"] = "STALE_BASE_TARGET"
+            return result
+        if final_plan.get("policy_provenance") != fresh_plan.get("policy_provenance"):
+            result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
+            return result
+
     # Final mutation gate: after every other network read, re-read the mutable PR
     # target and local authorization consecutively, then POST without another
     # pre-effect network operation.
@@ -437,7 +484,13 @@ def execute_codex_review_request(
         return result
     final_pr_error = _validate_exact_pr_snapshot(final_pr, plan["head_sha"])
     if final_pr_error is not None:
+        if final_pr_error == "STALE_HEAD_SHA":
+            result["observed_head_sha"] = final_pr["head"]["sha"]
         result["failure_reason"] = final_pr_error
+        return result
+
+    if recheck_follow_evidence and _base_target(final_pr) != (plan.get("base_ref"), plan.get("base_sha")):
+        result["failure_reason"] = "STALE_BASE_TARGET"
         return result
 
     final_policy = load_policy(policy_path)
@@ -485,6 +538,8 @@ def execute_codex_review_request(
         post_pr = get_pr_details(owner, repo, pr_number)
         post_pr_error = _validate_exact_pr_snapshot(post_pr, plan["head_sha"])
         if post_pr_error is not None:
+            if post_pr_error == "STALE_HEAD_SHA":
+                result["observed_head_sha"] = post_pr["head"]["sha"]
             result["postcondition_result"] = False
             result["final_outcome"] = "FAILED"
             result["failure_reason"] = f"POSTCONDITION_{post_pr_error}"
