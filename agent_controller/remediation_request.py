@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 import hashlib
 import json
 
@@ -391,6 +391,7 @@ def execute_codex_remediation_request(
     policy_path: str | None,
     apply: bool = False,
     expected_findings_sha256: str | None = None,
+    pre_mutation_check: Callable[[Mapping[str, Any]], str | None] | None = None,
 ) -> dict[str, Any]:
     expected_repo = f"{owner}/{repo}"
     source_head = plan.get("source_head_sha")
@@ -582,6 +583,23 @@ def execute_codex_remediation_request(
     if final_actions_ci_status != "PASS":
         result["failure_reason"] = "EXACT_HEAD_CI_NOT_PASS"
         return result
+
+    if pre_mutation_check is not None:
+        latest_policy = load_policy(policy_path)
+        if not isinstance(latest_policy, Mapping) or latest_policy != final_policy:
+            result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
+            return result
+        try:
+            check_failure = pre_mutation_check(latest_policy)
+        except Exception:
+            check_failure = "CAPACITY_REOBSERVATION_REQUIRED"
+        if check_failure is not None:
+            result["failure_reason"] = (
+                check_failure
+                if isinstance(check_failure, str) and check_failure
+                else "CAPACITY_REOBSERVATION_REQUIRED"
+            )
+            return result
 
     try:
         result["mutation_attempted"] = True

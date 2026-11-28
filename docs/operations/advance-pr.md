@@ -10,7 +10,11 @@ python -m agent_controller.cli advance-pr --repo OWNER/REPO --pr 123 --policy po
 
 GitHub認証と操作許可は既存 `request-codex-review` / `request-codex-remediation` と同じ。`GITHUB_TOKEN` はファイルや公開証拠へ書かない。変更パス制限は対象Issueに合わせる。
 
-ローカルpolicy例（時刻は実際の観測時刻に置き換える）：
+### 容量観測（手動policy / live Codex opt-in）
+
+既定は従来どおり手動policy方式を維持する。ローカル `codex app-server` から実測容量を直接読む場合は `--codex-live-capacity` を明示指定する（必要に応じ `--codex-command` / `--codex-timeout` を併用）。`--codex-live-capacity` 無しで `--codex-command` / `--codex-timeout` を指定するとエラーで停止する（既存の `--codex-bin` は手動モードでも従来どおり許容される）。
+
+手動policy例（時刻は実際の観測時刻に置き換える）：
 
 ```json
 {
@@ -28,7 +32,29 @@ GitHub認証と操作許可は既存 `request-codex-review` / `request-codex-rem
 }
 ```
 
-容量観測の有効期間は5分。`AVAILABLE` / `DEGRADED` と既知の観測元が必要で、`UNKNOWN`・期限切れ・reset時刻到達では再観測を求める。既存 `recommend_provider` を再利用し、追加課金が必要／不明なら停止する。Codexのquota自動取得や有料fallbackはない。
+`--codex-live-capacity` を使う場合のローカルpolicy例（`capacity` の手動転記は不要、実行時にpolicyファイルは書き換えない）：
+
+```text
+python -m agent_controller.cli advance-pr --repo OWNER/REPO --pr 123 --policy policy.local.json --allowed-paths "agent_controller/*" "tests/*" "docs/*" --codex-live-capacity --apply
+```
+
+```json
+{
+  "allowed_actions": ["REQUEST_CODEX_REVIEW", "REQUEST_CODEX_REMEDIATION"],
+  "trusted_review_request_authors": ["OWNER"],
+  "advance_pr": {
+    "max_remediation_rounds": 3,
+    "additional_paid_usage_required": false
+  }
+}
+```
+
+- **遅延収集:** 既存plannerが `EXECUTABLE` と判定し、`additional_paid_usage_required: false` が確認できたレビュー／修正要求に限り `capacity_collect.read_codex_rate_limits_result` を呼ぶ（ダッシュボードJSONは経由しない）。`WAIT_CI`・`WAIT_CURRENT_HEAD_REVIEW`・`HUMAN_GATE_READY` や拒否／不要状態では収集しない。
+- **対象poolとfail-closed:** 応答の `ordinaryUsageAllowed` が `false`（`ORDINARY_USAGE_NOT_ALLOWED`）または `null` の場合は停止する。曖昧でない `codex` バケットの `codex-five-hour` と `codex-weekly` の両方を `codex_capacity` と `provider_capacity` (`recommend_provider`) で評価し、枯渇・枠欠落・曖昧（複数バケットや未分類窓など）・取得失敗・`UNKNOWN`・期限切れ／`resetsAt` 欠落または到達では `WAIT_CAPACITY` で停止し、手動 `capacity` への暗黙fallbackや有料fallbackは行わない（手動モードの任意 `reset_at` 互換性は維持）。
+- **独立観測と投稿直前鮮度:** dry-run と `--apply` は独立に観測する。観測有効期間は300秒で、`--apply` では要求投稿の最終ゲート直前まで300秒以内かつreset未到達を維持し、executorが読んだ最新policyと `additional_paid_usage_required: false` の整合性も最終ゲートで照合する。
+- **AC-7（実利用効果）:** 実利用での手動転記回数削減の測定はコード統合とは別に追跡され、本手順書更新時点では未測定。
+
+容量観測の有効期間は5分。`AVAILABLE` / `DEGRADED` と既知の観測元が必要で、`UNKNOWN`・期限切れ・reset時刻到達では再観測を求める。既存 `recommend_provider` を再利用し、追加課金が必要／不明なら停止する。手動モードでCodexのquota自動取得や有料fallbackはない。
 
 | state | 次の操作 |
 |---|---|
@@ -41,7 +67,7 @@ GitHub認証と操作許可は既存 `request-codex-review` / `request-codex-rem
 | `STOP_TASK_OBSERVATION_REQUIRED` | `View Task` を開き、完了と適用可否を確認 |
 | `STOP_FOR_HUMAN_APPLY` | `View Task → Update branch`、その後再実行 |
 | `STOP_HEAD_CHANGED` | 新HEADで再実行。以前のCI・レビューは使わない |
-| `WAIT_CAPACITY` | 容量・追加費用を再観測してpolicy更新 |
+| `WAIT_CAPACITY` | `--codex-live-capacity` ならローカルCodex容量・追加費用policyを確認して再実行（手動・有料fallbackなし）；手動モードは容量・追加費用を再観測してpolicy更新 |
 | `STOP_BUDGET` | 人間が修正計画を見直す |
 | `HUMAN_GATE_READY` | 表示されたPR・HEAD・CI・レビューを確認し、人間がReadyを判断 |
 

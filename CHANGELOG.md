@@ -15,6 +15,13 @@ Agent Controller の意味のある設計変更・Phase 完了・安全境界の
 
 ---
 
+## 2026-11-25 — 6段階ロードマップ採用（Issue #336）と `advance-pr` の live Codex 容量接続（Issue #335, Draft / unmerged）
+
+- **6段階開発ロードマップと評価指標の採用（[Issue #336](https://github.com/oimus1976/agent-controller/issues/336)）:** 2026-11-25 の本人指示により、実利用フェーズの6段階ロードマップを開発優先順位の正本として採用し、`PROJECT_STATUS.md` に反映（旧 [#55](https://github.com/oimus1976/agent-controller/issues/55) の優先順位表は履歴として保全）。評価基準として全体所要時間、実装・CI・レビュー/修正・**人間判断待ち時間**の内訳、人間介在回数、AIクレジット・CI費用を記録対象とした（未測定項目は未測定と明記し、新規監視基盤や常駐監視は追加しない）。ADR #90 の human-final 規則・ADR #199 の独立 exact-head レビュー・各 workstream Issue の仕様/権限境界は変更しない。
+- **`advance-pr` への live Codex 容量観測接続（[Issue #335](https://github.com/oimus1976/agent-controller/issues/335), Draft / unmerged）:** `--codex-live-capacity`（および `--codex-command` / `--codex-timeout`）を明示 opt-in として追加。既存 `capacity_collect.read_codex_rate_limits_result`、`codex_capacity.parse_codex_rate_limits_capacity`、`provider_capacity.recommend_provider` を直接再利用し、ダッシュボード JSON 経由や policy ファイル書き換えを行わない。
+- **遅延収集と fail-closed:** 既存 planner が `EXECUTABLE` かつ `additional_paid_usage_required: false` と確認できたレビュー／修正要求に限り収集する。`ordinaryUsageAllowed` の明示拒否（`false` -> `ORDINARY_USAGE_NOT_ALLOWED`）や `null`、`codex` バケットの `codex-five-hour` と `codex-weekly` 両枠の枯渇・枠欠落・曖昧（複数バケットや未分類窓など）・取得失敗・`UNKNOWN`・期限切れ／`resetsAt` 欠落または到達では `WAIT_CAPACITY` で停止し、手動 `capacity` や追加課金への暗黙 fallback を行わない（L2 レビュー指摘対応）。
+- **独立観測・最終ゲート鮮度・既存境界の維持:** dry-run と `--apply` は独立して観測し、`execute_codex_review_request` / `execute_codex_remediation_request` の投稿直前ゲートでも executor 読込済み最新 policy との整合性（`additional_paid_usage_required: false` を含む）・300 秒鮮度・reset 未到達を再検証する。従来の手動 policy 方式（任意 `reset_at` および `--codex-bin` 互換を含む）・1回最大1要求・exact-head・指摘集合ハッシュ・重複防止・手順書（[advance-pr.md](docs/operations/advance-pr.md)）を維持。AC-7 の実利用効果（手動転記回数の削減）は未測定でありコード統合と分離して追跡する。
+
 ## 2026-11-18 — Windows AI Usage refresh preview (Issue #333, unmerged)
 
 - Prepare changes from actual quota observations, preserve unavailable provider data with its original observation time, and run dashboard validation before any publication.
