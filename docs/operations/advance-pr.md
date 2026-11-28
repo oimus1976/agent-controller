@@ -120,7 +120,7 @@ python -m agent_controller.cli advance-pr --follow --repo OWNER/REPO --pr 123 --
 ```
 
 - `WAIT_CI` と `WAIT_CURRENT_HEAD_REVIEW` の間だけ再観測する。要求が実行可能になってから容量を取得する。dry-runは実行可能な操作を表示した時点で終了する。現HEADへ同じレビュー要求を繰り返さない。
-- `HUMAN_GATE_READY` は人間のReady判断で停止する。修正要求を投稿したとき、または既存要求を見つけたときは、[#200](https://github.com/oimus1976/agent-controller/issues/200) に従って停止し、必要に応じて人間が `View Task → Update branch` を確認する。HEADが動いた場合は両SHAを記録し、旧HEADで承認された処理を続けない。
+- `HUMAN_GATE_READY` は人間のReady判断で停止する。修正要求を投稿したとき、または既存要求を見つけたときは、[#200](https://github.com/oimus1976/agent-controller/issues/200) に従って停止し、必要に応じて人間が `View Task → Update branch` を確認する。HEADが動いた場合は両SHAを記録する。差分の観測後にbaseが変わった場合はスコープを再確認するため停止する。
 - 観測と待機の合計は `--max-elapsed-seconds`、観測回数は `--max-polls` で制限する。各観測の外部呼び出しを含む上限は残り時間と120秒の短い方。処理中のタイムアウトでは、投稿が届いた可能性を残して停止するため、再実行前にGitHub上の要求を確認する。
 - 同じPRのfollow、`advance-pr --apply`、`reconcile-pr` は同じローカルロックを使う。競合したfollowは `STOP_CONFLICT` を同じディレクトリの競合専用JSONに保存する。保存先は標準出力の `result_file`、実行中の処理の保存先は `shared_result_file` で確認できる。単発dry-runはロックを取得しない。残ったロックを自動解除しない。
 - 終了結果は指定したローカルJSONへ原子的に書き、標準出力にも返す。省略時は同じOS一時ディレクトリにあるPRロックと同じ名前の `.result.json`。複数PRに同一の結果ファイルを指定しない。通知は既定で無効。`--notify-mode bell|windows-toast|command` は結果保存後に一度だけ実行し、別枠で10秒に制限する。`command` にはローカル実行ファイルまたは `.py` を指定し、結果ファイルの絶対パスが単一引数で渡る。通知失敗でも結果から停止理由を読める。Windowsトーストは対話デスクトップに依存する。

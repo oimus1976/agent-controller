@@ -169,6 +169,13 @@ def _validate_exact_pr_snapshot(
     return None
 
 
+def _base_target(pr):
+    base = pr.get("base") if isinstance(pr, Mapping) else None
+    if isinstance(base, Mapping):
+        return base.get("ref"), base.get("sha")
+    return None, None
+
+
 def _inspect_review_request(
     owner: str,
     repo: str,
@@ -241,6 +248,8 @@ def plan_codex_review_request(
     issue_comments = inspection.get("issue_comments")
 
     plan["head_sha"] = head_sha
+    plan["base_ref"] = inspection.get("base_branch")
+    plan["base_sha"] = inspection.get("base_sha")
     after_head = inspection.get("head_after_collection")
     if isinstance(after_head, str) and after_head != head_sha:
         plan["head_after_collection"] = after_head
@@ -457,6 +466,10 @@ def execute_codex_review_request(
             result["failure_reason"] = final_plan.get("reason")
             result["actions_ci_status"] = final_plan.get("actions_ci_status")
             return result
+        if ((final_plan.get("base_ref"), final_plan.get("base_sha"))
+                != (plan.get("base_ref"), plan.get("base_sha"))):
+            result["failure_reason"] = "STALE_BASE_TARGET"
+            return result
         if final_plan.get("policy_provenance") != fresh_plan.get("policy_provenance"):
             result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
             return result
@@ -474,6 +487,10 @@ def execute_codex_review_request(
         if final_pr_error == "STALE_HEAD_SHA":
             result["observed_head_sha"] = final_pr["head"]["sha"]
         result["failure_reason"] = final_pr_error
+        return result
+
+    if recheck_follow_evidence and _base_target(final_pr) != (plan.get("base_ref"), plan.get("base_sha")):
+        result["failure_reason"] = "STALE_BASE_TARGET"
         return result
 
     final_policy = load_policy(policy_path)

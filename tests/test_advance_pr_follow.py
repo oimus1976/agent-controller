@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from agent_controller import advance_pr, cli, inspector, remediation_request, review_request
 from agent_controller.advance_pr_follow import _run_step, follow_pr
 from agent_controller.reconciler import ReconcilerLock, pr_lock_path, reconcile_pr_once
+from agent_controller.remediation_request import _inspect_remediation_request as inspect_remediation
 from agent_controller.review_evidence import REQUIRED_GITHUB_SURFACES, ReviewSurfaceStatus
 from tests.test_advance_pr import HEAD, NEW_HEAD, REPO, inspection, pr_snapshot
 
@@ -153,6 +154,30 @@ class AdvancePrFollowTests(unittest.TestCase):
         self.collect.assert_not_called()
         self.post_review.assert_not_called()
 
+    def test_same_head_base_retarget_invalidates_scope_for_ready_and_review(self):
+        changed = pr_snapshot()
+        changed["base"].update(ref="release", sha="d" * 40)
+        self.inspect.return_value = inspection("CLEAN")
+        self.pr.return_value = changed
+        result = self.run_follow()
+        self.assertEqual((result["state"], result["reason"]), ("STOP_SCOPE", "STALE_BASE_TARGET"))
+        self.collect.assert_not_called()
+
+        self.inspect.return_value = inspection()
+        self.pr.return_value = pr_snapshot()
+        target = pr_snapshot()
+
+        def identity():
+            nonlocal target
+            target = changed
+            return "oimus1976"
+
+        with patch.object(review_request, "get_pr_details", side_effect=lambda *args: target), \
+             patch.object(review_request, "get_authenticated_github_login", side_effect=identity):
+            result = self.run_follow()
+        self.assertEqual((result["state"], result["reason"]), ("STOP_SCOPE", "STALE_BASE_TARGET"))
+        self.post_review.assert_not_called()
+
     def test_drift_at_each_executors_final_target_check_blocks_post(self):
         review_actual = pr_snapshot()
         rem_actual = pr_snapshot()
@@ -274,6 +299,26 @@ class AdvancePrFollowTests(unittest.TestCase):
         self.assertFalse(result["execution"]["mutation_attempted"])
         self.post_rem.assert_not_called()
 
+    def test_remediation_supplemental_target_read_reports_drift(self):
+        self.inspect.return_value = self.rem_evidence
+        for drift_phase in ("plan", "after identity"):
+            with self.subTest(drift_phase=drift_phase):
+                actual = pr_snapshot(NEW_HEAD if drift_phase == "plan" else HEAD)
+
+                def identity():
+                    nonlocal actual
+                    actual = pr_snapshot(NEW_HEAD)
+                    return "oimus1976"
+
+                with patch.object(remediation_request, "_inspect_remediation_request", inspect_remediation), \
+                     patch.object(remediation_request, "inspect_pr", return_value=self.rem_evidence), \
+                     patch.object(remediation_request, "get_pr_details", side_effect=lambda *args: actual), \
+                     patch.object(remediation_request, "get_authenticated_github_login", side_effect=identity):
+                    result = self.run_follow()
+                self.assertEqual(result["state"], "STOP_HEAD_CHANGED")
+                self.assertEqual((result["initial_head_sha"], result["head_sha"]), (HEAD, NEW_HEAD))
+                self.post_rem.assert_not_called()
+
     def test_dry_run_stops_at_first_executable_action(self):
         result = self.run_follow(apply=False)
         self.assertEqual((result["state"], result["reason"]), ("REQUEST_REVIEW", "DRY_RUN"))
@@ -298,35 +343,37 @@ class AdvancePrFollowTests(unittest.TestCase):
     def test_conflicts_preserve_active_results_and_allow_single_dry_run(self):
         old = b'{"state":"winner"}'
         self.result.write_bytes(old)
-        notify_calls = []
+        observed = {}
 
         def notify(mode, command, path, result):
-            self.assertEqual(json.loads(path.read_text())["state"], "STOP_CONFLICT")
-            notify_calls.append(path)
+            observed["notification"] = (path, json.loads(path.read_text()))
 
         def hold_step(kwargs, timeout):
-            conflict = self.run_follow(notify_mode="bell", notify=notify)
-            self.assertEqual(conflict["state"], "STOP_CONFLICT")
-            self.assertEqual(conflict["lock_path"], pr_lock_path(**self.target))
-            self.assertEqual(self.result.read_bytes(), old)
-            self.assertEqual(conflict["shared_result_file"], str(self.result))
-            conflict_path = Path(conflict["result_file"])
-            self.assertNotEqual(conflict_path, self.result)
-            self.assertEqual(conflict["notification"], {"status": "SENT"})
-            self.assertEqual(json.loads(conflict_path.read_text()), conflict)
-            self.assertEqual(notify_calls, [conflict_path])
-            single = advance_pr.advance_pr_once(**self.target, apply=True)
-            self.assertEqual(single["state"], "STOP_CONFLICT")
-            reconciled = reconcile_pr_once(**self.target)
-            self.assertEqual(reconciled["state"], "STOP_CONFLICT")
-            self.assertEqual(reconciled["action_plan"]["reason"], "CONCURRENT_RECONCILIATION")
-            dry = advance_pr.advance_pr_once(**self.target)
-            self.assertNotEqual(dry["state"], "STOP_CONFLICT")
+            observed["conflict"] = self.run_follow(notify_mode="bell", notify=notify)
+            observed["winner_during_conflict"] = self.result.read_bytes()
+            observed["single"] = advance_pr.advance_pr_once(**self.target, apply=True)
+            observed["reconciled"] = reconcile_pr_once(**self.target)
+            observed["dry"] = advance_pr.advance_pr_once(**self.target)
             raise OSError("injected worker failure")
 
         result = self.run_follow(run_step=hold_step)
         self.assertEqual(result["reason"], "FOLLOW_STEP_FAILED")
-        self.assertEqual(len(notify_calls), 1)
+        conflict = observed["conflict"]
+        self.assertEqual(conflict["state"], "STOP_CONFLICT")
+        self.assertEqual(conflict["lock_path"], pr_lock_path(**self.target))
+        self.assertEqual(observed["winner_during_conflict"], old)
+        self.assertEqual(conflict["shared_result_file"], str(self.result.resolve()))
+        conflict_path = Path(conflict["result_file"])
+        self.assertNotEqual(conflict_path, self.result.resolve())
+        self.assertEqual(conflict["notification"], {"status": "SENT"})
+        self.assertEqual(json.loads(conflict_path.read_text()), conflict)
+        self.assertEqual(observed["notification"][0], conflict_path)
+        self.assertEqual(observed["notification"][1]["state"], "STOP_CONFLICT")
+        self.assertEqual(observed["notification"][1]["notification"]["status"], "PENDING")
+        self.assertEqual(observed["single"]["state"], "STOP_CONFLICT")
+        self.assertEqual(observed["reconciled"]["state"], "STOP_CONFLICT")
+        self.assertEqual(observed["reconciled"]["action_plan"]["reason"], "CONCURRENT_RECONCILIATION")
+        self.assertNotEqual(observed["dry"]["state"], "STOP_CONFLICT")
         lock = ReconcilerLock(pr_lock_path(**self.target))
         self.assertTrue(lock.acquire())
         lock.release()
@@ -348,14 +395,14 @@ class AdvancePrFollowTests(unittest.TestCase):
         calls = []
 
         def notifier(mode, command, path, result):
-            calls.append(path)
-            before = json.loads(path.read_text())
-            self.assertEqual(before["state"], "HUMAN_GATE_READY")
-            self.assertEqual(before["notification"]["status"], "PENDING")
+            calls.append((path, json.loads(path.read_text())))
             raise RuntimeError("private notifier output")
 
         result = self.run_follow(notify_mode="bell", notify=notifier)
-        self.assertEqual(calls, [self.result])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], self.result.resolve())
+        self.assertEqual(calls[0][1]["state"], "HUMAN_GATE_READY")
+        self.assertEqual(calls[0][1]["notification"]["status"], "PENDING")
         self.assertEqual(result["notification"], {"status": "FAILED", "error": "NOTIFICATION_FAILED"})
         self.assertEqual(json.loads(self.result.read_text()), result)
         self.assertNotIn("private notifier output", self.result.read_text())

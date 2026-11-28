@@ -16,7 +16,7 @@ from .remediation_request_mutator import (
     codex_remediation_request_marker,
     post_codex_remediation_request,
 )
-from .review_request import _safe_scope_status, _trusted_request_authors
+from .review_request import _base_target, _safe_scope_status, _trusted_request_authors
 from .review_request_mutator import get_authenticated_github_login
 from .review_evidence import canonical_review_from_mapping
 
@@ -191,10 +191,13 @@ def _inspect_remediation_request(
     base_repo_data = base.get("repo") if isinstance(base, Mapping) else None
     head_sha = head.get("sha") if isinstance(head, Mapping) else None
 
-    if inspection.get("head_sha") != head_sha:
-        raise ValueError("PR head changed after canonical inspection")
-
     result = dict(inspection)
+    if inspection.get("head_sha") != head_sha:
+        codex_remediation_request_marker(head_sha)  # Validate the observed SHA before reporting drift.
+        result["head_after_collection"] = head_sha
+    inspected_base = (inspection.get("base_branch"), inspection.get("base_sha"))
+    if all(inspected_base) and _base_target(pr_data) != inspected_base:
+        result["scope_base_changed"] = True
     result.update({
         "head_ref": head.get("ref") if isinstance(head, Mapping) else None,
         "head_repo": _repo_full_name(head_repo_data),
@@ -284,6 +287,11 @@ def plan_codex_remediation_request(
     after_head = inspection.get("head_after_collection")
     if isinstance(after_head, str) and after_head != head_sha:
         plan["head_after_collection"] = after_head
+        plan["reason"] = "STALE_HEAD_SHA"
+        return plan
+    if inspection.get("scope_base_changed") is True:
+        plan["reason"] = "STALE_BASE_TARGET"
+        return plan
     plan["head_ref"] = head_ref
     plan["head_repo"] = head_repo
     plan["base_ref"] = base_ref
@@ -526,6 +534,9 @@ def execute_codex_remediation_request(
         if final_review_head != source_head:
             result["observed_head_sha"] = final_review_head
             result["failure_reason"] = "STALE_HEAD_SHA"
+            return result
+        if final_review_inspection.get("scope_base_changed") is True:
+            result["failure_reason"] = "STALE_BASE_TARGET"
             return result
         final_canonical = canonical_review_from_mapping(
             final_review_inspection.get("canonical_review_evidence"),

@@ -21,7 +21,7 @@ from .remediation_request import (
     execute_codex_remediation_request, remediation_findings_sha256,
     standalone_codex_blockers,
 )
-from .review_request import _safe_scope_status, plan_codex_review_request, execute_codex_review_request
+from .review_request import _base_target, _safe_scope_status, plan_codex_review_request, execute_codex_review_request
 from .review_evidence import canonical_review_from_mapping
 
 
@@ -323,6 +323,8 @@ def _advance_pr_step(*, owner, repo, pr_number, policy_path, scope_policy, apply
         reason = reason.removeprefix("POSTCONDITION_")
         if reason in {"PR_CLOSED_OR_MERGED", "PR_STATE_NOT_OPEN", "PR_NOT_DRAFT"}:
             return finish("STOP_TARGET", reason, "Check that the PR is still open and Draft.")
+        if reason == "STALE_BASE_TARGET":
+            return finish("STOP_SCOPE", reason, "Recheck the changed-file scope against the current base.")
         if reason == "EXACT_HEAD_CI_NOT_PASS":
             result["actions_ci_status"] = evidence.get("actions_ci_status")
             if result["actions_ci_status"] in {"PENDING", "MISSING"}:
@@ -368,6 +370,9 @@ def _advance_pr_step(*, owner, repo, pr_number, policy_path, scope_policy, apply
                 result["head_sha"] = pr["head"]["sha"]
             return finish("STOP_HEAD_CHANGED" if error == "STALE_HEAD_SHA" else "STOP_TARGET",
                           error, "Rerun advance-pr against the current open Draft PR.")
+        scope_base = (inspection.get("base_branch"), inspection.get("base_sha"))
+        if step_deadline is not None and (not all(scope_base) or _base_target(pr) != scope_base):
+            return late_stop("STALE_BASE_TARGET", inspection)
     except Exception:
         return finish("STOP_EVIDENCE", "EVIDENCE_FETCH_FAILED", "Rerun advance-pr after GitHub evidence is readable.")
 
@@ -447,6 +452,8 @@ def _advance_pr_step(*, owner, repo, pr_number, policy_path, scope_policy, apply
     if plan.get("decision") != "EXECUTABLE":
         return late_stop(plan.get("reason"), plan) or finish(
             "STOP_PROVIDER", plan.get("reason"), "Resolve the existing request primitive's refusal.")
+    if step_deadline is not None and (plan.get("base_ref"), plan.get("base_sha")) != scope_base:
+        return late_stop("STALE_BASE_TARGET", plan)
     # A policy edit during the fresh planner must not reuse stale policy
     # authorization or skip paid-usage checks before live observation.
     if apply and load_policy(policy_path) != policy:
