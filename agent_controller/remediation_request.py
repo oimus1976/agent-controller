@@ -395,6 +395,7 @@ def execute_codex_remediation_request(
     apply: bool = False,
     expected_findings_sha256: str | None = None,
     pre_mutation_check: Callable[[Mapping[str, Any]], str | None] | None = None,
+    recheck_follow_evidence: bool = False,
 ) -> dict[str, Any]:
     expected_repo = f"{owner}/{repo}"
     source_head = plan.get("source_head_sha")
@@ -535,6 +536,15 @@ def execute_codex_remediation_request(
         if final_canonical is None or not final_canonical.collection_complete:
             result["failure_reason"] = "REVIEW_EVIDENCE_UNAVAILABLE"
             return result
+        if recheck_follow_evidence:
+            comments = final_review_inspection.get("issue_comments")
+            if not isinstance(comments, list):
+                result["failure_reason"] = "REVIEW_EVIDENCE_MALFORMED"
+                return result
+            if _has_same_source_head_request(comments, source_head, trusted_authors):
+                result["final_outcome"] = "NOOP"
+                result["failure_reason"] = "REMEDIATION_ALREADY_REQUESTED_FOR_SOURCE_HEAD"
+                return result
         if (expected_findings_sha256 is not None and
                 remediation_findings_sha256(final_review_inspection) != expected_findings_sha256):
             result["failure_reason"] = "REMEDIATION_FINDINGS_CHANGED"

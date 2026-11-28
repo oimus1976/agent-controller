@@ -254,6 +254,26 @@ class AdvancePrFollowTests(unittest.TestCase):
         self.post_rem.assert_not_called()
         self.collect.assert_not_called()
 
+    def test_remediation_marker_arriving_during_identity_stops_before_post(self):
+        self.inspect.return_value = self.rem_evidence
+        marker = remediation_request.codex_remediation_request_marker(HEAD)
+        comments = [{"id": 1, "user": {"login": "oimus1976"}, "body": f"@codex address that feedback\n\n{marker}"}]
+        current = self.rem_evidence
+
+        def identity():
+            nonlocal current
+            current = dict(self.rem_evidence, issue_comments=comments)
+            return "oimus1976"
+
+        with patch.object(remediation_request, "_inspect_remediation_request", side_effect=lambda *args: current), \
+             patch.object(remediation_request, "get_authenticated_github_login", side_effect=identity):
+            result = self.run_follow()
+        self.assertEqual((result["state"], result["reason"]),
+                         ("STOP_TASK_OBSERVATION_REQUIRED", "REMEDIATION_ALREADY_REQUESTED_FOR_SOURCE_HEAD"))
+        self.assertIn("View Task", result["next_action"])
+        self.assertFalse(result["execution"]["mutation_attempted"])
+        self.post_rem.assert_not_called()
+
     def test_dry_run_stops_at_first_executable_action(self):
         result = self.run_follow(apply=False)
         self.assertEqual((result["state"], result["reason"]), ("REQUEST_REVIEW", "DRY_RUN"))
