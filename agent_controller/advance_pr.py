@@ -491,7 +491,11 @@ def _advance_pr_step(*, owner, repo, pr_number, policy_path, scope_policy, apply
             return "FOLLOW_STEP_DEADLINE"
         return capacity_gate(final_policy)
 
-    extra = {"expected_findings_sha256": result["finding_set_sha256"]} if state == "REMEDIATE_SCOPED" else {}
+    extra = {}
+    if state == "REMEDIATE_SCOPED":
+        extra["expected_findings_sha256"] = result["finding_set_sha256"]
+    elif step_deadline is not None:
+        extra["recheck_follow_evidence"] = True
     execution = executor(plan=plan, owner=owner, repo=repo, pr_number=pr_number,
                          policy_path=policy_path, apply=True,
                          pre_mutation_check=final_gate, **extra)

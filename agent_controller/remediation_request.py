@@ -535,10 +535,6 @@ def execute_codex_remediation_request(
         if final_canonical is None or not final_canonical.collection_complete:
             result["failure_reason"] = "REVIEW_EVIDENCE_UNAVAILABLE"
             return result
-        if _has_same_source_head_request(final_review_inspection["issue_comments"], source_head, trusted_authors):
-            result["final_outcome"] = "NOOP"
-            result["failure_reason"] = "REMEDIATION_ALREADY_REQUESTED_FOR_SOURCE_HEAD"
-            return result
         if (expected_findings_sha256 is not None and
                 remediation_findings_sha256(final_review_inspection) != expected_findings_sha256):
             result["failure_reason"] = "REMEDIATION_FINDINGS_CHANGED"
@@ -585,11 +581,6 @@ def execute_codex_remediation_request(
         result["failure_reason"] = base_error
         return result
 
-    if final_actions_ci_status != "PASS":
-        result["actions_ci_status"] = final_actions_ci_status
-        result["failure_reason"] = "EXACT_HEAD_CI_NOT_PASS"
-        return result
-
     final_policy = load_policy(policy_path)
     if not isinstance(final_policy, Mapping) or final_policy != pre_identity_policy:
         result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
@@ -603,6 +594,11 @@ def execute_codex_remediation_request(
         or ACTION not in final_allowed
     ):
         result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
+        return result
+
+    if final_actions_ci_status != "PASS":
+        result["actions_ci_status"] = final_actions_ci_status
+        result["failure_reason"] = "EXACT_HEAD_CI_NOT_PASS"
         return result
 
     if pre_mutation_check is not None:

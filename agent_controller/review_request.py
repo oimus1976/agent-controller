@@ -331,6 +331,7 @@ def execute_codex_review_request(
     policy_path: str | None,
     apply: bool = False,
     pre_mutation_check: Callable[[Mapping[str, Any]], str | None] | None = None,
+    recheck_follow_evidence: bool = False,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "planned_head_sha": plan.get("head_sha"),
@@ -437,6 +438,28 @@ def execute_codex_review_request(
     except Exception:
         result["failure_reason"] = "POSTING_IDENTITY_READ_FAILED"
         return result
+
+    if recheck_follow_evidence:
+        # While resolving the posting login, CI can be rerun or another
+        # requester can post review evidence without changing this head.
+        final_plan = plan_codex_review_request(
+            owner=owner, repo=repo, pr_number=pr_number, policy_path=policy_path,
+            scope_policy=scope_policy,
+        )
+        final_head = final_plan.get("head_after_collection") or final_plan.get("head_sha")
+        if final_head is not None and final_head != plan["head_sha"]:
+            result["observed_head_sha"] = final_head
+            result["failure_reason"] = "STALE_HEAD_SHA"
+            return result
+        if final_plan.get("decision") != "EXECUTABLE":
+            if final_plan.get("decision") == "NOOP":
+                result["final_outcome"] = "NOOP"
+            result["failure_reason"] = final_plan.get("reason")
+            result["actions_ci_status"] = final_plan.get("actions_ci_status")
+            return result
+        if final_plan.get("policy_provenance") != fresh_plan.get("policy_provenance"):
+            result["failure_reason"] = "POLICY_CHANGED_BEFORE_MUTATION"
+            return result
 
     # Final mutation gate: after every other network read, re-read the mutable PR
     # target and local authorization consecutively, then POST without another

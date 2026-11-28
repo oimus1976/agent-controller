@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from uuid import uuid4
 
 from .advance_pr import _advance_conflict, _advance_pr_step, _advance_target
 from .capacity_collect import DEFAULT_CODEX_TIMEOUT_SECONDS
@@ -164,31 +165,43 @@ def follow_pr(
     transitions = []
     initial_head = expected_head
     review_requested = False
+    notification_valid = (notify_mode in {"none", "bell", "windows-toast", "command"}
+                          and ((notify_mode == "command") == bool(notify_command)))
 
-    def finish(state=None, reason=None, action=None, *, conflict=False):
+    def finish(state=None, reason=None, action=None):
         if state is not None:
             result.update(state=state, reason=reason, next_action=action)
-        notification = {"status": "SKIPPED" if conflict else "DISABLED" if notify_mode == "none" else "PENDING"}
-        if conflict:
-            notification["reason"] = "CONCURRENT_PR_ADVANCE"
+        notification = {"status": "DISABLED" if notify_mode == "none" else "PENDING"}
         return dict(
             result, initial_head_sha=initial_head, result_file=str(path),
             observation_count=count, elapsed_seconds=elapsed, transitions=transitions,
             started_at=started_at, finished_at=_now(), notification=notification,
         )
 
+    def publish(state=None, reason=None, action=None):
+        terminal = finish(state, reason, action)
+        if not notification_valid:
+            terminal.update(state="STOP_POLICY", reason="INVALID_NOTIFICATION",
+                            next_action="Provide a command only in command mode.")
+            terminal["notification"] = {"status": "SKIPPED", "reason": "INVALID_NOTIFICATION"}
+            _persist(path, terminal)
+            return terminal
+        return _persist_and_notify(path, terminal, notify_mode, notify_command, notify)
+
+    lock_error = False
     try:
         acquired = lock.acquire()
     except OSError:
-        result["lock_path"] = lock.lock_file
-        return finish("STOP_CONFLICT", "PR_LOCK_UNAVAILABLE", "Check the lock directory.", conflict=True)
+        acquired, lock_error = False, True
     if not acquired:
-        # Never replace the winning invocation's result or trigger its notifier.
+        # A contender owns neither the shared path nor the lock. Publish its
+        # exit independently, even when the winner has yet to write a result.
         result.update(_advance_conflict(owner, repo, pr_number, lock.lock_file))
-        return finish(conflict=True)
-
-    def publish(state=None, reason=None, action=None):
-        return _persist_and_notify(path, finish(state, reason, action), notify_mode, notify_command, notify)
+        result["shared_result_file"] = str(path)
+        path = path.with_name(f".advance-pr-conflict-{uuid4().hex}.json")
+        if lock_error:
+            return publish("STOP_CONFLICT", "PR_LOCK_UNAVAILABLE", "Check the lock directory.")
+        return publish()
 
     try:
         # A result file may not replace the shared lock or the policy it consumes.
@@ -197,12 +210,8 @@ def follow_pr(
             terminal = finish("STOP_POLICY", "UNSAFE_RESULT_PATH", "Choose a separate JSON result file.")
             terminal["notification"] = {"status": "SKIPPED", "reason": "UNSAFE_RESULT_PATH"}
             return terminal
-        if (notify_mode not in {"none", "bell", "windows-toast", "command"}
-                or ((notify_mode == "command") != bool(notify_command))):
-            terminal = finish("STOP_POLICY", "INVALID_NOTIFICATION", "Provide a command only in command mode.")
-            terminal["notification"] = {"status": "SKIPPED", "reason": "INVALID_NOTIFICATION"}
-            _persist(path, terminal)
-            return terminal
+        if not notification_valid:
+            return publish()
         try:
             _validate_bounds(max_elapsed_seconds=max_elapsed_seconds, max_observations=max_polls,
                              poll_interval_seconds=interval)

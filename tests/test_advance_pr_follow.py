@@ -181,6 +181,28 @@ class AdvancePrFollowTests(unittest.TestCase):
         self.post_review.assert_not_called()
         self.post_rem.assert_not_called()
 
+    def test_review_replans_after_identity_before_the_final_target_check(self):
+        marker = review_request.codex_review_request_marker(HEAD)
+        comments = [{"id": 1, "user": {"login": "oimus1976"}, "body": f"@codex review\n\n{marker}"}]
+        for evidence, expected in (
+            (inspection(ci="FAIL"), "EXACT_HEAD_CI_NOT_PASS"),
+            (inspection(comments=comments), "REVIEW_ALREADY_REQUESTED_FOR_HEAD"),
+        ):
+            with self.subTest(expected=expected):
+                current = inspection()
+
+                def identity():
+                    nonlocal current
+                    current = evidence
+                    return "oimus1976"
+
+                with patch.object(review_request, "_inspect_review_request", side_effect=lambda *args: current), \
+                     patch.object(review_request, "get_authenticated_github_login", side_effect=identity):
+                    result = self.run_follow(max_polls=1)
+                self.assertEqual(result["transitions"][-1]["reason"], expected)
+                self.assertFalse(result["execution"]["mutation_attempted"])
+                self.post_review.assert_not_called()
+
     def test_target_ci_capacity_and_evidence_boundaries(self):
         for snapshot in (dict(pr_snapshot(), state="closed"), dict(pr_snapshot(), merged=True),
                          dict(pr_snapshot(), draft=False)):
@@ -258,11 +280,21 @@ class AdvancePrFollowTests(unittest.TestCase):
         self.result.write_bytes(old)
         notify_calls = []
 
+        def notify(mode, command, path, result):
+            self.assertEqual(json.loads(path.read_text())["state"], "STOP_CONFLICT")
+            notify_calls.append(path)
+
         def hold_step(kwargs, timeout):
-            conflict = self.run_follow(notify_mode="bell", notify=lambda *args: notify_calls.append(args))
+            conflict = self.run_follow(notify_mode="bell", notify=notify)
             self.assertEqual(conflict["state"], "STOP_CONFLICT")
             self.assertEqual(conflict["lock_path"], pr_lock_path(**self.target))
             self.assertEqual(self.result.read_bytes(), old)
+            self.assertEqual(conflict["shared_result_file"], str(self.result))
+            conflict_path = Path(conflict["result_file"])
+            self.assertNotEqual(conflict_path, self.result)
+            self.assertEqual(conflict["notification"], {"status": "SENT"})
+            self.assertEqual(json.loads(conflict_path.read_text()), conflict)
+            self.assertEqual(notify_calls, [conflict_path])
             single = advance_pr.advance_pr_once(**self.target, apply=True)
             self.assertEqual(single["state"], "STOP_CONFLICT")
             reconciled = reconcile_pr_once(**self.target)
@@ -274,7 +306,7 @@ class AdvancePrFollowTests(unittest.TestCase):
 
         result = self.run_follow(run_step=hold_step)
         self.assertEqual(result["reason"], "FOLLOW_STEP_FAILED")
-        self.assertEqual(notify_calls, [])
+        self.assertEqual(len(notify_calls), 1)
         lock = ReconcilerLock(pr_lock_path(**self.target))
         self.assertTrue(lock.acquire())
         lock.release()
@@ -287,6 +319,7 @@ class AdvancePrFollowTests(unittest.TestCase):
             result = self.run_follow(owner="OIMUS1976")
             self.assertEqual(result["state"], "STOP_CONFLICT")
             self.assertFalse(self.result.exists())
+            self.assertTrue(Path(result["result_file"]).is_file())
         finally:
             lock.release()
 
