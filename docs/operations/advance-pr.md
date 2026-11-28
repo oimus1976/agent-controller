@@ -110,3 +110,31 @@ UIで直接確認できた状態は、任意のローカルJSONを `--codex-task
 `status` は `running` / `complete_pending_apply` / `failed`。repo・PR・source-headが一致したときだけ使い、人間の観測という出所を保つ。古いファイルは使い回さず状態を再確認する。これは停止先を選ぶ補助であり、GitHub公開・レビュー成功・Ready権限の証拠にはならない。完了・適用待ちは未実装と違うため、Update branchが利用できる間は同じ修正を再実装しない。適用後はGitHubの新HEADを読み、CIと独立レビューを取り直す。
 
 常駐監視、別providerへの自動切替、runnerやowner-machine操作は対象外。Ready後のmergeも人間が判断する。
+
+## Draft作成・push直後の有界follow（#340）
+
+実装エージェントはDraft作成またはpush後に、検証済みのPR番号と40桁のHEADを指定して起動できる。既定は読み取り専用。対象・HEAD・許可する操作が明示された実行計画でのみ `--apply` を付け、既存policy、指摘集合の確認、追加課金禁止を満たす。新HEADでは、そのHEADを指定して別のfollowを起動する。
+
+```text
+python -m agent_controller.cli advance-pr --follow --repo OWNER/REPO --pr 123 --expected-head FULL_SHA --policy policy.local.json --allowed-paths "agent_controller/*" "tests/*" "docs/*" --codex-live-capacity --interval 60 --max-polls 60 --max-elapsed-seconds 3600 --result-file follow-123.json
+```
+
+- `WAIT_CI` と `WAIT_CURRENT_HEAD_REVIEW` の間だけ再観測する。要求が実行可能になってから容量を取得する。dry-runは実行可能な操作を表示した時点で終了する。現HEADへ同じレビュー要求を繰り返さない。
+- `HUMAN_GATE_READY` は人間のReady判断で停止する。修正要求を投稿したとき、または既存要求を見つけたときは、[#200](https://github.com/oimus1976/agent-controller/issues/200) に従って停止し、必要に応じて人間が `View Task → Update branch` を確認する。HEADが動いた場合は両SHAを記録し、旧HEADで承認された処理を続けない。
+- 観測と待機の合計は `--max-elapsed-seconds`、観測回数は `--max-polls` で制限する。各観測の外部呼び出しを含む上限は残り時間と120秒の短い方。処理中のタイムアウトでは、投稿が届いた可能性を残して停止するため、再実行前にGitHub上の要求を確認する。
+- 同じPRのfollow、`advance-pr --apply`、`reconcile-pr` は同じローカルロックを使う。競合した起動は `STOP_CONFLICT` とロックパスを標準出力に返し、既存の結果ファイルを上書きしない。単発dry-runはロックを取得しない。残ったロックを自動解除しない。
+- 終了結果は指定したローカルJSONへ原子的に書き、標準出力にも返す。省略時は同じOS一時ディレクトリにあるPRロックと同じ名前の `.result.json`。複数PRに同一の結果ファイルを指定しない。通知は既定で無効。`--notify-mode bell|windows-toast|command` は結果保存後に一度だけ実行し、別枠で10秒に制限する。`command` にはローカル実行ファイルまたは `.py` を指定し、結果ファイルの絶対パスが単一引数で渡る。通知失敗でも結果から停止理由を読める。Windowsトーストは対話デスクトップに依存する。
+
+### 起動したエージェントの終了後も続ける場合
+
+作業用worktreeと既存のGitHub認証が使えるホスト上で、一回限りのPythonプロセスとして起動する。Windows PowerShellでは作業用worktreeで以下を実行する。例の相対パスはworktree内を指す。標準出力と標準エラーは起動ごとに別ファイルを指定する。
+
+```powershell
+$followArgs = @('-m', 'agent_controller.cli', 'advance-pr', '--follow',
+    '--repo', 'OWNER/REPO', '--pr', '123', '--expected-head', 'FULL_SHA',
+    '--policy', 'policy.local.json', '--allowed-paths', 'agent_controller/*', 'tests/*', 'docs/*',
+    '--max-polls', '60', '--max-elapsed-seconds', '3600', '--result-file', 'follow-123.json')
+Start-Process -FilePath (Get-Command python).Source -WorkingDirectory (Get-Location).Path -ArgumentList $followArgs -WindowStyle Hidden -RedirectStandardOutput 'follow-123.stdout.json' -RedirectStandardError 'follow-123.stderr.log'
+```
+
+Unix系では同じ引数のPythonコマンドを `nohup` で起動し、標準入力を `/dev/null`、標準出力・標準エラーをローカルファイルへリダイレクトしてバックグラウンドに置く。エージェントの終了時に子プロセス一式を破棄する環境では、その環境外の既存ホストの起動経路を使う。起動はプロセスと起動ログで確認し、停止理由を読むときは結果JSONの `started_at` と `initial_head_sha` を照合する。

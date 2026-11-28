@@ -15,6 +15,7 @@ from .provider_capacity import (
     ProviderAvailability, CapacityObservationSource, ProviderCapacityObservation,
     ProviderCandidate, _parse_aware_iso8601, recommend_provider,
 )
+from .reconciler import ReconcilerLock, pr_lock_path
 from .remediation_request import (
     _validate_safe_pr_snapshot, plan_codex_remediation_request,
     execute_codex_remediation_request, remediation_findings_sha256,
@@ -277,18 +278,62 @@ def _finding_gate(inspection, head, requests):
 def advance_pr_once(*, owner, repo, pr_number, policy_path=None, scope_policy=None,
                     apply=False, task_observation=None, live_capacity=False,
                     codex_command="codex", codex_timeout=DEFAULT_CODEX_TIMEOUT_SECONDS):
-    """Fresh inspect, then at most one existing review/remediation request.
+    """Run one step, taking the shared per-PR lock for any apply."""
+    kwargs = dict(owner=owner, repo=repo, pr_number=pr_number, policy_path=policy_path,
+                  scope_policy=scope_policy, apply=apply, task_observation=task_observation,
+                  live_capacity=live_capacity, codex_command=codex_command, codex_timeout=codex_timeout)
+    if not apply:
+        return _advance_pr_step(**kwargs)
+    lock = ReconcilerLock(pr_lock_path(owner, repo, pr_number))
+    if not lock.acquire():
+        return _advance_conflict(owner, repo, pr_number, lock.lock_file)
+    try:
+        return _advance_pr_step(**kwargs)
+    finally:
+        lock.release()
 
-    Task observations are operator-reported Cloud UI facts, used only to stop;
-    they never establish publication, readiness, or permission to retry.
-    """
+
+def _advance_target(owner, repo, pr_number):
     full_repo = f"{owner}/{repo}"
-    result = {"repo": full_repo, "pr": pr_number,
-              "pr_url": f"https://github.com/{full_repo}/pull/{pr_number}",
-              "head_sha": None, "actions_ci_status": None, "review_verdict": None}
+    return {"repo": full_repo, "pr": pr_number,
+            "pr_url": f"https://github.com/{full_repo}/pull/{pr_number}",
+            "head_sha": None, "actions_ci_status": None, "review_verdict": None}
+
+
+def _advance_conflict(owner, repo, pr_number, lock_path):
+    return dict(_advance_target(owner, repo, pr_number), state="STOP_CONFLICT",
+                reason="CONCURRENT_PR_ADVANCE", lock_path=lock_path,
+                next_action="Read the other process's result before retrying.")
+
+
+def _advance_pr_step(*, owner, repo, pr_number, policy_path, scope_policy, apply,
+                     task_observation, live_capacity, codex_command, codex_timeout,
+                     expected_head=None, review_requested=False, step_deadline=None, report_head=None):
+    """Run under the caller's lock for apply; follow binds the head before any write."""
+    result = _advance_target(owner, repo, pr_number)
+    full_repo = result["repo"]
 
     def finish(state, reason, action):
         return dict(result, state=state, reason=reason, next_action=action)
+
+    def late_stop(reason, evidence):
+        """Keep the single-shot outcome contract, with more specific follow stops."""
+        if step_deadline is None or not isinstance(reason, str):
+            return None
+        reason = reason.removeprefix("POSTCONDITION_")
+        if reason in {"PR_CLOSED_OR_MERGED", "PR_STATE_NOT_OPEN", "PR_NOT_DRAFT"}:
+            return finish("STOP_TARGET", reason, "Check that the PR is still open and Draft.")
+        if reason == "EXACT_HEAD_CI_NOT_PASS":
+            result["actions_ci_status"] = evidence.get("actions_ci_status")
+            if result["actions_ci_status"] in {"PENDING", "MISSING"}:
+                return finish("WAIT_CI", reason, "Wait for this head's CI.")
+            return finish("STOP_CI", reason, "Inspect this head's CI failure/unavailable evidence.")
+        if reason in {"REVIEW_EVIDENCE_UNAVAILABLE", "REVIEW_EVIDENCE_MALFORMED"}:
+            return finish("STOP_REVIEW_EVIDENCE", reason, "Wait for readable canonical review evidence.")
+        if reason in {"EVIDENCE_FETCH_FAILED", "PRE_MUTATION_TARGET_READ_FAILED", "FINAL_TARGET_READ_FAILED",
+                      "TARGET_READ_FAILED", "VERIFICATION_FETCH_FAILED"}:
+            return finish("STOP_EVIDENCE", reason, "Check the PR and any request before resuming.")
+        return None
 
     if not isinstance(live_capacity, bool):
         return finish("STOP_POLICY", "MALFORMED_POLICY", "Pass a boolean live_capacity option.")
@@ -306,9 +351,21 @@ def advance_pr_once(*, owner, repo, pr_number, policy_path=None, scope_policy=No
         result["head_sha"] = head
         if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
             raise ValueError("HEAD_SHA_MALFORMED")
+        if step_deadline is not None:
+            result["initial_head_sha"] = expected_head or head
+        if report_head is not None:
+            report_head(head)
+        if expected_head is not None and head != expected_head:
+            return finish("STOP_HEAD_CHANGED", "STALE_HEAD_SHA", "Inspect the new HEAD before starting another follow.")
+        after_head = inspection.get("head_after_collection")
+        if step_deadline is not None and isinstance(after_head, str) and after_head != head:
+            result["head_sha"] = after_head
+            return finish("STOP_HEAD_CHANGED", "STALE_HEAD_SHA", "Inspect the new HEAD before starting another follow.")
         pr = get_pr_details(owner, repo, pr_number)
         error = _validate_safe_pr_snapshot(pr, head, full_repo)
         if error:
+            if error == "STALE_HEAD_SHA":
+                result["head_sha"] = pr["head"]["sha"]
             return finish("STOP_HEAD_CHANGED" if error == "STALE_HEAD_SHA" else "STOP_TARGET",
                           error, "Rerun advance-pr against the current open Draft PR.")
     except Exception:
@@ -370,6 +427,9 @@ def advance_pr_once(*, owner, repo, pr_number, policy_path=None, scope_policy=No
         planner, executor = plan_codex_remediation_request, execute_codex_remediation_request
         state, key = "REMEDIATE_SCOPED", "source_head_sha"
     elif canonical.verdict == "ABSENT":
+        if review_requested:
+            return finish("WAIT_CURRENT_HEAD_REVIEW", "REVIEW_ALREADY_REQUESTED_FOR_HEAD",
+                          "Wait for current-head review evidence.")
         planner, executor = plan_codex_review_request, execute_codex_review_request
         state, key = "REQUEST_REVIEW", "head_sha"
     else:
@@ -377,13 +437,16 @@ def advance_pr_once(*, owner, repo, pr_number, policy_path=None, scope_policy=No
 
     plan = planner(owner=owner, repo=repo, pr_number=pr_number, policy_path=policy_path,
                    scope_policy=scope_policy)
-    if plan.get(key) is not None and plan.get(key) != head:
+    planned_head = plan.get("head_after_collection") or plan.get(key)
+    if planned_head is not None and planned_head != head:
+        result["head_sha"] = planned_head
         return finish("STOP_HEAD_CHANGED", "STALE_HEAD_SHA", "Rerun advance-pr; prior-head CI/review is invalid.")
     if plan.get("decision") == "NOOP":
         return finish("WAIT_CURRENT_HEAD_REVIEW" if state == "REQUEST_REVIEW" else "STOP_TASK_OBSERVATION_REQUIRED",
                       plan.get("reason"), "Rerun advance-pr to observe the pending operation.")
     if plan.get("decision") != "EXECUTABLE":
-        return finish("STOP_PROVIDER", plan.get("reason"), "Resolve the existing request primitive's refusal.")
+        return late_stop(plan.get("reason"), plan) or finish(
+            "STOP_PROVIDER", plan.get("reason"), "Resolve the existing request primitive's refusal.")
     # A policy edit during the fresh planner must not reuse stale policy
     # authorization or skip paid-usage checks before live observation.
     if apply and load_policy(policy_path) != policy:
@@ -395,6 +458,12 @@ def advance_pr_once(*, owner, repo, pr_number, policy_path=None, scope_policy=No
     )
     target = f"{full_repo}#{pr_number}"
     if live_capacity:
+        if step_deadline is not None:
+            remaining = step_deadline - time.monotonic()
+            if remaining <= 0:
+                return finish("STOP_WAIT_LIMIT", "STEP_TIMEOUT", "Check the PR before another follow.")
+            # Reserve time for shutdown, even in a follow with a short deadline.
+            codex_timeout = min(codex_timeout, max(remaining - 10, remaining / 2))
         reason, capacity_gate = _live_capacity_gate(
             policy,
             config,
@@ -416,13 +485,36 @@ def advance_pr_once(*, owner, repo, pr_number, policy_path=None, scope_policy=No
     reason = capacity_gate(current_policy)
     if reason:
         return finish("WAIT_CAPACITY", reason, capacity_action)
+
+    def final_gate(final_policy):
+        if step_deadline is not None and time.monotonic() >= step_deadline:
+            return "FOLLOW_STEP_DEADLINE"
+        return capacity_gate(final_policy)
+
     extra = {"expected_findings_sha256": result["finding_set_sha256"]} if state == "REMEDIATE_SCOPED" else {}
     execution = executor(plan=plan, owner=owner, repo=repo, pr_number=pr_number,
                          policy_path=policy_path, apply=True,
-                         pre_mutation_check=capacity_gate, **extra)
+                         pre_mutation_check=final_gate, **extra)
     result["execution"] = execution
     success = "PASS" if state == "REMEDIATE_SCOPED" else "SUCCESS"
     if execution.get("final_outcome") != success:
+        if step_deadline is not None:
+            observed_head = execution.get("observed_head_sha") or execution.get("execution_head_sha")
+            failure = execution.get("failure_reason")
+            if failure == "FOLLOW_STEP_DEADLINE":
+                return finish("STOP_WAIT_LIMIT", "STEP_TIMEOUT", "Check the PR before another follow.")
+            if failure in {"STALE_HEAD_SHA", "POSTCONDITION_STALE_HEAD_SHA"}:
+                result["head_sha"] = observed_head if observed_head != head else None
+                return finish("STOP_HEAD_CHANGED", "STALE_HEAD_SHA",
+                              "Inspect the new HEAD and any posted request before another follow.")
+            stopped = late_stop(failure, execution)
+            if stopped is not None:
+                return stopped
+            if execution.get("final_outcome") == "NOOP":
+                if failure in {"REVIEW_ALREADY_REQUESTED_FOR_HEAD", "CODEX_REVIEW_ALREADY_PRESENT_ON_HEAD"}:
+                    return finish("WAIT_CURRENT_HEAD_REVIEW", failure, "Wait for current-head review evidence.")
+                if failure == "REMEDIATION_ALREADY_REQUESTED_FOR_SOURCE_HEAD":
+                    return finish("STOP_TASK_OBSERVATION_REQUIRED", failure, "Check View Task → Update branch.")
         if not execution.get("mutation_attempted"):
             failure = execution.get("failure_reason")
             if failure in _CAPACITY_FAILURE_REASONS:
@@ -435,7 +527,12 @@ def advance_pr_once(*, owner, repo, pr_number, policy_path=None, scope_policy=No
         fresh = get_pr_details(owner, repo, pr_number)
     except Exception:
         return finish("STOP_EVIDENCE", "POST_REQUEST_READ_FAILED", "Rerun advance-pr to verify the request; do not post a duplicate.")
-    if _validate_safe_pr_snapshot(fresh, head, full_repo):
+    fresh_error = _validate_safe_pr_snapshot(fresh, head, full_repo)
+    if fresh_error:
+        if fresh_error == "STALE_HEAD_SHA":
+            result["head_sha"] = fresh["head"]["sha"]
+        if step_deadline is not None and fresh_error != "STALE_HEAD_SHA":
+            return finish("STOP_TARGET", fresh_error, "Check the target and the request that was already posted.")
         return finish("STOP_HEAD_CHANGED", "TARGET_CHANGED_AFTER_REQUEST", "Rerun advance-pr for fresh-head CI and review.")
     return finish("WAIT_REMEDIATION" if state == "REMEDIATE_SCOPED" else "WAIT_CURRENT_HEAD_REVIEW",
                   "REQUEST_POSTED", "Rerun advance-pr after the requested operation completes.")

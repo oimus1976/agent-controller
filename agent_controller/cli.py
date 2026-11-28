@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from .attention_queue import AttentionCategory
 from .advance_pr import advance_pr_once
+from .advance_pr_follow import DEFAULT_MAX_ELAPSED, DEFAULT_MAX_POLLS, follow_pr
 from .capacity_collect import DEFAULT_CODEX_TIMEOUT_SECONDS
 from .codex_live import CodexSnapshotReadClient
 from .github_target_client import GitHubRestTargetReadClient
@@ -90,6 +91,15 @@ def main():
     parser.add_argument("--state-file", default=".pr_state.json", help="Path to local state/evidence file")
     parser.add_argument("--interval", type=int, default=60, help="Polling interval in seconds for loop mode")
 
+    parser.add_argument("--follow", action="store_true", help="Bounded advance-pr polling")
+    parser.add_argument("--expected-head", help="Exact lowercase SHA for advance-pr --follow")
+    parser.add_argument("--max-polls", type=int, help=f"Maximum follow observations (default: {DEFAULT_MAX_POLLS})")
+    parser.add_argument("--max-elapsed-seconds", type=float, help=f"Maximum follow duration (default: {DEFAULT_MAX_ELAPSED})")
+    parser.add_argument("--result-file", help="Terminal JSON path for advance-pr --follow")
+    parser.add_argument("--notify-mode", choices=("none", "bell", "windows-toast", "command"),
+                        help="Optional terminal notification for advance-pr --follow")
+    parser.add_argument("--notify-command", help="Local executable (or .py file) passed the terminal result path")
+
     parser.add_argument("--policy", help="Path to explicit local policy JSON file")
     parser.add_argument("--receipts-file", default=".action_receipts.json", help="Path to action receipts file (reconcile-pr)")
     parser.add_argument("--apply", action='store_true', help="Actually perform authorized GitHub writes")
@@ -135,6 +145,15 @@ def main():
     parser.add_argument("--session-id", help="Existing Jules session id for observe-jules")
 
     args = parser.parse_args()
+
+    follow_options = (args.expected_head, args.max_polls, args.max_elapsed_seconds,
+                      args.result_file, args.notify_mode, args.notify_command)
+    if args.follow and (args.command != "advance-pr" or args.once):
+        parser.error("--follow is for advance-pr without --once")
+    if not args.follow and any(option is not None for option in follow_options):
+        parser.error("follow options require advance-pr --follow")
+    if (args.notify_mode == "command") != bool(args.notify_command):
+        parser.error("--notify-command is required in command mode and unsupported in other modes")
 
     if args.command == "dispatch-jules":
         repo = _require_repo(parser, args.repo)
@@ -366,10 +385,20 @@ def main():
                     task_observation = json.load(handle)
                 if not isinstance(task_observation, dict):
                     raise ValueError("Codex task observation must be an object")
-            result = advance_pr_once(owner=owner, repo=repo, pr_number=args.pr,
-                                     policy_path=args.policy, scope_policy=policy,
-                                     apply=args.apply, task_observation=task_observation,
-                                     **advance_kwargs)
+            target = dict(owner=owner, repo=repo, pr_number=args.pr, policy_path=args.policy,
+                          scope_policy=policy, apply=args.apply, task_observation=task_observation,
+                          **advance_kwargs)
+            if args.follow:
+                result = follow_pr(
+                    **target, expected_head=args.expected_head, interval=args.interval,
+                    max_polls=DEFAULT_MAX_POLLS if args.max_polls is None else args.max_polls,
+                    max_elapsed_seconds=(DEFAULT_MAX_ELAPSED if args.max_elapsed_seconds is None
+                                         else args.max_elapsed_seconds),
+                    result_file=args.result_file, notify_mode=args.notify_mode or "none",
+                    notify_command=args.notify_command,
+                )
+            else:
+                result = advance_pr_once(**target)
             print(json.dumps(result, indent=2))
         except Exception as e:
             print(f"Error advancing PR: {e}", file=sys.stderr)
